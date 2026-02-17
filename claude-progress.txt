@@ -1,5 +1,53 @@
 # Schedule Agent 开发进度
 
+## 2026-02-17 - 任务: STR-001 实现 JSON 存储
+
+### 完成内容:
+- 创建 `src/schedule_agent/storage/json_repository.py` JSON 存储仓库:
+  - 实现通用 `JSONRepository[T]` 基类，提供泛型 CRUD 操作
+  - 实现线程安全的文件读写（使用 Lock）
+  - 实现自动 JSON 序列化（支持 datetime, date, Pydantic 模型）
+  - 实现基础方法: create, get, update, delete, get_all, count, clear
+
+- 实现 `EventRepository` 事件专用仓库:
+  - get_by_date_range(): 按时间范围查询
+  - get_by_date(): 按日期查询
+  - get_today(): 获取今天的事件
+  - get_upcoming(): 获取未来事件
+  - get_by_status(): 按状态查询
+  - find_conflicts(): 查找时间冲突
+  - search(): 按标题/描述/标签搜索
+
+- 实现 `TaskRepository` 任务专用仓库:
+  - get_by_status(): 按状态查询
+  - get_todo(): 获取待办任务
+  - get_completed(): 获取已完成任务
+  - get_overdue(): 获取过期任务
+  - get_due_today(): 获取今天截止的任务
+  - get_due_this_week(): 获取本周截止的任务
+  - get_scheduled(): 获取已安排的任务
+  - get_unscheduled(): 获取未安排的任务
+  - search(): 按标题/描述/标签搜索
+
+- 更新 `src/schedule_agent/storage/__init__.py` 导出所有仓库类
+
+- 创建测试文件 `tests/test_storage.py` (37 个测试用例全部通过)
+
+### 测试:
+- 运行 `pytest tests/test_storage.py -v` 全部 37 个测试通过
+- 运行 `pytest tests/ -v` 全部 86 个测试通过
+- 验证 CRUD 操作正常工作
+- 验证查询功能正确返回结果
+- 验证数据持久化正常
+- 验证特殊字符和中文字符处理正确
+
+### 备注:
+- 默认存储路径为 `data/events.json` 和 `data/tasks.json`
+- 使用线程锁确保并发写入安全
+- 下一步任务: LLM-001 实现豆包 LLM 客户端
+
+---
+
 ## 2026-02-17 - 任务: MDL-001 定义数据模型 (Event, Task, TimeSlot)
 
 ### 完成内容:

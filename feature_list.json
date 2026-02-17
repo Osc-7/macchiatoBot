@@ -49,7 +49,7 @@
         "实现 Task CRUD",
         "编写存储测试"
       ],
-      "passes": false,
+      "passes": true,
       "priority": "high"
     },
     {

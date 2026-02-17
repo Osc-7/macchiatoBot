@@ -153,7 +153,7 @@
         "测试场景3: 混合输入和规划",
         "测试场景4: 查看日程"
       ],
-      "passes": false,
+      "passes": true,
       "priority": "medium"
     }
   ]

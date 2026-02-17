@@ -1,5 +1,62 @@
 # Schedule Agent 开发进度
 
+## 2026-02-17 - 任务: TST-001 端到端场景测试
+
+### 完成内容:
+- 创建 `tests/test_e2e.py` 端到端测试文件:
+  - 场景1: 基本添加 Event（4 个测试用例）
+  - 场景2: 添加 Task（4 个测试用例）
+  - 场景3: 混合输入和规划（6 个测试用例）
+  - 场景4: 查看日程（6 个测试用例）
+  - 集成测试: 完整用户流程（2 个测试用例）
+
+- 场景1: 基本添加 Event 测试:
+  - test_add_single_event: 测试添加单个事件
+  - test_add_event_with_details: 测试添加带详细信息的事件
+  - test_add_multiple_events: 测试添加多个事件
+  - test_add_event_with_conflict_warning: 测试添加冲突事件时返回警告
+
+- 场景2: 添加 Task 测试:
+  - test_add_single_task: 测试添加单个任务
+  - test_add_task_with_details: 测试添加带详细信息的任务
+  - test_add_multiple_tasks: 测试添加多个任务
+  - test_add_task_without_due_date: 测试添加没有截止日期的任务
+
+- 场景3: 混合输入和规划测试:
+  - test_get_free_slots_empty_schedule: 测试获取空闲时间（空日程）
+  - test_get_free_slots_with_events: 测试获取空闲时间（有事件）
+  - test_plan_single_task: 测试规划单个任务
+  - test_plan_multiple_tasks: 测试规划多个任务
+  - test_plan_with_existing_events: 测试在现有事件周围规划任务
+  - test_plan_respects_sleep_time: 测试规划避开睡眠时间
+
+- 场景4: 查看日程测试:
+  - test_get_events_today: 测试查看今天的日程
+  - test_get_events_upcoming: 测试查看即将到来的日程
+  - test_get_events_search: 测试搜索日程
+  - test_get_tasks_todo: 测试查看待办任务
+  - test_get_tasks_overdue: 测试查看过期任务
+  - test_get_tasks_search: 测试搜索任务
+
+- 集成测试:
+  - test_complete_user_flow: 测试完整的用户流程（添加日程→添加任务→规划→查看）
+  - test_multi_day_planning: 测试多天规划
+
+### 测试:
+- 运行 `pytest tests/test_e2e.py -v` 全部 22 个测试通过
+- 运行 `pytest tests/ -v --ignore=tests/test_llm.py` 全部 326 个测试通过
+- 验证所有四个场景的完整功能
+- 验证工具之间的协作正常
+- 验证存储和查询功能正确
+
+### 备注:
+- 端到端测试覆盖了所有核心功能模块
+- 测试使用临时目录，不污染实际数据
+- 这是 feature_list.json 中的最后一个任务
+- 项目全部 12 个功能任务已完成
+
+---
+
 ## 2026-02-17 - 任务: CLI-001 实现命令行交互界面
 
 ### 完成内容:

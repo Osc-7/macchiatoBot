@@ -1,5 +1,51 @@
 # Schedule Agent 开发进度
 
+## 2026-02-17 - 任务: MDL-001 定义数据模型 (Event, Task, TimeSlot)
+
+### 完成内容:
+- 创建 `src/schedule_agent/models/event.py` Event 模型:
+  - 定义 EventStatus 枚举 (scheduled, in_progress, completed, cancelled)
+  - 定义 EventPriority 枚举 (low, medium, high, urgent)
+  - 实现 Event 类包含: id, title, description, start_time, end_time, location, status, priority, tags, reminders
+  - 实现 duration_minutes 属性计算时长
+  - 实现 is_all_day 属性判断全天事件
+  - 实现 is_conflict_with() 方法检测事件冲突
+
+- 创建 `src/schedule_agent/models/task.py` Task 模型:
+  - 定义 TaskStatus 枚举 (todo, in_progress, completed, cancelled)
+  - 定义 TaskPriority 枚举 (low, medium, high, urgent)
+  - 实现 Task 类包含: id, title, description, estimated_minutes, due_date, status, priority, tags
+  - 实现 mark_completed() 和 mark_cancelled() 方法
+  - 实现 schedule() 和 unschedule() 方法管理时间安排
+  - 实现 is_overdue 属性判断任务是否过期
+  - 支持字符串格式的截止日期解析
+
+- 创建 `src/schedule_agent/models/time_slot.py` TimeSlot 模型:
+  - 定义 SlotType 枚举 (free, busy, sleep, buffer)
+  - 实现 TimeSlot 类表示时间段
+  - 实现 contains(), overlaps_with() 方法
+  - 实现 can_fit() 判断是否能容纳任务
+  - 实现 split_for_task() 分割时间段
+  - 实现 intersect() 和 merge() 方法
+  - 实现 create_sleep_slots() 辅助函数
+
+- 更新 `src/schedule_agent/models/__init__.py` 导出所有模型
+
+- 创建测试文件 `tests/test_models.py` (34 个测试用例全部通过)
+
+### 测试:
+- 运行 `pytest tests/test_models.py -v` 全部 34 个测试通过
+- 运行 `pytest tests/ -v` 全部 49 个测试通过
+- 验证所有模型创建、属性计算、方法调用正确
+- 验证 JSON 序列化/反序列化正常
+
+### 备注:
+- 使用 Pydantic V2 的 ConfigDict 替代弃用的 class Config
+- json_encoders 警告为 Pydantic V2 已知弃用，不影响功能
+- 下一步任务: STR-001 实现 JSON 存储
+
+---
+
 ## 2026-02-17 - 任务: CFG-001 配置豆包 API
 
 ### 完成内容:

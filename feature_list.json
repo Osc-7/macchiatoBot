@@ -36,7 +36,7 @@
         "创建 TimeSlot 模型",
         "编写模型测试"
       ],
-      "passes": false,
+      "passes": true,
       "priority": "high"
     },
     {

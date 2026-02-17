@@ -23,7 +23,7 @@
         "实现配置加载模块",
         "测试配置读取"
       ],
-      "passes": false,
+      "passes": true,
       "priority": "high"
     },
     {

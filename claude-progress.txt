@@ -1,5 +1,31 @@
 # Schedule Agent 开发进度
 
+## 2026-02-17 - 任务: CFG-001 配置豆包 API
+
+### 完成内容:
+- 确认 `config.yaml` 和 `config.example.yaml` 配置文件模板已存在
+- 创建配置加载模块 `src/schedule_agent/config.py`:
+  - 使用 Pydantic 定义配置模型 (LLMConfig, TimeConfig, StorageConfig, AgentConfig)
+  - 实现 `load_config()` 函数加载 YAML 配置文件
+  - 实现环境变量覆盖敏感配置 (DOUBAO_API_KEY, DOUBAO_MODEL)
+  - 实现 `find_config_file()` 自动查找配置文件（当前目录 -> 项目根目录）
+  - 实现全局配置单例 `get_config()` 和重置函数 `reset_config()`
+- 更新 `src/schedule_agent/utils/__init__.py` 导出配置相关模块
+- 创建测试文件 `tests/test_config.py` (15 个测试用例全部通过)
+
+### 测试:
+- 运行 `pytest tests/test_config.py -v` 全部 15 个测试通过
+- 验证配置加载功能正常工作
+- 验证环境变量覆盖功能
+- 验证配置文件查找逻辑
+
+### 备注:
+- config.yaml 包含实际 API Key，已添加到 .gitignore
+- config.example.yaml 作为配置模板供用户参考
+- 下一步任务: MDL-001 定义数据模型
+
+---
+
 ## 2026-02-17 - 任务: INF-001 初始化项目结构和 Git 仓库
 
 ### 完成内容:

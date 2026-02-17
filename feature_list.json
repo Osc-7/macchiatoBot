@@ -140,7 +140,7 @@
         "添加退出命令",
         "测试 CLI"
       ],
-      "passes": false,
+      "passes": true,
       "priority": "high"
     },
     {

@@ -87,7 +87,7 @@
         "处理相对时间（明天、下周等）",
         "编写测试用例"
       ],
-      "passes": false,
+      "passes": true,
       "priority": "high"
     },
     {

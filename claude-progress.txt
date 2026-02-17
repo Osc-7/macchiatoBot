@@ -1,5 +1,46 @@
 # Schedule Agent 开发进度
 
+## 2026-02-17 - 任务: TOL-002 实现时间解析工具
+
+### 完成内容:
+- 创建 `src/schedule_agent/core/tools/parse_time.py` 时间解析工具:
+  - 实现 `TimeParser` 类，支持中文自然语言时间解析
+  - 实现 `ParsedTime` 数据类，包含解析结果
+  - 实现 `ParseTimeTool` 工具类，继承 `BaseTool`
+
+- 支持的时间解析功能:
+  - 相对日期：今天、明天、后天、昨天、前天、大后天
+  - 天数偏移：X天后、X周后
+  - 星期几：周一~周日（支持多种表达：星期一、礼拜一等）
+  - 周偏移：下周X、本周X、这周X
+  - 月份日期：X月X日、YYYY年X月X日
+  - 月偏移：下个月、下个月X日
+  - 时间段：凌晨、早上、上午、中午、下午、傍晚、晚上、夜间、深夜
+  - 时间点：X点、X点X分、下午X点等
+  - 时间范围：X点到Y点、X点-Y点
+
+- 更新 `src/schedule_agent/core/tools/__init__.py` 导出新工具
+
+- 创建测试文件 `tests/test_parse_time.py`:
+  - TimeParser 测试 (26 个用例)
+  - ParsedTime 测试 (2 个用例)
+  - ParseTimeTool 测试 (9 个用例)
+  - 边缘情况测试 (4 个用例)
+
+### 测试:
+- 运行 `pytest tests/test_parse_time.py -v` 全部 41 个测试通过
+- 运行 `pytest tests/ -v` 全部 189 个测试通过 (1 个跳过)
+- 验证各种中文时间描述的解析
+- 验证跨年、跨月等边缘情况
+
+### 备注:
+- 时间解析使用规则引擎，无需调用 LLM API
+- 支持多种中文时间表达变体
+- 返回结果包含置信度评分
+- 下一步任务: TOL-003 实现存储工具
+
+---
+
 ## 2026-02-17 - 任务: LLM-001 实现豆包 LLM 客户端
 
 ### 完成内容:

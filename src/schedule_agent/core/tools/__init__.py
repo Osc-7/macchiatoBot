@@ -3,6 +3,7 @@
 """
 
 from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from .parse_time import ParseTimeTool, ParsedTime, TimeParser
 from .registry import ToolRegistry
 
 __all__ = [
@@ -11,4 +12,7 @@ __all__ = [
     "ToolParameter",
     "ToolResult",
     "ToolRegistry",
+    "ParseTimeTool",
+    "ParsedTime",
+    "TimeParser",
 ]

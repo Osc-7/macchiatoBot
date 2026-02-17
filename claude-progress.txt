@@ -1,5 +1,60 @@
 # Schedule Agent 开发进度
 
+## 2026-02-17 - 任务: TOL-004 实现规划器工具 (get_free_slots, plan_tasks)
+
+### 完成内容:
+- 创建 `src/schedule_agent/core/tools/planner_tools.py` 规划器工具:
+  - 实现 `GetFreeSlotsTool` 工具类：获取空闲时间段
+  - 实现 `PlanTasksTool` 工具类：自动规划任务
+
+- GetFreeSlotsTool 功能:
+  - 分析指定日期范围内的空闲时间
+  - 自动排除已有事件占用的时段
+  - 自动排除睡眠时间（默认 23:00-08:00，可配置）
+  - 支持最小时长过滤（min_duration 参数）
+  - 支持多天查询
+  - 计算总空闲时长
+
+- PlanTasksTool 功能:
+  - 自动将待办任务安排到空闲时间段
+  - 按优先级（紧急>高>中>低）和截止日期排序
+  - 考虑任务的预计时长
+  - 避免与现有日程冲突
+  - 支持指定任务 ID 列表规划
+  - 支持最大任务数量限制
+  - 支持优先上午安排选项
+  - 规划后自动创建日程事件
+  - 更新任务状态为 in_progress
+
+- 睡眠时间考虑:
+  - 默认睡眠时间：23:00-08:00
+  - 可通过构造函数参数自定义
+  - 自动计算跨天的睡眠时间段
+
+- 更新 `src/schedule_agent/core/tools/__init__.py` 导出新工具
+
+- 创建测试文件 `tests/test_planner_tools.py`:
+  - GetFreeSlotsTool 测试 (11 个用例)
+  - PlanTasksTool 测试 (13 个用例)
+  - 集成测试 (3 个用例)
+
+### 测试:
+- 运行 `pytest tests/test_planner_tools.py -v` 全部 30 个测试通过
+- 运行 `pytest tests/ -v` 全部 266 个测试通过 (1 个跳过)
+- 验证空闲时间计算正确
+- 验证睡眠时间排除正确
+- 验证任务按优先级和截止日期排序
+- 验证规划后创建事件和更新任务状态
+- 验证避免与现有事件冲突
+
+### 备注:
+- 工具遵循 OpenAI Function Calling 格式
+- 每个工具都有详细的使用说明和示例
+- 工具返回结构化的 ToolResult
+- 下一步任务: AGT-001 实现主 Agent 循环
+
+---
+
 ## 2026-02-17 - 任务: TOL-003 实现存储工具 (add_event, add_task, get_events, get_tasks)
 
 ### 完成内容:

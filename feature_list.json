@@ -114,7 +114,7 @@
         "实现睡眠时间考虑",
         "编写测试用例"
       ],
-      "passes": false,
+      "passes": true,
       "priority": "high"
     },
     {

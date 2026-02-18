@@ -54,6 +54,28 @@ class AgentConfig(BaseModel):
     enable_debug: bool = Field(default=False, description="是否启用调试模式")
 
 
+class LoggingConfig(BaseModel):
+    """日志配置"""
+
+    session_log_dir: str = Field(
+        default="./logs/sessions",
+        description="Session 日志目录",
+    )
+    enable_session_log: bool = Field(
+        default=True,
+        description="是否启用 session 日志",
+    )
+    enable_detailed_log: bool = Field(
+        default=False,
+        description="是否记录完整 prompt",
+    )
+    max_system_prompt_log_len: int = Field(
+        default=2000,
+        ge=0,
+        description="详细模式下 system prompt 截断长度",
+    )
+
+
 class Config(BaseModel):
     """应用配置"""
 
@@ -61,6 +83,7 @@ class Config(BaseModel):
     time: TimeConfig = Field(default_factory=TimeConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
 
 def find_config_file() -> Path:

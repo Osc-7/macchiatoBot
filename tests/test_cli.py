@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from io import StringIO
 import sys
 
-from schedule_agent.config import Config, LLMConfig
+from schedule_agent.config import Config, LLMConfig, LoggingConfig
 from schedule_agent.core import ScheduleAgent
 from schedule_agent.core.tools import BaseTool
 
@@ -109,6 +109,7 @@ class TestRunInteractiveLoop:
         agent = MagicMock(spec=ScheduleAgent)
         agent.process_input = AsyncMock(return_value="这是测试响应")
         agent.clear_context = MagicMock()
+        agent.get_token_usage = MagicMock(return_value={"call_count": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
         return agent
 
     @pytest.mark.asyncio
@@ -207,6 +208,7 @@ class TestMainAsync:
                 api_key="test-api-key",
                 model="test-model",
             ),
+            logging=LoggingConfig(enable_session_log=False),
         )
 
     @pytest.mark.asyncio
@@ -270,6 +272,7 @@ class TestCLIIntegration:
                 api_key="test-api-key",
                 model="test-model",
             ),
+            logging=LoggingConfig(enable_session_log=False),
         )
 
     @pytest.mark.asyncio

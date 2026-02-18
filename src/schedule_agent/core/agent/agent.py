@@ -5,12 +5,16 @@
 """
 
 import json
-from typing import Any, Dict, List, Optional
+import time
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from schedule_agent.config import Config, get_config
 from schedule_agent.core.context import ConversationContext, get_time_context
 from schedule_agent.core.llm import LLMClient, LLMResponse, ToolCall, TokenUsage
 from schedule_agent.core.tools import BaseTool, ToolRegistry, ToolResult
+
+if TYPE_CHECKING:
+    from schedule_agent.utils.session_logger import SessionLogger
 
 
 class ScheduleAgent:
@@ -30,6 +34,7 @@ class ScheduleAgent:
         tools: Optional[List[BaseTool]] = None,
         max_iterations: int = 10,
         timezone: str = "Asia/Shanghai",
+        session_logger: Optional["SessionLogger"] = None,
     ):
         """
         初始化 Agent。
@@ -39,6 +44,7 @@ class ScheduleAgent:
             tools: 工具列表，如果为 None 则使用空注册表
             max_iterations: 最大工具调用迭代次数
             timezone: 时区
+            session_logger: 会话日志记录器，用于记录完整 session 日志
         """
         self._config = config or get_config()
         self._llm_client = LLMClient(self._config)
@@ -46,8 +52,11 @@ class ScheduleAgent:
         self._context = ConversationContext()
         self._max_iterations = max_iterations
         self._timezone = timezone
+        self._session_logger = session_logger
         # 本会话 token 用量累计
         self._token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "call_count": 0}
+        # 当前轮次（每次 process_input 递增）
+        self._current_turn_id = 0
 
         # 注册工具
         if tools:
@@ -98,6 +107,10 @@ class ScheduleAgent:
         """
         return dict(self._token_usage)
 
+    def get_turn_count(self) -> int:
+        """获取本会话已处理的用户轮次数量"""
+        return self._current_turn_id
+
     def reset_token_usage(self) -> None:
         """重置本会话的 token 用量统计"""
         self._token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "call_count": 0}
@@ -118,21 +131,46 @@ class ScheduleAgent:
         Returns:
             Agent 的响应文本
         """
+        # 0. 递增轮次并记录用户消息
+        self._current_turn_id += 1
+        turn_id = self._current_turn_id
+
         # 1. 添加用户消息到上下文
         self._context.add_user_message(user_input)
+
+        if self._session_logger:
+            self._session_logger.on_user_message(turn_id, user_input)
 
         # 2. Agent 主循环
         iteration = 0
         while iteration < self._max_iterations:
             iteration += 1
 
+            system_prompt = self._build_system_prompt()
+            messages = self._context.get_messages()
+            tools_defs = self._tool_registry.get_all_definitions()
+
+            if self._session_logger:
+                self._session_logger.on_llm_request(
+                    turn_id=turn_id,
+                    iteration=iteration,
+                    message_count=len(messages),
+                    tool_count=len(tools_defs),
+                    system_prompt_len=len(system_prompt),
+                    system_prompt=system_prompt if self._session_logger.enable_detailed_log else None,
+                    messages=messages if self._session_logger.enable_detailed_log else None,
+                )
+
             # 2.1 调用 LLM
             response = await self._llm_client.chat_with_tools(
-                system_message=self._build_system_prompt(),
-                messages=self._context.get_messages(),
-                tools=self._tool_registry.get_all_definitions(),
+                system_message=system_prompt,
+                messages=messages,
+                tools=tools_defs,
                 tool_choice="auto",
             )
+
+            if self._session_logger:
+                self._session_logger.on_llm_response(turn_id, iteration, response)
 
             # 累计 token 用量
             if response.usage:
@@ -148,7 +186,15 @@ class ScheduleAgent:
 
                 # 执行所有工具调用
                 for tool_call in response.tool_calls:
+                    if self._session_logger:
+                        self._session_logger.on_tool_call(turn_id, iteration, tool_call)
+                    t0 = time.perf_counter()
                     result = await self._execute_tool_call(tool_call)
+                    duration_ms = int((time.perf_counter() - t0) * 1000)
+                    if self._session_logger:
+                        self._session_logger.on_tool_result(
+                            turn_id, iteration, tool_call.id, result, duration_ms
+                        )
                     self._context.add_tool_result(tool_call.id, result)
 
                 # 继续循环，让 LLM 处理工具结果
@@ -157,13 +203,21 @@ class ScheduleAgent:
             # 2.3 返回最终响应
             if response.content:
                 self._context.add_assistant_message(content=response.content)
+                if self._session_logger:
+                    self._session_logger.on_assistant_message(turn_id, response.content)
                 return response.content
 
             # 如果没有内容也没有工具调用，返回默认响应
-            return "抱歉，我无法处理您的请求。请重试或换一种方式表达。"
+            fallback = "抱歉，我无法处理您的请求。请重试或换一种方式表达。"
+            if self._session_logger:
+                self._session_logger.on_assistant_message(turn_id, fallback)
+            return fallback
 
         # 超过最大迭代次数
-        return "抱歉，处理您的请求时超出了最大迭代次数。请简化您的问题或稍后重试。"
+        overflow_msg = "抱歉，处理您的请求时超出了最大迭代次数。请简化您的问题或稍后重试。"
+        if self._session_logger:
+            self._session_logger.on_assistant_message(turn_id, overflow_msg)
+        return overflow_msg
 
     def _build_system_prompt(self) -> str:
         """

@@ -43,6 +43,7 @@ data/*.json
 !data/.gitkeep
 config.yaml
 automation-logs/
+logs/
 
 # OS
 .DS_Store

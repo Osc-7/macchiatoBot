@@ -11,6 +11,7 @@ from typing import List, Optional
 
 from schedule_agent.config import Config, get_config
 from schedule_agent.core import ScheduleAgent
+from schedule_agent.utils.session_logger import SessionLogger
 from schedule_agent.core.tools import (
     BaseTool,
     ParseTimeTool,
@@ -197,22 +198,41 @@ async def main_async(args: Optional[List[str]] = None):
     # 获取默认工具
     tools = get_default_tools()
 
-    # 创建 Agent
-    async with ScheduleAgent(
-        config=config,
-        tools=tools,
-        max_iterations=config.agent.max_iterations,
-        timezone=config.time.timezone,
-    ) as agent:
-        # 检查是否有命令行参数
-        if args and len(args) > 1:
-            # 执行单条命令
-            command = " ".join(args[1:])
-            response = await run_single_command(agent, command)
-            print(response)
-        else:
-            # 运行交互式循环
-            await run_interactive_loop(agent)
+    # 创建 Session 日志记录器（若启用）
+    session_logger = None
+    if config.logging.enable_session_log:
+        session_logger = SessionLogger(
+            log_dir=config.logging.session_log_dir,
+            enable_detailed_log=config.logging.enable_detailed_log,
+            max_system_prompt_log_len=config.logging.max_system_prompt_log_len,
+        )
+        session_logger.on_session_start()
+
+    agent_ref = None
+    try:
+        async with ScheduleAgent(
+            config=config,
+            tools=tools,
+            max_iterations=config.agent.max_iterations,
+            timezone=config.time.timezone,
+            session_logger=session_logger,
+        ) as agent:
+            agent_ref = agent
+            # 检查是否有命令行参数
+            if args and len(args) > 1:
+                # 执行单条命令
+                command = " ".join(args[1:])
+                response = await run_single_command(agent, command)
+                print(response)
+            else:
+                # 运行交互式循环
+                await run_interactive_loop(agent)
+    finally:
+        if session_logger:
+            turn_count = agent_ref.get_turn_count() if agent_ref else 0
+            total_usage = agent_ref.get_token_usage() if agent_ref else None
+            session_logger.on_session_end(turn_count, total_usage)
+            session_logger.close()
 
 
 def main():

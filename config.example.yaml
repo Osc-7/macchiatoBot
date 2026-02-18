@@ -55,3 +55,10 @@ storage:
 agent:
   max_iterations: 10
   enable_debug: true
+
+# 日志配置
+logging:
+  session_log_dir: "./logs/sessions"
+  enable_session_log: true
+  enable_detailed_log: false
+  max_system_prompt_log_len: 2000

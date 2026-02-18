@@ -6,7 +6,13 @@ from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from .parse_time import ParseTimeTool, ParsedTime, TimeParser
 from .planner_tools import GetFreeSlotsTool, PlanTasksTool
 from .registry import ToolRegistry
-from .storage_tools import AddEventTool, AddTaskTool, GetEventsTool, GetTasksTool
+from .storage_tools import (
+    AddEventTool,
+    AddTaskTool,
+    GetEventsTool,
+    GetTasksTool,
+    DeleteScheduleDataTool,
+)
 
 __all__ = [
     "BaseTool",
@@ -21,6 +27,7 @@ __all__ = [
     "AddTaskTool",
     "GetEventsTool",
     "GetTasksTool",
+    "DeleteScheduleDataTool",
     "GetFreeSlotsTool",
     "PlanTasksTool",
 ]

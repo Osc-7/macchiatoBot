@@ -44,6 +44,7 @@ class TestGetDefaultTools:
             "add_task",
             "get_events",
             "get_tasks",
+            "delete_schedule_data",
             "get_free_slots",
             "plan_tasks",
         ]

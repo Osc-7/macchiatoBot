@@ -732,3 +732,221 @@ class GetTasksTool(BaseTool):
                 "count": len(tasks),
             },
         )
+
+
+class DeleteScheduleDataTool(BaseTool):
+    """
+    删除日程/任务工具
+
+    支持删除单条、多条或全量数据。通过用户确认（yes/no）做基本审核。
+    """
+
+    def __init__(
+        self,
+        event_repository: Optional[EventRepository] = None,
+        task_repository: Optional[TaskRepository] = None,
+    ):
+        """
+        初始化删除工具。
+
+        Args:
+            event_repository: 事件仓库（可选）
+            task_repository: 任务仓库（可选）
+        """
+        self._event_repository = event_repository or EventRepository()
+        self._task_repository = task_repository or TaskRepository()
+
+    @property
+    def name(self) -> str:
+        return "delete_schedule_data"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="delete_schedule_data",
+            description="""删除事件或任务。
+
+支持以下删除模式：
+- 单条删除：按 ID 删除单个事件/任务
+- 批量删除：按 ID 列表删除多条记录
+- 全量删除：删除该类型下全部记录（delete_all=true）
+
+重要：所有删除都必须先经用户确认。流程应为：
+1. 用户提出删除请求时，先用 get_events/get_tasks 查出将要删除的条目，向用户列出并询问「确认删除吗？请回复 是/确认/yes 以执行」；
+2. 仅当用户明确回复 是、确认、yes 等肯定意图后，再调用本工具并传 confirm=true 执行删除。
+不要在没有用户确认的情况下传 confirm=true。""",
+            parameters=[
+                ToolParameter(
+                    name="resource_type",
+                    type="string",
+                    description="资源类型：event（事件）或 task（任务）",
+                    required=True,
+                    enum=["event", "task"],
+                ),
+                ToolParameter(
+                    name="target_ids",
+                    type="array",
+                    description="要删除的 ID 列表（单条或批量删除使用）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="delete_all",
+                    type="boolean",
+                    description="是否删除该类型下全部记录（默认 false）",
+                    required=False,
+                    default=False,
+                ),
+                ToolParameter(
+                    name="confirm",
+                    type="boolean",
+                    description="是否已获用户确认（用户回复 是/确认/yes 后才设为 true）",
+                    required=True,
+                ),
+            ],
+            examples=[
+                {
+                    "description": "删除单个任务（用户已确认）",
+                    "params": {
+                        "resource_type": "task",
+                        "target_ids": ["a1b2c3d4"],
+                        "confirm": True,
+                    },
+                },
+                {
+                    "description": "批量删除多个事件（用户已确认）",
+                    "params": {
+                        "resource_type": "event",
+                        "target_ids": ["e1", "e2", "e3"],
+                        "confirm": True,
+                    },
+                },
+                {
+                    "description": "全量删除任务（用户已确认）",
+                    "params": {
+                        "resource_type": "task",
+                        "delete_all": True,
+                        "confirm": True,
+                    },
+                },
+            ],
+            usage_notes=[
+                "删除操作不可恢复。批量/全量删除前务必先列出待删项并让用户确认（是/yes/确认）后再调用并传 confirm=true。",
+            ],
+        )
+
+    def _get_repository(self, resource_type: str):
+        if resource_type == "event":
+            return self._event_repository
+        return self._task_repository
+
+    @staticmethod
+    def _deduplicate_ids(raw_ids: List[str]) -> List[str]:
+        seen = set()
+        deduped: List[str] = []
+        for item_id in raw_ids:
+            if isinstance(item_id, str) and item_id and item_id not in seen:
+                seen.add(item_id)
+                deduped.append(item_id)
+        return deduped
+
+    async def execute(self, **kwargs) -> ToolResult:
+        """
+        执行删除操作。
+
+        Args:
+            resource_type: 资源类型（event/task）
+            target_ids: 目标 ID 列表
+            delete_all: 是否全量删除
+            confirm: 是否已获用户确认（是/确认/yes）
+
+        Returns:
+            删除结果
+        """
+        resource_type = kwargs.get("resource_type")
+        if resource_type not in ("event", "task"):
+            return ToolResult(
+                success=False,
+                error="INVALID_RESOURCE_TYPE",
+                message="resource_type 必须是 event 或 task",
+            )
+
+        confirm = kwargs.get("confirm", False)
+        if confirm is not True:
+            return ToolResult(
+                success=False,
+                error="CONFIRMATION_REQUIRED",
+                message="删除操作需要用户确认。请先向用户列出待删项，待用户回复 是/确认/yes 后再调用并传 confirm=true",
+            )
+
+        delete_all = kwargs.get("delete_all", False)
+        raw_target_ids = kwargs.get("target_ids", [])
+        if raw_target_ids is None:
+            raw_target_ids = []
+        if not isinstance(raw_target_ids, list):
+            return ToolResult(
+                success=False,
+                error="INVALID_TARGET_IDS",
+                message="target_ids 必须是数组类型",
+            )
+        target_ids = self._deduplicate_ids(raw_target_ids)
+
+        if delete_all and target_ids:
+            return ToolResult(
+                success=False,
+                error="CONFLICTING_PARAMETERS",
+                message="delete_all=true 时不应提供 target_ids",
+            )
+
+        repository = self._get_repository(resource_type)
+        mode = "single"
+
+        if delete_all:
+            mode = "all"
+            target_ids = [item.id for item in repository.get_all()]
+        elif not target_ids:
+            return ToolResult(
+                success=False,
+                error="MISSING_TARGET_IDS",
+                message="请提供 target_ids，或设置 delete_all=true",
+            )
+        elif len(target_ids) > 1:
+            mode = "batch"
+
+        deleted_ids: List[str] = []
+        not_found_ids: List[str] = []
+
+        for item_id in target_ids:
+            if repository.delete(item_id):
+                deleted_ids.append(item_id)
+            else:
+                not_found_ids.append(item_id)
+
+        if not deleted_ids:
+            return ToolResult(
+                success=False,
+                error="NOTHING_DELETED",
+                message=f"未删除任何 {resource_type}，目标可能不存在",
+                metadata={
+                    "resource_type": resource_type,
+                    "mode": mode,
+                    "not_found_ids": not_found_ids,
+                },
+            )
+
+        message = f"成功删除 {len(deleted_ids)} 条{resource_type}记录"
+        if not_found_ids:
+            message += f"，另有 {len(not_found_ids)} 条未找到"
+
+        return ToolResult(
+            success=True,
+            data={
+                "deleted_ids": deleted_ids,
+                "not_found_ids": not_found_ids,
+            },
+            message=message,
+            metadata={
+                "resource_type": resource_type,
+                "mode": mode,
+                "deleted_count": len(deleted_ids),
+                "not_found_count": len(not_found_ids),
+            },
+        )

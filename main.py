@@ -18,6 +18,7 @@ from schedule_agent.core.tools import (
     AddTaskTool,
     GetEventsTool,
     GetTasksTool,
+    DeleteScheduleDataTool,
     GetFreeSlotsTool,
     PlanTasksTool,
 )
@@ -36,6 +37,7 @@ def get_default_tools() -> List[BaseTool]:
         AddTaskTool(),
         GetEventsTool(),
         GetTasksTool(),
+        DeleteScheduleDataTool(),
         GetFreeSlotsTool(),
         PlanTasksTool(),
     ]
@@ -54,6 +56,7 @@ def print_welcome():
     print("\n输入 'quit' 或 'exit' 退出程序")
     print("输入 'clear' 清空对话历史")
     print("输入 'help' 查看帮助信息")
+    print("输入 'usage' 或 'stats' 查看本会话 token 用量")
     print("-" * 50 + "\n")
 
 
@@ -66,12 +69,26 @@ def print_help():
     print("  quit / exit  - 退出程序")
     print("  clear        - 清空对话历史")
     print("  help         - 显示此帮助信息")
+    print("  usage / stats - 查看本会话 token 用量统计")
     print("\n示例对话:")
     print("  - 明天下午3点有个团队会议")
     print("  - 添加一个任务：完成项目报告，预计2小时，周五前完成")
     print("  - 查看今天的日程")
     print("  - 查看我的待办任务")
     print("  - 帮我规划一下明天的任务")
+    print("-" * 50 + "\n")
+
+
+def print_token_usage(agent: ScheduleAgent):
+    """打印本会话 token 用量统计"""
+    u = agent.get_token_usage()
+    print("\n" + "-" * 50)
+    print("本会话 Token 用量统计")
+    print("-" * 50)
+    print(f"  调用次数:     {u['call_count']}")
+    print(f"  输入 token:   {u['prompt_tokens']}")
+    print(f"  输出 token:   {u['completion_tokens']}")
+    print(f"  合计 token:   {u['total_tokens']}")
     print("-" * 50 + "\n")
 
 
@@ -95,6 +112,9 @@ async def run_interactive_loop(agent: ScheduleAgent):
 
             # 处理退出命令
             if user_input.lower() in ("quit", "exit", "q"):
+                u = agent.get_token_usage()
+                if u["call_count"] > 0:
+                    print(f"\n本会话共调用 LLM {u['call_count']} 次，合计 token: {u['total_tokens']}（输入 {u['prompt_tokens']} + 输出 {u['completion_tokens']}）")
                 print("\n再见！祝你生活愉快！\n")
                 break
 
@@ -107,6 +127,11 @@ async def run_interactive_loop(agent: ScheduleAgent):
             # 处理帮助命令
             if user_input.lower() == "help":
                 print_help()
+                continue
+
+            # 处理 token 用量统计
+            if user_input.lower() in ("usage", "stats", "tokens"):
+                print_token_usage(agent)
                 continue
 
             # 处理用户输入

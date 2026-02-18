@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from schedule_agent.config import Config, get_config
 from schedule_agent.core.context import ConversationContext, get_time_context
-from schedule_agent.core.llm import LLMClient, LLMResponse, ToolCall
+from schedule_agent.core.llm import LLMClient, LLMResponse, ToolCall, TokenUsage
 from schedule_agent.core.tools import BaseTool, ToolRegistry, ToolResult
 
 
@@ -46,6 +46,8 @@ class ScheduleAgent:
         self._context = ConversationContext()
         self._max_iterations = max_iterations
         self._timezone = timezone
+        # 本会话 token 用量累计
+        self._token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "call_count": 0}
 
         # 注册工具
         if tools:
@@ -87,6 +89,19 @@ class ScheduleAgent:
         """清空对话上下文"""
         self._context.clear()
 
+    def get_token_usage(self) -> dict:
+        """
+        获取本会话累计的 token 用量。
+
+        Returns:
+            包含 prompt_tokens, completion_tokens, total_tokens, call_count 的字典
+        """
+        return dict(self._token_usage)
+
+    def reset_token_usage(self) -> None:
+        """重置本会话的 token 用量统计"""
+        self._token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "call_count": 0}
+
     async def process_input(self, user_input: str) -> str:
         """
         处理用户输入。
@@ -118,6 +133,13 @@ class ScheduleAgent:
                 tools=self._tool_registry.get_all_definitions(),
                 tool_choice="auto",
             )
+
+            # 累计 token 用量
+            if response.usage:
+                self._token_usage["prompt_tokens"] += response.usage.prompt_tokens
+                self._token_usage["completion_tokens"] += response.usage.completion_tokens
+                self._token_usage["total_tokens"] += response.usage.total_tokens
+                self._token_usage["call_count"] += 1
 
             # 2.2 处理工具调用
             if response.tool_calls:

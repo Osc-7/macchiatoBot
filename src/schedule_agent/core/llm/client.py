@@ -13,6 +13,29 @@ from schedule_agent.config import Config, get_config
 
 
 @dataclass
+class TokenUsage:
+    """单次调用的 token 用量"""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    @classmethod
+    def from_response(cls, response: Any) -> "TokenUsage":
+        """从 API 响应中解析 usage，无则返回全 0"""
+        if response is None:
+            return cls()
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return cls()
+        return cls(
+            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            total_tokens=getattr(usage, "total_tokens", 0) or 0,
+        )
+
+
+@dataclass
 class ToolCall:
     """工具调用"""
 
@@ -41,6 +64,9 @@ class LLMResponse:
 
     raw_response: Any = None
     """原始响应对象"""
+
+    usage: Optional[TokenUsage] = None
+    """本次调用的 token 用量（API 返回时才有）"""
 
 
 class LLMClient:
@@ -111,12 +137,14 @@ class LLMClient:
         )
 
         choice = response.choices[0]
+        usage = TokenUsage.from_response(response)
 
         return LLMResponse(
             content=choice.message.content,
             tool_calls=[],
             finish_reason=choice.finish_reason,
             raw_response=response,
+            usage=usage,
         )
 
     async def chat_with_tools(
@@ -172,11 +200,14 @@ class LLMClient:
                     )
                 )
 
+        usage = TokenUsage.from_response(response)
+
         return LLMResponse(
             content=choice.message.content,
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason,
             raw_response=response,
+            usage=usage,
         )
 
     async def close(self) -> None:

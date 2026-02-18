@@ -15,6 +15,7 @@ from schedule_agent.core.tools.storage_tools import (
     AddTaskTool,
     GetEventsTool,
     GetTasksTool,
+    DeleteScheduleDataTool,
 )
 from schedule_agent.core.tools.base import ToolDefinition
 from schedule_agent.storage.json_repository import EventRepository, TaskRepository
@@ -68,6 +69,15 @@ def get_events_tool(event_repository):
 def get_tasks_tool(task_repository):
     """创建获取任务工具"""
     return GetTasksTool(repository=task_repository)
+
+
+@pytest.fixture
+def delete_tool(event_repository, task_repository):
+    """创建删除工具"""
+    return DeleteScheduleDataTool(
+        event_repository=event_repository,
+        task_repository=task_repository,
+    )
 
 
 # ============================================================================
@@ -680,6 +690,101 @@ class TestGetTasksTool:
         # 应该按截止日期排序
         assert result.data[0].title == "先截止"
         assert result.data[1].title == "后截止"
+
+
+# ============================================================================
+# DeleteScheduleDataTool 测试
+# ============================================================================
+
+class TestDeleteScheduleDataTool:
+    """DeleteScheduleDataTool 测试类"""
+
+    def test_name(self, delete_tool):
+        """测试工具名称"""
+        assert delete_tool.name == "delete_schedule_data"
+
+    def test_get_definition(self, delete_tool):
+        """测试获取工具定义"""
+        definition = delete_tool.get_definition()
+        assert isinstance(definition, ToolDefinition)
+        assert definition.name == "delete_schedule_data"
+        param_names = [p.name for p in definition.parameters]
+        assert "resource_type" in param_names
+        assert "confirm" in param_names
+
+    @pytest.mark.asyncio
+    async def test_delete_single_task_success(self, delete_tool, task_repository):
+        """测试单条删除任务"""
+        task = Task(title="待删除任务")
+        task_repository.create(task)
+
+        result = await delete_tool.execute(
+            resource_type="task",
+            target_ids=[task.id],
+            confirm=True,
+        )
+
+        assert result.success is True
+        assert result.metadata["mode"] == "single"
+        assert task_repository.get(task.id) is None
+
+    @pytest.mark.asyncio
+    async def test_delete_requires_confirmation(self, delete_tool, task_repository):
+        """测试删除必须确认"""
+        task = Task(title="待删除任务")
+        task_repository.create(task)
+
+        result = await delete_tool.execute(
+            resource_type="task",
+            target_ids=[task.id],
+            confirm=False,
+        )
+
+        assert result.success is False
+        assert result.error == "CONFIRMATION_REQUIRED"
+        assert task_repository.get(task.id) is not None
+
+    @pytest.mark.asyncio
+    async def test_batch_delete_success_with_confirm(self, delete_tool, task_repository):
+        """测试批量删除（用户确认后）"""
+        task1 = Task(title="任务1")
+        task2 = Task(title="任务2")
+        task_repository.create(task1)
+        task_repository.create(task2)
+
+        result = await delete_tool.execute(
+            resource_type="task",
+            target_ids=[task1.id, task2.id],
+            confirm=True,
+        )
+
+        assert result.success is True
+        assert result.metadata["mode"] == "batch"
+        assert result.metadata["deleted_count"] == 2
+        assert task_repository.get(task1.id) is None
+        assert task_repository.get(task2.id) is None
+
+    @pytest.mark.asyncio
+    async def test_delete_all_success(self, delete_tool, event_repository):
+        """测试全量删除（用户确认后）"""
+        today = date.today()
+        for i in range(2):
+            event = Event(
+                title=f"待删除事件{i}",
+                start_time=datetime.combine(today, datetime.min.time().replace(hour=9 + i)),
+                end_time=datetime.combine(today, datetime.min.time().replace(hour=10 + i)),
+            )
+            event_repository.create(event)
+
+        result = await delete_tool.execute(
+            resource_type="event",
+            delete_all=True,
+            confirm=True,
+        )
+
+        assert result.success is True
+        assert result.metadata["mode"] == "all"
+        assert event_repository.get_all() == []
 
 
 # ============================================================================

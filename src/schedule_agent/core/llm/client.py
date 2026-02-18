@@ -184,6 +184,9 @@ class LLMClient:
         if tools:
             request_params["tools"] = tools
             request_params["tool_choice"] = tool_choice
+            # 百炼/OpenAI 兼容：parallel_tool_calls 让模型单次返回多个工具调用，减少往返
+            # 参见 https://help.aliyun.com/zh/model-studio/qwen-function-calling
+            request_params["parallel_tool_calls"] = True
 
         response = await self._client.chat.completions.create(**request_params)
 

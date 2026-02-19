@@ -41,6 +41,15 @@ try:
 except ImportError:
     _HAS_PROMPT_TOOLKIT = False
 
+try:
+    from rich.console import Console
+    from rich.markdown import Markdown
+    _HAS_RICH = True
+    _RICH_CONSOLE: Optional["Console"] = Console()
+except Exception:  # pragma: no cover - 极端环境下容错
+    _HAS_RICH = False
+    _RICH_CONSOLE = None
+
 
 def get_default_tools() -> List[BaseTool]:
     """
@@ -200,7 +209,13 @@ async def run_interactive_loop(agent: ScheduleAgent):
             try:
                 response = await agent.process_input(user_input)
                 print()
-                print(assistant_prefix() + response)
+                # 优先使用 rich 渲染 Markdown，以获得更好的终端展示效果
+                if _HAS_RICH and _RICH_CONSOLE is not None:
+                    # 将「助手」前缀和内容一起作为 Markdown 渲染，避免前缀与正文错位
+                    md_text = f"**助手：**\n\n{response}"
+                    _RICH_CONSOLE.print(Markdown(md_text))
+                else:
+                    print(assistant_prefix() + response)
                 print()
             except Exception as e:
                 print()

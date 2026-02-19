@@ -8,6 +8,7 @@ Schedule Agent CLI 入口
 import asyncio
 import sys
 from typing import List, Optional
+import shutil
 
 from schedule_agent.config import Config, get_config
 from schedule_agent.core import ScheduleAgent
@@ -18,8 +19,9 @@ from schedule_agent.utils.cli_style import (
     label,
     accent,
     prompt_prefix,
-    assistant_prefix,
     sep_line,
+    thin_separator,
+    status_bar,
 )
 from schedule_agent.core.tools import (
     BaseTool,
@@ -37,9 +39,11 @@ from schedule_agent.core.tools import (
 try:
     from prompt_toolkit import PromptSession as _PromptSession
     from prompt_toolkit.formatted_text import HTML
+    from prompt_toolkit.styles import Style
     _HAS_PROMPT_TOOLKIT = True
 except ImportError:
     _HAS_PROMPT_TOOLKIT = False
+    Style = None
 
 try:
     from rich.console import Console
@@ -59,11 +63,11 @@ async def _thinking_spinner(stop_event: "asyncio.Event") -> None:
     """
     frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     i = 0
-    text_width = 0
+    # 预估一行宽度，用于清理时覆盖整行（避免中英文宽度差导致残留）
+    width = shutil.get_terminal_size((80, 20)).columns
     while not stop_event.is_set():
         prefix = frames[i % len(frames)]
         msg = f"{prefix} 正在思考，请稍候…"
-        text_width = max(text_width, len(msg))
         sys.stdout.write("\r" + msg)
         sys.stdout.flush()
         i += 1
@@ -72,8 +76,8 @@ async def _thinking_spinner(stop_event: "asyncio.Event") -> None:
         except asyncio.CancelledError:
             break
 
-    # 清空这一行
-    sys.stdout.write("\r" + " " * text_width + "\r")
+    # 清空这一行（用整行宽度覆盖，避免多字节字符残留）
+    sys.stdout.write("\r" + " " * width + "\r")
     sys.stdout.flush()
 
 
@@ -98,21 +102,43 @@ def get_default_tools() -> List[BaseTool]:
 
 
 def print_welcome():
-    """打印欢迎信息"""
-    print()
-    print(sep_line("=", 50))
-    print("  " + title("Schedule Agent - 智能日程管理助手"))
-    print(sep_line("=", 50))
-    print()
-    print(hint("你好！我是你的日程管理助手，可以帮助你："))
-    print("  • 添加日程事件（会议、约会等）")
-    print("  • 创建待办任务")
-    print("  • 查询日程和任务")
-    print("  • 智能规划时间")
-    print()
-    print(hint("命令：") + " quit/exit 退出  |  clear 清空对话  |  help 帮助  |  usage/stats 用量")
-    print(sep_line("-", 50))
-    print()
+    """打印欢迎信息（Markdown 格式，推荐 rich 渲染）"""
+    md = """
+# Schedule Agent - 智能日程管理助手
+
+你好！我是你的日程管理助手，可以帮助你：
+
+- 添加日程事件（会议、约会等）
+- 创建待办任务
+- 查询日程和任务
+- 智能规划时间
+
+**命令：**
+
+- `quit` / `exit` 退出
+- `clear` 清空对话
+- `help` 帮助
+- `usage` / `stats` 用量统计
+
+
+"""
+    if _HAS_RICH and _RICH_CONSOLE is not None:
+        _RICH_CONSOLE.print(Markdown(md))
+    else:
+        print()
+        print("=" * 50)
+        print("  Schedule Agent - 智能日程管理助手")
+        print("=" * 50)
+        print()
+        print("你好！我是你的日程管理助手，可以帮助你：")
+        print("  • 添加日程事件（会议、约会等）")
+        print("  • 创建待办任务")
+        print("  • 查询日程和任务")
+        print("  • 智能规划时间")
+        print()
+        print("命令： quit/exit 退出  |  clear 清空对话  |  help 帮助  |  usage/stats 用量")
+        print("-" * 50)
+        print()
 
 
 def print_help():
@@ -161,44 +187,28 @@ async def run_interactive_loop(agent: ScheduleAgent):
         agent: ScheduleAgent 实例
     """
     print_welcome()
+    print(thin_separator())
 
-    # 有 prompt_toolkit 时使用带样式的提示符和底部状态栏显示 token 统计
     if _HAS_PROMPT_TOOLKIT:
         pt_session = _PromptSession()
-        prompt_text = HTML('<style fg="ansicyan" bold="true">你: </style>')
-
-        def _bottom_toolbar():
-            """底部状态栏：显示当前会话的 token 统计信息"""
-            u = agent.get_token_usage()
-            # 使用浅色背景 + 深色前景，类似 Vim 状态栏效果
-            text = (
-                f" Token: total {u['total_tokens']} "
-                f"| in {u['prompt_tokens']} "
-                f"| out {u['completion_tokens']} "
-                f"| calls {u['call_count']} "
-            )
-            return HTML(
-                "<style bg='ansigray' fg='ansiblack'>"
-                + text +
-                "</style>"
-            )
+        pt_prompt = HTML("<style fg='ansicyan' bold='true'>❯ </style>")
     else:
         pt_session = None
-        prompt_text = None
+        pt_prompt = None
+
+    # 记录上一轮的 token 总量，用于计算增量
+    prev_total_tokens = 0
 
     while True:
         try:
-            if pt_session is not None and prompt_text is not None:
+            # 获取用户输入
+            if pt_session is not None and pt_prompt is not None:
                 user_input = (
-                    await pt_session.prompt_async(
-                        prompt_text,
-                        bottom_toolbar=_bottom_toolbar,
-                    )
+                    await pt_session.prompt_async(pt_prompt)
                 ).strip()
             else:
                 user_input = input(prompt_prefix()).strip()
 
-            # 跳过空输入
             if not user_input:
                 continue
 
@@ -213,47 +223,48 @@ async def run_interactive_loop(agent: ScheduleAgent):
                 print()
                 break
 
-            # 处理清空对话命令
             if user_input.lower() == "clear":
                 agent.clear_context()
-                print()
-                print(hint("对话历史已清空。"))
-                print()
+                print(hint("  对话历史已清空。"))
+                print(thin_separator())
                 continue
 
-            # 处理帮助命令
             if user_input.lower() == "help":
                 print_help()
+                print(thin_separator())
                 continue
 
-            # 处理 token 用量统计
             if user_input.lower() in ("usage", "stats", "tokens"):
                 print_token_usage(agent)
+                print(thin_separator())
                 continue
 
             # 处理用户输入
             spinner_stop: Optional[asyncio.Event] = None
             spinner_task: Optional["asyncio.Task"] = None
             try:
-                # 在等待 LLM 响应期间显示简单的等待动画
                 spinner_stop = asyncio.Event()
                 spinner_task = asyncio.create_task(_thinking_spinner(spinner_stop))
 
                 response = await agent.process_input(user_input)
 
-                # 停止动画
                 spinner_stop.set()
                 await spinner_task
 
+                # 输出助手响应
                 print()
-                # 优先使用 rich 渲染 Markdown，以获得更好的终端展示效果
                 if _HAS_RICH and _RICH_CONSOLE is not None:
-                    # 将「助手」前缀和内容一起作为 Markdown 渲染，避免前缀与正文错位
-                    md_text = f"**助手：**\n\n{response}"
-                    _RICH_CONSOLE.print(Markdown(md_text))
+                    _RICH_CONSOLE.print(Markdown(response))
                 else:
-                    print(assistant_prefix() + response)
+                    print(response)
                 print()
+
+                # 状态栏：token 用量
+                u = agent.get_token_usage()
+                delta = u["total_tokens"] - prev_total_tokens
+                prev_total_tokens = u["total_tokens"]
+                print(status_bar(u["total_tokens"], u["call_count"], delta))
+
             except Exception as e:
                 if spinner_stop is not None:
                     spinner_stop.set()
@@ -264,9 +275,9 @@ async def run_interactive_loop(agent: ScheduleAgent):
                         pass
 
                 print()
-                print(accent("抱歉，处理您的请求时发生错误: ") + str(e))
-                print(hint("请重试或换一种方式表达。"))
-                print()
+                print(accent("  抱歉，处理您的请求时发生错误: ") + str(e))
+                print(hint("  请重试或换一种方式表达。"))
+                print(thin_separator())
 
         except KeyboardInterrupt:
             print()

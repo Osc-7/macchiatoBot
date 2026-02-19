@@ -51,6 +51,32 @@ except Exception:  # pragma: no cover - 极端环境下容错
     _RICH_CONSOLE = None
 
 
+async def _thinking_spinner(stop_event: "asyncio.Event") -> None:
+    """
+    简单的「正在思考」动画。
+
+    使用单行覆盖的方式，不依赖 prompt_toolkit，只在等待 LLM 响应期间运行。
+    """
+    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    i = 0
+    text_width = 0
+    while not stop_event.is_set():
+        prefix = frames[i % len(frames)]
+        msg = f"{prefix} 正在思考，请稍候…"
+        text_width = max(text_width, len(msg))
+        sys.stdout.write("\r" + msg)
+        sys.stdout.flush()
+        i += 1
+        try:
+            await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            break
+
+    # 清空这一行
+    sys.stdout.write("\r" + " " * text_width + "\r")
+    sys.stdout.flush()
+
+
 def get_default_tools() -> List[BaseTool]:
     """
     获取默认的工具列表。
@@ -206,8 +232,19 @@ async def run_interactive_loop(agent: ScheduleAgent):
                 continue
 
             # 处理用户输入
+            spinner_stop: Optional[asyncio.Event] = None
+            spinner_task: Optional["asyncio.Task"] = None
             try:
+                # 在等待 LLM 响应期间显示简单的等待动画
+                spinner_stop = asyncio.Event()
+                spinner_task = asyncio.create_task(_thinking_spinner(spinner_stop))
+
                 response = await agent.process_input(user_input)
+
+                # 停止动画
+                spinner_stop.set()
+                await spinner_task
+
                 print()
                 # 优先使用 rich 渲染 Markdown，以获得更好的终端展示效果
                 if _HAS_RICH and _RICH_CONSOLE is not None:
@@ -218,6 +255,14 @@ async def run_interactive_loop(agent: ScheduleAgent):
                     print(assistant_prefix() + response)
                 print()
             except Exception as e:
+                if spinner_stop is not None:
+                    spinner_stop.set()
+                if spinner_task is not None:
+                    try:
+                        await spinner_task
+                    except Exception:
+                        pass
+
                 print()
                 print(accent("抱歉，处理您的请求时发生错误: ") + str(e))
                 print(hint("请重试或换一种方式表达。"))

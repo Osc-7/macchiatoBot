@@ -13,6 +13,28 @@ from openai import AsyncOpenAI
 
 from schedule_agent.config import Config, get_config
 
+# Qwen 深度思考模式会将推理内容放在 content 中（有时与回复混合），用 ` <think>...</think>` 包裹。
+# 参见 https://www.alibabacloud.com/help/zh/model-studio/deep-thinking
+THINKING_END_TAG = "</think>"
+
+
+def _strip_thinking_content(content: Optional[str]) -> Optional[str]:
+    """
+    剥离 Qwen 等模型的思考内容（` <think>...</think>` 块），只保留 `</think>` 之后的正式回复。
+
+    Args:
+        content: 原始 content，可能包含思考内容
+
+    Returns:
+        剥离后的 content，无 ` <think>` 块则原样返回
+    """
+    if not content or not isinstance(content, str):
+        return content
+    idx = content.find(THINKING_END_TAG)
+    if idx == -1:
+        return content
+    return content[idx + len(THINKING_END_TAG) :].strip()
+
 
 @dataclass
 class TokenUsage:
@@ -140,9 +162,10 @@ class LLMClient:
 
         choice = response.choices[0]
         usage = TokenUsage.from_response(response)
+        content = _strip_thinking_content(choice.message.content)
 
         return LLMResponse(
-            content=choice.message.content,
+            content=content,
             tool_calls=[],
             finish_reason=choice.finish_reason,
             raw_response=response,
@@ -252,9 +275,10 @@ class LLMClient:
                 )
 
         usage = TokenUsage.from_response(response)
+        content = _strip_thinking_content(choice.message.content)
 
         return LLMResponse(
-            content=choice.message.content,
+            content=content,
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason,
             raw_response=response,
@@ -308,7 +332,8 @@ class LLMClient:
             if hasattr(chunk, "usage") and chunk.usage:
                 last_usage = chunk.usage
 
-        content = "".join(content_parts) if content_parts else None
+        raw_content = "".join(content_parts) if content_parts else None
+        content = _strip_thinking_content(raw_content)
 
         tool_calls_list: List[ToolCall] = []
         for idx in sorted(tool_calls_map.keys()):

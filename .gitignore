@@ -42,6 +42,7 @@ htmlcov/
 data/*.json
 !data/.gitkeep
 config.yaml
+src/schedule_agent/prompts/system/user.md
 automation-logs/
 logs/
 

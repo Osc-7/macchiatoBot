@@ -6,7 +6,34 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from schedule_agent.core.llm import LLMClient, LLMResponse, ToolCall
+from schedule_agent.core.llm.client import _strip_thinking_content
 from schedule_agent.config import Config, LLMConfig, SearchOptionsConfig
+
+
+class TestStripThinkingContent:
+    """测试 Qwen 思考内容剥离"""
+
+    def test_no_think_tag(self):
+        """无 think 标签时原样返回"""
+        assert _strip_thinking_content("直接回复") == "直接回复"
+
+    def test_with_think_tag(self):
+        """有 <think> 块时只保留其后内容"""
+        raw = "好的，让我总结一下。\n\n**日程：**...\n</think>\n\n看看你今天的安排～"
+        assert _strip_thinking_content(raw) == "看看你今天的安排～"
+
+    def test_empty_after_strip(self):
+        """</think> 后为空时返回空字符串"""
+        raw = "思考内容</think>"
+        assert _strip_thinking_content(raw) == ""
+
+    def test_none_input(self):
+        """None 输入返回 None"""
+        assert _strip_thinking_content(None) is None
+
+    def test_empty_string(self):
+        """空字符串原样返回"""
+        assert _strip_thinking_content("") == ""
 
 
 @pytest.fixture

@@ -314,6 +314,9 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             if env_model:
                 raw_config["llm"]["model"] = env_model
 
+    # 兼容旧配置：user 已迁移至 prompts/system/user.md
+    raw_config.pop("user", None)
+
     return Config(**raw_config)
 
 

@@ -749,9 +749,9 @@ class GetTasksTool(BaseTool):
 
 class UpdateEventTool(BaseTool):
     """
-    更新事件状态工具
+    更新事件工具
 
-    支持将事件标记为已完成、已取消、进行中或已安排。
+    支持更新事件状态、标题、时间、地点等字段。
     """
 
     def __init__(self, repository: Optional[EventRepository] = None):
@@ -764,16 +764,18 @@ class UpdateEventTool(BaseTool):
     def get_definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="update_event",
-            description="""更新事件的状态。
+            description="""更新事件内容（状态、标题、时间等）。
 
-这是修改事件状态的工具，当用户想要：
+这是修改事件的主要工具，当用户想要：
 - 标记事件为已完成（"做完了""完成了""搞定了"）
 - 取消事件
 - 将事件标记为进行中
 - 将事件重新设为已安排
+- 调整事件时间（改期、提前、延后）
+- 修改事件标题、地点、描述、优先级、标签
 
 重要区分：
-- 修改事件状态（完成/取消/进行中/已安排）→ 使用本工具 update_event
+- 修改事件信息（状态/时间/标题/地点等）→ 使用本工具 update_event
 - 永久删除事件 → 使用 delete_schedule_data
 这两者是完全不同的操作，不可混淆。""",
             parameters=[
@@ -786,9 +788,52 @@ class UpdateEventTool(BaseTool):
                 ToolParameter(
                     name="status",
                     type="string",
-                    description="目标状态：completed（已完成）、cancelled（已取消）、in_progress（进行中）、scheduled（已安排）",
-                    required=True,
+                    description="目标状态：completed（已完成）、cancelled（已取消）、in_progress（进行中）、scheduled（已安排）。如果不更新状态，可以不提供此参数。",
+                    required=False,
                     enum=["completed", "cancelled", "in_progress", "scheduled"],
+                ),
+                ToolParameter(
+                    name="title",
+                    type="string",
+                    description="新的事件标题（可选）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="start_time",
+                    type="string",
+                    description="新的开始时间，ISO 格式（如 2026-02-18T15:00:00，可选）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="end_time",
+                    type="string",
+                    description="新的结束时间，ISO 格式（如 2026-02-18T16:00:00，可选）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="description",
+                    type="string",
+                    description="新的事件描述（可选）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="location",
+                    type="string",
+                    description="新的事件地点（可选）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="priority",
+                    type="string",
+                    description="新的优先级：low（低）、medium（中）、high（高）、urgent（紧急）（可选）",
+                    required=False,
+                    enum=["low", "medium", "high", "urgent"],
+                ),
+                ToolParameter(
+                    name="tags",
+                    type="array",
+                    description="新的标签列表（可选，如 [\"工作\", \"会议\"]）",
+                    required=False,
                 ),
             ],
             examples=[
@@ -804,11 +849,29 @@ class UpdateEventTool(BaseTool):
                     "description": "将事件改为进行中",
                     "params": {"event_id": "a1b2c3d4", "status": "in_progress"},
                 },
+                {
+                    "description": "调整事件时间",
+                    "params": {
+                        "event_id": "a1b2c3d4",
+                        "start_time": "2026-02-18T16:00:00",
+                        "end_time": "2026-02-18T17:00:00",
+                    },
+                },
+                {
+                    "description": "同时修改标题和地点",
+                    "params": {
+                        "event_id": "a1b2c3d4",
+                        "title": "项目复盘会",
+                        "location": "会议室B",
+                    },
+                },
             ],
             usage_notes=[
-                "标记完成、取消等状态变更请使用本工具，不要使用 delete_schedule_data",
+                "标记完成、取消和改期等都请使用本工具，不要使用 delete_schedule_data",
                 '用户说「做完了」「完成了」「搞定了」「标记为已完成」等都应调用本工具',
+                "用户说「改到X点」「延期到明天」「调整会议时间」等都应调用本工具并更新 start_time/end_time",
                 "需要先通过 get_events 获取事件 ID",
+                "status 与其他字段至少提供一个，可以同时更新多个字段",
             ],
         )
 
@@ -822,20 +885,24 @@ class UpdateEventTool(BaseTool):
             )
 
         status_str = kwargs.get("status")
-        if not status_str:
+        title = kwargs.get("title")
+        start_time_str = kwargs.get("start_time")
+        end_time_str = kwargs.get("end_time")
+        update_fields = {
+            "status": status_str,
+            "title": title,
+            "start_time": start_time_str,
+            "end_time": end_time_str,
+            "description": kwargs.get("description"),
+            "location": kwargs.get("location"),
+            "priority": kwargs.get("priority"),
+            "tags": kwargs.get("tags"),
+        }
+        if all(value is None for value in update_fields.values()):
             return ToolResult(
                 success=False,
-                error="MISSING_STATUS",
-                message="缺少目标状态",
-            )
-
-        try:
-            target_status = EventStatus(status_str)
-        except ValueError:
-            return ToolResult(
-                success=False,
-                error="INVALID_STATUS",
-                message=f"无效的状态值: {status_str}，可选: scheduled, in_progress, completed, cancelled",
+                error="MISSING_UPDATE_PARAM",
+                message="至少需要提供一个更新字段（如 status、title、start_time 等）",
             )
 
         event = self._repository.get(event_id)
@@ -847,10 +914,111 @@ class UpdateEventTool(BaseTool):
             )
 
         old_status = event.status
-        event.status = target_status
+        old_start_time = event.start_time
+        old_end_time = event.end_time
+        updates: List[str] = []
+
+        if status_str:
+            try:
+                target_status = EventStatus(status_str)
+            except ValueError:
+                return ToolResult(
+                    success=False,
+                    error="INVALID_STATUS",
+                    message=f"无效的状态值: {status_str}，可选: scheduled, in_progress, completed, cancelled",
+                )
+            event.status = target_status
+            updates.append(f"状态: {old_status.value} → {target_status.value}")
+
+        if title is not None:
+            if not isinstance(title, str) or not title.strip():
+                return ToolResult(
+                    success=False,
+                    error="INVALID_TITLE",
+                    message="title 必须是非空字符串",
+                )
+            old_title = event.title
+            event.title = title
+            updates.append(f"标题: {old_title} → {title}")
+
+        if kwargs.get("description") is not None:
+            old_description = event.description or "无"
+            event.description = kwargs.get("description")
+            new_description = event.description or "无"
+            updates.append(f"描述: {old_description} → {new_description}")
+
+        if kwargs.get("location") is not None:
+            old_location = event.location or "无"
+            event.location = kwargs.get("location")
+            new_location = event.location or "无"
+            updates.append(f"地点: {old_location} → {new_location}")
+
+        if kwargs.get("priority") is not None:
+            priority_str = kwargs.get("priority")
+            try:
+                new_priority = EventPriority(priority_str)
+            except ValueError:
+                return ToolResult(
+                    success=False,
+                    error="INVALID_PRIORITY",
+                    message=f"无效的优先级: {priority_str}，可选: low, medium, high, urgent",
+                )
+            old_priority = event.priority
+            event.priority = new_priority
+            updates.append(f"优先级: {old_priority.value} → {new_priority.value}")
+
+        if kwargs.get("tags") is not None:
+            tags = kwargs.get("tags")
+            if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+                return ToolResult(
+                    success=False,
+                    error="INVALID_TAGS",
+                    message="tags 必须是字符串数组",
+                )
+            old_tags = event.tags
+            event.tags = tags
+            updates.append(f"标签: {old_tags} → {tags}")
+
+        if start_time_str is not None:
+            try:
+                new_start_time = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
+            except ValueError as e:
+                return ToolResult(
+                    success=False,
+                    error="INVALID_TIME_FORMAT",
+                    message=f"开始时间格式无效: {str(e)}",
+                )
+            event.start_time = new_start_time
+            updates.append(
+                f"开始时间: {old_start_time.isoformat()} → {new_start_time.isoformat()}"
+            )
+
+        if end_time_str is not None:
+            try:
+                new_end_time = datetime.fromisoformat(end_time_str.replace("Z", "+00:00"))
+            except ValueError as e:
+                return ToolResult(
+                    success=False,
+                    error="INVALID_TIME_FORMAT",
+                    message=f"结束时间格式无效: {str(e)}",
+                )
+            event.end_time = new_end_time
+            updates.append(
+                f"结束时间: {old_end_time.isoformat()} → {new_end_time.isoformat()}"
+            )
+
+        if event.end_time <= event.start_time:
+            return ToolResult(
+                success=False,
+                error="INVALID_TIME_RANGE",
+                message="结束时间必须晚于开始时间",
+            )
+
         event.update_timestamp()
 
         self._repository.update(event)
+
+        conflicts = self._repository.find_conflicts(event, exclude_id=event.id)
 
         status_labels = {
             EventStatus.SCHEDULED: "已安排",
@@ -859,14 +1027,24 @@ class UpdateEventTool(BaseTool):
             EventStatus.CANCELLED: "已取消",
         }
 
+        message = f"事件「{event.title}」已更新：{', '.join(updates)}"
+        if conflicts:
+            conflict_titles = [c.title for c in conflicts]
+            message += f"\n警告: 更新时间后与以下事件存在冲突: {', '.join(conflict_titles)}"
+
         return ToolResult(
             success=True,
             data=event,
-            message=f"事件「{event.title}」状态已从 {status_labels[old_status]} 更新为 {status_labels[target_status]}",
+            message=message,
             metadata={
                 "event_id": event.id,
                 "old_status": old_status.value,
-                "new_status": target_status.value,
+                "new_status": event.status.value,
+                "updated_fields": [k for k, v in update_fields.items() if v is not None],
+                "has_conflicts": len(conflicts) > 0,
+                "conflict_count": len(conflicts),
+                "status_label_before": status_labels[old_status],
+                "status_label_after": status_labels[event.status],
             },
         )
 

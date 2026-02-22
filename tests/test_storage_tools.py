@@ -15,6 +15,7 @@ from schedule_agent.core.tools.storage_tools import (
     AddTaskTool,
     GetEventsTool,
     GetTasksTool,
+    UpdateEventTool,
     UpdateTaskTool,
     DeleteScheduleDataTool,
 )
@@ -70,6 +71,12 @@ def get_events_tool(event_repository):
 def get_tasks_tool(task_repository):
     """创建获取任务工具"""
     return GetTasksTool(repository=task_repository)
+
+
+@pytest.fixture
+def update_event_tool(event_repository):
+    """创建更新事件工具"""
+    return UpdateEventTool(repository=event_repository)
 
 
 @pytest.fixture
@@ -919,6 +926,172 @@ class TestUpdateTaskTool:
         )
         assert result.success is False
         assert result.error == "INVALID_DATE_FORMAT"
+
+
+# ============================================================================
+# UpdateEventTool 测试
+# ============================================================================
+
+class TestUpdateEventTool:
+    """UpdateEventTool 测试类 - 修改日程（状态、标题、时间等）"""
+
+    def test_name(self, update_event_tool):
+        assert update_event_tool.name == "update_event"
+
+    def test_get_definition(self, update_event_tool):
+        definition = update_event_tool.get_definition()
+        assert isinstance(definition, ToolDefinition)
+        assert definition.name == "update_event"
+        param_names = [p.name for p in definition.parameters]
+        assert "event_id" in param_names
+        assert "status" in param_names
+        assert "title" in param_names
+        assert "start_time" in param_names
+        assert "end_time" in param_names
+
+    @pytest.mark.asyncio
+    async def test_update_status_completed(self, update_event_tool, event_repository):
+        """测试标记事件为已完成"""
+        today = date.today()
+        event = Event(
+            title="待完成事件",
+            start_time=datetime.combine(today, datetime.min.time().replace(hour=10)),
+            end_time=datetime.combine(today, datetime.min.time().replace(hour=11)),
+        )
+        event_repository.create(event)
+
+        result = await update_event_tool.execute(event_id=event.id, status="completed")
+
+        assert result.success is True
+        assert result.metadata["new_status"] == "completed"
+        updated = event_repository.get(event.id)
+        assert updated.status == EventStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_update_title(self, update_event_tool, event_repository):
+        """测试修改事件标题"""
+        today = date.today()
+        event = Event(
+            title="原标题",
+            start_time=datetime.combine(today, datetime.min.time().replace(hour=10)),
+            end_time=datetime.combine(today, datetime.min.time().replace(hour=11)),
+        )
+        event_repository.create(event)
+
+        result = await update_event_tool.execute(event_id=event.id, title="新标题")
+
+        assert result.success is True
+        assert "标题" in result.message
+        updated = event_repository.get(event.id)
+        assert updated.title == "新标题"
+
+    @pytest.mark.asyncio
+    async def test_update_time(self, update_event_tool, event_repository):
+        """测试修改事件时间"""
+        today = date.today()
+        event = Event(
+            title="会议",
+            start_time=datetime.combine(today, datetime.min.time().replace(hour=10)),
+            end_time=datetime.combine(today, datetime.min.time().replace(hour=11)),
+        )
+        event_repository.create(event)
+
+        new_start = f"{today}T16:00:00"
+        new_end = f"{today}T17:00:00"
+        result = await update_event_tool.execute(
+            event_id=event.id, start_time=new_start, end_time=new_end
+        )
+
+        assert result.success is True
+        updated = event_repository.get(event.id)
+        assert updated.start_time.isoformat().startswith(str(today))
+        assert updated.end_time.hour == 17
+
+    @pytest.mark.asyncio
+    async def test_update_location(self, update_event_tool, event_repository):
+        """测试修改事件地点"""
+        today = date.today()
+        event = Event(
+            title="会议",
+            start_time=datetime.combine(today, datetime.min.time().replace(hour=10)),
+            end_time=datetime.combine(today, datetime.min.time().replace(hour=11)),
+            location="会议室A",
+        )
+        event_repository.create(event)
+
+        result = await update_event_tool.execute(event_id=event.id, location="会议室B")
+
+        assert result.success is True
+        updated = event_repository.get(event.id)
+        assert updated.location == "会议室B"
+
+    @pytest.mark.asyncio
+    async def test_update_multiple_fields(self, update_event_tool, event_repository):
+        """测试同时修改多个字段"""
+        today = date.today()
+        event = Event(
+            title="原会议",
+            start_time=datetime.combine(today, datetime.min.time().replace(hour=10)),
+            end_time=datetime.combine(today, datetime.min.time().replace(hour=11)),
+            location="A",
+        )
+        event_repository.create(event)
+
+        result = await update_event_tool.execute(
+            event_id=event.id,
+            title="新会议",
+            location="B",
+            priority="high",
+        )
+
+        assert result.success is True
+        updated = event_repository.get(event.id)
+        assert updated.title == "新会议"
+        assert updated.location == "B"
+        assert updated.priority == EventPriority.HIGH
+
+    @pytest.mark.asyncio
+    async def test_missing_event_id(self, update_event_tool):
+        result = await update_event_tool.execute(status="completed")
+        assert result.success is False
+        assert result.error == "MISSING_EVENT_ID"
+
+    @pytest.mark.asyncio
+    async def test_missing_update_param(self, update_event_tool, event_repository):
+        event = Event(
+            title="测试",
+            start_time=datetime(2026, 2, 18, 10, 0),
+            end_time=datetime(2026, 2, 18, 11, 0),
+        )
+        event_repository.create(event)
+
+        result = await update_event_tool.execute(event_id=event.id)
+        assert result.success is False
+        assert result.error == "MISSING_UPDATE_PARAM"
+
+    @pytest.mark.asyncio
+    async def test_event_not_found(self, update_event_tool):
+        result = await update_event_tool.execute(event_id="nonexistent", status="completed")
+        assert result.success is False
+        assert result.error == "EVENT_NOT_FOUND"
+
+    @pytest.mark.asyncio
+    async def test_end_before_start(self, update_event_tool, event_repository):
+        today = date.today()
+        event = Event(
+            title="会议",
+            start_time=datetime.combine(today, datetime.min.time().replace(hour=10)),
+            end_time=datetime.combine(today, datetime.min.time().replace(hour=11)),
+        )
+        event_repository.create(event)
+
+        result = await update_event_tool.execute(
+            event_id=event.id,
+            start_time=f"{today}T12:00:00",
+            end_time=f"{today}T11:00:00",
+        )
+        assert result.success is False
+        assert result.error == "INVALID_TIME_RANGE"
 
 
 # ============================================================================

@@ -476,6 +476,7 @@ class ParseTimeTool(BaseTool):
                 "如果没有指定时间，默认为全天事件",
                 "置信度越高表示解析越可靠",
             ],
+            tags=['时间', '解析'],
         )
 
     async def execute(self, **kwargs) -> ToolResult:

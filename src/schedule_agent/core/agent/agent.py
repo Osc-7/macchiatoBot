@@ -198,13 +198,13 @@ class ScheduleAgent:
         Returns:
             包含 prompt_tokens, completion_tokens, total_tokens, call_count, cost_yuan 的字典
         """
-        out = dict(self._token_usage)
+        out: dict[str, int | float] = dict(self._token_usage)
         cost = compute_cost_from_calls(
             self._usage_calls,
             self._config.llm.model,
         )
         if cost is not None:
-            out["cost_yuan"] = int(cost)
+            out["cost_yuan"] = cost
         return out
 
     def get_turn_count(self) -> int:

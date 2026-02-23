@@ -167,7 +167,54 @@ class TestModifyFileTool:
         tool = ModifyFileTool(config=config)
         defn = tool.get_definition()
         assert defn.name == "modify_file"
-        assert "mode" in [p.name for p in defn.parameters]
+        param_names = [p.name for p in defn.parameters]
+        assert "mode" in param_names
+        assert "old_text" in param_names
+        assert "new_text" in param_names
+        assert "content" in param_names
+
+    @pytest.mark.asyncio
+    async def test_modify_file_search_replace_exact_success(self, tmp_path):
+        (tmp_path / "app.py").write_text("def foo():\n    pass\n", encoding="utf-8")
+        config = _make_config(allow_modify=True, base_dir=str(tmp_path))
+        tool = ModifyFileTool(config=config)
+        result = await tool.execute(
+            path="app.py",
+            mode="search_replace",
+            old_text="def foo():\n    pass",
+            new_text="def foo():\n    return 1",
+        )
+        assert result.success
+        assert (tmp_path / "app.py").read_text() == "def foo():\n    return 1\n"
+
+    @pytest.mark.asyncio
+    async def test_modify_file_search_replace_line_trimmed_fallback(self, tmp_path):
+        (tmp_path / "f.py").write_text("def bar():  \n    x = 1  \n", encoding="utf-8")
+        config = _make_config(allow_modify=True, base_dir=str(tmp_path))
+        tool = ModifyFileTool(config=config)
+        result = await tool.execute(
+            path="f.py",
+            mode="search_replace",
+            old_text="def bar():\n    x = 1",
+            new_text="def bar():\n    x = 2",
+        )
+        assert result.success
+        assert "x = 2" in (tmp_path / "f.py").read_text()
+
+    @pytest.mark.asyncio
+    async def test_modify_file_search_replace_failure_suggests_fallback(self, tmp_path):
+        (tmp_path / "f.txt").write_text("actual content", encoding="utf-8")
+        config = _make_config(allow_modify=True, base_dir=str(tmp_path))
+        tool = ModifyFileTool(config=config)
+        result = await tool.execute(
+            path="f.txt",
+            mode="search_replace",
+            old_text="nonexistent text",
+            new_text="replacement",
+        )
+        assert not result.success
+        assert result.error == "SEARCH_REPLACE_FAILED"
+        assert "read_file" in result.message or "write_file" in result.message
 
     @pytest.mark.asyncio
     async def test_modify_file_append_success(self, tmp_path):
@@ -207,6 +254,17 @@ class TestModifyFileTool:
         )
         assert not result.success
         assert result.error == "INVALID_MODE"
+
+    @pytest.mark.asyncio
+    async def test_modify_file_search_replace_missing_params(self, tmp_path):
+        (tmp_path / "f.txt").write_text("x", encoding="utf-8")
+        config = _make_config(allow_modify=True, base_dir=str(tmp_path))
+        tool = ModifyFileTool(config=config)
+        result = await tool.execute(
+            path="f.txt", mode="search_replace", old_text="x"
+        )
+        assert not result.success
+        assert result.error == "MISSING_PARAMS"
 
 
 # ============================================================================

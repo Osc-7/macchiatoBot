@@ -56,6 +56,7 @@ class MemorySearchLongTermTool(BaseTool):
                 },
             ],
             usage_notes=["返回匹配的长期记忆条目"],
+            tags=['记忆', '检索'],
         )
 
     async def execute(self, **kwargs) -> ToolResult:
@@ -119,6 +120,7 @@ class MemorySearchContentTool(BaseTool):
                 },
             ],
             usage_notes=["支持关键词检索；若启用 QMD 则同时进行语义检索"],
+            tags=['记忆', '检索'],
         )
 
     async def execute(self, **kwargs) -> ToolResult:
@@ -203,6 +205,7 @@ class MemoryStoreTool(BaseTool):
                 "content 建议使用 Markdown 格式",
                 "文件存储在内容记忆库对应分类目录下",
             ],
+            tags=['记忆', '写入'],
         )
 
     async def execute(self, **kwargs) -> ToolResult:
@@ -278,6 +281,7 @@ class MemoryIngestTool(BaseTool):
             usage_notes=[
                 "转换后的 Markdown 存储在内容记忆库对应分类目录下",
             ],
+            tags=['记忆', '导入'],
         )
 
     async def execute(self, **kwargs) -> ToolResult:

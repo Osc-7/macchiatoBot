@@ -128,6 +128,7 @@ class AddEventTool(BaseTool):
                 "结束时间必须晚于开始时间",
                 "如果有时间冲突，工具会返回警告但仍会创建事件",
             ],
+            tags=['日程', '创建'],
         )
 
     async def execute(self, **kwargs) -> ToolResult:
@@ -327,6 +328,7 @@ class AddTaskTool(BaseTool):
                 "如果没有指定截止日期，任务不会过期",
                 "任务创建后状态为待办(todo)，可以稍后安排时间",
             ],
+            tags=['任务', '创建'],
         )
 
     async def execute(self, **kwargs) -> ToolResult:
@@ -498,6 +500,7 @@ class GetEventsTool(BaseTool):
                 "搜索会匹配标题、描述和标签",
                 "结果按开始时间升序排列",
             ],
+            tags=['日程', '查询'],
         )
 
     async def execute(self, **kwargs) -> ToolResult:
@@ -659,6 +662,7 @@ class GetTasksTool(BaseTool):
                 "搜索会匹配标题、描述和标签",
                 "结果按优先级和截止日期排序",
             ],
+            tags=['任务', '查询'],
         )
 
     async def execute(self, **kwargs) -> ToolResult:
@@ -873,6 +877,7 @@ class UpdateEventTool(BaseTool):
                 "需要先通过 get_events 获取事件 ID",
                 "status 与其他字段至少提供一个，可以同时更新多个字段",
             ],
+            tags=['日程', '修改'],
         )
 
     async def execute(self, **kwargs) -> ToolResult:
@@ -1130,6 +1135,7 @@ class UpdateTaskTool(BaseTool):
                 "需要先通过 get_tasks 获取任务 ID",
                 "status 和 due_date 至少提供一个，可以同时提供",
             ],
+            tags=['任务', '修改'],
         )
 
     async def execute(self, **kwargs) -> ToolResult:
@@ -1335,6 +1341,7 @@ class DeleteScheduleDataTool(BaseTool):
                 'confirm=true 仅在用户明确同意「删除」时才可设置。「标记完成」「已完成」「做完了」等表述是状态更新，不是删除确认，应使用 update_task。',
                 "如果用户的原始请求不是删除，而是标记完成或取消，请改用 update_task 工具。",
             ],
+            tags=['日程', '任务', '删除'],
         )
 
     def _get_repository(self, resource_type: str):

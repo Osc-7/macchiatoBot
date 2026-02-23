@@ -133,6 +133,7 @@ class RunCommandTool(BaseTool):
                 "超时时会终止进程并返回 COMMAND_TIMEOUT",
                 "即使 return_code 非 0，也会返回 stdout/stderr 方便排查",
             ],
+            tags=['命令', '执行'],
         )
 
     def _resolve_cwd(self, cwd: Optional[str]) -> tuple[Optional[Path], Optional[str]]:

@@ -18,6 +18,7 @@ from schedule_agent.core.mcp import MCPClientManager
 from schedule_agent.utils.session_logger import SessionLogger
 from schedule_agent.core.tools import (
     BaseTool,
+    LoadSkillTool,
     ParseTimeTool,
     AddEventTool,
     AddTaskTool,
@@ -80,6 +81,10 @@ def get_default_tools(config: Optional[Config] = None) -> List[BaseTool]:
     # 如果配置支持网页抓取（provider=qwen），添加网页抓取工具
     if config and config.llm.provider == "qwen":
         tools.append(WebExtractorTool(config=config))
+
+    # 技能按需加载工具（skills.enabled 或 skills.cli_dir 时注册）
+    if config and ((config.skills.enabled or []) or getattr(config.skills, "cli_dir", None)):
+        tools.append(LoadSkillTool(config=config))
 
     # 记忆系统工具
     if config and config.memory.enabled:

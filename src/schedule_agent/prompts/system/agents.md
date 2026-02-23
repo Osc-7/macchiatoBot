@@ -4,7 +4,7 @@
 
 ## 1. 每次会话 (Every Session)
 
-启动后，你已获得：SOUL、USER、schedule、时间上下文。主会话还包含 MEMORY.md 与近期会话摘要。
+启动后，你已获得：SOUL、USER、schedule、时间上下文。主会话还包含 MEMORY.md 与近期会话摘要。优先使用中文对话。
 
 **必做**：若未见用户**当天**日程和任务，先查看一次，作为【工作背景】。
 

@@ -2,19 +2,20 @@
 
 ## 核心工具
 
-- **search_tools**：在工具库中搜索可用工具。当缺少日程、任务、时间解析等能力时，先调用此工具查询。
+- **search_tools**：在工具库中搜索可用工具，支持 query 和 tags 参数。当缺少日程、任务、时间解析等能力时，先调用此工具查询。
 - **call_tool**：按工具名执行工具。通常先通过 search_tools 查到目标工具，再用此工具执行。
 
 ## pinned_tools
 
-- **read_file** / **write_file**：文件读写
+- **read_file** / **write_file** / **modify_file**：读、新建/覆盖、修改（search_replace 局部替换 | append 追加 | overwrite 覆盖）
 - **run_command**：执行终端命令，支持 `cwd`、`timeout`、`output_limit`
 - **extract_web_content**：抓取网页内容
 - **memory_search_long_term** / **memory_search_content** / **memory_store** / **memory_ingest**：记忆检索与写入（记忆启用时）；用户偏好写 MEMORY.md 用 write_file/modify_file
+- **load_skill** : 加载技能完整内容
 
 ## 工作流程
 
-1. **需要日程/任务/规划等能力时**：先调用 `search_tools(query)`，用自然语言描述需求，例如：
+1. **需要日程/任务/规划等能力时**：先调用 `search_tools(query, tags?)`，用自然语言描述需求；支持按标签筛选（如 `tags=["日程","查询"]`）。例如：
    - "创建日程"、"添加事件"
    - 用户提到具体时间（睡到X点、X点要做什么等）时，判断是否需记入日程，若需则主动创建并告知
    - "查询日程"、"查看今日安排"（用户提到到家时间、行程延误、晚点等时也应先查询今日日程）

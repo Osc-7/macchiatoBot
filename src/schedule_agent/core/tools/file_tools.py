@@ -2,10 +2,11 @@
 文件读写工具 - 提供 read_file, write_file, modify_file
 
 读取受 allow_read 配置控制，写入和修改需要 allow_write/allow_modify 权限。
+modify_file 支持三种模式：search_replace（局部替换）、append（追加）、overwrite（覆盖）。
 """
 
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional, Tuple
 
 from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from schedule_agent.config import Config, FileToolsConfig, get_config
@@ -81,6 +82,7 @@ class ReadFileTool(BaseTool):
                 "只能读取文本文件，二进制文件会返回错误",
                 "文件不存在时返回明确错误",
             ],
+            tags=['文件', '读取'],
         )
 
     def _resolve_path(self, path: str) -> tuple[Optional[Path], Optional[str]]:
@@ -218,6 +220,7 @@ class WriteFileTool(BaseTool):
                 "路径不能超出配置的 base_dir",
                 "会完全覆盖已存在的文件",
             ],
+            tags=['文件', '写入'],
         )
 
     def _resolve_path(self, path: str) -> tuple[Optional[Path], Optional[str]]:
@@ -286,11 +289,89 @@ class WriteFileTool(BaseTool):
             )
 
 
+def _search_replace_with_fallbacks(
+    content: str, old_text: str, new_text: str, replace_all: bool
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    多级回退的 search-replace（参考 Cline、OpenCode、Aider 实践）。
+    Returns: (new_content, None) 成功； (None, error_message) 失败。
+    """
+    if not old_text:
+        return None, "old_text 不能为空"
+
+    # 1. 精确匹配
+    if replace_all:
+        if old_text in content:
+            return content.replace(old_text, new_text), None
+    else:
+        if old_text in content:
+            return content.replace(old_text, new_text, 1), None
+
+    # 2. 行级 trim 容差：按行 rstrip 后逐行比对
+    old_lines = old_text.splitlines()
+    content_lines = content.splitlines()
+    if old_lines and len(content_lines) >= len(old_lines):
+        old_stripped = [l.rstrip() for l in old_lines]
+        i = 0
+        replaced = False
+        while i <= len(content_lines) - len(old_lines):
+            match = all(
+                content_lines[i + j].rstrip() == old_stripped[j]
+                for j in range(len(old_lines))
+            )
+            if match:
+                block = '\n'.join(content_lines[i:i + len(old_lines)])
+                new_content = content.replace(block, new_text, 1)
+                if not replace_all:
+                    return new_content, None
+                content = new_content
+                content_lines = content.splitlines()
+                i = 0
+                replaced = True
+            else:
+                i += 1
+        if replaced:
+            return content, None
+
+    # 3. 锚点匹配：用首尾行定位块（块至少 2 行）
+    old_stripped = [l.strip() for l in old_text.strip().splitlines() if l.strip()]
+    if len(old_stripped) >= 2:
+        first_line = old_stripped[0]
+        last_line = old_stripped[-1]
+        start_idx = None
+        end_idx = None
+        for i, line in enumerate(content_lines):
+            if line.strip() == first_line:
+                start_idx = i
+                break
+        if start_idx is not None:
+            for i in range(len(content_lines) - 1, start_idx, -1):
+                if content_lines[i].strip() == last_line:
+                    end_idx = i
+                    break
+        if start_idx is not None and end_idx is not None and end_idx >= start_idx:
+            block = '\n'.join(content_lines[start_idx:end_idx + 1])
+            if replace_all:
+                new_content = content.replace(block, new_text)
+            else:
+                new_content = content.replace(block, new_text, 1)
+            if new_content != content:
+                return new_content, None
+
+    return None, (
+        "未找到匹配的 old_text。建议：1) 确认 old_text 与文件内容完全一致（含缩进、换行）；"
+        "2) 使用 read_file 读取后再用 write_file 覆盖。"
+    )
+
+
 class ModifyFileTool(BaseTool):
     """
-    修改文件工具
+    修改文件工具（符合 AI Coding Agent 最佳实践）
 
-    在现有文件中追加内容或替换部分内容。需要权限控制。
+    支持三种模式：
+    - search_replace: 局部替换（多级回退匹配），Token 高效，适合精确修改
+    - append: 在文件末尾追加
+    - overwrite: 覆盖整个文件（与 write_file 类似）
     """
 
     def __init__(
@@ -312,16 +393,14 @@ class ModifyFileTool(BaseTool):
     def get_definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="modify_file",
-            description="""修改现有文件：追加内容或替换全部内容。
+            description="""修改现有文件。支持三种模式，按场景选择：
 
-当用户想要：
-- 在文件末尾追加内容
-- 修改现有文件的内容
-- 更新配置、笔记等
+1. **search_replace**（推荐）：局部替换，只需提供 old_text 和 new_text，Token 成本低。
+   适合：修改函数、插入几行、替换配置项等。支持多级回退匹配（精确→空白容差→锚点）。
+2. **append**：在文件末尾追加内容。适合：日志、MEMORY.md、笔记追加。
+3. **overwrite**：覆盖整个文件。适合：小文件重写；search_replace 多次失败时的兜底。
 
-支持两种模式：
-- append: 在文件末尾追加内容
-- overwrite: 覆盖整个文件（与 write_file 类似，但语义为「修改」）""",
+优先使用 search_replace；大范围修改或匹配失败时，用 read_file 读取后用 write_file 覆盖。""",
             parameters=[
                 ToolParameter(
                     name="path",
@@ -330,18 +409,37 @@ class ModifyFileTool(BaseTool):
                     required=True,
                 ),
                 ToolParameter(
-                    name="content",
-                    type="string",
-                    description="要追加或写入的内容",
-                    required=True,
-                ),
-                ToolParameter(
                     name="mode",
                     type="string",
-                    description="修改模式：append（追加）或 overwrite（覆盖）",
+                    description="修改模式：search_replace（局部替换）| append（追加）| overwrite（覆盖）",
                     required=False,
-                    enum=["append", "overwrite"],
-                    default="append",
+                    enum=["search_replace", "append", "overwrite"],
+                    default="search_replace",
+                ),
+                ToolParameter(
+                    name="old_text",
+                    type="string",
+                    description="search_replace 模式：要查找并替换的文本。需与文件内容一致（含缩进、换行）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="new_text",
+                    type="string",
+                    description="search_replace 模式：替换后的文本",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="content",
+                    type="string",
+                    description="append/overwrite 模式：要追加或写入的完整内容",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="replace_all",
+                    type="boolean",
+                    description="search_replace 模式：是否替换所有匹配（默认 false，仅替换第一次）",
+                    required=False,
+                    default=False,
                 ),
                 ToolParameter(
                     name="encoding",
@@ -353,23 +451,33 @@ class ModifyFileTool(BaseTool):
             ],
             examples=[
                 {
-                    "description": "在文件末尾追加内容",
+                    "description": "局部替换：在函数中插入一行",
                     "params": {
-                        "path": "notes.txt",
-                        "content": "\n追加一行",
-                        "mode": "append",
+                        "path": "app.py",
+                        "mode": "search_replace",
+                        "old_text": "def greet():\n    pass",
+                        "new_text": "def greet():\n    print('hi')\n    pass",
                     },
                 },
                 {
-                    "description": "覆盖整个文件",
-                    "params": {"path": "config.txt", "content": "新配置", "mode": "overwrite"},
+                    "description": "在文件末尾追加",
+                    "params": {
+                        "path": "MEMORY.md",
+                        "mode": "append",
+                        "content": "\n- 用户偏好下午开会",
+                    },
+                },
+                {
+                    "description": "覆盖整个文件（兜底）",
+                    "params": {"path": "config.txt", "mode": "overwrite", "content": "新配置内容"},
                 },
             ],
             usage_notes=[
                 "修改需要配置允许：file_tools.allow_modify: true",
-                "路径不能超出配置的 base_dir",
+                "search_replace 时 old_text 需与文件内容完全一致；失败时建议 read_file + write_file",
                 "append 模式下文件不存在会先创建",
             ],
+            tags=['文件', '修改'],
         )
 
     def _resolve_path(self, path: str) -> tuple[Optional[Path], Optional[str]]:
@@ -384,18 +492,11 @@ class ModifyFileTool(BaseTool):
 
     async def execute(self, **kwargs) -> ToolResult:
         path_str = kwargs.get("path")
-        content = kwargs.get("content")
         if not path_str:
             return ToolResult(
                 success=False,
                 error="MISSING_PATH",
                 message="缺少必需参数: path",
-            )
-        if content is None:
-            return ToolResult(
-                success=False,
-                error="MISSING_CONTENT",
-                message="缺少必需参数: content",
             )
 
         if not self._ft_config.allow_modify:
@@ -409,12 +510,84 @@ class ModifyFileTool(BaseTool):
         if err:
             return ToolResult(success=False, error="INVALID_PATH", message=err)
 
-        mode = kwargs.get("mode", "append")
-        if mode not in ("append", "overwrite"):
+        mode = kwargs.get("mode", "search_replace")
+        if mode not in ("search_replace", "append", "overwrite"):
             return ToolResult(
                 success=False,
                 error="INVALID_MODE",
-                message="mode 必须为 append 或 overwrite",
+                message="mode 必须为 search_replace、append 或 overwrite",
+            )
+
+        encoding = kwargs.get("encoding", "utf-8")
+        replace_all = bool(kwargs.get("replace_all", False))
+
+        # search_replace 模式
+        if mode == "search_replace":
+            old_text = kwargs.get("old_text")
+            new_text = kwargs.get("new_text")
+            if old_text is None or new_text is None:
+                return ToolResult(
+                    success=False,
+                    error="MISSING_PARAMS",
+                    message="search_replace 模式需要 old_text 和 new_text",
+                )
+            if not resolved.exists():
+                return ToolResult(
+                    success=False,
+                    error="FILE_NOT_FOUND",
+                    message=f"文件不存在: {path_str}，search_replace 只能修改已存在的文件",
+                )
+
+            try:
+                content = resolved.read_text(encoding=encoding)
+            except OSError as e:
+                return ToolResult(
+                    success=False,
+                    error="IO_ERROR",
+                    message=f"读取失败: {e}",
+                )
+
+            new_content, err_msg = _search_replace_with_fallbacks(
+                content, old_text, new_text, replace_all
+            )
+            if err_msg:
+                return ToolResult(
+                    success=False,
+                    error="SEARCH_REPLACE_FAILED",
+                    message=err_msg,
+                )
+
+            if self._permission_provider:
+                summary = f"search_replace {path_str}，替换 1 处" if not replace_all else f"search_replace {path_str}，替换多处"
+                allowed = await self._permission_provider("modify", path_str, summary)
+                if not allowed:
+                    return ToolResult(
+                        success=False,
+                        error="USER_DENIED",
+                        message="用户拒绝了修改操作",
+                    )
+
+            try:
+                resolved.write_text(new_content, encoding=encoding)
+                return ToolResult(
+                    success=True,
+                    data={"path": str(resolved), "mode": "search_replace"},
+                    message=f"成功局部替换文件: {resolved.name}",
+                )
+            except OSError as e:
+                return ToolResult(
+                    success=False,
+                    error="IO_ERROR",
+                    message=f"写入失败: {e}",
+                )
+
+        # append / overwrite 模式
+        content = kwargs.get("content")
+        if content is None:
+            return ToolResult(
+                success=False,
+                error="MISSING_CONTENT",
+                message="append 和 overwrite 模式需要 content 参数",
             )
 
         action_cn = "追加" if mode == "append" else "覆盖"
@@ -427,8 +600,6 @@ class ModifyFileTool(BaseTool):
                     error="USER_DENIED",
                     message="用户拒绝了修改操作",
                 )
-
-        encoding = kwargs.get("encoding", "utf-8")
 
         try:
             resolved.parent.mkdir(parents=True, exist_ok=True)

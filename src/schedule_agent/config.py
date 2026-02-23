@@ -290,11 +290,15 @@ class MemoryConfig(BaseModel):
 
 
 class SkillsConfig(BaseModel):
-    """可选技能配置（prompts/skills/ 下的可复用技能）"""
+    """可选技能配置（prompts/skills/ + 可选的 Skills CLI 目录）"""
 
     enabled: List[str] = Field(
         default_factory=list,
         description="启用的技能名列表，对应 prompts/skills/{name}/SKILL.md",
+    )
+    cli_dir: Optional[str] = Field(
+        default="~/.agents/skills",
+        description="Skills CLI 安装目录（npx skills add -g 默认安装位置），技能仅从此目录读取",
     )
 
 
@@ -316,6 +320,7 @@ class AgentConfig(BaseModel):
         default_factory=lambda: [
             "search_tools",
             "call_tool",
+            "load_skill",  # 技能按需加载；仅 skills.enabled 时注册
             "read_file",
             "write_file",
             "run_command",

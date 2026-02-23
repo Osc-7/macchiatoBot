@@ -87,10 +87,11 @@ agent:
   # kernel 模式下 LRU 工作集大小（不含 pinned_tools）
   working_set_size: 6
   # 核心工具 + pinned_tools，kernel 模式下始终暴露
-  # 核心：search_tools, call_tool；pinned：read_file, write_file, run_command, extract_web_content；记忆启用时可加入 memory_*
+  # 核心：search_tools, call_tool；pinned：load_skill（skills 启用时）、read_file、write_file 等
   pinned_tools:
     - "search_tools"
     - "call_tool"
+    - "load_skill"
     - "read_file"
     - "write_file"
     - "run_command"
@@ -119,10 +120,10 @@ mcp:
   #     init_timeout_seconds: 15
   #     call_timeout_seconds: 30
 
-# 可选技能配置（可复用技能，从 prompts/skills/{name}/SKILL.md 加载）
-# 添加技能目录后在此启用即可 load/unload
+# 技能配置（仅从 cli_dir 读取，与 npx skills 统一）
 skills:
-  enabled: []  # 例如: [my-custom-skill]
+  enabled: []  # 为空展示全部；可填 [find-skills, coding] 仅展示指定
+  cli_dir: "~/.agents/skills"  # Skills CLI 默认目录
 
 # 记忆系统配置
 memory:

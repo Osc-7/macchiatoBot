@@ -117,6 +117,7 @@ class GetFreeSlotsTool(BaseTool):
                 "结果按开始时间排序",
                 "可以使用 min_duration 过滤掉太短的时间段",
             ],
+            tags=['日程', '规划', '查询'],
         )
 
     def _create_sleep_slots(self, target_date: date) -> List[TimeSlot]:
@@ -465,6 +466,7 @@ class PlanTasksTool(BaseTool):
                 "规划后任务状态会变为 in_progress",
                 "每个任务会创建对应的日程事件",
             ],
+            tags=['任务', '规划'],
         )
 
     def _get_free_slots_for_planning(

@@ -64,10 +64,11 @@ class ToolDefinition:
     - 参数定义
     - 使用示例
     - 注意事项
+    - 标签（用于搜索和分类）
     """
 
     name: str
-    """工具名称（动词+名词格式，如 create_event, get_tasks）"""
+    """工具名称（动词 + 名词格式，如 create_event, get_tasks）"""
 
     description: str
     """详细描述，包括功能说明和使用场景"""
@@ -80,6 +81,9 @@ class ToolDefinition:
 
     usage_notes: List[str] = field(default_factory=list)
     """使用注意事项"""
+
+    tags: List[str] = field(default_factory=list)
+    """标签列表，用于工具搜索和分类"""
 
     def to_openai_tool(self) -> Dict[str, Any]:
         """
@@ -127,7 +131,7 @@ class ToolDefinition:
                 params = example.get("params", {})
                 parts.append(f"\n{i}. {desc}")
                 if params:
-                    parts.append(f"   参数: {json.dumps(params, ensure_ascii=False)}")
+                    parts.append(f"   参数：{json.dumps(params, ensure_ascii=False)}")
 
         if self.usage_notes:
             parts.append("\n\n注意事项:")

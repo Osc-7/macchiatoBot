@@ -131,6 +131,7 @@ class WebExtractorTool(BaseTool):
                 "如果指定了 query，工具会根据查询要求提取相关信息",
                 "查询火车/航班时刻时，务必在 query 中写明出发地、目的地（如「厦门到上海 G260 时刻表」），否则可能返回同名车次/航班的其它线路信息。",
             ],
+            tags=['网络', '抓取'],
         )
 
     async def execute(self, **kwargs) -> ToolResult:

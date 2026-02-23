@@ -204,7 +204,7 @@ class ScheduleAgent:
             self._config.llm.model,
         )
         if cost is not None:
-            out["cost_yuan"] = cost
+            out["cost_yuan"] = int(cost)
         return out
 
     def get_turn_count(self) -> int:

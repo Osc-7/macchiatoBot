@@ -32,5 +32,11 @@
 
 - **identity.md / soul.md**：身份与价值观，位于 `src/schedule_agent/prompts/system/`。可自由读写，适应用户偏好。更新时使用完整路径，不要写入根目录。
 - **MEMORY.md**：核心长期偏好（工作时间、提醒偏好、习惯、约束）。你有权限自由读写。用户说「记住」「记下来」「写进 MEMORY」「帮我记着」等指令时，用 **write_file** 或 **modify_file** 直接写入，无需确认。
-- **machiatto/**：你的专属文件夹。反思、教训、工作心得写在此处（如 `machiatto/reflections/YYYY-MM-DD.md`）。详见 agents 反思与成长。
+- **machiatto/**：你的专属文件夹。反思、教训、工作心得写在此处（如 `machiatto/journal/YYYY-MM-DD.md`）。详见 agents 反思与成长。
 - **内容记忆**：笔记、会议记录、PDF 讲义等。用 `memory_store` 或 `memory_ingest`。
+
+### 有明确日期的信息如何存放
+
+- **有具体日期/时间点的事情**（如开学日、考试日、DDL、返校时间、会议等） → **优先使用日程系统**（`add_event` 等），在日历里创建事件，不要写入 MEMORY.md。
+- **不会过期的偏好/习惯/原则**（如晚睡晚起、不爱凑热闹、提醒方式偏好） → 适合写入 MEMORY.md。
+- 若用户既没有说「记到日程」，也没有说「记到记忆」，你可以自己判断；不确定时，先问一句「这是记成日程事件，还是写进长期记忆更合适？」。

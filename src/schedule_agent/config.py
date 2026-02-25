@@ -69,6 +69,15 @@ class LLMConfig(BaseModel):
     )
     temperature: float = Field(default=0.7, ge=0, le=2, description="生成温度")
     max_tokens: int = Field(default=4096, ge=1, description="最大 token 数")
+    request_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        description="LLM 请求超时（秒）",
+    )
+    stream: bool = Field(
+        default=False,
+        description="是否使用流式输出（推荐在思考模式下开启）",
+    )
     enable_search: bool = Field(
         default=False,
         description="是否启用联网搜索功能（仅支持阿里云百炼 Qwen）",
@@ -80,6 +89,11 @@ class LLMConfig(BaseModel):
     enable_thinking: bool = Field(
         default=False,
         description="是否启用思考模式（用于网页抓取等功能，仅支持阿里云百炼 Qwen）",
+    )
+    thinking_budget: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="思考预算 token 上限（仅部分模型支持）",
     )
     enable_web_extractor: bool = Field(
         default=False,
@@ -356,6 +370,24 @@ class LoggingConfig(BaseModel):
     )
 
 
+class UIConfig(BaseModel):
+    """CLI 可视化配置"""
+
+    show_draft: str = Field(
+        default="summary",
+        description='草稿显示模式: off | summary | full',
+    )
+    draft_max_chars: int = Field(
+        default=500,
+        ge=50,
+        description="summary 模式下草稿最大显示字符数",
+    )
+    dim_draft: bool = Field(
+        default=True,
+        description="是否使用暗色样式显示草稿",
+    )
+
+
 class Config(BaseModel):
     """应用配置"""
 
@@ -364,6 +396,10 @@ class Config(BaseModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    ui: UIConfig = Field(
+        default_factory=UIConfig,
+        description="CLI 可视化配置",
+    )
     file_tools: FileToolsConfig = Field(
         default_factory=FileToolsConfig,
         description="文件读写工具配置",

@@ -19,6 +19,7 @@ from schedule_agent.config import (
     CommandToolsConfig,
     MCPConfig,
     MCPServerConfig,
+    UIConfig,
     load_config,
     get_config,
     reset_config,
@@ -45,6 +46,9 @@ class TestConfigModels:
         assert config.model == "test-model"
         assert config.temperature == 0.7
         assert config.max_tokens == 4096
+        assert config.request_timeout_seconds == 120.0
+        assert config.stream is False
+        assert config.thinking_budget is None
 
     def test_time_config_defaults(self):
         """测试时间配置默认值"""
@@ -144,6 +148,19 @@ class TestConfigModels:
         config = Config(llm=LLMConfig(api_key="x", model="x"))
         assert config.mcp is not None
         assert config.mcp.enabled is False
+
+    def test_ui_config_defaults(self):
+        """测试 UI 配置默认值"""
+        ui = UIConfig()
+        assert ui.show_draft == "summary"
+        assert ui.draft_max_chars == 500
+        assert ui.dim_draft is True
+
+    def test_config_has_ui_default(self):
+        """测试 Config 未指定 ui 时使用默认值"""
+        config = Config(llm=LLMConfig(api_key="x", model="x"))
+        assert config.ui is not None
+        assert config.ui.show_draft == "summary"
 
 
 class TestLoadConfig:

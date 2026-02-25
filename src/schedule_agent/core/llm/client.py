@@ -6,8 +6,9 @@ LLM 客户端封装
 """
 
 import json
+import inspect
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from openai import AsyncOpenAI
 
@@ -50,6 +51,17 @@ class TokenUsage:
         if response is None:
             return cls()
         usage = getattr(response, "usage", None)
+        if usage is None:
+            return cls()
+        return cls(
+            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            total_tokens=getattr(usage, "total_tokens", 0) or 0,
+        )
+
+    @classmethod
+    def from_usage(cls, usage: Any) -> "TokenUsage":
+        """从 usage 对象直接解析 token 用量，无则返回全 0"""
         if usage is None:
             return cls()
         return cls(
@@ -116,6 +128,7 @@ class LLMClient:
         self._client = AsyncOpenAI(
             api_key=self._config.llm.api_key,
             base_url=self._config.llm.base_url,
+            timeout=self._config.llm.request_timeout_seconds,
         )
 
     @property
@@ -155,12 +168,20 @@ class LLMClient:
 
         full_messages.extend(messages)
 
-        response = await self._client.chat.completions.create(
-            model=self.model,
-            messages=full_messages,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-        )
+        request_params = {
+            "model": self.model,
+            "messages": full_messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+        extra_body = self._build_qwen_extra_body()
+        if extra_body:
+            request_params["extra_body"] = extra_body
+
+        if self._config.llm.stream:
+            return await self._chat_with_tools_stream(request_params)
+
+        response = await self._client.chat.completions.create(**request_params)
 
         choice = response.choices[0]
         usage = TokenUsage.from_response(response)
@@ -180,6 +201,8 @@ class LLMClient:
         tools: Optional[List[Dict[str, Any]]] = None,
         system_message: Optional[str] = None,
         tool_choice: str = "auto",
+        on_content_delta: Optional[Callable[[str], Any]] = None,
+        on_reasoning_delta: Optional[Callable[[str], Any]] = None,
     ) -> LLMResponse:
         """
         发送支持工具调用的对话请求。
@@ -214,51 +237,18 @@ class LLMClient:
             # 参见 https://help.aliyun.com/zh/model-studio/qwen-function-calling
             request_params["parallel_tool_calls"] = True
 
-        # 联网搜索功能（仅支持阿里云百炼 Qwen）
-        # 注意：网页抓取功能已通过 WebExtractorTool 工具实现，不在全局启用
-        # 参见 https://help.aliyun.com/zh/model-studio/web-search
-        if self._config.llm.enable_search and self._config.llm.provider == "qwen":
-            extra_body = {"enable_search": True}
-            
-            # 启用思考模式（如果配置了）
-            if self._config.llm.enable_thinking:
-                extra_body["enable_thinking"] = True
-            
-            # 添加搜索选项
-            search_options = {}
-            
-            if self._config.llm.search_options:
-                search_opts = self._config.llm.search_options
-                
-                if search_opts.forced_search:
-                    search_options["forced_search"] = True
-                
-                # 注意：search_strategy: agent_max 会与工具冲突，工具内部会单独处理
-                # 这里只使用非 agent_max 的策略（turbo, max 等）
-                if search_opts.search_strategy not in ("agent_max", "agent") and search_opts.search_strategy != "turbo":
-                    search_options["search_strategy"] = search_opts.search_strategy
-                
-                if search_opts.enable_source:
-                    search_options["enable_source"] = True
-                
-                if search_opts.enable_citation and search_opts.enable_source:
-                    search_options["enable_citation"] = True
-                    if search_opts.citation_format != "[<number>]":
-                        search_options["citation_format"] = search_opts.citation_format
-                
-                if search_opts.enable_search_extension:
-                    search_options["enable_search_extension"] = True
-                
-                if search_opts.freshness is not None:
-                    search_options["freshness"] = search_opts.freshness
-                
-                if search_opts.assigned_site_list:
-                    search_options["assigned_site_list"] = search_opts.assigned_site_list
-            
-            if search_options:
-                extra_body["search_options"] = search_options
-            
+        # 百炼扩展参数（通过 extra_body 传递）
+        # 参见 https://help.aliyun.com/zh/model-studio/deep-thinking
+        extra_body = self._build_qwen_extra_body()
+        if extra_body:
             request_params["extra_body"] = extra_body
+
+        if self._config.llm.stream:
+            return await self._chat_with_tools_stream(
+                request_params,
+                on_content_delta=on_content_delta,
+                on_reasoning_delta=on_reasoning_delta,
+            )
 
         response = await self._client.chat.completions.create(**request_params)
 
@@ -287,18 +277,28 @@ class LLMClient:
             usage=usage,
         )
 
-    async def _chat_with_tools_stream(self, request_params: Dict[str, Any]) -> LLMResponse:
+    async def _chat_with_tools_stream(
+        self,
+        request_params: Dict[str, Any],
+        on_content_delta: Optional[Callable[[str], Any]] = None,
+        on_reasoning_delta: Optional[Callable[[str], Any]] = None,
+    ) -> LLMResponse:
         """
         流式调用（网页抓取必须使用流式模式）。
         汇总流式响应后返回完整的 LLMResponse。
         """
-        params = {**request_params, "stream": True}
+        params = {
+            **request_params,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
         stream = await self._client.chat.completions.create(**params)
 
         content_parts: List[str] = []
         tool_calls_map: Dict[int, Dict[str, Any]] = {}
         finish_reason = "stop"
         last_usage = None
+        filter_state = {"mode": "normal", "pending": ""}
 
         async for chunk in stream:
             if not chunk.choices:
@@ -312,6 +312,20 @@ class LLMClient:
 
             if delta.content:
                 content_parts.append(delta.content)
+                if on_content_delta:
+                    filtered = self._filter_thinking_delta(delta.content, filter_state)
+                    if filtered:
+                        maybe_awaitable = on_content_delta(filtered)
+                        if inspect.isawaitable(maybe_awaitable):
+                            await maybe_awaitable
+            if (
+                on_reasoning_delta
+                and hasattr(delta, "reasoning_content")
+                and delta.reasoning_content
+            ):
+                maybe_awaitable = on_reasoning_delta(delta.reasoning_content)
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
 
             if hasattr(delta, "tool_calls") and delta.tool_calls:
                 for tc in delta.tool_calls:
@@ -349,7 +363,7 @@ class LLMClient:
                     ToolCall(id=tc["id"], name=tc["name"], arguments=args)
                 )
 
-        usage = TokenUsage.from_response(last_usage) if last_usage else None
+        usage = TokenUsage.from_usage(last_usage) if last_usage else None
 
         return LLMResponse(
             content=content,
@@ -358,6 +372,110 @@ class LLMClient:
             raw_response=None,
             usage=usage,
         )
+
+    @staticmethod
+    def _filter_thinking_delta(chunk: str, state: Dict[str, str]) -> str:
+        """
+        流式输出时剔除 <think>...</think> 段，仅返回可展示文本。
+        """
+        start_tag = "<think>"
+        end_tag = "</think>"
+        text = state.get("pending", "") + chunk
+        mode = state.get("mode", "normal")
+        out_parts: List[str] = []
+
+        def _max_prefix_suffix_len(s: str, token: str) -> int:
+            max_len = min(len(s), len(token) - 1)
+            for n in range(max_len, 0, -1):
+                if s.endswith(token[:n]):
+                    return n
+            return 0
+
+        while text:
+            if mode == "normal":
+                idx = text.find(start_tag)
+                if idx == -1:
+                    keep = _max_prefix_suffix_len(text, start_tag)
+                    if keep:
+                        out_parts.append(text[:-keep])
+                        text = text[-keep:]
+                    else:
+                        out_parts.append(text)
+                        text = ""
+                    break
+                out_parts.append(text[:idx])
+                text = text[idx + len(start_tag) :]
+                mode = "in_think"
+                continue
+
+            idx = text.find(end_tag)
+            if idx == -1:
+                keep = _max_prefix_suffix_len(text, end_tag)
+                text = text[-keep:] if keep else ""
+                break
+            text = text[idx + len(end_tag) :]
+            mode = "normal"
+
+        state["mode"] = mode
+        state["pending"] = text
+        return "".join(out_parts)
+
+    def _build_qwen_extra_body(self) -> Optional[Dict[str, Any]]:
+        """
+        构建阿里云百炼 Qwen 的 extra_body 扩展参数。
+        - enable_thinking 必须通过 extra_body 传递（OpenAI Python SDK）
+        - thinking_budget 仅部分模型支持
+        """
+        if self._config.llm.provider != "qwen":
+            return None
+
+        extra_body: Dict[str, Any] = {}
+
+        if self._config.llm.enable_search:
+            extra_body["enable_search"] = True
+
+        if self._config.llm.enable_thinking:
+            extra_body["enable_thinking"] = True
+
+        if self._config.llm.thinking_budget is not None:
+            extra_body["thinking_budget"] = self._config.llm.thinking_budget
+
+        # 搜索选项仅在 enable_search=true 时生效
+        if self._config.llm.enable_search and self._config.llm.search_options:
+            search_opts = self._config.llm.search_options
+            search_options: Dict[str, Any] = {}
+
+            if search_opts.forced_search:
+                search_options["forced_search"] = True
+
+            # 注意：search_strategy: agent/agent_max 会与工具冲突，工具内部单独处理
+            if (
+                search_opts.search_strategy not in ("agent_max", "agent")
+                and search_opts.search_strategy != "turbo"
+            ):
+                search_options["search_strategy"] = search_opts.search_strategy
+
+            if search_opts.enable_source:
+                search_options["enable_source"] = True
+
+            if search_opts.enable_citation and search_opts.enable_source:
+                search_options["enable_citation"] = True
+                if search_opts.citation_format != "[<number>]":
+                    search_options["citation_format"] = search_opts.citation_format
+
+            if search_opts.enable_search_extension:
+                search_options["enable_search_extension"] = True
+
+            if search_opts.freshness is not None:
+                search_options["freshness"] = search_opts.freshness
+
+            if search_opts.assigned_site_list:
+                search_options["assigned_site_list"] = search_opts.assigned_site_list
+
+            if search_options:
+                extra_body["search_options"] = search_options
+
+        return extra_body or None
 
     async def close(self) -> None:
         """关闭客户端连接"""

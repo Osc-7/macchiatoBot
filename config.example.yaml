@@ -38,10 +38,13 @@ llm:
   summary_model: "qwen-flash"  # 用于总结/提炼的轻量模型（可选）
   temperature: 0.7
   max_tokens: 4096
+  request_timeout_seconds: 120  # LLM 请求超时（秒）
+  stream: true  # 启用流式输出（推荐）
   # 联网搜索配置（仅支持阿里云百炼 Qwen）
   # 参见 https://help.aliyun.com/zh/model-studio/web-search
   enable_search: false  # 是否启用联网搜索
-  enable_thinking: false  # 是否启用思考模式（用于网页抓取等功能）
+  enable_thinking: false  # 是否启用思考模式（通过 extra_body 传递）
+  thinking_budget: null  # 思考长度上限（可选；仅部分模型支持）
   enable_web_extractor: false  # 是否启用网页抓取功能（需 enable_search=true 和 enable_thinking=true）
   # 参见 https://help.aliyun.com/zh/model-studio/web-extractor
   search_options:
@@ -155,3 +158,9 @@ logging:
   enable_session_log: true
   enable_detailed_log: false
   max_system_prompt_log_len: 2000
+
+# CLI 可视化配置
+ui:
+  show_draft: "summary"  # 草稿显示: off | summary | full
+  draft_max_chars: 500   # summary 模式下草稿最大显示字符数
+  dim_draft: true        # 草稿是否使用暗色显示

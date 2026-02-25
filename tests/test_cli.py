@@ -203,7 +203,9 @@ class TestRunInteractiveLoop:
         with patch('builtins.input', side_effect=['明天的日程', 'quit']):
             await run_interactive_loop(mock_agent)
 
-        mock_agent.process_input.assert_called_once_with('明天的日程')
+        mock_agent.process_input.assert_called_once()
+        assert mock_agent.process_input.call_args.args[0] == '明天的日程'
+        assert "on_stream_delta" in mock_agent.process_input.call_args.kwargs
 
     @pytest.mark.asyncio
     async def test_empty_input_skipped(self, mock_agent):
@@ -415,5 +417,7 @@ class TestCLIIntegration:
                     with patch('builtins.print'):
                         await cli_module.main_async([])
 
-                mock_agent.process_input.assert_called_once_with("hello")
+                mock_agent.process_input.assert_called_once()
+                assert mock_agent.process_input.call_args.args[0] == "hello"
+                assert "on_stream_delta" in mock_agent.process_input.call_args.kwargs
                 mock_agent.clear_context.assert_called_once()

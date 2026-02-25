@@ -486,6 +486,52 @@ class TestLLMClient:
             if "search_options" in extra_body:
                 assert "search_strategy" not in extra_body["search_options"] or extra_body["search_options"].get("search_strategy") != "agent_max"
 
+    @pytest.mark.asyncio
+    async def test_chat_with_thinking_enabled_without_search(self):
+        """测试仅开启思考模式时，仍通过 extra_body 传 enable_thinking"""
+        config = Config(
+            llm=LLMConfig(
+                provider="qwen",
+                api_key="test-api-key",
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                model="qwen-plus",
+                temperature=0.7,
+                max_tokens=4096,
+                enable_search=False,
+                enable_thinking=True,
+                thinking_budget=128,
+            )
+        )
+
+        with patch("schedule_agent.core.llm.client.AsyncOpenAI") as mock_openai:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "这是回复"
+            mock_response.choices[0].message.tool_calls = None
+            mock_response.choices[0].finish_reason = "stop"
+            mock_response.usage = None
+            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+            mock_client.close = AsyncMock()
+            mock_openai.return_value = mock_client
+
+            client = LLMClient(config=config)
+            client._client = mock_client
+
+            response = await client.chat_with_tools(
+                messages=[{"role": "user", "content": "你好"}],
+                tools=None,
+            )
+
+            assert response.content == "这是回复"
+
+            call_args = mock_client.chat.completions.create.call_args
+            assert "extra_body" in call_args.kwargs
+            extra_body = call_args.kwargs["extra_body"]
+            assert "enable_search" not in extra_body
+            assert extra_body["enable_thinking"] is True
+            assert extra_body["thinking_budget"] == 128
+
 
 class TestLLMClientIntegration:
     """LLM 客户端集成测试（需要真实 API）"""

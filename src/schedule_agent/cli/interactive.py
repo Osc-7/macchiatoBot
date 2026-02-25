@@ -5,20 +5,25 @@ CLI 交互式界面
 """
 
 import asyncio
+import json
 import sys
 import shutil
-from typing import Optional
+import threading
+from typing import Any, Optional
 
 from schedule_agent.core import ScheduleAgent
 from schedule_agent.utils.cli_style import (
     hint,
     label,
     accent,
+    t,
     prompt_prefix,
     thin_separator,
     status_bar,
 )
 
+_PromptSession: Any = None
+HTML: Any = None
 try:
     from prompt_toolkit import PromptSession as _PromptSession
     from prompt_toolkit.formatted_text import HTML
@@ -26,17 +31,19 @@ try:
 except ImportError:
     _HAS_PROMPT_TOOLKIT = False
 
+Console: Any = None
+Markdown: Any = None
 try:
     from rich.console import Console
     from rich.markdown import Markdown
     _HAS_RICH = True
-    _RICH_CONSOLE: Optional["Console"] = Console()
+    _RICH_CONSOLE: Any = Console()
 except Exception:  # pragma: no cover - 极端环境下容错
     _HAS_RICH = False
     _RICH_CONSOLE = None
 
 
-async def _thinking_spinner(stop_event: "asyncio.Event") -> None:
+async def _thinking_spinner(stop_event: asyncio.Event) -> None:
     """
     简单的「正在思考」动画。
 
@@ -44,11 +51,10 @@ async def _thinking_spinner(stop_event: "asyncio.Event") -> None:
     """
     frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     i = 0
-    # 预估一行宽度，用于清理时覆盖整行（避免中英文宽度差导致残留）
     width = shutil.get_terminal_size((80, 20)).columns
     while not stop_event.is_set():
         prefix = frames[i % len(frames)]
-        msg = f"{prefix} 正在思考，请稍候…"
+        msg = f"{prefix}"
         sys.stdout.write("\r" + msg)
         sys.stdout.flush()
         i += 1
@@ -57,7 +63,6 @@ async def _thinking_spinner(stop_event: "asyncio.Event") -> None:
         except asyncio.CancelledError:
             break
 
-    # 清空这一行（用整行宽度覆盖，避免多字节字符残留）
     sys.stdout.write("\r" + " " * width + "\r")
     sys.stdout.flush()
 
@@ -182,12 +187,15 @@ async def run_interactive_loop(agent: ScheduleAgent):
         pt_session = None
         pt_prompt = None
 
-    # 记录上一轮的 token 总量，用于计算增量
     prev_total_tokens = 0
+    ui_cfg = getattr(getattr(agent, "config", None), "ui", None)
+    show_draft = str(getattr(ui_cfg, "show_draft", "summary") or "summary").lower()
+    if show_draft not in {"off", "summary", "full"}:
+        show_draft = "summary"
+    draft_max_chars = int(getattr(ui_cfg, "draft_max_chars", 500) or 500)
 
     while True:
         try:
-            # 获取用户输入
             if pt_session is not None and pt_prompt is not None:
                 user_input = (
                     await pt_session.prompt_async(pt_prompt)
@@ -198,7 +206,6 @@ async def run_interactive_loop(agent: ScheduleAgent):
             if not user_input:
                 continue
 
-            # 处理退出命令
             if user_input.lower() in ("quit", "exit", "q"):
                 u = agent.get_token_usage()
                 if u["call_count"] > 0:
@@ -226,17 +233,167 @@ async def run_interactive_loop(agent: ScheduleAgent):
                 print(thin_separator())
                 continue
 
-            # 处理用户输入
+            # ── 处理用户输入 ──
             spinner_stop: Optional[asyncio.Event] = None
-            spinner_task: Optional["asyncio.Task"] = None
+            spinner_task: Optional[asyncio.Task[Any]] = None
+            stream_buffer = ""
+            reasoning_started = False
+            reasoning_buffer = ""
+
             try:
                 spinner_stop = asyncio.Event()
-                spinner_task = asyncio.create_task(_thinking_spinner(spinner_stop))
-                response = await agent.process_input(user_input)
-                spinner_stop.set()
-                await spinner_task
+                width = shutil.get_terminal_size((80, 20)).columns
+                spinner_line_active = False
+                spinner_paused = False
+                io_lock = threading.Lock()
 
-                # 输出助手响应
+                # ── Spinner: 后台旋转动画 ──
+                async def _run_spinner() -> None:
+                    nonlocal spinner_line_active
+                    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+                    i = 0
+                    while not spinner_stop.is_set():
+                        if spinner_paused:
+                            await asyncio.sleep(0.03)
+                            continue
+                        with io_lock:
+                            sys.stdout.write("\r" + frames[i % len(frames)])
+                            sys.stdout.flush()
+                            spinner_line_active = True
+                        i += 1
+                        await asyncio.sleep(0.1)
+
+                    with io_lock:
+                        if spinner_line_active:
+                            sys.stdout.write("\r" + " " * width + "\r")
+                            sys.stdout.flush()
+                            spinner_line_active = False
+
+                spinner_task = asyncio.create_task(_run_spinner())
+
+                def _erase_spinner_line() -> None:
+                    nonlocal spinner_line_active
+                    if spinner_line_active:
+                        sys.stdout.write("\r" + " " * width + "\r")
+                        sys.stdout.flush()
+                        spinner_line_active = False
+
+                def _pause_spinner() -> None:
+                    nonlocal spinner_paused
+                    spinner_paused = True
+
+                def _resume_spinner() -> None:
+                    nonlocal spinner_paused
+                    if spinner_stop is not None and not spinner_stop.is_set():
+                        spinner_paused = False
+
+                def _stop_spinner() -> None:
+                    _pause_spinner()
+                    with io_lock:
+                        _erase_spinner_line()
+                    if spinner_stop is not None and not spinner_stop.is_set():
+                        spinner_stop.set()
+
+                def _print_with_spinner(text: str = "", end: str = "\n") -> None:
+                    """暂停 spinner → 擦除 → 打印 → 恢复，保证输出原子性"""
+                    _pause_spinner()
+                    with io_lock:
+                        _erase_spinner_line()
+                        print(text, end=end)
+                        sys.stdout.flush()
+                    _resume_spinner()
+
+                def _short(obj: object, max_len: int = 120) -> str:
+                    try:
+                        text = (
+                            obj
+                            if isinstance(obj, str)
+                            else json.dumps(obj, ensure_ascii=False, default=str)
+                        )
+                    except Exception:
+                        text = str(obj)
+                    if len(text) <= max_len:
+                        return text
+                    return text[: max_len - 3] + "..."
+
+                def _emit_draft_snapshot() -> None:
+                    """将累积的流式内容以 dim 文本输出为草稿（和思维链同级）"""
+                    nonlocal stream_buffer
+                    if show_draft == "off":
+                        stream_buffer = ""
+                        return
+                    draft_text = (stream_buffer or "").strip()
+                    stream_buffer = ""
+                    if not draft_text:
+                        return
+                    if show_draft == "summary":
+                        draft_text = " ".join(draft_text.split())
+                        if len(draft_text) > draft_max_chars:
+                            draft_text = draft_text[: max(0, draft_max_chars - 3)] + "..."
+                    _print_with_spinner(t(f"  草稿：{draft_text}", dim=True))
+
+                def _flush_reasoning_buffer() -> None:
+                    nonlocal reasoning_buffer, reasoning_started
+                    text = reasoning_buffer.strip()
+                    reasoning_buffer = ""
+                    if text:
+                        _print_with_spinner(t(text, dim=True))
+                        reasoning_started = True
+
+                # ── 流式回调 ──
+
+                def on_stream_delta(delta: str) -> None:
+                    nonlocal stream_buffer
+                    if not delta:
+                        return
+                    stream_buffer += delta
+
+                def on_reasoning_delta(delta: str) -> None:
+                    nonlocal reasoning_started, reasoning_buffer
+                    if not delta:
+                        return
+                    reasoning_buffer += delta
+                    if "\n\n" in reasoning_buffer or len(reasoning_buffer) > 300:
+                        _flush_reasoning_buffer()
+
+                def on_trace_event(event: dict) -> None:
+                    nonlocal reasoning_started
+                    event_type = event.get("type")
+                    if event_type == "llm_request":
+                        _flush_reasoning_buffer()
+                        if reasoning_started:
+                            _print_with_spinner()
+                        reasoning_started = False
+                        _emit_draft_snapshot()
+                        iteration = event.get("iteration")
+                        tool_count = event.get("tool_count")
+                        _print_with_spinner()
+                        _print_with_spinner(hint(f"  第 {iteration} 步: 调用模型（可用工具 {tool_count}）"))
+                    elif event_type == "tool_call":
+                        _flush_reasoning_buffer()
+                        _emit_draft_snapshot()
+                        name = event.get("name")
+                        args = _short(event.get("arguments", {}))
+                        _print_with_spinner(hint(f"  → 调用工具: {name}({args})"))
+                    elif event_type == "tool_result":
+                        name = event.get("name")
+                        ok = "成功" if event.get("success") else "失败"
+                        msg = _short(event.get("message", ""))
+                        ms = event.get("duration_ms")
+                        _print_with_spinner(hint(f"  → 工具结果: {name} {ok}（{ms}ms） {msg}"))
+
+                response = await agent.process_input(
+                    user_input,
+                    on_stream_delta=on_stream_delta,
+                    on_reasoning_delta=on_reasoning_delta,
+                    on_trace_event=on_trace_event,
+                )
+                _stop_spinner()
+                _flush_reasoning_buffer()
+                if spinner_task is not None:
+                    await spinner_task
+
+                # 最终回复：一次性 Rich Markdown 渲染
                 print()
                 if _HAS_RICH and _RICH_CONSOLE is not None:
                     _RICH_CONSOLE.print(Markdown(response))
@@ -244,7 +401,6 @@ async def run_interactive_loop(agent: ScheduleAgent):
                     print(response)
                 print()
 
-                # 状态栏：token 用量
                 u = agent.get_token_usage()
                 delta = u["total_tokens"] - prev_total_tokens
                 prev_total_tokens = u["total_tokens"]
@@ -254,6 +410,9 @@ async def run_interactive_loop(agent: ScheduleAgent):
             except Exception as e:
                 if spinner_stop is not None:
                     spinner_stop.set()
+                with io_lock:
+                    sys.stdout.write("\r" + " " * shutil.get_terminal_size((80, 20)).columns + "\r")
+                    sys.stdout.flush()
                 if spinner_task is not None:
                     try:
                         await spinner_task

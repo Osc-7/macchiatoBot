@@ -6,11 +6,12 @@
 """
 
 import asyncio
+import inspect
 import json
 import time
 from datetime import datetime
 from datetime import timezone as dt_timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from schedule_agent.config import Config, MemoryConfig, get_config
 from schedule_agent.core.context import ConversationContext, get_time_context
@@ -157,6 +158,11 @@ class ScheduleAgent:
                 )
 
     @property
+    def config(self) -> Config:
+        """获取当前配置"""
+        return self._config
+
+    @property
     def tool_registry(self) -> VersionedToolRegistry:
         """获取工具注册表"""
         return self._tool_registry
@@ -216,7 +222,13 @@ class ScheduleAgent:
         self._token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "call_count": 0}
         self._usage_calls.clear()
 
-    async def process_input(self, user_input: str) -> str:
+    async def process_input(
+        self,
+        user_input: str,
+        on_stream_delta: Optional[Callable[[str], Any]] = None,
+        on_reasoning_delta: Optional[Callable[[str], Any]] = None,
+        on_trace_event: Optional[Callable[[Dict[str, Any]], Any]] = None,
+    ) -> str:
         """
         处理用户输入。
 
@@ -228,6 +240,9 @@ class ScheduleAgent:
 
         Args:
             user_input: 用户输入
+            on_stream_delta: 流式文本增量回调（仅文本内容）
+            on_reasoning_delta: 思维链增量回调（reasoning_content）
+            on_trace_event: 轨迹事件回调（工具调用、结果、轮次）
 
         Returns:
             Agent 的响应文本
@@ -293,6 +308,17 @@ class ScheduleAgent:
                     system_prompt=system_prompt if self._session_logger.enable_detailed_log else None,
                     messages=messages if self._session_logger.enable_detailed_log else None,
                 )
+            if on_trace_event:
+                maybe_awaitable = on_trace_event(
+                    {
+                        "type": "llm_request",
+                        "turn_id": turn_id,
+                        "iteration": iteration,
+                        "tool_count": len(tools_defs),
+                    }
+                )
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
 
             # 2.1 调用 LLM
             response = await self._llm_client.chat_with_tools(
@@ -300,6 +326,8 @@ class ScheduleAgent:
                 messages=messages,
                 tools=tools_defs,
                 tool_choice="auto",
+                on_content_delta=on_stream_delta,
+                on_reasoning_delta=on_reasoning_delta,
             )
 
             if self._session_logger:
@@ -322,11 +350,40 @@ class ScheduleAgent:
 
                 # 执行所有工具调用
                 for tool_call in response.tool_calls:
+                    if on_trace_event:
+                        maybe_awaitable = on_trace_event(
+                            {
+                                "type": "tool_call",
+                                "turn_id": turn_id,
+                                "iteration": iteration,
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.name,
+                                "arguments": tool_call.arguments,
+                            }
+                        )
+                        if inspect.isawaitable(maybe_awaitable):
+                            await maybe_awaitable
                     if self._session_logger:
                         self._session_logger.on_tool_call(turn_id, iteration, tool_call)
                     t0 = time.perf_counter()
                     result = await self._execute_tool_call(tool_call)
                     duration_ms = int((time.perf_counter() - t0) * 1000)
+                    if on_trace_event:
+                        maybe_awaitable = on_trace_event(
+                            {
+                                "type": "tool_result",
+                                "turn_id": turn_id,
+                                "iteration": iteration,
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.name,
+                                "success": result.success,
+                                "message": result.message,
+                                "duration_ms": duration_ms,
+                                "error": result.error,
+                            }
+                        )
+                        if inspect.isawaitable(maybe_awaitable):
+                            await maybe_awaitable
                     if self._session_logger:
                         self._session_logger.on_tool_result(
                             turn_id, iteration, tool_call.id, result, duration_ms

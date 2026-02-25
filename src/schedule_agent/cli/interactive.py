@@ -378,6 +378,11 @@ async def run_interactive_loop(agent: ScheduleAgent):
                         _pause_spinner()
                         with io_lock:
                             _erase_spinner_line()
+                        # 给 spinner 一点时间完全停下，避免首帧残留
+                        try:
+                            time.sleep(0.03)
+                        except Exception:
+                            pass
                         _flush_reasoning_buffer()
                         stream_started = True
                         print()

@@ -358,11 +358,12 @@ async def run_interactive_loop(agent: ScheduleAgent):
                         _pause_spinner()
                         with io_lock:
                             _erase_spinner_line()
-                        try:
-                            time.sleep(0.08)
-                        except Exception:
-                            pass
                         _flush_reasoning_buffer()
+                        # flush 内部的 _print_with_spinner 会 resume spinner，
+                        # 必须重新 pause，否则 spinner 会在整个 Live 期间和 Rich 抢 stdout
+                        _pause_spinner()
+                        with io_lock:
+                            _erase_spinner_line()
                         stream_started = True
                         print()
                         if _HAS_RICH and _RICH_CONSOLE is not None:

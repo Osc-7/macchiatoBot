@@ -369,6 +369,10 @@ class TestGetEventsTool:
         definition = get_events_tool.get_definition()
         assert isinstance(definition, ToolDefinition)
         assert definition.name == "get_events"
+        param_names = [p.name for p in definition.parameters]
+        assert "date" in param_names
+        param_names = [p.name for p in definition.parameters]
+        assert "date" in param_names
 
     @pytest.mark.asyncio
     async def test_execute_today_empty(self, get_events_tool):
@@ -398,6 +402,48 @@ class TestGetEventsTool:
         assert result.success is True
         assert len(result.data) == 1
         assert result.data[0].title == "今天的事件"
+
+    @pytest.mark.asyncio
+    async def test_execute_by_date_param(self, get_events_tool, event_repository):
+        """测试通过 date 参数查询指定日期"""
+        target_day = date.today() + timedelta(days=1)
+        other_day = date.today() + timedelta(days=2)
+
+        event_on_target = Event(
+            title="目标日程",
+            start_time=datetime.combine(target_day, datetime.min.time().replace(hour=10)),
+            end_time=datetime.combine(target_day, datetime.min.time().replace(hour=11)),
+        )
+        event_on_other = Event(
+            title="非目标日程",
+            start_time=datetime.combine(other_day, datetime.min.time().replace(hour=10)),
+            end_time=datetime.combine(other_day, datetime.min.time().replace(hour=11)),
+        )
+        event_repository.create(event_on_target)
+        event_repository.create(event_on_other)
+
+        result = await get_events_tool.execute(date=target_day.isoformat())
+
+        assert result.success is True
+        assert result.metadata["query_type"] == "date"
+        assert len(result.data) == 1
+        assert result.data[0].title == "目标日程"
+
+    @pytest.mark.asyncio
+    async def test_execute_by_date_invalid_format(self, get_events_tool):
+        """测试 date 参数格式错误"""
+        result = await get_events_tool.execute(date="2026/02/27")
+
+        assert result.success is False
+        assert result.error == "INVALID_DATE_FORMAT"
+
+    @pytest.mark.asyncio
+    async def test_execute_query_type_date_missing_date_param(self, get_events_tool):
+        """测试 query_type=date 但缺少 date 参数"""
+        result = await get_events_tool.execute(query_type="date")
+
+        assert result.success is False
+        assert result.error == "MISSING_DATE"
 
     @pytest.mark.asyncio
     async def test_execute_upcoming(self, get_events_tool, event_repository):
@@ -503,6 +549,50 @@ class TestGetEventsTool:
 
         assert result.success is True
         assert result.metadata["query_type"] == "today"
+
+    @pytest.mark.asyncio
+    async def test_execute_with_date_param(self, get_events_tool, event_repository):
+        """测试通过 date 参数查询指定日期"""
+        target_day = date.today() + timedelta(days=1)
+        another_day = target_day + timedelta(days=1)
+
+        event_repository.create(
+            Event(
+                title="目标日期事件",
+                start_time=datetime.combine(target_day, datetime.min.time().replace(hour=10)),
+                end_time=datetime.combine(target_day, datetime.min.time().replace(hour=11)),
+            )
+        )
+        event_repository.create(
+            Event(
+                title="其他日期事件",
+                start_time=datetime.combine(another_day, datetime.min.time().replace(hour=10)),
+                end_time=datetime.combine(another_day, datetime.min.time().replace(hour=11)),
+            )
+        )
+
+        result = await get_events_tool.execute(date=target_day.isoformat())
+
+        assert result.success is True
+        assert result.metadata["query_type"] == "date"
+        assert len(result.data) == 1
+        assert result.data[0].title == "目标日期事件"
+
+    @pytest.mark.asyncio
+    async def test_execute_with_invalid_date_param(self, get_events_tool):
+        """测试 date 参数格式错误"""
+        result = await get_events_tool.execute(date="2026/02/27")
+
+        assert result.success is False
+        assert result.error == "INVALID_DATE_FORMAT"
+
+    @pytest.mark.asyncio
+    async def test_execute_query_type_date_without_date(self, get_events_tool):
+        """测试 query_type=date 但缺少 date 参数"""
+        result = await get_events_tool.execute(query_type="date")
+
+        assert result.success is False
+        assert result.error == "MISSING_DATE"
 
     @pytest.mark.asyncio
     async def test_execute_events_sorted_by_time(self, get_events_tool, event_repository):

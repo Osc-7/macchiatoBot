@@ -446,10 +446,16 @@ class GetEventsTool(BaseTool):
                 ToolParameter(
                     name="query_type",
                     type="string",
-                    description="查询类型：today（今天）、upcoming（即将到来）、all（所有）、search（搜索）",
+                    description="查询类型：today（今天）、date（指定日期）、upcoming（即将到来）、range（时间范围）、all（所有）、search（搜索）",
                     required=False,
-                    enum=["today", "upcoming", "all", "search"],
+                    enum=["today", "date", "upcoming", "range", "all", "search"],
                     default="today",
+                ),
+                ToolParameter(
+                    name="date",
+                    type="string",
+                    description="指定日期，格式: YYYY-MM-DD（推荐，查询某一天时优先使用）",
+                    required=False,
                 ),
                 ToolParameter(
                     name="search_query",
@@ -483,6 +489,10 @@ class GetEventsTool(BaseTool):
                     "params": {"query_type": "today"},
                 },
                 {
+                    "description": "查看指定日期的日程（推荐）",
+                    "params": {"date": "2026-02-27"},
+                },
+                {
                     "description": "查看未来7天的日程",
                     "params": {"query_type": "upcoming", "days": 7},
                 },
@@ -497,6 +507,7 @@ class GetEventsTool(BaseTool):
             ],
             usage_notes=[
                 "默认查询今天的事件",
+                "查询某一天时优先使用 date 参数（YYYY-MM-DD），比传 today 更准确",
                 "搜索会匹配标题、描述和标签",
                 "结果按开始时间升序排列",
             ],
@@ -518,13 +529,35 @@ class GetEventsTool(BaseTool):
             操作结果，包含匹配的事件列表
         """
         query_type = kwargs.get("query_type", "today")
+        query_date_str = kwargs.get("date")
 
         events: List[Event] = []
         message = ""
 
-        if query_type == "today":
+        # 优先支持 date 参数：即使 query_type 未显式传入，也能准确查询指定日期
+        if query_date_str:
+            try:
+                target_date = date.fromisoformat(query_date_str)
+            except ValueError:
+                return ToolResult(
+                    success=False,
+                    error="INVALID_DATE_FORMAT",
+                    message=f"日期格式无效: {query_date_str}，请使用 YYYY-MM-DD 格式",
+                )
+            events = self._repository.get_by_date(target_date)
+            message = f"{query_date_str} 有 {len(events)} 个日程"
+            query_type = "date"
+
+        elif query_type == "today":
             events = self._repository.get_today()
             message = f"今天有 {len(events)} 个日程"
+
+        elif query_type == "date":
+            return ToolResult(
+                success=False,
+                error="MISSING_DATE",
+                message="query_type=date 时需要提供 date 参数（YYYY-MM-DD）",
+            )
 
         elif query_type == "upcoming":
             days = kwargs.get("days", 7)

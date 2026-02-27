@@ -2,10 +2,13 @@
 run_command 工具测试
 """
 
+import os
+
 import pytest
 
 from schedule_agent.config import CommandToolsConfig, Config, LLMConfig
 from schedule_agent.core.tools.command_tools import RunCommandTool
+from schedule_agent.core.tools.dev_terminal_tool import DevTerminalTool
 
 
 def _make_config(
@@ -105,5 +108,37 @@ class TestRunCommandTool:
         config = _make_config(enabled=False, base_dir=str(tmp_path))
         tool = RunCommandTool(config=config)
         result = await tool.execute(command="echo hi")
+        assert not result.success
+        assert result.error == "PERMISSION_DENIED"
+
+
+class TestDevTerminalTool:
+    def test_get_definition(self):
+        config = _make_config()
+        tool = DevTerminalTool(config=config)
+        definition = tool.get_definition()
+        assert definition.name == "dev_terminal_session"
+        param_names = [p.name for p in definition.parameters]
+        assert "terminal_name" in param_names
+        assert "command" in param_names
+        assert "cwd" in param_names
+        assert "wait_for_text" in param_names
+
+    @pytest.mark.asyncio
+    async def test_dev_terminal_unavailable_returns_error(self, tmp_path, monkeypatch):
+        # 使用一个几乎不可能有服务监听的端口，确保连接失败
+        monkeypatch.setenv("DEV_TERMINAL_URL", "http://127.0.0.1:9")
+        config = _make_config(base_dir=str(tmp_path))
+        tool = DevTerminalTool(config=config)
+        result = await tool.execute(terminal_name="test-session")
+        assert not result.success
+        assert result.error == "DEV_TERMINAL_UNAVAILABLE"
+
+    @pytest.mark.asyncio
+    async def test_dev_terminal_respects_permission_switch(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEV_TERMINAL_URL", "http://127.0.0.1:9")
+        config = _make_config(enabled=False, base_dir=str(tmp_path))
+        tool = DevTerminalTool(config=config)
+        result = await tool.execute(terminal_name="test-session")
         assert not result.success
         assert result.error == "PERMISSION_DENIED"

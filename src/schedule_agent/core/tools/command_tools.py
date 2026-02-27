@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -140,11 +142,30 @@ class RunCommandTool(BaseTool):
         )
 
     def _resolve_cwd(self, cwd: Optional[str]) -> tuple[Optional[Path], Optional[str]]:
+        """
+        解析工作目录。
+
+        默认要求 cwd 位于 command_tools.base_dir 下，但允许少量安全的白名单目录：
+        - 用户主目录下的 ~/.agents/skills（用于安装/管理技能）
+        """
         base = Path(self._cmd_config.base_dir).resolve()
         cwd_str = cwd or "."
         try:
-            target = (base / cwd_str).resolve()
-            if not str(target).startswith(str(base)):
+            # 展开 ~，便于识别 ~/.agents/skills 白名单
+            raw_path = Path(cwd_str).expanduser()
+
+            # 白名单：允许 ~/.agents/skills 及其子目录
+            home = Path(os.path.expanduser("~")).resolve()
+            skills_root = (home / ".agents" / "skills").resolve()
+            if raw_path.is_absolute() and str(raw_path).startswith(str(skills_root)):
+                target = raw_path
+            else:
+                # 默认：相对于 base_dir 解析
+                target = (base / raw_path).resolve()
+
+            if not str(target).startswith(str(base)) and not str(target).startswith(
+                str(skills_root)
+            ):
                 return None, f"工作目录 '{cwd_str}' 超出允许的目录范围"
             if not target.exists():
                 return None, f"工作目录不存在: {cwd_str}"
@@ -236,11 +257,14 @@ class RunCommandTool(BaseTool):
             return ToolResult(success=False, error="INVALID_CWD", message=cwd_err)
 
         collector = _OutputCollector(limit=output_limit)
+        # start_new_session=True 让子进程拥有独立进程组，超时可 killpg 杀死整棵进程树
+        # （否则只杀 shell，后台子进程会继承 pipe 写端，read 永无 EOF，gather 无限阻塞）
         process = await asyncio.create_subprocess_shell(
             command,
             cwd=str(resolved_cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=(os.name != "nt"),
         )
 
         stdout_task = asyncio.create_task(
@@ -255,19 +279,41 @@ class RunCommandTool(BaseTool):
             await asyncio.wait_for(process.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             timed_out = True
-            # 先 SIGTERM，给进程退出留宽限时间
-            process.terminate()
+            # 杀死整棵进程树（shell + 子进程如 server.sh、npx），否则子进程继承 pipe
+            # 写端不关闭，_read_stream 永无 EOF，gather(stdout_task, stderr_task) 无限阻塞
+            if os.name != "nt" and hasattr(signal, "SIGTERM"):
+                try:
+                    # start_new_session 下 shell 是 session 领导者，PGID == pid
+                    os.killpg(process.pid, signal.SIGTERM)
+                except (ProcessLookupError, OSError):
+                    process.terminate()
+            else:
+                process.terminate()
             try:
                 await asyncio.wait_for(process.wait(), timeout=_KILL_GRACE_SECONDS)
             except asyncio.TimeoutError:
-                # SIGTERM 无效，强制 SIGKILL
-                process.kill()
+                if os.name != "nt" and hasattr(signal, "SIGKILL"):
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except (ProcessLookupError, OSError):
+                        process.kill()
+                else:
+                    process.kill()
                 try:
                     await asyncio.wait_for(process.wait(), timeout=_KILL_GRACE_SECONDS)
                 except asyncio.TimeoutError:
-                    pass  # 仍不退出则放弃等待，避免无限阻塞
+                    pass  # 仍不退出则放弃等待
         finally:
-            await asyncio.gather(stdout_task, stderr_task)
+            # 若子进程仍持有 pipe 写端，read 可能永不返回；加超时防止无限阻塞
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(stdout_task, stderr_task),
+                    timeout=_KILL_GRACE_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                stdout_task.cancel()
+                stderr_task.cancel()
+                await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
         return_code = process.returncode
         data = {

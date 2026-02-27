@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "dev-terminal": {
+      "source": "parkerhancock/dev-terminal",
+      "sourceType": "github",
+      "computedHash": "3bc10a7d3d004d17c45027144f2ca63e871fa071ea7f23039ecb570979e42fb6"
+    }
+  }
+}

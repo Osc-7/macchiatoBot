@@ -49,4 +49,45 @@ if [ -f ".env" ]; then
     log_success "已加载 .env"
 fi
 
+# 5. 启动 dev-terminal server（如已运行则跳过）
+start_dev_terminal_server() {
+    local DEV_TERM_DIR="${HOME}/.agents/skills/dev-terminal"
+    local HEALTH_URL_ROOT="http://localhost:9333"
+    local HEALTH_URL_PAGE="${HEALTH_URL_ROOT}/"
+
+    # 若未安装 curl，则跳过自动启动（不影响主流程）
+    if ! command -v curl >/dev/null 2>&1; then
+        log_warn "未找到 curl，跳过 dev-terminal 自动启动"
+        return 0
+    fi
+
+    # 已有 server 在跑就直接返回（能连到 9333 且返回任意 HTTP 状态即可）
+    if curl -sS -o /dev/null "$HEALTH_URL_ROOT" >/dev/null 2>&1; then
+        log_info "dev-terminal server 已在运行，跳过启动"
+        return 0
+    fi
+
+    # 没有安装 skill 就不尝试启动
+    if [ ! -d "$DEV_TERM_DIR" ]; then
+        log_warn "未检测到 dev-terminal 技能目录（$DEV_TERM_DIR），跳过自动启动"
+        return 0
+    fi
+
+    log_info "正在后台启动 dev-terminal server..."
+    (
+        cd "$DEV_TERM_DIR" && \
+        ./server.sh >/tmp/dev-terminal-server.log 2>&1 &
+    )
+
+    # 简单等一下再做一次健康检查
+    sleep 1
+    if curl -sS -o /dev/null "$HEALTH_URL_PAGE" >/dev/null 2>&1; then
+        log_success "dev-terminal server 已启动"
+    else
+        log_warn "尝试启动 dev-terminal server 但健康检查失败，请手动检查 ~/.agents/skills/dev-terminal"
+    fi
+}
+
+start_dev_terminal_server || log_warn "dev-terminal server 自动启动失败，可手动运行：cd ~/.agents/skills/dev-terminal && ./server.sh &"
+
 echo -e "${GREEN}✅ 环境就绪 (${PYTHON_BIN})${NC}"

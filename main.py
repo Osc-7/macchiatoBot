@@ -7,7 +7,7 @@ Schedule Agent CLI 入口
 
 import asyncio
 import sys
-from typing import List, Optional
+from typing import Callable, Awaitable, List, Optional, cast
 
 from schedule_agent.config import Config, get_config
 from schedule_agent.core import ScheduleAgent
@@ -208,8 +208,9 @@ def main():
                 loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             loop.run_until_complete(loop.shutdown_asyncgens())
             shutdown_default_executor = getattr(loop, "shutdown_default_executor", None)
-            if callable(shutdown_default_executor):
-                loop.run_until_complete(shutdown_default_executor())
+            if shutdown_default_executor is not None:
+                shutdown_executor_fn = cast(Callable[[], Awaitable[None]], shutdown_default_executor)
+                loop.run_until_complete(shutdown_executor_fn())
         except Exception:
             pass
         finally:

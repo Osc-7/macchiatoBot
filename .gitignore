@@ -46,7 +46,7 @@ config.yaml
 src/schedule_agent/prompts/system/
 automation-logs/
 logs/
-
+prompts/skills/maker-time-promtector/
 # OS
 .DS_Store
 Thumbs.db

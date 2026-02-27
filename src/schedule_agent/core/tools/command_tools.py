@@ -11,6 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+# 超时后给进程退出留的宽限时间（秒）；超时后仍未退出则 SIGKILL
+_KILL_GRACE_SECONDS = 5
+
 from schedule_agent.config import CommandToolsConfig, Config, get_config
 
 from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
@@ -252,8 +255,17 @@ class RunCommandTool(BaseTool):
             await asyncio.wait_for(process.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             timed_out = True
-            process.kill()
-            await process.wait()
+            # 先 SIGTERM，给进程退出留宽限时间
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=_KILL_GRACE_SECONDS)
+            except asyncio.TimeoutError:
+                # SIGTERM 无效，强制 SIGKILL
+                process.kill()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=_KILL_GRACE_SECONDS)
+                except asyncio.TimeoutError:
+                    pass  # 仍不退出则放弃等待，避免无限阻塞
         finally:
             await asyncio.gather(stdout_task, stderr_task)
 

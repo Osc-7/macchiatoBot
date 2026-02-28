@@ -1,6 +1,7 @@
 """
 文件读写工具 - 提供 read_file, write_file, modify_file
 
+路径可为任意有效路径（/etc、~/.config 等），与 command_tools 一致。
 读取受 allow_read 配置控制，写入和修改需要 allow_write/allow_modify 权限。
 modify_file 支持三种模式：search_replace（局部替换）、append（追加）、overwrite（覆盖）。
 """
@@ -49,14 +50,13 @@ class ReadFileTool(BaseTool):
 - 了解文件中写了什么
 
 工具会：
-- 检查路径是否在允许的目录内
-- 返回文件文本内容（ UTF-8 编码）
+- 返回文件文本内容（UTF-8 编码）
 - 对二进制文件返回错误""",
             parameters=[
                 ToolParameter(
                     name="path",
                     type="string",
-                    description="文件路径（相对或绝对，必须在允许的 base_dir 下）",
+                    description="文件路径（相对路径相对于 base_dir，绝对路径可为 /etc/xxx、~/.config/xxx 等）",
                     required=True,
                 ),
                 ToolParameter(
@@ -78,7 +78,7 @@ class ReadFileTool(BaseTool):
                 },
             ],
             usage_notes=[
-                "路径不能超出配置的 base_dir，否则会被拒绝",
+                "path 支持任意有效路径（/etc/xxx、~/.config/xxx 等），相对路径相对于 base_dir",
                 "只能读取文本文件，二进制文件会返回错误",
                 "文件不存在时返回明确错误",
             ],
@@ -87,16 +87,15 @@ class ReadFileTool(BaseTool):
 
     def _resolve_path(self, path: str) -> tuple[Optional[Path], Optional[str]]:
         """
-        解析并验证路径是否在 base_dir 内。
+        解析路径，支持任意有效路径（绝对路径直接使用，相对路径相对于 base_dir）。
 
         Returns:
             (resolved_path, error_message) - 成功时 error_message 为 None
         """
         base = Path(self._ft_config.base_dir).resolve()
         try:
-            resolved = (base / path).resolve()
-            if not str(resolved).startswith(str(base)):
-                return None, f"路径 '{path}' 超出允许的目录范围"
+            raw = Path(path).expanduser()
+            resolved = raw.resolve() if raw.is_absolute() else (base / raw).resolve()
             return resolved, None
         except (OSError, ValueError) as e:
             return None, f"无效路径: {e}"
@@ -185,14 +184,13 @@ class WriteFileTool(BaseTool):
 
 工具会：
 - 检查写入权限（配置或用户确认）
-- 检查路径是否在允许的目录内
 - 创建或覆盖文件
 - 若文件已存在会完全覆盖原内容""",
             parameters=[
                 ToolParameter(
                     name="path",
                     type="string",
-                    description="文件路径（相对或绝对，必须在允许的 base_dir 下）",
+                    description="文件路径（相对路径相对于 base_dir，绝对路径可为任意有效路径）",
                     required=True,
                 ),
                 ToolParameter(
@@ -217,7 +215,7 @@ class WriteFileTool(BaseTool):
             ],
             usage_notes=[
                 "写入和覆盖需要配置允许：file_tools.allow_write: true",
-                "路径不能超出配置的 base_dir",
+                "path 支持任意有效路径（/etc、~/.config 等）",
                 "会完全覆盖已存在的文件",
             ],
             tags=['文件', '写入'],
@@ -226,9 +224,8 @@ class WriteFileTool(BaseTool):
     def _resolve_path(self, path: str) -> tuple[Optional[Path], Optional[str]]:
         base = Path(self._ft_config.base_dir).resolve()
         try:
-            resolved = (base / path).resolve()
-            if not str(resolved).startswith(str(base)):
-                return None, f"路径 '{path}' 超出允许的目录范围"
+            raw = Path(path).expanduser()
+            resolved = raw.resolve() if raw.is_absolute() else (base / raw).resolve()
             return resolved, None
         except (OSError, ValueError) as e:
             return None, f"无效路径: {e}"
@@ -405,7 +402,7 @@ class ModifyFileTool(BaseTool):
                 ToolParameter(
                     name="path",
                     type="string",
-                    description="文件路径（相对或绝对，必须在允许的 base_dir 下）",
+                    description="文件路径（相对路径相对于 base_dir，绝对路径可为任意有效路径）",
                     required=True,
                 ),
                 ToolParameter(
@@ -474,6 +471,7 @@ class ModifyFileTool(BaseTool):
             ],
             usage_notes=[
                 "修改需要配置允许：file_tools.allow_modify: true",
+                "path 支持任意有效路径（/etc、~/.config 等）",
                 "search_replace 时 old_text 需与文件内容完全一致；失败时建议 read_file + write_file",
                 "append 模式下文件不存在会先创建",
             ],
@@ -483,9 +481,8 @@ class ModifyFileTool(BaseTool):
     def _resolve_path(self, path: str) -> tuple[Optional[Path], Optional[str]]:
         base = Path(self._ft_config.base_dir).resolve()
         try:
-            resolved = (base / path).resolve()
-            if not str(resolved).startswith(str(base)):
-                return None, f"路径 '{path}' 超出允许的目录范围"
+            raw = Path(path).expanduser()
+            resolved = raw.resolve() if raw.is_absolute() else (base / raw).resolve()
             return resolved, None
         except (OSError, ValueError) as e:
             return None, f"无效路径: {e}"

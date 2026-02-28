@@ -77,7 +77,7 @@ file_tools:
   allow_read: true    # 允许读取文件
   allow_write: false  # 允许写入/创建文件（建议按需启用）
   allow_modify: false # 允许修改/追加文件（建议按需启用）
-  base_dir: "."       # 允许操作的基础目录，所有路径必须在此目录下
+  base_dir: "."       # 相对路径的基准目录；绝对路径可访问任意位置（/etc、~/.config 等）
 
 # Agent 配置
 agent:

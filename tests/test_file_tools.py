@@ -74,14 +74,18 @@ class TestReadFileTool:
         assert "allow_read" in result.message
 
     @pytest.mark.asyncio
-    async def test_read_file_path_traversal_rejected(self, tmp_path):
-        (tmp_path / "f.txt").write_text("x", encoding="utf-8")
-        config = _make_config(allow_read=True, base_dir=str(tmp_path))
-        tool = ReadFileTool(config=config)
-        result = await tool.execute(path="../f.txt")
-        assert not result.success
-        assert result.error == "INVALID_PATH"
-        assert "超出" in result.message
+    async def test_read_file_allow_absolute_path(self, tmp_path):
+        """path 支持任意有效路径（绝对路径可不限于 base_dir）"""
+        external = tmp_path.parent / "external_read_test.txt"
+        external.write_text("external content", encoding="utf-8")
+        try:
+            config = _make_config(allow_read=True, base_dir=str(tmp_path))
+            tool = ReadFileTool(config=config)
+            result = await tool.execute(path=str(external))
+            assert result.success
+            assert result.data["content"] == "external content"
+        finally:
+            external.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
     async def test_read_file_missing_path(self):

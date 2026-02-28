@@ -139,7 +139,7 @@ class FileToolsConfig(BaseModel):
     )
     base_dir: str = Field(
         default=".",
-        description="允许操作的基础目录，所有文件路径必须在此目录下（安全限制）",
+        description="相对路径的基准目录；绝对路径（如 /etc、~/.config）可访问任意位置",
     )
 
 
@@ -156,7 +156,7 @@ class CommandToolsConfig(BaseModel):
     )
     base_dir: str = Field(
         default=".",
-        description="命令允许执行的基础目录，cwd 必须在此目录下",
+        description="相对路径 cwd 的基准目录；绝对路径可指定任意有效目录（如 /etc、~/.config）",
     )
     default_timeout_seconds: float = Field(
         default=30.0,

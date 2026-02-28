@@ -1,13 +1,15 @@
 """
 命令执行工具 - 提供 run_command
 
-在受控目录下执行终端命令，支持超时、工作目录、输出长度限制和返回码。
+执行终端命令，支持超时、工作目录、输出长度限制和返回码。
+cwd 可指向任意有效路径；危险操作需用户确认（confirm=true）后执行。
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import re
 import signal
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +17,19 @@ from typing import Optional
 
 # 超时后给进程退出留的宽限时间（秒）；超时后仍未退出则 SIGKILL
 _KILL_GRACE_SECONDS = 5
+
+# 危险命令模式：匹配到且未传 confirm=true 时需用户确认
+_DANGEROUS_PATTERNS = [
+    re.compile(r"\brm\s+(-[^ ]*r[^ ]*|-rf|-fr|-r\s+-f)\b", re.I),  # rm -rf / rm -r
+    re.compile(r"\brm\s+-[^ ]*f[^ ]*\s+-r\b", re.I),
+    re.compile(r"\bchmod\s+(-R|--recursive)\b", re.I),
+    re.compile(r"\bchown\s+(-R|--recursive)\b", re.I),
+    re.compile(r"\bdd\s+", re.I),
+    re.compile(r"\bsudo\b", re.I),
+    re.compile(r"\bmkfs\.", re.I),
+    re.compile(r">\s*/dev/(sd|hd|nvme|vd)[a-z]", re.I),
+    re.compile(r"\bformat\s+", re.I),
+]
 
 from schedule_agent.config import CommandToolsConfig, Config, get_config
 
@@ -82,16 +97,16 @@ class RunCommandTool(BaseTool):
             description="""执行终端命令并返回结果。
 
 当用户想要：
-- 查看目录/文件信息（例如 ls、pwd）
+- 查看目录/文件信息（例如 ls、pwd、ls /etc）
 - 运行脚本或测试命令（例如 pytest、python script.py）
 - 查询 Git 状态、构建状态等开发信息
+- 访问系统目录（/etc、/usr、~/.config 等）
 
 工具会：
-- 在受控基础目录下执行命令
-- 支持自定义工作目录 cwd
+- 在指定工作目录 cwd 下执行（cwd 可为任意有效路径）
 - 支持超时 timeout（秒）
 - 限制输出长度 output_limit（字符）
-- 返回 return_code、stdout、stderr""",
+- 危险操作（rm -rf、chmod -R、sudo 等）需用户确认后传 confirm=true""",
             parameters=[
                 ToolParameter(
                     name="command",
@@ -102,7 +117,7 @@ class RunCommandTool(BaseTool):
                 ToolParameter(
                     name="cwd",
                     type="string",
-                    description="工作目录（相对或绝对路径，必须位于 command_tools.base_dir 内）",
+                    description="工作目录（相对路径相对于 base_dir，绝对路径可为任意有效目录如 /etc、~/.config）",
                     required=False,
                     default=".",
                 ),
@@ -118,11 +133,22 @@ class RunCommandTool(BaseTool):
                     description="输出长度限制（stdout+stderr 总字符数），默认使用配置 command_tools.default_output_limit",
                     required=False,
                 ),
+                ToolParameter(
+                    name="confirm",
+                    type="boolean",
+                    description="危险操作需用户过目确认后设为 true（如 rm -rf、chmod -R、sudo 等）",
+                    required=False,
+                    default=False,
+                ),
             ],
             examples=[
                 {
                     "description": "查看当前目录文件",
                     "params": {"command": "ls -la"},
+                },
+                {
+                    "description": "查看系统目录",
+                    "params": {"command": "ls -la", "cwd": "/etc"},
                 },
                 {
                     "description": "在指定子目录运行测试，超时 20 秒",
@@ -134,7 +160,8 @@ class RunCommandTool(BaseTool):
                 },
             ],
             usage_notes=[
-                "cwd 必须位于允许的 base_dir 内，越界会被拒绝",
+                "cwd 支持任意有效路径（/etc、/usr、~/.config 等），相对路径相对于 base_dir",
+                "危险命令（rm -rf、chmod -R、sudo、dd 等）需先向用户展示命令，待用户确认后再传 confirm=true 执行",
                 "超时时会终止进程并返回 COMMAND_TIMEOUT",
                 "即使 return_code 非 0，也会返回 stdout/stderr 方便排查",
             ],
@@ -145,28 +172,17 @@ class RunCommandTool(BaseTool):
         """
         解析工作目录。
 
-        默认要求 cwd 位于 command_tools.base_dir 下，但允许少量安全的白名单目录：
-        - 用户主目录下的 ~/.agents/skills（用于安装/管理技能）
+        支持任意有效路径：相对路径相对于 base_dir，绝对路径直接使用。
         """
         base = Path(self._cmd_config.base_dir).resolve()
         cwd_str = cwd or "."
         try:
-            # 展开 ~，便于识别 ~/.agents/skills 白名单
             raw_path = Path(cwd_str).expanduser()
-
-            # 白名单：允许 ~/.agents/skills 及其子目录
-            home = Path(os.path.expanduser("~")).resolve()
-            skills_root = (home / ".agents" / "skills").resolve()
-            if raw_path.is_absolute() and str(raw_path).startswith(str(skills_root)):
-                target = raw_path
+            if raw_path.is_absolute():
+                target = raw_path.resolve()
             else:
-                # 默认：相对于 base_dir 解析
                 target = (base / raw_path).resolve()
 
-            if not str(target).startswith(str(base)) and not str(target).startswith(
-                str(skills_root)
-            ):
-                return None, f"工作目录 '{cwd_str}' 超出允许的目录范围"
             if not target.exists():
                 return None, f"工作目录不存在: {cwd_str}"
             if not target.is_dir():
@@ -174,6 +190,14 @@ class RunCommandTool(BaseTool):
             return target, None
         except (OSError, ValueError) as e:
             return None, f"无效工作目录: {e}"
+
+    @staticmethod
+    def _is_dangerous_command(command: str) -> bool:
+        """检测是否为危险命令（需用户确认）。"""
+        for pat in _DANGEROUS_PATTERNS:
+            if pat.search(command):
+                return True
+        return False
 
     @staticmethod
     async def _read_stream(
@@ -203,6 +227,14 @@ class RunCommandTool(BaseTool):
                 success=False,
                 error="PERMISSION_DENIED",
                 message="命令执行功能未启用，请在配置中设置 command_tools.enabled 和 command_tools.allow_run 为 true",
+            )
+
+        # 危险命令需用户确认
+        if self._is_dangerous_command(command) and kwargs.get("confirm") is not True:
+            return ToolResult(
+                success=False,
+                error="CONFIRMATION_REQUIRED",
+                message="该命令可能造成不可逆损害（如 rm -rf、chmod -R、sudo 等）。请先向用户展示命令内容，待用户确认后再调用并传 confirm=true 执行",
             )
 
         timeout = kwargs.get("timeout", self._cmd_config.default_timeout_seconds)

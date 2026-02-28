@@ -8,7 +8,6 @@ import pytest
 
 from schedule_agent.config import CommandToolsConfig, Config, LLMConfig
 from schedule_agent.core.tools.command_tools import RunCommandTool
-from schedule_agent.core.tools.dev_terminal_tool import DevTerminalTool
 
 
 def _make_config(
@@ -46,6 +45,7 @@ class TestRunCommandTool:
         assert "cwd" in param_names
         assert "timeout" in param_names
         assert "output_limit" in param_names
+        assert "confirm" in param_names
 
     @pytest.mark.asyncio
     async def test_run_command_success(self, tmp_path):
@@ -87,12 +87,31 @@ class TestRunCommandTool:
         assert result.data["cwd"] == str(child)
 
     @pytest.mark.asyncio
-    async def test_run_command_reject_outside_cwd(self, tmp_path):
+    async def test_run_command_allow_any_cwd(self, tmp_path):
+        """cwd 可为任意有效路径（如 /tmp、系统目录）"""
         config = _make_config(base_dir=str(tmp_path))
         tool = RunCommandTool(config=config)
-        result = await tool.execute(command="pwd", cwd="../")
+        result = await tool.execute(command="pwd", cwd="/tmp")
+        assert result.success
+        assert "/tmp" in result.data["stdout"]
+
+    @pytest.mark.asyncio
+    async def test_run_command_dangerous_requires_confirm(self, tmp_path):
+        """危险命令未传 confirm 时返回 CONFIRMATION_REQUIRED"""
+        config = _make_config(base_dir=str(tmp_path))
+        tool = RunCommandTool(config=config)
+        result = await tool.execute(command="rm -rf /tmp/some-dir")
         assert not result.success
-        assert result.error == "INVALID_CWD"
+        assert result.error == "CONFIRMATION_REQUIRED"
+
+    @pytest.mark.asyncio
+    async def test_run_command_dangerous_with_confirm(self, tmp_path):
+        """危险命令传 confirm=true 后正常执行"""
+        config = _make_config(base_dir=str(tmp_path))
+        tool = RunCommandTool(config=config)
+        # rm -rf 不存在的目录会成功（exit 0）
+        result = await tool.execute(command="rm -rf /tmp/nonexistent-dir-xyz", confirm=True)
+        assert result.success
 
     @pytest.mark.asyncio
     async def test_run_command_output_limit(self, tmp_path):
@@ -108,37 +127,5 @@ class TestRunCommandTool:
         config = _make_config(enabled=False, base_dir=str(tmp_path))
         tool = RunCommandTool(config=config)
         result = await tool.execute(command="echo hi")
-        assert not result.success
-        assert result.error == "PERMISSION_DENIED"
-
-
-class TestDevTerminalTool:
-    def test_get_definition(self):
-        config = _make_config()
-        tool = DevTerminalTool(config=config)
-        definition = tool.get_definition()
-        assert definition.name == "dev_terminal_session"
-        param_names = [p.name for p in definition.parameters]
-        assert "terminal_name" in param_names
-        assert "command" in param_names
-        assert "cwd" in param_names
-        assert "wait_for_text" in param_names
-
-    @pytest.mark.asyncio
-    async def test_dev_terminal_unavailable_returns_error(self, tmp_path, monkeypatch):
-        # 使用一个几乎不可能有服务监听的端口，确保连接失败
-        monkeypatch.setenv("DEV_TERMINAL_URL", "http://127.0.0.1:9")
-        config = _make_config(base_dir=str(tmp_path))
-        tool = DevTerminalTool(config=config)
-        result = await tool.execute(terminal_name="test-session")
-        assert not result.success
-        assert result.error == "DEV_TERMINAL_UNAVAILABLE"
-
-    @pytest.mark.asyncio
-    async def test_dev_terminal_respects_permission_switch(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("DEV_TERMINAL_URL", "http://127.0.0.1:9")
-        config = _make_config(enabled=False, base_dir=str(tmp_path))
-        tool = DevTerminalTool(config=config)
-        result = await tool.execute(terminal_name="test-session")
         assert not result.success
         assert result.error == "PERMISSION_DENIED"

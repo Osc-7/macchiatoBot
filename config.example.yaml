@@ -57,6 +57,13 @@ llm:
     # freshness: 7  # 搜索时效性（天数）: 7 | 30 | 180 | 365
     # assigned_site_list: []  # 限定搜索来源站点列表（最多25个）
 
+# 多模态识图配置（调用多模态大模型，不依赖本地 OCR 模型）
+multimodal:
+  enabled: false
+  model: null   # 例如: "qwen-vl-max-latest"；null 表示复用 llm.model
+  max_image_size_mb: 8
+  request_timeout_seconds: 120
+
 # 时间配置
 time:
   timezone: "Asia/Shanghai"
@@ -100,6 +107,7 @@ agent:
     - "write_file"
     - "run_command"
     - "extract_web_content"
+    - "analyze_image"
     - "memory_search_long_term"
     - "memory_search_content"
     - "memory_store"

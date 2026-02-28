@@ -34,6 +34,7 @@ from schedule_agent.core.tools import (
     MemorySearchContentTool,
     MemoryStoreTool,
     MemoryIngestTool,
+    AnalyzeImageTool,
 )
 from schedule_agent.core.memory import (
     ContentMemory,
@@ -92,6 +93,10 @@ def get_default_tools(config: Optional[Config] = None) -> List[BaseTool]:
         tools.append(MemorySearchContentTool(content, top_n))
         tools.append(MemoryStoreTool(content))
         tools.append(MemoryIngestTool(content))
+
+    # 多模态识图工具（调用多模态大模型）
+    if config and config.multimodal.enabled:
+        tools.append(AnalyzeImageTool(config=config))
 
     return tools
 

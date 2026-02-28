@@ -15,6 +15,7 @@ from schedule_agent.config import (
     TimeConfig,
     StorageConfig,
     AgentConfig,
+    MultimodalConfig,
     FileToolsConfig,
     CommandToolsConfig,
     MCPConfig,
@@ -57,6 +58,13 @@ class TestConfigModels:
         assert config.sleep_start == "23:00"
         assert config.sleep_end == "08:00"
 
+    def test_multimodal_config_defaults(self):
+        """测试多模态配置默认值"""
+        mm = MultimodalConfig()
+        assert mm.enabled is False
+        assert mm.model is None
+        assert mm.max_image_size_mb == 8.0
+
     def test_storage_config_defaults(self):
         """测试存储配置默认值"""
         config = StorageConfig()
@@ -85,6 +93,7 @@ class TestConfigModels:
         assert config.time.timezone == "Asia/Shanghai"
         assert config.storage.type == "json"
         assert config.agent.max_iterations == 10
+        assert config.multimodal.enabled is False
 
     def test_file_tools_config_defaults(self):
         """测试文件工具配置默认值"""

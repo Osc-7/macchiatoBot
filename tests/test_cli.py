@@ -16,6 +16,7 @@ from schedule_agent.config import (
     LoggingConfig,
     FileToolsConfig,
     CommandToolsConfig,
+    MultimodalConfig,
     MCPConfig,
     MCPServerConfig,
 )
@@ -88,6 +89,16 @@ class TestGetDefaultTools:
         tools = cli_module.get_default_tools(config=config)
         tool_names = [t.name for t in tools]
         assert "run_command" in tool_names
+
+    def test_get_default_tools_includes_analyze_image_when_enabled(self):
+        """当 multimodal.enabled 时，应包含 analyze_image"""
+        config = Config(
+            llm=LLMConfig(api_key="x", model="x"),
+            multimodal=MultimodalConfig(enabled=True),
+        )
+        tools = cli_module.get_default_tools(config=config)
+        tool_names = [t.name for t in tools]
+        assert "analyze_image" in tool_names
 
 
 class TestPrintFunctions:

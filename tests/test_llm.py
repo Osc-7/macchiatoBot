@@ -218,6 +218,38 @@ class TestLLMClient:
             assert call_args.kwargs["tool_choice"] == "auto"
 
     @pytest.mark.asyncio
+    async def test_chat_with_image(self, mock_config):
+        """测试多模态识图请求参数构造"""
+        with patch("schedule_agent.core.llm.client.AsyncOpenAI") as mock_openai:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "图片里有一段报错信息"
+            mock_response.choices[0].finish_reason = "stop"
+            mock_response.usage = None
+            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+            mock_client.close = AsyncMock()
+            mock_openai.return_value = mock_client
+
+            client = LLMClient(config=mock_config)
+            client._client = mock_client
+
+            response = await client.chat_with_image(
+                prompt="提取错误信息",
+                image_url="https://example.com/error.png",
+                system_message="你是视觉助手",
+                model_override="qwen-vl-max-latest",
+            )
+
+            assert response.content == "图片里有一段报错信息"
+            call_args = mock_client.chat.completions.create.call_args
+            assert call_args.kwargs["model"] == "qwen-vl-max-latest"
+            user_msg = call_args.kwargs["messages"][-1]
+            assert user_msg["role"] == "user"
+            assert user_msg["content"][0]["type"] == "text"
+            assert user_msg["content"][1]["type"] == "image_url"
+
+    @pytest.mark.asyncio
     async def test_chat_without_tools(self, mock_config, mock_openai_response):
         """测试不带工具的 chat_with_tools"""
         with patch("schedule_agent.core.llm.client.AsyncOpenAI") as mock_openai:

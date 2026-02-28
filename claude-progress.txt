@@ -852,3 +852,46 @@ tests/                   # 测试目录
 ### 下一步
 - 配置豆包 API
 - 创建项目目录结构
+
+## 2026-02-28 - 任务: USR-IMG-001 基于多模态大模型的识图能力接入
+
+### 完成内容:
+- 新增多模态配置 `MultimodalConfig`（`src/schedule_agent/config.py`）
+  - `enabled`: 识图工具开关
+  - `model`: 视觉模型名（可与主模型分离）
+  - `max_image_size_mb`: 本地图片大小限制
+  - `request_timeout_seconds`: 识图请求超时
+- 扩展 `LLMClient`（`src/schedule_agent/core/llm/client.py`）
+  - 新增 `chat_with_image()`，支持文本+图片的多模态请求
+  - 新增 `_normalize_text_content()` 统一处理模型返回 content 结构
+- 新增工具 `AnalyzeImageTool`（`src/schedule_agent/core/tools/multimodal_tools.py`）
+  - 工具名：`analyze_image`
+  - 支持 `image_path`（本地文件）或 `image_url`（网络图片）二选一
+  - 本地图片自动转 data URL 后调用多模态模型
+  - 支持 `prompt` 与 `detail_level` 输出粒度控制
+  - 增加输入校验、超时处理、错误码返回
+- 工具集成
+  - 在 `src/schedule_agent/core/tools/__init__.py` 导出 `AnalyzeImageTool`
+  - 在 `main.py` 的 `get_default_tools()` 中按 `config.multimodal.enabled` 自动注册
+  - 在 Agent 默认 pinned 工具中加入 `analyze_image`，适配 kernel 模式
+- 配置示例更新
+  - `config.example.yaml` 增加 `multimodal` 段
+  - `config.yaml` 增加 `multimodal` 段并启用（`qwen-vl-max-latest`）
+
+### 测试:
+- 新增 `tests/test_multimodal_tools.py`（4 个用例）
+  - 参数互斥校验
+  - URL 校验
+  - 本地文件不存在校验
+  - 本地图片成功识图流程
+- 更新 `tests/test_llm.py`
+  - 新增 `test_chat_with_image`，校验多模态请求报文结构
+- 更新 `tests/test_config.py`
+  - 新增多模态配置默认值测试
+- 更新 `tests/test_cli.py`
+  - 新增 `multimodal.enabled` 时默认工具注册测试
+- 全量测试结果：`pytest tests/ -v` -> 508 passed, 3 skipped
+
+### 备注:
+- 识图路径改为“多模态大模型推理”，不依赖本地 OCR 模型加速，避免 M 芯片/GPU 推理配置导致的慢速问题
+- 当前实现默认支持 URL 与本地图片；本地路径会做大小限制与 base64 转换

@@ -37,6 +37,24 @@ def _strip_thinking_content(content: Optional[str]) -> Optional[str]:
     return content[idx + len(THINKING_END_TAG) :].strip()
 
 
+def _normalize_text_content(content: Any) -> Optional[str]:
+    """将模型返回的 content 统一为纯文本。"""
+    if content is None:
+        return None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts: List[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = item.get("text")
+                if isinstance(text, str):
+                    texts.append(text)
+        if texts:
+            return "\n".join(texts).strip()
+    return str(content)
+
+
 @dataclass
 class TokenUsage:
     """单次调用的 token 用量"""
@@ -185,7 +203,61 @@ class LLMClient:
 
         choice = response.choices[0]
         usage = TokenUsage.from_response(response)
-        content = _strip_thinking_content(choice.message.content)
+        content = _strip_thinking_content(_normalize_text_content(choice.message.content))
+
+        return LLMResponse(
+            content=content,
+            tool_calls=[],
+            finish_reason=choice.finish_reason,
+            raw_response=response,
+            usage=usage,
+        )
+
+    async def chat_with_image(
+        self,
+        prompt: str,
+        image_url: str,
+        system_message: Optional[str] = None,
+        model_override: Optional[str] = None,
+    ) -> LLMResponse:
+        """
+        发送多模态识图请求（文本 + 图片）。
+
+        Args:
+            prompt: 图片分析提示词
+            image_url: 图片地址，支持 http(s) URL 或 data URL
+            system_message: 可选系统提示词
+            model_override: 可选模型覆盖
+
+        Returns:
+            LLM 响应
+        """
+        full_messages: List[Dict[str, Any]] = []
+
+        if system_message:
+            full_messages.append({"role": "system", "content": system_message})
+
+        full_messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }
+        )
+
+        request_params: Dict[str, Any] = {
+            "model": model_override or self.model,
+            "messages": full_messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+
+        response = await self._client.chat.completions.create(**request_params)
+        choice = response.choices[0]
+        usage = TokenUsage.from_response(response)
+        content = _strip_thinking_content(_normalize_text_content(choice.message.content))
 
         return LLMResponse(
             content=content,
@@ -267,7 +339,7 @@ class LLMClient:
                 )
 
         usage = TokenUsage.from_response(response)
-        content = _strip_thinking_content(choice.message.content)
+        content = _strip_thinking_content(_normalize_text_content(choice.message.content))
 
         return LLMResponse(
             content=content,

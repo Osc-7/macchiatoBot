@@ -101,6 +101,29 @@ class LLMConfig(BaseModel):
     )
 
 
+class MultimodalConfig(BaseModel):
+    """多模态（识图）配置"""
+
+    enabled: bool = Field(
+        default=False,
+        description="是否启用多模态识图工具",
+    )
+    model: Optional[str] = Field(
+        default=None,
+        description="多模态模型名，未配置时复用 llm.model",
+    )
+    max_image_size_mb: float = Field(
+        default=8.0,
+        gt=0,
+        description="本地图片最大大小（MB），超过则拒绝",
+    )
+    request_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        description="识图请求超时（秒），未实现单独超时时由 LLM 全局超时控制",
+    )
+
+
 class TimeConfig(BaseModel):
     """时间配置"""
 
@@ -340,6 +363,7 @@ class AgentConfig(BaseModel):
             "write_file",
             "run_command",
             "extract_web_content",
+            "analyze_image",
             "memory_search_long_term",
             "memory_search_content",
             "memory_store",
@@ -393,6 +417,10 @@ class Config(BaseModel):
     """应用配置"""
 
     llm: LLMConfig
+    multimodal: MultimodalConfig = Field(
+        default_factory=MultimodalConfig,
+        description="多模态识图配置",
+    )
     time: TimeConfig = Field(default_factory=TimeConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)

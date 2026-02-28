@@ -28,6 +28,7 @@ from .memory_tools import (
     MemoryStoreTool,
     MemoryIngestTool,
 )
+from .multimodal_tools import AnalyzeImageTool
 from .load_skill_tool import LoadSkillTool
 
 __all__ = [
@@ -61,5 +62,6 @@ __all__ = [
     "MemorySearchContentTool",
     "MemoryStoreTool",
     "MemoryIngestTool",
+    "AnalyzeImageTool",
     "LoadSkillTool",
 ]

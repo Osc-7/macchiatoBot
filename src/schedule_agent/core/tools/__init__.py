@@ -30,6 +30,7 @@ from .memory_tools import (
 )
 from .multimodal_tools import AnalyzeImageTool
 from .load_skill_tool import LoadSkillTool
+from .canvas_tools import SyncCanvasTool
 
 __all__ = [
     "BaseTool",
@@ -64,4 +65,5 @@ __all__ = [
     "MemoryIngestTool",
     "AnalyzeImageTool",
     "LoadSkillTool",
+    "SyncCanvasTool",
 ]

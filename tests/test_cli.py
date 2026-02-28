@@ -17,6 +17,7 @@ from schedule_agent.config import (
     FileToolsConfig,
     CommandToolsConfig,
     MultimodalConfig,
+    CanvasIntegrationConfig,
     MCPConfig,
     MCPServerConfig,
 )
@@ -99,6 +100,16 @@ class TestGetDefaultTools:
         tools = cli_module.get_default_tools(config=config)
         tool_names = [t.name for t in tools]
         assert "analyze_image" in tool_names
+
+    def test_get_default_tools_includes_canvas_tool_when_enabled(self):
+        """当 canvas.enabled 时，应包含 sync_canvas"""
+        config = Config(
+            llm=LLMConfig(api_key="x", model="x"),
+            canvas=CanvasIntegrationConfig(enabled=True, api_key="dummy_canvas_key_12345"),
+        )
+        tools = cli_module.get_default_tools(config=config)
+        tool_names = [t.name for t in tools]
+        assert "sync_canvas" in tool_names
 
 
 class TestPrintFunctions:

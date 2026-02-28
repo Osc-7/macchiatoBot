@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+# 统一的默认 Base URL 常量
+DEFAULT_BASE_URL = "https://oc.sjtu.edu.cn/api/v1"
+
+
 @dataclass
 class CanvasConfig:
     """Canvas API 配置类
@@ -16,7 +20,7 @@ class CanvasConfig:
         default_days_ahead: 默认同步未来多少天的事件
     """
     api_key: str
-    base_url: str = "https://sjtu.instructure.com/api/v1"
+    base_url: str = DEFAULT_BASE_URL
     sync_enabled: bool = True
     sync_interval_hours: int = 6
     default_days_ahead: int = 60
@@ -40,10 +44,7 @@ class CanvasConfig:
         
         return cls(
             api_key=api_key,
-            base_url=os.getenv(
-                "CANVAS_BASE_URL", 
-                "https://sjtu.instructure.com/api/v1"
-            ),
+            base_url=os.getenv("CANVAS_BASE_URL", DEFAULT_BASE_URL),
             sync_enabled=os.getenv(
                 "CANVAS_SYNC_ENABLED", "true"
             ).lower() == "true",

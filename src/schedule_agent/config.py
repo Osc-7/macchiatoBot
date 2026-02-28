@@ -124,6 +124,32 @@ class MultimodalConfig(BaseModel):
     )
 
 
+class CanvasIntegrationConfig(BaseModel):
+    """Canvas 集成配置"""
+
+    enabled: bool = Field(
+        default=False,
+        description="是否启用 Canvas 同步工具",
+    )
+    api_key: Optional[str] = Field(
+        default=None,
+        description="Canvas API Key（可为空并改用环境变量 CANVAS_API_KEY）",
+    )
+    base_url: str = Field(
+        default="https://oc.sjtu.edu.cn/api/v1",
+        description="Canvas API Base URL",
+    )
+    default_days_ahead: int = Field(
+        default=60,
+        ge=1,
+        description="默认同步未来多少天的数据",
+    )
+    include_submitted: bool = Field(
+        default=False,
+        description="默认是否同步已提交作业",
+    )
+
+
 class TimeConfig(BaseModel):
     """时间配置"""
 
@@ -421,6 +447,10 @@ class Config(BaseModel):
         default_factory=MultimodalConfig,
         description="多模态识图配置",
     )
+    canvas: CanvasIntegrationConfig = Field(
+        default_factory=CanvasIntegrationConfig,
+        description="Canvas 集成配置",
+    )
     time: TimeConfig = Field(default_factory=TimeConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
@@ -535,6 +565,16 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             env_model = os.environ.get("DOUBAO_MODEL")
             if env_model:
                 raw_config["llm"]["model"] = env_model
+
+    # Canvas 配置支持环境变量覆盖
+    if "canvas" not in raw_config:
+        raw_config["canvas"] = {}
+    env_canvas_api_key = os.environ.get("CANVAS_API_KEY")
+    if env_canvas_api_key:
+        raw_config["canvas"]["api_key"] = env_canvas_api_key
+    env_canvas_base_url = os.environ.get("CANVAS_BASE_URL")
+    if env_canvas_base_url:
+        raw_config["canvas"]["base_url"] = env_canvas_base_url
 
     # 兼容旧配置：user 已迁移至 prompts/system/user.md
     raw_config.pop("user", None)

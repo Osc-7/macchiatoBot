@@ -35,6 +35,7 @@ from schedule_agent.core.tools import (
     MemoryStoreTool,
     MemoryIngestTool,
     AnalyzeImageTool,
+    SyncCanvasTool,
 )
 from schedule_agent.core.memory import (
     ContentMemory,
@@ -97,6 +98,10 @@ def get_default_tools(config: Optional[Config] = None) -> List[BaseTool]:
     # 多模态识图工具（调用多模态大模型）
     if config and config.multimodal.enabled:
         tools.append(AnalyzeImageTool(config=config))
+
+    # Canvas 同步工具
+    if config and config.canvas.enabled:
+        tools.append(SyncCanvasTool(config=config))
 
     return tools
 

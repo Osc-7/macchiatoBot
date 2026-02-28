@@ -16,6 +16,7 @@ from schedule_agent.config import (
     StorageConfig,
     AgentConfig,
     MultimodalConfig,
+    CanvasIntegrationConfig,
     FileToolsConfig,
     CommandToolsConfig,
     MCPConfig,
@@ -71,6 +72,15 @@ class TestConfigModels:
         assert config.type == "json"
         assert config.data_dir == "./data"
 
+    def test_canvas_config_defaults(self):
+        """测试 Canvas 配置默认值"""
+        canvas = CanvasIntegrationConfig()
+        assert canvas.enabled is False
+        assert canvas.api_key is None
+        assert canvas.base_url == "https://oc.sjtu.edu.cn/api/v1"
+        assert canvas.default_days_ahead == 60
+        assert canvas.include_submitted is False
+
     def test_agent_config_defaults(self):
         """测试 Agent 配置默认值"""
         config = AgentConfig()
@@ -94,6 +104,7 @@ class TestConfigModels:
         assert config.storage.type == "json"
         assert config.agent.max_iterations == 10
         assert config.multimodal.enabled is False
+        assert config.canvas.enabled is False
 
     def test_file_tools_config_defaults(self):
         """测试文件工具配置默认值"""
@@ -279,6 +290,24 @@ llm:
         config = load_config(config_file)
 
         assert config.llm.model == "env-model"
+
+    def test_canvas_api_key_override(self, tmp_path, monkeypatch):
+        """测试环境变量覆盖 Canvas API Key"""
+        monkeypatch.setenv("CANVAS_API_KEY", "env-canvas-key")
+
+        config_content = """
+llm:
+  api_key: "test-key"
+  model: "test-model"
+canvas:
+  enabled: true
+  api_key: "file-canvas-key"
+"""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+
+        config = load_config(config_file)
+        assert config.canvas.api_key == "env-canvas-key"
 
 
 class TestGlobalConfig:

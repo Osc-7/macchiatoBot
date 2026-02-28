@@ -64,6 +64,14 @@ multimodal:
   max_image_size_mb: 8
   request_timeout_seconds: 120
 
+# Canvas 集成配置
+canvas:
+  enabled: false
+  api_key: null  # 推荐使用环境变量 CANVAS_API_KEY
+  base_url: "https://oc.sjtu.edu.cn/api/v1"
+  default_days_ahead: 60
+  include_submitted: false
+
 # 时间配置
 time:
   timezone: "Asia/Shanghai"

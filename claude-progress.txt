@@ -895,3 +895,35 @@ tests/                   # 测试目录
 ### 备注:
 - 识图路径改为“多模态大模型推理”，不依赖本地 OCR 模型加速，避免 M 芯片/GPU 推理配置导致的慢速问题
 - 当前实现默认支持 URL 与本地图片；本地路径会做大小限制与 base64 转换
+
+## 2026-02-28 - 任务: USR-CANVAS-TOOL-001 Canvas 集成审查、修复与工具化注册
+
+### 完成内容:
+- 新增 `SyncCanvasTool`（`src/schedule_agent/core/tools/canvas_tools.py`）
+  - 继承 `BaseTool`，工具名 `sync_canvas`
+  - 统一 `ToolDefinition` / `ToolResult` 返回格式
+  - 支持参数：`days_ahead`、`include_submitted`
+  - 使用 `CanvasClient + CanvasSync` 拉取 Canvas 数据，并通过 `AddEventTool` 写入本地日程
+- 工具系统接入
+  - `src/schedule_agent/core/tools/__init__.py` 导出 `SyncCanvasTool`
+  - `main.py:get_default_tools()` 在 `config.canvas.enabled=true` 时注册 `sync_canvas`
+- 配置体系对齐项目规范
+  - `src/schedule_agent/config.py` 新增 `CanvasIntegrationConfig`
+  - `Config` 新增 `canvas` 配置段
+  - `load_config()` 增加 `CANVAS_API_KEY` / `CANVAS_BASE_URL` 环境变量覆盖
+  - `config.example.yaml` 增加 `canvas` 示例配置
+- Canvas 测试修复
+  - `tests/test_canvas_connection.py` 增加 `pytest.mark.asyncio` 与 live 测试门禁（`CANVAS_ENABLE_LIVE_TESTS=true` 才执行）
+  - 修复该文件缺失的 `datetime` 导入问题
+- 新增测试
+  - `tests/test_canvas_tool.py`：覆盖 API Key 缺失与成功同步路径
+  - `tests/test_cli.py`：新增默认工具注册 `sync_canvas` 断言
+  - `tests/test_config.py`：新增 `CanvasIntegrationConfig` 默认值和 env 覆盖测试
+
+### 测试:
+- 运行 `pytest tests/ -v`
+- 结果：`513 passed, 5 skipped`
+
+### 备注:
+- `tests/test_canvas_connection.py` 为真实 Canvas API 集成测试，默认跳过，避免在 CI/本地无密钥环境误失败。
+- 通过 `config.canvas.enabled` 控制是否向 Agent 暴露 `sync_canvas`，默认关闭。

@@ -158,6 +158,61 @@ class TimeConfig(BaseModel):
     sleep_end: str = Field(default="08:00", description="睡眠结束时间")
 
 
+class PlanningWorkingHoursConfig(BaseModel):
+    """单条工作时段配置。"""
+
+    weekday: int = Field(
+        ...,
+        ge=1,
+        le=7,
+        description="星期几（1=周一，7=周日）",
+    )
+    start: str = Field(..., description="开始时间（HH:MM）")
+    end: str = Field(..., description="结束时间（HH:MM）")
+
+
+class PlanningWeightsConfig(BaseModel):
+    """规划评分权重配置。"""
+
+    urgency: float = Field(default=0.4, ge=0.0, description="DDL 紧迫度权重")
+    difficulty: float = Field(default=0.3, ge=0.0, description="任务难度权重")
+    importance: float = Field(default=0.3, ge=0.0, description="用户重视度权重")
+    overdue_bonus: float = Field(default=0.2, ge=0.0, description="逾期加权项")
+
+
+class PlanningConfig(BaseModel):
+    """任务规划配置。"""
+
+    timezone: str = Field(default="Asia/Shanghai", description="规划时区")
+    lookahead_days: int = Field(
+        default=7,
+        ge=1,
+        description="默认规划窗口天数",
+    )
+    min_block_minutes: int = Field(
+        default=30,
+        ge=1,
+        description="最小时间块（分钟）",
+    )
+    break_minutes_after_task: int = Field(
+        default=15,
+        ge=0,
+        description="每个任务后的休息时间（分钟），0 表示不插入休息",
+    )
+    prefer_weekday_slots: bool = Field(
+        default=True,
+        description="是否优先使用工作日时段（周一到周五），周末仅作补充",
+    )
+    working_hours: List[PlanningWorkingHoursConfig] = Field(
+        default_factory=list,
+        description="每周工作时段配置",
+    )
+    weights: PlanningWeightsConfig = Field(
+        default_factory=PlanningWeightsConfig,
+        description="规划评分权重",
+    )
+
+
 class StorageConfig(BaseModel):
     """存储配置"""
 
@@ -452,6 +507,10 @@ class Config(BaseModel):
         description="Canvas 集成配置",
     )
     time: TimeConfig = Field(default_factory=TimeConfig)
+    planning: PlanningConfig = Field(
+        default_factory=PlanningConfig,
+        description="任务规划配置",
+    )
     storage: StorageConfig = Field(default_factory=StorageConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)

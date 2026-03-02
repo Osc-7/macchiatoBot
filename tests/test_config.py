@@ -17,6 +17,9 @@ from schedule_agent.config import (
     AgentConfig,
     MultimodalConfig,
     CanvasIntegrationConfig,
+    PlanningConfig,
+    PlanningWorkingHoursConfig,
+    PlanningWeightsConfig,
     FileToolsConfig,
     CommandToolsConfig,
     MCPConfig,
@@ -71,6 +74,15 @@ class TestConfigModels:
         config = StorageConfig()
         assert config.type == "json"
         assert config.data_dir == "./data"
+
+    def test_planning_config_defaults(self):
+        """测试规划配置默认值"""
+        planning = PlanningConfig()
+        assert planning.timezone == "Asia/Shanghai"
+        assert planning.lookahead_days == 7
+        assert planning.min_block_minutes == 30
+        assert planning.working_hours == []
+        assert isinstance(planning.weights, PlanningWeightsConfig)
 
     def test_canvas_config_defaults(self):
         """测试 Canvas 配置默认值"""
@@ -182,6 +194,12 @@ class TestConfigModels:
         assert config.ui is not None
         assert config.ui.show_draft == "summary"
 
+    def test_config_has_planning_default(self):
+        """测试 Config 未指定 planning 时使用默认值"""
+        config = Config(llm=LLMConfig(api_key="x", model="x"))
+        assert config.planning is not None
+        assert config.planning.working_hours == []
+
 
 class TestLoadConfig:
     """测试配置加载"""
@@ -209,6 +227,15 @@ storage:
 agent:
   max_iterations: 5
   enable_debug: true
+
+planning:
+  timezone: "Asia/Shanghai"
+  lookahead_days: 7
+  min_block_minutes: 30
+  working_hours:
+    - weekday: 1
+      start: "09:00"
+      end: "18:00"
 """
         config_file = tmp_path / "config.yaml"
         config_file.write_text(config_content, encoding="utf-8")
@@ -221,6 +248,8 @@ agent:
         assert config.time.timezone == "Asia/Shanghai"
         assert config.agent.max_iterations == 5
         assert config.agent.enable_debug is True
+        assert config.planning.working_hours[0].weekday == 1
+        assert config.planning.working_hours[0].start == "09:00"
 
     def test_load_minimal_config(self, tmp_path):
         """测试加载最小配置（只包含必需字段）"""

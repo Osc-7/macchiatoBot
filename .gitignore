@@ -57,3 +57,5 @@ memory/
 
 # Agent 自主管理的长期记忆（不纳入版本控制）
 MEMORY.md
+
+user_file/

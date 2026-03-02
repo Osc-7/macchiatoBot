@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
+from schedule_agent.config import PlanningConfig, PlanningWorkingHoursConfig
 from schedule_agent.core.tools import (
     AddEventTool,
     AddTaskTool,
@@ -70,9 +71,16 @@ def tool_registry(event_repository, task_repository):
 
     # 注册规划器工具
     registry.register(GetFreeSlotsTool(event_repository=event_repository))
+    planning_config = PlanningConfig(
+        working_hours=[
+            PlanningWorkingHoursConfig(weekday=i, start="09:00", end="22:00")
+            for i in range(1, 8)
+        ]
+    )
     registry.register(PlanTasksTool(
         event_repository=event_repository,
         task_repository=task_repository,
+        planning_config=planning_config,
     ))
 
     return registry
@@ -444,6 +452,7 @@ class TestScenario3Planning:
         # 规划任务
         result = await tool_registry.execute(
             "plan_tasks",
+            start_date=tomorrow.isoformat(),
             days=1,
             max_tasks=1,
         )

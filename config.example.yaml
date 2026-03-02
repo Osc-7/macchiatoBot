@@ -78,6 +78,42 @@ time:
   sleep_start: "23:00"
   sleep_end: "08:00"
 
+# 任务规划配置（plan_tasks 必需）
+planning:
+  timezone: "Asia/Shanghai"
+  lookahead_days: 7
+  min_block_minutes: 30
+  break_minutes_after_task: 15   # 任务间休息时间（分钟），避免连轴转
+  prefer_weekday_slots: true     # 优先工作日排程，周末作为补充
+  # weekday: 1-7（周一到周日）
+  working_hours:
+    - weekday: 1
+      start: "09:00"
+      end: "22:00"
+    - weekday: 2
+      start: "09:00"
+      end: "22:00"
+    - weekday: 3
+      start: "09:00"
+      end: "22:00"
+    - weekday: 4
+      start: "09:00"
+      end: "22:00"
+    - weekday: 5
+      start: "09:00"
+      end: "22:00"
+    - weekday: 6
+      start: "09:00"
+      end: "22:00"
+    - weekday: 7
+      start: "09:00"
+      end: "22:00"
+  weights:
+    urgency: 0.4
+    difficulty: 0.3
+    importance: 0.3
+    overdue_bonus: 0.2
+
 # 存储配置
 storage:
   type: "json"

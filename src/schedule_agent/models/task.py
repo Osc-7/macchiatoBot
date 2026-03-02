@@ -7,7 +7,7 @@ Agent 可以根据任务属性自动规划到合适的时间段。
 
 from datetime import datetime, date
 from enum import Enum
-from typing import Optional
+from typing import Optional, Literal, Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator, ConfigDict
@@ -64,6 +64,36 @@ class Task(BaseModel):
     status: TaskStatus = Field(default=TaskStatus.TODO, description="任务状态")
     priority: TaskPriority = Field(default=TaskPriority.MEDIUM, description="优先级")
     tags: list[str] = Field(default_factory=list, description="标签列表")
+    difficulty: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        description="任务难度评分（1-5）",
+    )
+    importance: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        description="用户重视程度（1-5）",
+    )
+    source: Literal["user", "canvas", "planner", "system"] = Field(
+        default="user",
+        description="任务来源",
+    )
+    origin_ref: Optional[str] = Field(
+        default=None,
+        description="外部来源引用 ID（如 canvas assignment id）",
+        max_length=200,
+    )
+    deadline_event_id: Optional[str] = Field(
+        default=None,
+        description="关联截止事件 ID",
+        max_length=64,
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="附加元数据",
+    )
     scheduled_start: Optional[datetime] = Field(None, description="已安排的开始时间")
     scheduled_end: Optional[datetime] = Field(None, description="已安排的结束时间")
     created_at: datetime = Field(default_factory=datetime.now, description="创建时间")

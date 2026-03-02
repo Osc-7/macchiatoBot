@@ -63,7 +63,7 @@ def get_default_tools(config: Optional[Config] = None) -> List[BaseTool]:
         UpdateTaskTool(),
         DeleteScheduleDataTool(),
         GetFreeSlotsTool(),
-        PlanTasksTool(),
+        PlanTasksTool(planning_config=config.planning if config else None),
     ]
 
     # 文件读写工具（读取、写入、修改，写入/修改需配置允许）

@@ -6,7 +6,7 @@ Event 模型 - 表示日程事件
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Optional, Literal, Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, ConfigDict
@@ -61,6 +61,37 @@ class Event(BaseModel):
     reminders: list[int] = Field(
         default_factory=list,
         description="提醒时间列表（分钟为单位）"
+    )
+    source: Literal["user", "canvas", "planner", "course_import", "system"] = Field(
+        default="user",
+        description="事件来源",
+    )
+    event_type: Literal["normal", "course", "deadline", "planned_block"] = Field(
+        default="normal",
+        description="事件类型",
+    )
+    is_blocking: bool = Field(
+        default=True,
+        description="是否占用时间（规划时不可覆盖）",
+    )
+    origin_ref: Optional[str] = Field(
+        default=None,
+        description="外部来源引用 ID（如 canvas assignment id）",
+        max_length=200,
+    )
+    linked_task_id: Optional[str] = Field(
+        default=None,
+        description="关联任务 ID（如 deadline 对应任务）",
+        max_length=64,
+    )
+    plan_run_id: Optional[str] = Field(
+        default=None,
+        description="规划批次 ID（planner 生成）",
+        max_length=64,
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="附加元数据",
     )
     created_at: datetime = Field(
         default_factory=datetime.now,

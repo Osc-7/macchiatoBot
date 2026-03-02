@@ -4,7 +4,7 @@ import pytest
 
 from schedule_agent.config import Config, LLMConfig, CanvasIntegrationConfig
 from schedule_agent.core.tools.canvas_tools import SyncCanvasTool
-from schedule_agent.core.tools.base import ToolResult
+from schedule_agent.storage.json_repository import EventRepository, TaskRepository
 
 
 class _FakeCanvasConfig:
@@ -47,29 +47,37 @@ class _FakeCanvasSync:
     def __init__(self, client, event_creator=None):
         self.client = client
         self.event_creator = event_creator
-        self.called = False
 
     async def sync_to_schedule(self, days_ahead=60, include_submitted=False):
-        self.called = True
         if self.event_creator:
             await self.event_creator(
                 {
-                    "title": "Canvas Demo",
+                    "title": "[作业] CS101: HW1",
                     "start_time": "2026-03-01T10:00:00",
-                    "end_time": "2026-03-01T11:00:00",
+                    "end_time": "2026-03-01T12:00:00",
                     "description": "from canvas",
-                    "priority": "medium",
-                    "tags": ["canvas"],
+                    "priority": "high",
+                    "tags": ["canvas", "作业"],
+                    "metadata": {
+                        "source": "canvas",
+                        "canvas_id": 123,
+                        "course_id": 456,
+                        "type": "assignment",
+                    },
                 }
             )
         return _FakeSyncResult()
 
 
 @pytest.mark.asyncio
-async def test_sync_canvas_disabled(monkeypatch):
+async def test_sync_canvas_disabled(monkeypatch, tmp_path):
     monkeypatch.delenv("CANVAS_API_KEY", raising=False)
     config = Config(llm=LLMConfig(api_key="x", model="x"))
-    tool = SyncCanvasTool(config=config)
+    tool = SyncCanvasTool(
+        config=config,
+        event_repository=EventRepository(tmp_path / "events.json"),
+        task_repository=TaskRepository(tmp_path / "tasks.json"),
+    )
 
     result = await tool.execute()
     assert result.success is False
@@ -77,13 +85,17 @@ async def test_sync_canvas_disabled(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_sync_canvas_missing_api_key(monkeypatch):
+async def test_sync_canvas_missing_api_key(monkeypatch, tmp_path):
     monkeypatch.delenv("CANVAS_API_KEY", raising=False)
     config = Config(
         llm=LLMConfig(api_key="x", model="x"),
         canvas=CanvasIntegrationConfig(enabled=True, api_key=None),
     )
-    tool = SyncCanvasTool(config=config)
+    tool = SyncCanvasTool(
+        config=config,
+        event_repository=EventRepository(tmp_path / "events.json"),
+        task_repository=TaskRepository(tmp_path / "tasks.json"),
+    )
 
     result = await tool.execute()
     assert result.success is False
@@ -91,7 +103,7 @@ async def test_sync_canvas_missing_api_key(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_sync_canvas_success(monkeypatch):
+async def test_sync_canvas_success_creates_task_and_deadline(monkeypatch, tmp_path):
     config = Config(
         llm=LLMConfig(api_key="x", model="x"),
         canvas=CanvasIntegrationConfig(
@@ -102,21 +114,82 @@ async def test_sync_canvas_success(monkeypatch):
             include_submitted=False,
         ),
     )
-    tool = SyncCanvasTool(config=config)
 
-    async def _fake_create_event(**kwargs):
-        return ToolResult(
-            success=True,
-            message="ok",
-            metadata={"event_id": "evt_001"},
-        )
+    event_repo = EventRepository(tmp_path / "events.json")
+    task_repo = TaskRepository(tmp_path / "tasks.json")
+    tool = SyncCanvasTool(
+        config=config,
+        event_repository=event_repo,
+        task_repository=task_repo,
+    )
 
     monkeypatch.setattr("schedule_agent.core.tools.canvas_tools.CanvasConfig", _FakeCanvasConfig)
     monkeypatch.setattr("schedule_agent.core.tools.canvas_tools.CanvasClient", _FakeCanvasClient)
     monkeypatch.setattr("schedule_agent.core.tools.canvas_tools.CanvasSync", _FakeCanvasSync)
-    monkeypatch.setattr(tool._add_event_tool, "execute", _fake_create_event)
 
     result = await tool.execute(days_ahead=7, include_submitted=True)
     assert result.success is True
     assert result.data["created_count"] == 1
     assert result.metadata["source"] == "canvas"
+    assert result.metadata["write_tasks"] is True
+    assert result.metadata["write_deadline_events"] is True
+
+    tasks = task_repo.get_all()
+    assert len(tasks) == 1
+    assert tasks[0].source == "canvas"
+    assert tasks[0].origin_ref is not None
+    assert tasks[0].deadline_event_id is not None
+
+    events = event_repo.get_all()
+    assert len(events) == 1
+    assert events[0].event_type == "deadline"
+    assert events[0].linked_task_id == tasks[0].id
+
+
+@pytest.mark.asyncio
+async def test_sync_canvas_submitted_marks_task_and_event_completed(monkeypatch, tmp_path):
+    class _SubmittedCanvasSync(_FakeCanvasSync):
+        async def sync_to_schedule(self, days_ahead=60, include_submitted=False):
+            if self.event_creator:
+                await self.event_creator(
+                    {
+                        "title": "[作业] CS101: HW1",
+                        "start_time": "2026-03-01T10:00:00",
+                        "end_time": "2026-03-01T12:00:00",
+                        "description": "from canvas",
+                        "priority": "high",
+                        "tags": ["canvas", "作业", "已提交"],
+                        "metadata": {
+                            "source": "canvas",
+                            "canvas_id": 999,
+                            "course_id": 456,
+                            "type": "assignment",
+                        },
+                    }
+                )
+            return _FakeSyncResult()
+
+    config = Config(
+        llm=LLMConfig(api_key="x", model="x"),
+        canvas=CanvasIntegrationConfig(enabled=True, api_key="dummy_canvas_key_12345"),
+    )
+
+    event_repo = EventRepository(tmp_path / "events.json")
+    task_repo = TaskRepository(tmp_path / "tasks.json")
+    tool = SyncCanvasTool(
+        config=config,
+        event_repository=event_repo,
+        task_repository=task_repo,
+    )
+
+    monkeypatch.setattr("schedule_agent.core.tools.canvas_tools.CanvasConfig", _FakeCanvasConfig)
+    monkeypatch.setattr("schedule_agent.core.tools.canvas_tools.CanvasClient", _FakeCanvasClient)
+    monkeypatch.setattr("schedule_agent.core.tools.canvas_tools.CanvasSync", _SubmittedCanvasSync)
+
+    result = await tool.execute(include_submitted=True)
+    assert result.success is True
+
+    task = task_repo.get_all()[0]
+    event = event_repo.get_all()[0]
+    assert task.status.value == "completed"
+    assert event.status.value == "completed"

@@ -5,7 +5,7 @@
 """
 
 from datetime import datetime, date, timedelta
-from typing import Optional, List
+from typing import Optional, List, Any
 
 from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from schedule_agent.storage.json_repository import EventRepository, TaskRepository
@@ -98,6 +98,48 @@ class AddEventTool(BaseTool):
                     name="tags",
                     type="array",
                     description="标签列表，用于分类（可选，如: [\"工作\", \"会议\"]）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="source",
+                    type="string",
+                    description="事件来源：user/canvas/planner/course_import/system（可选）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="event_type",
+                    type="string",
+                    description="事件类型：normal/course/deadline/planned_block（可选）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="is_blocking",
+                    type="boolean",
+                    description="是否占用时间（可选，默认 true）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="origin_ref",
+                    type="string",
+                    description="外部来源引用 ID（可选）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="linked_task_id",
+                    type="string",
+                    description="关联任务 ID（可选）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="plan_run_id",
+                    type="string",
+                    description="规划批次 ID（可选）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="metadata",
+                    type="object",
+                    description="附加结构化元数据（可选）",
                     required=False,
                 ),
             ],
@@ -200,6 +242,13 @@ class AddEventTool(BaseTool):
             location=kwargs.get("location"),
             priority=priority,
             tags=kwargs.get("tags", []),
+            source=kwargs.get("source", "user"),
+            event_type=kwargs.get("event_type", "normal"),
+            is_blocking=kwargs.get("is_blocking", True),
+            origin_ref=kwargs.get("origin_ref"),
+            linked_task_id=kwargs.get("linked_task_id"),
+            plan_run_id=kwargs.get("plan_run_id"),
+            metadata=kwargs.get("metadata", {}) or {},
         )
 
         # 检查时间冲突
@@ -301,6 +350,42 @@ class AddTaskTool(BaseTool):
                     description="标签列表，用于分类（可选，如: [\"工作\", \"学习\"]）",
                     required=False,
                 ),
+                ToolParameter(
+                    name="difficulty",
+                    type="integer",
+                    description="任务难度（1-5，可选，默认3）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="importance",
+                    type="integer",
+                    description="用户重视程度（1-5，可选，默认3）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="source",
+                    type="string",
+                    description="任务来源：user/canvas/planner/system（可选）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="origin_ref",
+                    type="string",
+                    description="外部来源引用 ID（可选）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="deadline_event_id",
+                    type="string",
+                    description="关联截止事件 ID（可选）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="metadata",
+                    type="object",
+                    description="附加结构化元数据（可选）",
+                    required=False,
+                ),
             ],
             examples=[
                 {
@@ -380,6 +465,14 @@ class AddTaskTool(BaseTool):
         if not isinstance(estimated_minutes, int) or estimated_minutes < 1:
             estimated_minutes = 60
 
+        difficulty = kwargs.get("difficulty", 3)
+        if not isinstance(difficulty, int) or difficulty < 1 or difficulty > 5:
+            difficulty = 3
+
+        importance = kwargs.get("importance", 3)
+        if not isinstance(importance, int) or importance < 1 or importance > 5:
+            importance = 3
+
         # 创建任务
         task = Task(
             title=title,
@@ -388,6 +481,12 @@ class AddTaskTool(BaseTool):
             due_date=due_date,
             priority=priority,
             tags=kwargs.get("tags", []),
+            difficulty=difficulty,
+            importance=importance,
+            source=kwargs.get("source", "user"),
+            origin_ref=kwargs.get("origin_ref"),
+            deadline_event_id=kwargs.get("deadline_event_id"),
+            metadata=kwargs.get("metadata", {}) or {},
         )
 
         # 保存任务
@@ -791,8 +890,13 @@ class UpdateEventTool(BaseTool):
     支持更新事件状态、标题、时间、地点等字段。
     """
 
-    def __init__(self, repository: Optional[EventRepository] = None):
+    def __init__(
+        self,
+        repository: Optional[EventRepository] = None,
+        task_repository: Optional[TaskRepository] = None,
+    ):
         self._repository = repository or EventRepository()
+        self._task_repository = task_repository or TaskRepository()
 
     @property
     def name(self) -> str:
@@ -955,6 +1059,7 @@ class UpdateEventTool(BaseTool):
         old_start_time = event.start_time
         old_end_time = event.end_time
         updates: List[str] = []
+        linked_task_updated = False
 
         if status_str:
             try:
@@ -967,6 +1072,19 @@ class UpdateEventTool(BaseTool):
                 )
             event.status = target_status
             updates.append(f"状态: {old_status.value} → {target_status.value}")
+
+            # deadline 事件状态联动任务状态，保证双向一致
+            if event.event_type == "deadline" and event.linked_task_id:
+                linked_task = self._task_repository.get(event.linked_task_id)
+                if linked_task:
+                    if target_status == EventStatus.COMPLETED:
+                        linked_task.mark_completed()
+                        self._task_repository.update(linked_task)
+                        linked_task_updated = True
+                    elif target_status == EventStatus.CANCELLED:
+                        linked_task.mark_cancelled()
+                        self._task_repository.update(linked_task)
+                        linked_task_updated = True
 
         if title is not None:
             if not isinstance(title, str) or not title.strip():
@@ -1083,6 +1201,7 @@ class UpdateEventTool(BaseTool):
                 "conflict_count": len(conflicts),
                 "status_label_before": status_labels[old_status],
                 "status_label_after": status_labels[event.status],
+                "linked_task_updated": linked_task_updated,
             },
         )
 
@@ -1094,8 +1213,13 @@ class UpdateTaskTool(BaseTool):
     支持将任务标记为已完成、已取消、进行中或待办。
     """
 
-    def __init__(self, repository: Optional[TaskRepository] = None):
+    def __init__(
+        self,
+        repository: Optional[TaskRepository] = None,
+        event_repository: Optional[EventRepository] = None,
+    ):
         self._repository = repository or TaskRepository()
+        self._event_repository = event_repository or EventRepository()
 
     @property
     def name(self) -> str:
@@ -1202,6 +1326,7 @@ class UpdateTaskTool(BaseTool):
         old_status = task.status
         old_due_date = task.due_date
         updates = []
+        linked_event_updated = False
 
         # 更新状态
         if status_str:
@@ -1223,6 +1348,21 @@ class UpdateTaskTool(BaseTool):
                 task.update_timestamp()
             
             updates.append(f"状态: {old_status.value} → {target_status.value}")
+
+            # 任务状态联动截止事件：确保作业完成后任务与时间同步完成
+            if task.deadline_event_id:
+                linked_event = self._event_repository.get(task.deadline_event_id)
+                if linked_event:
+                    if target_status == TaskStatus.COMPLETED:
+                        linked_event.status = EventStatus.COMPLETED
+                        linked_event.update_timestamp()
+                        self._event_repository.update(linked_event)
+                        linked_event_updated = True
+                    elif target_status == TaskStatus.CANCELLED:
+                        linked_event.status = EventStatus.CANCELLED
+                        linked_event.update_timestamp()
+                        self._event_repository.update(linked_event)
+                        linked_event_updated = True
 
         # 更新截止日期
         if due_date_str:
@@ -1259,6 +1399,7 @@ class UpdateTaskTool(BaseTool):
         if due_date_str:
             metadata["old_due_date"] = old_due_date.isoformat() if old_due_date else None
             metadata["new_due_date"] = task.due_date.isoformat() if task.due_date else None
+        metadata["linked_event_updated"] = linked_event_updated
 
         return ToolResult(
             success=True,

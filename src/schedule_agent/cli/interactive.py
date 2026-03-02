@@ -14,6 +14,7 @@ import time
 from typing import Any, Optional
 
 from schedule_agent.core import ScheduleAgent
+from schedule_agent.automation.repositories import _automation_base_dir
 from schedule_agent.utils.cli_style import (
     hint,
     label,
@@ -26,9 +27,11 @@ from schedule_agent.utils.cli_style import (
 
 _PromptSession: Any = None
 HTML: Any = None
+_patch_stdout: Any = None
 try:
     from prompt_toolkit import PromptSession as _PromptSession
     from prompt_toolkit.formatted_text import HTML
+    from prompt_toolkit.patch_stdout import patch_stdout as _patch_stdout
     _HAS_PROMPT_TOOLKIT = True
 except ImportError:
     _HAS_PROMPT_TOOLKIT = False
@@ -200,6 +203,96 @@ async def run_interactive_loop(agent: ScheduleAgent) -> str:
 
         signal.signal(signal.SIGINT, _sigint_handler)
         sigint_handler_installed = True
+
+    # automation_activity.jsonl 已读到的行数，用于增量打印 [system] 消息。
+    # 启动时将基准线设置为当前行数，只展示本次 CLI 会话期间新增的记录。
+    automation_last_seen: int = 0
+    automation_stop_event: asyncio.Event = asyncio.Event()
+
+    base_dir_for_automation = _automation_base_dir()
+    activity_path = base_dir_for_automation / "automation_activity.jsonl"
+    if activity_path.exists():
+        try:
+            _text0 = activity_path.read_text(encoding="utf-8")
+            automation_last_seen = len(
+                [ln for ln in _text0.splitlines() if ln.strip()]
+            )
+        except Exception:
+            automation_last_seen = 0
+
+    def _print_pending_automation_system_messages() -> None:
+        """在一次对话轮次结束后，按顺序输出尚未展示的自动化系统消息。"""
+        nonlocal automation_last_seen
+        base_dir = _automation_base_dir()
+        path = base_dir / "automation_activity.jsonl"
+        if not path.exists():
+            return
+        try:
+            text = path.read_text(encoding="utf-8")
+        except Exception:
+            return
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if automation_last_seen >= len(lines):
+            return
+        new_lines = lines[automation_last_seen : ]
+        automation_last_seen = len(lines)
+
+        def _strip_markdown(s: str) -> str:
+            # 粗粒度移除 markdown 标记，只保留可读文本
+            for token in ("**", "__", "`", "```"):
+                s = s.replace(token, "")
+            return s
+
+        for line in new_lines:
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            ts = rec.get("timestamp", "")
+            source = rec.get("source", "")
+            result = rec.get("result") or {}
+            result_msg = ""
+            if isinstance(result, dict):
+                msg = result.get("message") or ""
+                if isinstance(msg, str) and msg:
+                    result_msg = _strip_markdown(msg.strip())
+            prefix_ts = f"{ts} " if ts else ""
+            # 只输出时间、任务名称和 Agent 最后一条消息
+            if result_msg:
+                text_out = f"{prefix_ts}{source} {result_msg}"
+            else:
+                text_out = f"{prefix_ts}{source}"
+            print()
+            print(label(f"[system] {text_out}"))
+            print()
+
+    async def _automation_notifier_loop() -> None:
+        """后台轮询 automation_activity.jsonl，有新记录时打印 [system] 消息。
+        
+        Agent 处理用户输入期间（is_processing=True）暂停打印，
+        避免系统消息插入 spinner 或 streaming 输出中破坏 UI。
+        积压的消息会在 Agent 回复完成后由主循环统一冲刷。
+        """
+        while not automation_stop_event.is_set():
+            try:
+                if not is_processing:
+                    _print_pending_automation_system_messages()
+            except Exception:
+                # 不让通知异常影响主循环
+                pass
+            try:
+                await asyncio.wait_for(asyncio.shield(automation_stop_event.wait()), timeout=5.0)
+            except asyncio.TimeoutError:
+                continue
+
+    automation_task: Optional[asyncio.Task[Any]] = asyncio.create_task(_automation_notifier_loop())
+
+    # patch_stdout 让所有 print() 通过 prompt_toolkit 渲染，
+    # 避免后台通知直接写 stdout 破坏输入提示符的显示。
+    _stdout_patcher = None
+    if _HAS_PROMPT_TOOLKIT and _patch_stdout is not None:
+        _stdout_patcher = _patch_stdout(raw=True)
+        _stdout_patcher.__enter__()
 
     try:
         while True:
@@ -511,6 +604,8 @@ async def run_interactive_loop(agent: ScheduleAgent) -> str:
                 prev_total_tokens = u["total_tokens"]
                 cost = u.get("cost_yuan")
                 print(status_bar(u["total_tokens"], u["call_count"], delta, cost))
+                # 在本轮对话完全结束后，按顺序输出后台自动化的 [system] 消息
+                _print_pending_automation_system_messages()
 
             except (KeyboardInterrupt, asyncio.CancelledError):
                 interrupted_processing = False
@@ -563,5 +658,16 @@ async def run_interactive_loop(agent: ScheduleAgent) -> str:
                 processing_task = None
 
     finally:
+        if _stdout_patcher is not None:
+            try:
+                _stdout_patcher.__exit__(None, None, None)
+            except Exception:
+                pass
         if sigint_handler_installed:
             signal.signal(signal.SIGINT, prev_sigint_handler)
+        if automation_task is not None:
+            automation_stop_event.set()
+            try:
+                await automation_task
+            except Exception:
+                pass

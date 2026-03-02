@@ -36,6 +36,14 @@ from schedule_agent.core.tools import (
     MemoryIngestTool,
     AnalyzeImageTool,
     SyncCanvasTool,
+    SyncSourcesTool,
+    GetSyncStatusTool,
+    GetDigestTool,
+    ListNotificationsTool,
+    AckNotificationTool,
+    ConfigureAutomationPolicyTool,
+    GetAutomationActivityTool,
+    FetchSjtuUndergradScheduleTool,
 )
 from schedule_agent.core.memory import (
     ContentMemory,
@@ -101,6 +109,24 @@ def get_default_tools(config: Optional[Config] = None) -> List[BaseTool]:
 
     # Canvas 同步工具（始终注册，便于 search_tools 发现；启用状态在工具内部校验）
     tools.append(SyncCanvasTool(config=config))
+    # 交大教学信息服务网课表同步工具（基于 Cookie，只读）
+    if config is not None:
+        tools.append(
+            FetchSjtuUndergradScheduleTool(
+                cookies_path=config.sjtu_jw.cookies_path,
+                config=config.sjtu_jw,
+            )
+        )
+    else:
+        tools.append(FetchSjtuUndergradScheduleTool())
+
+    tools.append(SyncSourcesTool())
+    tools.append(GetSyncStatusTool())
+    tools.append(GetDigestTool())
+    tools.append(ListNotificationsTool())
+    tools.append(AckNotificationTool())
+    tools.append(ConfigureAutomationPolicyTool())
+    tools.append(GetAutomationActivityTool())
 
     return tools
 

@@ -72,6 +72,14 @@ canvas:
   default_days_ahead: 60
   include_submitted: false
 
+# 上海交通大学教学信息服务网课表同步配置
+# 使用方式：
+# 1. 在浏览器或 Playwright 中访问 https://i.sjtu.edu.cn/jaccountlogin 并完成 jAccount 登录
+# 2. 将当前会话的 Cookie 导出为 JSON 文件（推荐使用 Playwright cookies.json 格式）
+# 3. 将 cookies_path 指向该 JSON 文件
+sjtu_jw:
+  cookies_path: "./data/sjtu_jw_cookies.json"
+
 # 时间配置
 time:
   timezone: "Asia/Shanghai"

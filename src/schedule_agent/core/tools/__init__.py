@@ -22,15 +22,20 @@ from .file_tools import ReadFileTool, WriteFileTool, ModifyFileTool
 from .web_extractor_tool import WebExtractorTool
 from .web_search_tool import WebSearchTool
 from .command_tools import RunCommandTool
-from .memory_tools import (
-    MemorySearchLongTermTool,
-    MemorySearchContentTool,
-    MemoryStoreTool,
-    MemoryIngestTool,
-)
+from .memory_tools import MemorySearchContentTool, MemorySearchLongTermTool, MemoryStoreTool, MemoryIngestTool
 from .multimodal_tools import AnalyzeImageTool
 from .load_skill_tool import LoadSkillTool
 from .canvas_tools import SyncCanvasTool
+from .automation_tools import (
+    SyncSourcesTool,
+    GetSyncStatusTool,
+    GetDigestTool,
+    ListNotificationsTool,
+    AckNotificationTool,
+    ConfigureAutomationPolicyTool,
+    GetAutomationActivityTool,
+)
+from .sjtu_jw_tools import FetchSjtuUndergradScheduleTool
 
 __all__ = [
     "BaseTool",
@@ -66,4 +71,12 @@ __all__ = [
     "AnalyzeImageTool",
     "LoadSkillTool",
     "SyncCanvasTool",
+    "SyncSourcesTool",
+    "GetSyncStatusTool",
+    "GetDigestTool",
+    "ListNotificationsTool",
+    "AckNotificationTool",
+    "ConfigureAutomationPolicyTool",
+    "GetAutomationActivityTool",
+    "FetchSjtuUndergradScheduleTool",
 ]

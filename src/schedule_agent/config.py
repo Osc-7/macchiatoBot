@@ -150,6 +150,15 @@ class CanvasIntegrationConfig(BaseModel):
     )
 
 
+class SjtuJwConfig(BaseModel):
+    """上海交通大学教学信息服务网课表同步配置"""
+
+    cookies_path: str = Field(
+        default="./data/sjtu_jw_cookies.json",
+        description="从浏览器或 Playwright 导出的教学信息服务网 Cookie JSON 文件路径",
+    )
+
+
 class TimeConfig(BaseModel):
     """时间配置"""
 
@@ -537,6 +546,10 @@ class Config(BaseModel):
     skills: SkillsConfig = Field(
         default_factory=SkillsConfig,
         description="可选技能配置（load/unload）",
+    )
+    sjtu_jw: SjtuJwConfig = Field(
+        default_factory=SjtuJwConfig,
+        description="上海交通大学教学信息服务网课表同步配置",
     )
 
 

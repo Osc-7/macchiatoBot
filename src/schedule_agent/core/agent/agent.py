@@ -472,6 +472,7 @@ class ScheduleAgent:
             tool_mode=self._config.agent.tool_mode or "full",
         )
 
+        # 记忆上下文
         if self._memory_enabled:
             parts: List[str] = []
             # 短期会话和 MEMORY.md 直接加载，无需检索
@@ -498,6 +499,47 @@ class ScheduleAgent:
                 prompt += (
                     f"\n\n# 工作记忆摘要\n\n{self._working_memory.running_summary}"
                 )
+
+        # 自动化摘要（最近日结 / 周结），帮助 Agent 感知近期整体节奏
+        try:
+            from schedule_agent.automation.repositories import DigestRepository  # type: ignore[import]
+
+            digest_repo = DigestRepository()
+            daily_digest = digest_repo.latest("daily")
+            weekly_digest = digest_repo.latest("weekly")
+        except Exception:
+            daily_digest = None
+            weekly_digest = None
+
+        digest_sections: List[str] = []
+        if daily_digest is not None:
+            digest_sections.append("## 最近日摘要")
+            # 先展示高亮条目
+            for item in (daily_digest.highlights or [])[:5]:
+                digest_sections.append(f"- {item}")
+            # 再展示正文节选，避免 prompt 过长
+            if daily_digest.content_md:
+                content = daily_digest.content_md
+                max_len = 800
+                excerpt = content if len(content) <= max_len else content[:max_len] + "\n..."
+                digest_sections.append("")
+                digest_sections.append(excerpt)
+
+        if weekly_digest is not None:
+            if digest_sections:
+                digest_sections.append("")
+            digest_sections.append("## 最近周摘要")
+            for item in (weekly_digest.highlights or [])[:5]:
+                digest_sections.append(f"- {item}")
+            if weekly_digest.content_md:
+                content = weekly_digest.content_md
+                max_len = 800
+                excerpt = content if len(content) <= max_len else content[:max_len] + "\n..."
+                digest_sections.append("")
+                digest_sections.append(excerpt)
+
+        if digest_sections:
+            prompt += "\n\n# 自动化摘要\n\n" + "\n".join(digest_sections)
 
         return prompt
 

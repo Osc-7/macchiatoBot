@@ -945,3 +945,102 @@ tests/                   # 测试目录
 
 ### 备注:
 - `canvas_implementation_plan.md` 与 `canvas_integration_task.md` 按用户确认已删除并纳入提交。
+
+## 2026-03-02 - 任务: USR-AUTO-001 自动化平台骨架（调度/同步/总结/通知）
+
+### 完成内容:
+- 新增自动化子系统目录 `src/schedule_agent/automation/`：
+  - `types.py`：定义 JobDefinition/JobRun/ExternalItem/Digest/NotificationOutbox/AutomationPolicy 等领域模型
+  - `repositories.py`：新增自动化 JSON 仓储（jobs/runs/cursors/external_items/digests/outbox/policy）
+  - `event_bus.py`：实现异步事件总线（publish/subscribe）
+  - `connectors/`：新增可替换连接器抽象与 `course/email` stub 连接器
+  - `services.py`：实现同步采集、规范化自动写入、摘要生成、通知 outbox 服务
+  - `scheduler.py`：实现后台调度器（按 job_type 分发 sync/summary 任务）
+  - `runtime.py`：完成运行时装配（事件订阅、服务编排、scheduler 接入）
+  - `__init__.py`：导出自动化子系统接口
+
+- 新增自动化工具 `src/schedule_agent/core/tools/automation_tools.py`：
+  - `sync_sources`
+  - `get_sync_status`
+  - `get_digest`
+  - `list_notifications`
+  - `ack_notification`
+  - `configure_automation_policy`
+
+- 工具系统接入：
+  - 更新 `src/schedule_agent/core/tools/__init__.py` 导出自动化工具
+  - 更新 `main.py:get_default_tools()` 默认注册自动化工具
+
+- 新增后台 Worker 入口 `automation_worker.py`：
+  - 可独立运行自动化调度链路（scheduler + event bus handlers）
+
+- 新增测试 `tests/test_automation_tools.py`：
+  - 覆盖手动同步、摘要生成与通知确认、自动化策略配置
+
+### 测试:
+- `pytest tests/test_automation_tools.py -v` -> 3 passed
+- `pytest tests/test_cli.py -v` -> 28 passed, 1 skipped
+- `pytest tests/test_tools.py -v` -> 28 passed
+- `pytest tests/test_agent.py -v` -> 24 passed, 1 skipped
+- `pytest tests/test_tool_kernel.py -v` -> 5 passed
+
+### 备注:
+- 当前课表/邮件连接器为 stub，实现了统一接入契约，后续可替换为真实 API 连接器。
+- 自动化运行时默认不自动启动 scheduler；可通过 `python automation_worker.py` 启动后台定时链路。
+
+## 2026-03-02 - 任务: USR-AUTO-002 将 course 同步接入 CanvasConnector
+
+### 完成内容:
+- 新增 `CanvasConnector`：`src/schedule_agent/automation/connectors/canvas.py`
+  - 实现与自动化 connector 接口一致的 `fetch()`
+  - 基于 `canvas_integration.CanvasClient` 拉取 upcoming assignments/events
+  - 输出统一的 `ConnectorFetchItem`（assignment -> task + deadline event，calendar event -> event）
+  - 支持 `CanvasConnector.from_app_config()` 从项目配置读取 canvas 开关与密钥
+
+- 更新自动化 runtime：`src/schedule_agent/automation/runtime.py`
+  - 同步来源优先选择 `CanvasConnector`
+  - 当 Canvas 不可用（未启用或缺密钥）时自动回退 `CourseConnectorStub`
+
+- 更新连接器导出：`src/schedule_agent/automation/connectors/__init__.py`
+
+- 新增测试：`tests/test_automation_canvas_connector.py`
+  - 覆盖可用态映射（生成 task + events）
+  - 覆盖不可用态（返回空结果）
+
+### 测试:
+- `pytest tests/test_automation_canvas_connector.py -v` -> 2 passed
+- `pytest tests/test_automation_tools.py -v` -> 3 passed
+- `pytest tests/test_cli.py -v` -> 28 passed, 1 skipped
+
+### 备注:
+- 自动化链路已从 `course_stub` 扩展到可插拔 `CanvasConnector`，结构上与后续真实邮件连接器保持一致。
+- 若 `canvas.enabled=true` 且存在 `CANVAS_API_KEY`/`config.canvas.api_key`，后台定时 `sync.course` 将走真实 Canvas 数据。
+
+---
+
+## 2026-03-02 - 任务: USR-SJTU-001 交大教学信息服务网课表 Agent 工具接入
+
+### 完成内容:
+- 新增 `SjtuJwConfig`（`config.py`）和 `config.example.yaml` 配置段：
+  - `sjtu_jw.cookies_path`: 指向从浏览器或 Playwright 导出的教学信息服务网 Cookie JSON 文件。
+- 新增 `FetchSjtuUndergradScheduleTool`（`src/schedule_agent/core/tools/sjtu_jw_tools.py`）：
+  - 工具名 `fetch_sjtu_undergrad_schedule`，只读，从教学信息服务网获取本科生课表 `kbList`。
+  - 内部封装 `SjtuUndergradClient`，基于 Cookie 和 `httpx` 调用 `https://i.sjtu.edu.cn/kbcx/xskbcx_cxXsKb.html`。
+  - 自动推断当前学年/学期（也支持显式传入 `year`/`term`），并对单条课程记录进行结构化归一化（节次、星期几、周次原始字段等）。
+- 更新工具注册：
+  - 在 `core/tools/__init__.py` 导出新工具。
+  - 在 `main.py:get_default_tools` 中注册该工具，并根据 `config.sjtu_jw.cookies_path` 注入默认 Cookie 路径。
+- 工具错误语义：
+  - Cookie 文件缺失 → `COOKIES_NOT_FOUND`。
+  - 未登录或登录过期 → `NOT_LOGGED_IN`，提示用户重新登录并更新 Cookie。
+
+### 测试:
+- 新增 `tests/test_sjtu_jw_tool.py`：
+  - `test_guess_academic_year_and_term_rules`: 覆盖学年/学期推断规则。
+  - `test_fetch_tool_success_uses_client_and_normalizes`: 验证工具调用 client 并正确归一化课程结构。
+  - `test_fetch_tool_handles_not_logged_in_error`: 验证 `NOT_LOGGED_IN` 错误映射为友好的 `ToolResult`。
+- 运行 `pytest tests/test_sjtu_jw_tool.py -v`：3 passed。
+
+### 备注:
+- 当前实现仅做「读取 + 归一化」并返回给 Agent/对话，不直接写入本地日程或自动化流水线。
+- 后续如需将课表自动写入 `Event` 模型，需要额外配置学期起始日期与节次时间表，以便展开为具体日期时间段。

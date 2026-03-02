@@ -8,6 +8,7 @@
 - **工具驱动**：LLM 决策 + 工具执行，职责清晰
 - **多 LLM 支持**：豆包、阿里云百炼 Qwen
 - **可扩展工具**：日程、任务、时间解析、空闲时段、规划、文件读写、网页抓取
+- **自动化骨架**：定时同步（课表/邮件 stub）、日/周总结、通知 Outbox、后台调度 Worker
 - **MCP 客户端**：可按配置接入外部 MCP Server 并自动注册远程工具
 
 ## 快速开始
@@ -23,6 +24,9 @@ cp config.example.yaml config.yaml
 # 3. 运行
 python main.py                    # 交互式
 python main.py 明天下午3点开会    # 单条命令
+
+# 启动自动化后台 Worker（定时同步/定时总结/通知链路）
+python automation_worker.py
 ```
 
 ## 项目结构

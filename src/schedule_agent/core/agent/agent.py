@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from datetime import datetime
 from datetime import timezone as dt_timezone
 from pathlib import Path
@@ -53,6 +54,39 @@ if TYPE_CHECKING:
     from schedule_agent.utils.session_logger import SessionLogger
 
 
+def _namespace_dir(path: str, user_id: str) -> str:
+    base = Path(path)
+    return str(base / user_id)
+
+
+def _namespace_file(path: str, user_id: str) -> str:
+    base = Path(path)
+    suffix = base.suffix
+    stem = base.stem if suffix else base.name
+    if suffix:
+        return str(base.with_name(f"{stem}.{user_id}{suffix}"))
+    return str(base.with_name(f"{stem}.{user_id}"))
+
+
+def _resolve_memory_owner_paths(mem_cfg: MemoryConfig, user_id: str) -> Dict[str, str]:
+    mem_md = Path(mem_cfg.memory_md_path)
+    if mem_md.name.lower() == "memory.md":
+        memory_md_path = str(Path(mem_cfg.long_term_dir) / user_id / "MEMORY.md")
+    else:
+        memory_md_path = _namespace_file(mem_cfg.memory_md_path, user_id)
+    return {
+        "short_term_dir": _namespace_dir(mem_cfg.short_term_dir, user_id),
+        "long_term_dir": _namespace_dir(mem_cfg.long_term_dir, user_id),
+        "content_dir": _namespace_dir(mem_cfg.content_dir, user_id),
+        "chat_history_db_path": _namespace_file(mem_cfg.chat_history_db_path, user_id),
+        "memory_md_path": memory_md_path,
+    }
+
+
+def _new_session_id() -> str:
+    return f"sess-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+
+
 class ScheduleAgent:
     """
     日程管理 Agent。
@@ -71,6 +105,8 @@ class ScheduleAgent:
         max_iterations: int = 10,
         timezone: str = "Asia/Shanghai",
         session_logger: Optional["SessionLogger"] = None,
+        user_id: str = "root",
+        source: str = "cli",
     ):
         """
         初始化 Agent。
@@ -81,8 +117,12 @@ class ScheduleAgent:
             max_iterations: 最大工具调用迭代次数
             timezone: 时区
             session_logger: 会话日志记录器，用于记录完整 session 日志
+            user_id: 记忆命名空间用户 ID（同一 user_id 可跨终端共享记忆）
+            source: 来源命名空间（如 cli/qq/whatsapp）
         """
         self._config = config or get_config()
+        self._user_id = user_id.strip() or "root"
+        self._source = source.strip() or "cli"
         self._llm_client = LLMClient(self._config)
         summary_model = getattr(self._config.llm, "summary_model", None)
         self._summary_llm_client = (
@@ -118,11 +158,14 @@ class ScheduleAgent:
         # 会话起始时间
         self._session_start_time = datetime.now(dt_timezone.utc).isoformat()
         # 会话 ID（用于 ChatHistoryDB 写入分组）
-        self._session_id = f"sess-{int(time.time())}"
+        self._session_id = _new_session_id()
+        # ChatHistoryDB 最后同步到的消息 ID（用于跨终端增量同步）
+        self._last_history_id: int = 0
 
         # 四层记忆系统
         mem_cfg: MemoryConfig = self._config.memory
         self._memory_enabled = mem_cfg.enabled
+        source_paths = _resolve_memory_owner_paths(mem_cfg, self._user_id)
 
         self._working_memory = WorkingMemory(
             context=self._context,
@@ -132,17 +175,17 @@ class ScheduleAgent:
             hard_threshold_ratio=mem_cfg.working_summary_hard_ratio,
         )
         self._short_term_memory = ShortTermMemory(
-            storage_dir=mem_cfg.short_term_dir,
+            storage_dir=source_paths["short_term_dir"],
             k=mem_cfg.short_term_k,
         )
         self._long_term_memory = LongTermMemory(
-            storage_dir=mem_cfg.long_term_dir,
-            memory_md_path=mem_cfg.memory_md_path,
+            storage_dir=source_paths["long_term_dir"],
+            memory_md_path=source_paths["memory_md_path"],
             qmd_enabled=mem_cfg.qmd_enabled,
             qmd_command=mem_cfg.qmd_command,
         )
         self._content_memory = ContentMemory(
-            content_dir=mem_cfg.content_dir,
+            content_dir=source_paths["content_dir"],
             qmd_enabled=mem_cfg.qmd_enabled,
             qmd_command=mem_cfg.qmd_command,
         )
@@ -151,7 +194,10 @@ class ScheduleAgent:
             top_n=mem_cfg.recall_top_n,
             score_threshold=mem_cfg.recall_score_threshold,
         )
-        self._chat_history_db = ChatHistoryDB(mem_cfg.chat_history_db_path)
+        self._chat_history_db = ChatHistoryDB(
+            source_paths["chat_history_db_path"],
+            default_source=None,
+        )
 
         # 注册工具
         if tools:
@@ -285,6 +331,7 @@ class ScheduleAgent:
         Returns:
             Agent 的响应文本
         """
+        await self._sync_external_session_updates()
         # 0. 递增轮次并记录用户消息
         self._current_turn_id += 1
         turn_id = self._current_turn_id
@@ -310,11 +357,13 @@ class ScheduleAgent:
 
         # 写入 ChatHistoryDB
         if self._memory_enabled:
-            self._chat_history_db.write_message(
+            msg_id = self._chat_history_db.write_message(
                 session_id=self._session_id,
                 role="user",
                 content=user_input,
+                source=self._source,
             )
+            self._last_history_id = max(self._last_history_id, int(msg_id))
 
         # 1.5 工作记忆：若超阈值则启动并行总结（与 LLM 对话同时执行，结束后合并）
         summary_task: Optional[asyncio.Task] = None
@@ -444,12 +493,14 @@ class ScheduleAgent:
                         self._queue_media_for_next_call(result)
                         # 写入 ChatHistoryDB（工具内容截断到 500 字）
                         if self._memory_enabled:
-                            self._chat_history_db.write_message(
+                            msg_id = self._chat_history_db.write_message(
                                 session_id=self._session_id,
                                 role="tool",
                                 content=result.to_json(),
                                 tool_name=tool_call.name,
+                                source=self._source,
                             )
+                            self._last_history_id = max(self._last_history_id, int(msg_id))
 
                     # 继续循环，让 LLM 处理工具结果
                     continue
@@ -461,11 +512,13 @@ class ScheduleAgent:
                         self._session_logger.on_assistant_message(turn_id, response.content)
                     # 写入 ChatHistoryDB
                     if self._memory_enabled:
-                        self._chat_history_db.write_message(
+                        msg_id = self._chat_history_db.write_message(
                             session_id=self._session_id,
                             role="assistant",
                             content=response.content,
+                            source=self._source,
                         )
+                        self._last_history_id = max(self._last_history_id, int(msg_id))
                     final_response = response.content
                     break
 
@@ -742,13 +795,86 @@ class ScheduleAgent:
 
         return session_summary
 
+    async def activate_session(self, session_id: str, replay_messages_limit: Optional[int] = None) -> None:
+        """
+        激活指定会话并尝试从持久化历史恢复上下文。
+
+        用于跨终端切换到同一 session_id 时重建上下文。
+        """
+        sid = session_id.strip()
+        if not sid:
+            raise ValueError("session_id 不能为空")
+
+        self._context.clear()
+        self._session_id = sid
+        self._session_start_time = datetime.now(dt_timezone.utc).isoformat()
+        self._current_turn_id = 0
+        self._last_prompt_tokens = None
+        self._last_history_id = 0
+        self.reset_token_usage()
+        self._working_memory = WorkingMemory(
+            context=self._context,
+            max_tokens=self._config.memory.max_working_tokens,
+            threshold=self._config.memory.working_summary_threshold,
+            keep_recent=self._config.memory.working_keep_recent,
+            hard_threshold_ratio=self._config.memory.working_summary_hard_ratio,
+        )
+
+        if not self._memory_enabled:
+            return
+
+        history = self._chat_history_db.get_session_messages(sid)
+        if not history:
+            return
+        replay_rows = [r for r in history if r.get("role") in {"user", "assistant"}]
+        if replay_messages_limit is not None and replay_messages_limit > 0:
+            replay_rows = replay_rows[-replay_messages_limit:]
+        elif replay_messages_limit is not None and replay_messages_limit <= 0:
+            replay_rows = []
+        for row in replay_rows:
+            role = str(row.get("role", ""))
+            content = str(row.get("content", ""))
+            if role == "user":
+                self._context.add_user_message(content)
+            elif role == "assistant":
+                self._context.add_assistant_message(content=content)
+        self._current_turn_id = sum(1 for r in replay_rows if r.get("role") == "user")
+        self._last_history_id = max(int(r.get("id", 0)) for r in history)
+        first_ts = replay_rows[0].get("timestamp")
+        if isinstance(first_ts, str) and first_ts.strip():
+            self._session_start_time = first_ts
+
+    async def _sync_external_session_updates(self) -> None:
+        """同步其他终端在同一 session 里新增的 user/assistant 消息。"""
+        if not self._memory_enabled:
+            return
+        new_rows = self._chat_history_db.get_session_messages_after(
+            self._session_id,
+            self._last_history_id,
+            roles=["user", "assistant"],
+            limit=None,
+        )
+        if not new_rows:
+            return
+        for row in new_rows:
+            role = str(row.get("role", ""))
+            content = str(row.get("content", ""))
+            if role == "user":
+                self._context.add_user_message(content)
+            elif role == "assistant":
+                self._context.add_assistant_message(content=content)
+        # 有外部新增时，强制让本轮阈值判断基于当前上下文重估，确保压缩及时触发。
+        self._last_prompt_tokens = None
+        self._last_history_id = max(self._last_history_id, max(int(r.get("id", 0)) for r in new_rows))
+
     def reset_session(self) -> None:
         """
         重置会话状态（用于 session 切分）：清空对话上下文，生成新的 session_id。
         调用方应先调用 finalize_session()，再调用此方法。
         """
         self._context.clear()
-        self._session_id = f"sess-{int(time.time())}"
+        self._session_id = _new_session_id()
+        self._last_history_id = 0
         self._session_start_time = datetime.now(dt_timezone.utc).isoformat()
         self._current_turn_id = 0
         self.reset_token_usage()

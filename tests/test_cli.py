@@ -5,6 +5,7 @@ CLI 模块测试
 """
 
 import asyncio
+from types import SimpleNamespace
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from io import StringIO
@@ -283,6 +284,96 @@ class TestRunInteractiveLoop:
 
         # 应该捕获异常并继续运行
 
+    @pytest.mark.asyncio
+    async def test_session_commands_new_list_switch(self):
+        """测试 session 管理命令（new/list/switch）"""
+        agent = MagicMock()
+        agent.process_input = AsyncMock(return_value="不会调用")
+        agent.clear_context = MagicMock()
+        agent.get_token_usage = MagicMock(
+            return_value={"call_count": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        )
+        agent.config = SimpleNamespace(memory=SimpleNamespace(idle_timeout_minutes=30))
+        agent.mark_activity = MagicMock()
+        agent.expire_session_if_needed = AsyncMock(return_value=False)
+        agent.active_session_id = "cli:default"
+        _sessions = ["cli:default"]
+
+        def _list_sessions():
+            return list(_sessions)
+
+        async def _switch_session(session_id: str, create_if_missing: bool = True):
+            created = False
+            if session_id not in _sessions:
+                if not create_if_missing:
+                    raise KeyError(session_id)
+                _sessions.append(session_id)
+                created = True
+            agent.active_session_id = session_id
+            return created
+
+        agent.list_sessions = _list_sessions
+        agent.switch_session = AsyncMock(side_effect=_switch_session)
+
+        with patch("builtins.input", side_effect=["session", "session new cli:work", "session list", "session switch cli:default", "quit"]):
+            reason = await run_interactive_loop(agent)
+
+        assert reason == "quit"
+        agent.process_input.assert_not_called()
+        assert "cli:work" in _sessions
+        assert agent.active_session_id == "cli:default"
+
+    @pytest.mark.asyncio
+    async def test_session_switch_missing_session_shows_hint(self, capsys):
+        """测试切换到不存在会话时给出提示"""
+        agent = MagicMock()
+        agent.process_input = AsyncMock(return_value="不会调用")
+        agent.clear_context = MagicMock()
+        agent.get_token_usage = MagicMock(
+            return_value={"call_count": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        )
+        agent.config = SimpleNamespace(memory=SimpleNamespace(idle_timeout_minutes=30))
+        agent.mark_activity = MagicMock()
+        agent.expire_session_if_needed = AsyncMock(return_value=False)
+        agent.active_session_id = "cli:default"
+        agent.list_sessions = MagicMock(return_value=["cli:default"])
+        agent.switch_session = AsyncMock()
+
+        with patch("builtins.input", side_effect=["session switch cli:missing", "quit"]):
+            reason = await run_interactive_loop(agent)
+
+        assert reason == "quit"
+        agent.switch_session.assert_not_awaited()
+        captured = capsys.readouterr()
+        assert "会话不存在" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_session_whoami_shows_owner_source_session(self, capsys):
+        """测试 session whoami 输出 user/source/session"""
+        agent = MagicMock()
+        agent.process_input = AsyncMock(return_value="不会调用")
+        agent.clear_context = MagicMock()
+        agent.get_token_usage = MagicMock(
+            return_value={"call_count": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        )
+        agent.config = SimpleNamespace(memory=SimpleNamespace(idle_timeout_minutes=30))
+        agent.mark_activity = MagicMock()
+        agent.expire_session_if_needed = AsyncMock(return_value=False)
+        agent.active_session_id = "cli:default"
+        agent.owner_id = "root"
+        agent.source = "cli"
+        agent.list_sessions = MagicMock(return_value=["cli:default"])
+        agent.switch_session = AsyncMock()
+
+        with patch("builtins.input", side_effect=["session whoami", "quit"]):
+            reason = await run_interactive_loop(agent)
+
+        assert reason == "quit"
+        captured = capsys.readouterr()
+        assert "user=root" in captured.out
+        assert "source=cli" in captured.out
+        assert "session=cli:default" in captured.out
+
 
 class TestMainAsync:
     """测试异步主函数"""
@@ -324,7 +415,7 @@ class TestMainAsync:
                     assert isinstance(wrapped, AutomationCoreGateway)
                     assert isinstance(wrapped.raw_core_session, ScheduleAgentAdapter)
                     assert wrapped.raw_core_session.raw_agent is mock_agent_instance
-                mock_agent_instance.finalize_session.assert_called_once()
+                mock_agent_instance.finalize_session.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_main_async_skip_finalize_on_sigint_exit(self, mock_config):

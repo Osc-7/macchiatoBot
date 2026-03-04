@@ -87,3 +87,20 @@ async def test_session_lifecycle_passthrough():
     assert state.turn_count == 2
     assert state.token_usage["total_tokens"] == 5
     agent.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_activate_session_passthrough():
+    agent = MagicMock()
+    agent.process_input = AsyncMock(return_value="ok")
+    agent.finalize_session = AsyncMock(return_value=None)
+    agent.reset_session = MagicMock()
+    agent.close = AsyncMock()
+    agent.get_turn_count = MagicMock(return_value=0)
+    agent.get_token_usage = MagicMock(return_value={"total_tokens": 0})
+    agent.activate_session = AsyncMock(return_value=None)
+
+    adapter = ScheduleAgentAdapter(agent)
+    await adapter.activate_session("cli:shared")
+
+    agent.activate_session.assert_awaited_once_with("cli:shared")

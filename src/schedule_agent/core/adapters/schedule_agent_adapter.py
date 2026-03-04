@@ -91,6 +91,13 @@ class ScheduleAgentAdapter:
     async def close(self) -> None:
         await self._agent.close()
 
+    async def activate_session(self, session_id: str) -> None:
+        activate = getattr(self._agent, "activate_session", None)
+        if callable(activate):
+            maybe = activate(session_id)
+            if inspect.isawaitable(maybe):
+                await maybe
+
     def get_session_state(self) -> AgentSessionState:
         session_id = getattr(self._agent, "_session_id", "")
         turn_count = self._agent.get_turn_count()

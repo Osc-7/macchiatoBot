@@ -6,11 +6,17 @@ Schedule Agent CLI 入口
 """
 
 import asyncio
+import os
 import sys
 from typing import Any, Callable, Awaitable, List, Optional, cast
 
 from schedule_agent.config import Config, get_config
-from schedule_agent.automation import AutomationCoreGateway, SessionCutPolicy
+from schedule_agent.automation import (
+    AutomationCoreGateway,
+    AutomationIPCClient,
+    SessionCutPolicy,
+    default_socket_path,
+)
 from schedule_agent.core import ScheduleAgent, ScheduleAgentAdapter
 from schedule_agent.core.interfaces import AgentHooks, AgentRunInput
 from schedule_agent.cli import run_interactive_loop
@@ -184,6 +190,9 @@ async def main_async(args: Optional[List[str]] = None):
 
     # 获取默认工具
     tools = get_default_tools(config=config)
+    user_id = os.getenv("SCHEDULE_USER_ID", "root").strip() or "root"
+    source = os.getenv("SCHEDULE_SOURCE", "cli").strip() or "cli"
+    default_session_id = f"{source}:default"
 
     # 创建 Session 日志记录器（若启用）
     session_logger = None
@@ -196,29 +205,75 @@ async def main_async(args: Optional[List[str]] = None):
         session_logger.on_session_start()
 
     agent_ref = None
+    use_ipc_mode = (os.getenv("SCHEDULE_AUTOMATION_IPC", "auto").strip() or "auto").lower()
+    ipc_socket = os.getenv("SCHEDULE_AUTOMATION_SOCKET", "").strip() or default_socket_path()
     try:
+        if use_ipc_mode in {"1", "true", "yes", "auto"}:
+            ipc_client = AutomationIPCClient(
+                owner_id=user_id,
+                source=source,
+                socket_path=ipc_socket,
+            )
+            if await ipc_client.ping():
+                await ipc_client.connect()
+                agent_ref = ipc_client
+                try:
+                    if args and len(args) > 1:
+                        command = " ".join(args[1:])
+                        response = await run_single_command(ipc_client, command)
+                        print(response)
+                    else:
+                        await run_interactive_loop(ipc_client)
+                finally:
+                    await ipc_client.close()
+                return
+            if use_ipc_mode in {"1", "true", "yes"}:
+                print(f"错误: 未连接到 automation daemon ({ipc_socket})")
+                print("请先运行: python automation_daemon.py")
+                sys.exit(1)
+
         async with ScheduleAgent(
             config=config,
             tools=tools,
             max_iterations=config.agent.max_iterations,
             timezone=config.time.timezone,
             session_logger=session_logger,
+            user_id=user_id,
+            source=source,
         ) as agent:
             core_session = ScheduleAgentAdapter(agent)
+            async def _build_core_session(session_key: str) -> ScheduleAgentAdapter:
+                # 新会话使用独立 Agent，确保多会话上下文隔离。
+                created_agent = ScheduleAgent(
+                    config=config,
+                    tools=tools,
+                    max_iterations=config.agent.max_iterations,
+                    timezone=config.time.timezone,
+                    session_logger=session_logger,
+                    user_id=user_id,
+                    source=source,
+                )
+                await created_agent.__aenter__()
+                adapter = ScheduleAgentAdapter(created_agent)
+                await adapter.activate_session(session_key)
+                return adapter
             try:
                 idle_timeout = int(config.memory.idle_timeout_minutes)
             except Exception:
                 idle_timeout = 30
             gateway = AutomationCoreGateway(
                 core_session,
-                session_id="cli:default",
+                session_id=default_session_id,
                 policy=SessionCutPolicy(
                     idle_timeout_minutes=idle_timeout,
                     daily_cutoff_hour=4,
                 ),
+                session_factory=_build_core_session,
+                owner_id=user_id,
+                source=source,
             )
+            await core_session.activate_session(default_session_id)
             agent_ref = gateway
-            should_finalize_session = True
             try:
                 # 检查是否有命令行参数
                 if args and len(args) > 1:
@@ -228,20 +283,33 @@ async def main_async(args: Optional[List[str]] = None):
                     print(response)
                 else:
                     # 运行交互式循环
-                    exit_reason = await run_interactive_loop(gateway)
-                    # 仅用户主动 quit/exit/q 时写 summary；Ctrl+C/EOF 不写（调试后门）
-                    should_finalize_session = exit_reason == "quit"
+                    await run_interactive_loop(gateway)
             finally:
-                # 会话结束时触发记忆总结（必须在 LLM close 之前，因为需要调用 LLM）
-                if agent_ref and should_finalize_session:
+                if agent_ref:
                     try:
-                        await agent_ref.finalize_session()
+                        await agent_ref.close()
                     except Exception:
-                        pass  # 静默处理，避免干扰终端
+                        pass
     finally:
         if session_logger:
-            turn_count = agent_ref.get_turn_count() if agent_ref else 0
-            total_usage = agent_ref.get_token_usage() if agent_ref else None
+            turn_count = 0
+            total_usage = None
+            if agent_ref:
+                get_turn_count = getattr(agent_ref, "get_turn_count", None)
+                if callable(get_turn_count):
+                    maybe_turn = get_turn_count()
+                    if hasattr(maybe_turn, "__await__"):
+                        turn_count = int(await maybe_turn)
+                    else:
+                        turn_count = int(maybe_turn or 0)
+
+                get_token_usage = getattr(agent_ref, "get_token_usage", None)
+                if callable(get_token_usage):
+                    maybe_usage = get_token_usage()
+                    if hasattr(maybe_usage, "__await__"):
+                        total_usage = await maybe_usage
+                    else:
+                        total_usage = maybe_usage
             session_logger.on_session_end(turn_count, total_usage)
             session_logger.close()
 

@@ -19,6 +19,7 @@ import asyncio
 import logging
 import signal
 import sys
+from pathlib import Path
 
 from schedule_agent.automation.agent_task import TaskStatus
 from schedule_agent.automation.repositories import (
@@ -31,9 +32,19 @@ from schedule_agent.automation.task_queue import AgentTaskQueue
 from schedule_agent.automation.logging_utils import AutomationTaskLogger
 from schedule_agent.config import find_config_file, get_config, load_config
 
+LOG_DIR = Path(__file__).resolve().parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "agent_worker.log"
+
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.WARNING)
+file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+file_handler.setLevel(logging.INFO)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[console_handler, file_handler],
 )
 logger = logging.getLogger("agent_worker")
 

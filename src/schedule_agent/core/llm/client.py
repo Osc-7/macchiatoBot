@@ -10,7 +10,7 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI  # type: ignore
 
 from schedule_agent.config import Config, get_config
 

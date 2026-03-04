@@ -14,7 +14,9 @@ from .interfaces import (
     CoreSession,
     ExpireSessionCommand,
     InjectMessageCommand,
+    RESERVED_METADATA_KEYS,
     RunTurnCommand,
+    merge_run_metadata,
 )
 from .llm import LLMClient, LLMResponse, ToolCall
 from .tools import BaseTool, ToolDefinition, ToolParameter, ToolRegistry, ToolResult
@@ -32,6 +34,8 @@ __all__ = [
     "RunTurnCommand",
     "InjectMessageCommand",
     "ExpireSessionCommand",
+    "RESERVED_METADATA_KEYS",
+    "merge_run_metadata",
     # LLM
     "LLMClient",
     "LLMResponse",

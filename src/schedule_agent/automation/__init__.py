@@ -2,6 +2,8 @@
 
 from .agent_task import AgentTask, ContextPolicy, TaskStatus, make_cron_task, make_user_task
 from .core_gateway import AutomationCoreGateway, SessionCutPolicy
+from .ipc import AutomationIPCClient, AutomationIPCServer, IPCServerPolicy, default_socket_path
+from .session_registry import SessionRegistry
 from .event_bus import AsyncEventBus
 from .runtime import AutomationRuntime, get_runtime, reset_runtime
 from .scheduler import AutomationScheduler
@@ -37,6 +39,11 @@ __all__ = [
     "SessionManager",
     "AutomationCoreGateway",
     "SessionCutPolicy",
+    "AutomationIPCClient",
+    "AutomationIPCServer",
+    "IPCServerPolicy",
+    "default_socket_path",
+    "SessionRegistry",
     # Event-driven runtime (existing)
     "AsyncEventBus",
     "AutomationRuntime",

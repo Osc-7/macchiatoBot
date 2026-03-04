@@ -23,6 +23,7 @@ _DDL = """
 CREATE TABLE IF NOT EXISTS messages (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id   TEXT    NOT NULL,
+    source       TEXT    NOT NULL DEFAULT '',
     timestamp    TEXT    NOT NULL,
     role         TEXT    NOT NULL,
     content      TEXT    NOT NULL,
@@ -63,9 +64,10 @@ END;
 class ChatHistoryDB:
     """SQLite + FTS5 对话历史数据库。"""
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, default_source: Optional[str] = None) -> None:
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._default_source = (default_source or "").strip()
         self._conn: Optional[sqlite3.Connection] = None
         self._ensure_schema()
 
@@ -91,7 +93,15 @@ class ChatHistoryDB:
     def _ensure_schema(self) -> None:
         conn = self._get_conn()
         conn.executescript(_DDL)
+        self._ensure_source_column(conn)
         conn.commit()
+
+    def _ensure_source_column(self, conn: sqlite3.Connection) -> None:
+        cur = conn.execute("PRAGMA table_info(messages)")
+        cols = {str(r[1]) for r in cur.fetchall()}
+        if "source" not in cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_source_session ON messages(source, session_id)")
 
     @staticmethod
     def _truncate_tool_content(content: str) -> tuple[str, bool]:
@@ -107,6 +117,7 @@ class ChatHistoryDB:
         content: str,
         tool_name: Optional[str] = None,
         timestamp: Optional[str] = None,
+        source: Optional[str] = None,
     ) -> int:
         """
         写入一条消息。
@@ -122,6 +133,7 @@ class ChatHistoryDB:
             新记录的 rowid
         """
         ts = timestamp or datetime.now(timezone.utc).isoformat()
+        msg_source = (source or self._default_source or "").strip()
         is_truncated = 0
 
         if role == "tool":
@@ -131,10 +143,10 @@ class ChatHistoryDB:
         with self._cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO messages (session_id, timestamp, role, content, tool_name, is_truncated)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO messages (session_id, source, timestamp, role, content, tool_name, is_truncated)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (session_id, ts, role, content, tool_name, is_truncated),
+                (session_id, msg_source, ts, role, content, tool_name, is_truncated),
             )
             return cur.lastrowid  # type: ignore[return-value]
 
@@ -163,6 +175,7 @@ class ChatHistoryDB:
                 SELECT
                     m.id,
                     m.session_id,
+                    m.source,
                     m.timestamp,
                     m.role,
                     m.tool_name,
@@ -170,10 +183,11 @@ class ChatHistoryDB:
                 FROM messages_fts
                 JOIN messages m ON m.id = messages_fts.rowid
                 WHERE messages_fts MATCH ?
+                  AND (? = '' OR m.source = ?)
                 ORDER BY rank
                 LIMIT ?
                 """,
-                (safe_query, top_k),
+                (safe_query, self._default_source, self._default_source, top_k),
             )
             rows = cur.fetchall()
 
@@ -181,6 +195,7 @@ class ChatHistoryDB:
             {
                 "id": r["id"],
                 "session_id": r["session_id"],
+                "source": r["source"],
                 "timestamp": r["timestamp"],
                 "role": r["role"],
                 "tool_name": r["tool_name"],
@@ -205,7 +220,8 @@ class ChatHistoryDB:
         with self._cursor() as cur:
             # 先取中心消息的 session_id
             cur.execute(
-                "SELECT session_id FROM messages WHERE id = ?", (message_id,)
+                "SELECT session_id FROM messages WHERE id = ? AND (? = '' OR source = ?)",
+                (message_id, self._default_source, self._default_source),
             )
             row = cur.fetchone()
             if row is None:
@@ -214,13 +230,20 @@ class ChatHistoryDB:
 
             cur.execute(
                 """
-                SELECT id, session_id, timestamp, role, content, tool_name, is_truncated
+                SELECT id, session_id, source, timestamp, role, content, tool_name, is_truncated
                 FROM messages
                 WHERE session_id = ?
+                  AND (? = '' OR source = ?)
                   AND id BETWEEN ? AND ?
                 ORDER BY id
                 """,
-                (session_id, message_id - n, message_id + n),
+                (
+                    session_id,
+                    self._default_source,
+                    self._default_source,
+                    message_id - n,
+                    message_id + n,
+                ),
             )
             rows = cur.fetchall()
 
@@ -245,7 +268,8 @@ class ChatHistoryDB:
         """
         with self._cursor() as cur:
             cur.execute(
-                "SELECT session_id FROM messages WHERE id = ?", (message_id,)
+                "SELECT session_id FROM messages WHERE id = ? AND (? = '' OR source = ?)",
+                (message_id, self._default_source, self._default_source),
             )
             row = cur.fetchone()
             if row is None:
@@ -255,25 +279,29 @@ class ChatHistoryDB:
             if direction == "up":
                 cur.execute(
                     """
-                    SELECT id, session_id, timestamp, role, content, tool_name, is_truncated
+                    SELECT id, session_id, source, timestamp, role, content, tool_name, is_truncated
                     FROM messages
-                    WHERE session_id = ? AND id < ?
+                    WHERE session_id = ?
+                      AND (? = '' OR source = ?)
+                      AND id < ?
                     ORDER BY id DESC
                     LIMIT ?
                     """,
-                    (session_id, message_id, n),
+                    (session_id, self._default_source, self._default_source, message_id, n),
                 )
                 rows = list(reversed(cur.fetchall()))
             else:
                 cur.execute(
                     """
-                    SELECT id, session_id, timestamp, role, content, tool_name, is_truncated
+                    SELECT id, session_id, source, timestamp, role, content, tool_name, is_truncated
                     FROM messages
-                    WHERE session_id = ? AND id > ?
+                    WHERE session_id = ?
+                      AND (? = '' OR source = ?)
+                      AND id > ?
                     ORDER BY id ASC
                     LIMIT ?
                     """,
-                    (session_id, message_id, n),
+                    (session_id, self._default_source, self._default_source, message_id, n),
                 )
                 rows = cur.fetchall()
 
@@ -284,13 +312,55 @@ class ChatHistoryDB:
         with self._cursor() as cur:
             cur.execute(
                 """
-                SELECT id, session_id, timestamp, role, content, tool_name, is_truncated
+                SELECT id, session_id, source, timestamp, role, content, tool_name, is_truncated
                 FROM messages
                 WHERE session_id = ?
+                  AND (? = '' OR source = ?)
                 ORDER BY id
                 """,
-                (session_id,),
+                (session_id, self._default_source, self._default_source),
             )
+            rows = cur.fetchall()
+        return [_row_to_dict(r) for r in rows]
+
+    def get_session_messages_after(
+        self,
+        session_id: str,
+        after_id: int,
+        *,
+        roles: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取某 session 在指定 id 之后的消息（按时间顺序）。"""
+        if limit is not None:
+            limit = max(1, int(limit))
+        if roles:
+            placeholders = ",".join("?" for _ in roles)
+            sql = f"""
+                SELECT id, session_id, source, timestamp, role, content, tool_name, is_truncated
+                FROM messages
+                WHERE session_id = ?
+                  AND (? = '' OR source = ?)
+                  AND id > ?
+                  AND role IN ({placeholders})
+                ORDER BY id
+            """
+            params: List[Any] = [session_id, self._default_source, self._default_source, int(after_id), *roles]
+        else:
+            sql = """
+                SELECT id, session_id, source, timestamp, role, content, tool_name, is_truncated
+                FROM messages
+                WHERE session_id = ?
+                  AND (? = '' OR source = ?)
+                  AND id > ?
+                ORDER BY id
+            """
+            params = [session_id, self._default_source, self._default_source, int(after_id)]
+        if limit is not None:
+            sql = f"{sql}\nLIMIT ?"
+            params.append(limit)
+        with self._cursor() as cur:
+            cur.execute(sql, tuple(params))
             rows = cur.fetchall()
         return [_row_to_dict(r) for r in rows]
 
@@ -305,6 +375,7 @@ def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     return {
         "id": row["id"],
         "session_id": row["session_id"],
+        "source": row["source"],
         "timestamp": row["timestamp"],
         "role": row["role"],
         "content": row["content"],

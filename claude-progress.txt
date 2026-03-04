@@ -1075,3 +1075,31 @@ tests/                   # 测试目录
 - ShortTermMemory 类保留不删（避免破坏测试），仅从 agent 初始化流程中移除其使用
 - session 切分触发条件：idle 超时（可配）OR 跨越每日 04:00（本地时间）
 - ChatHistoryDB 使用 executescript() 初始化 DDL，避免分号分割问题
+
+## 2026-03-04 - 任务: Automation Daemon + IPC（统一过期切分）
+
+### 完成内容:
+- 新增 `automation_daemon.py`：常驻进程统一承载调度、队列消费与本地 IPC 服务。
+- 新增 `src/schedule_agent/automation/ipc.py`：
+  - `AutomationIPCServer`（Unix Socket JSON 请求）
+  - `AutomationIPCClient`（CLI 侧连接与调用）
+  - IPC 服务端内置过期巡检 loop（idle + 4am），触发 `finalize_session -> reset_session`。
+- 扩展 `AutomationCoreGateway`：
+  - `ensure_session(...)`（不改 active 的按 ID 会话确保）
+  - `clear_context_for_session(...)`
+  - `get_token_usage(session_id=...)`
+  - `get_turn_count(session_id=...)`
+- 更新 `main.py`：CLI 启动优先连接 automation IPC（`SCHEDULE_AUTOMATION_IPC=auto` 默认），不可用时回退本地直连；可强制 IPC 并在不可用时报错。
+- 更新 `interactive.py`：移除 CLI 本地 session 过期检查（before_user_turn / timer），只保留交互职责；兼容 agent 方法的 async/sync 调用。
+- 文档更新：
+  - `README.md` 补充 daemon + IPC 推荐运行方式与职责边界。
+  - 新增 `docs/AUTOMATION_ARCHITECTURE.md` 说明架构与指令链路。
+
+### 测试:
+- 新增 `tests/test_automation_ipc.py`（IPC server/client 的会话与 run_turn 端到端）。
+- 运行定向测试：`test_automation_ipc.py`、`test_automation_core_gateway.py`、`test_cli.py` 全通过。
+- 运行全量测试：`pytest tests/ -q` -> `559 passed, 5 skipped`。
+
+### 备注:
+- 当前 CLI 优先使用 IPC，但保留本地 fallback 以兼容未启动 daemon 的场景。
+- 调度任务指令化链路已确认：内置 job_type（sync/summary）与 `create_scheduled_job` 自定义 instruction 均通过 scheduler -> queue -> agent 执行。

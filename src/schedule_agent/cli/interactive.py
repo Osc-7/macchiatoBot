@@ -5,14 +5,14 @@ CLI 交互式界面
 """
 
 import asyncio
+import inspect
 import json
 import signal
 import sys
 import shutil
 import threading
 import time
-from datetime import datetime
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 from schedule_agent.core import ScheduleAgent
 from schedule_agent.core.interfaces import AgentHooks, AgentRunInput
@@ -110,6 +110,11 @@ def print_help():
 - `clear` &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;清空对话历史
 - `help` &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;显示此帮助
 - `usage` / `stats` &nbsp;&nbsp;本会话 token 用量
+- `session` &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;显示当前会话
+- `session whoami` &nbsp;显示当前 user/source/session
+- `session list` &nbsp;列出当前已加载会话
+- `session switch <id>` &nbsp;切换到指定会话（已存在）
+- `session new [id]` &nbsp;创建并切换到新会话
 
 ## 示例对话
 
@@ -132,6 +137,11 @@ def print_help():
         print("  clear       清空对话历史")
         print("  help        显示此帮助")
         print("  usage/stats 本会话 token 用量")
+        print("  session     查看当前会话")
+        print("  session whoami")
+        print("  session list")
+        print("  session switch <id>")
+        print("  session new [id]")
         print()
         print("示例对话:")
         print("  • 明天下午3点有个团队会议")
@@ -143,9 +153,8 @@ def print_help():
         print()
 
 
-def print_token_usage(agent: Any):
+def print_token_usage_data(u: dict):
     """打印本会话 token 用量统计"""
-    u = agent.get_token_usage()
     cost_line = f"\n- **预估费用**: `¥{u['cost_yuan']:.4f}`" if u.get("cost_yuan") is not None else ""
     md = f"""
 # Token 用量统计
@@ -189,90 +198,92 @@ async def run_interactive_loop(agent: Any) -> str:
     is_processing = False
     interrupted_processing = False
 
-    # Session 切分（兼容回退）：本地记录上次活动时间。
-    # 若传入 Automation gateway，会优先使用 gateway 的策略与指令。
-    _last_activity_ref: List[datetime] = [datetime.now()]
+    async def _maybe_await(value: Any) -> Any:
+        if inspect.isawaitable(value):
+            return await value
+        return value
 
-    def _should_cut_session(idle_timeout_minutes: int) -> bool:
-        """
-        检查是否需要切分 session。
+    async def _call_method(name: str, *args: Any, **kwargs: Any) -> Any:
+        fn = getattr(agent, name, None)
+        if not callable(fn):
+            return None
+        return await _maybe_await(fn(*args, **kwargs))
 
-        条件（满足任一即切分）：
-        1. idle 超时：距上次活动超过 idle_timeout_minutes 分钟
-        2. 每日 4am 切分：跨越了本地 04:00（上次活动在 4am 之前，现在已过 4am）
-        """
-        last_activity = _last_activity_ref[0]
-        # 使用本地时间（由全局 Config 统一设置为 Asia/Shanghai）
-        now = datetime.now()
-        idle_seconds = (now - last_activity).total_seconds()
-        if idle_seconds >= idle_timeout_minutes * 60:
+    async def _get_token_usage() -> dict:
+        usage = await _call_method("get_token_usage")
+        if isinstance(usage, dict):
+            return usage
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "call_count": 0, "cost_yuan": 0.0}
+
+    def _supports_session_commands() -> bool:
+        return (
+            hasattr(agent, "list_sessions")
+            and hasattr(agent, "switch_session")
+            and hasattr(agent, "active_session_id")
+        )
+
+    async def _handle_session_command(raw: str) -> bool:
+        if not _supports_session_commands():
+            return False
+        parts = raw.strip().split()
+        if not parts or parts[0].lower() != "session":
+            return False
+        sub = parts[1].lower() if len(parts) > 1 else "show"
+        if sub in {"show", "current"}:
+            active = getattr(agent, "active_session_id", "unknown")
+            print(hint(f"  当前会话: {active}"))
+            print(thin_separator())
             return True
-
-        # 每日 4am 切分：使用本地时间判断
-        # 如果上次活动是“昨天”或更早，且现在已过 04:00
-        if last_activity.date() < now.date() and now.hour >= 4:
+        if sub == "whoami":
+            active = getattr(agent, "active_session_id", "unknown")
+            owner = getattr(agent, "owner_id", "root")
+            source = getattr(agent, "source", "cli")
+            print(hint(f"  user={owner}  source={source}  session={active}"))
+            print(thin_separator())
             return True
-        # 同一天但上次在 04:00 之前、现在在 04:00 之后
-        if last_activity.date() == now.date() and last_activity.hour < 4 <= now.hour:
-            return True
-        return False
-
-    async def _session_cut_timer_loop() -> None:
-        """后台定时检查：到点（4am 或 idle 超时）即触发 session 切分，不依赖下次用户输入。"""
-        try:
-            idle_timeout = int(agent.config.memory.idle_timeout_minutes)
-        except Exception:
-            idle_timeout = 30
-        check_interval_sec = 60  # 每分钟检查一次
-        while not automation_stop_event.is_set():
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(automation_stop_event.wait()),
-                    timeout=check_interval_sec,
-                )
-            except asyncio.TimeoutError:
-                pass
-            if automation_stop_event.is_set():
-                break
-            # 仅在未在处理用户输入时切分，避免并发写 context
-            if is_processing:
-                continue
-            if hasattr(agent, "expire_session_if_needed"):
-                if await agent.expire_session_if_needed(reason="timer"):
-                    try:
-                        mark_activity = getattr(agent, "mark_activity", None)
-                        if callable(mark_activity):
-                            mark_activity()
-                    except Exception:
-                        pass
-                    print()
-                    print(hint("  [Session] 已自动切分新会话。"))
-                    print()
-                    _last_activity_ref[0] = datetime.now()
-                    continue
-            elif _should_cut_session(idle_timeout):
-                try:
-                    await _do_session_cut(hint)
-                    _last_activity_ref[0] = datetime.now()
-                except Exception:
-                    pass
-
-    async def _do_session_cut(hint_fn: Any) -> None:
-        """执行 session 切分：finalize → reset。"""
-        if hasattr(agent, "expire_session"):
-            await agent.expire_session(reason="manual_check")
+        if sub in {"list", "ls"}:
+            raw_sessions = await _call_method("list_sessions")
+            sessions = list(raw_sessions or [])
+            active = getattr(agent, "active_session_id", "")
             print()
-            print(hint_fn("  [Session] 已自动切分新会话。"))
-            print()
-            return
-        try:
-            await agent.finalize_session()
-        except Exception:
-            pass
-        agent.reset_session()
-        print()
-        print(hint_fn("  [Session] 已自动切分新会话。"))
-        print()
+            if not sessions:
+                print(hint("  当前没有会话。"))
+            else:
+                print(hint("  已加载会话:"))
+                for sid in sessions:
+                    marker = " *" if sid == active else ""
+                    print(hint(f"    - {sid}{marker}"))
+            print(thin_separator())
+            return True
+        if sub == "switch":
+            if len(parts) < 3:
+                print(hint("  用法: session switch <id>"))
+                print(thin_separator())
+                return True
+            target = parts[2].strip()
+            raw_sessions = await _call_method("list_sessions")
+            sessions = list(raw_sessions or [])
+            if target not in sessions:
+                print(hint(f"  会话不存在: {target}"))
+                print(hint("  可用 `session list` 查看，或 `session new <id>` 创建。"))
+                print(thin_separator())
+                return True
+            await _call_method("switch_session", target, create_if_missing=False)
+            print(hint(f"  已切换到会话: {target}"))
+            print(thin_separator())
+            return True
+        if sub == "new":
+            session_id = parts[2].strip() if len(parts) > 2 and parts[2].strip() else f"cli:{int(time.time())}"
+            created = await _call_method("switch_session", session_id, create_if_missing=True)
+            if created:
+                print(hint(f"  已创建并切换到新会话: {session_id}"))
+            else:
+                print(hint(f"  会话已存在，已切换: {session_id}"))
+            print(thin_separator())
+            return True
+        print(hint("  用法: session | session whoami | session list | session switch <id> | session new [id]"))
+        print(thin_separator())
+        return True
 
     prev_sigint_handler: Any = None
     sigint_handler_installed = False
@@ -373,7 +384,7 @@ async def run_interactive_loop(agent: Any) -> str:
                 continue
 
     automation_task: Optional[asyncio.Task[Any]] = asyncio.create_task(_automation_notifier_loop())
-    session_cut_task: Optional[asyncio.Task[Any]] = asyncio.create_task(_session_cut_timer_loop())
+    session_cut_task: Optional[asyncio.Task[Any]] = None
 
     # patch_stdout 让所有 print() 通过 prompt_toolkit 渲染，
     # 避免后台通知直接写 stdout 破坏输入提示符的显示。
@@ -422,28 +433,8 @@ async def run_interactive_loop(agent: Any) -> str:
             if not user_input:
                 continue
 
-            # 在处理用户输入前检查 session 切分
-            try:
-                idle_timeout = int(agent.config.memory.idle_timeout_minutes)
-            except Exception:
-                idle_timeout = 30
-            if hasattr(agent, "expire_session_if_needed"):
-                if await agent.expire_session_if_needed(reason="before_user_turn"):
-                    print()
-                    print(hint("  [Session] 已自动切分新会话。"))
-                    print()
-            elif _should_cut_session(idle_timeout):
-                await _do_session_cut(hint)
-            _last_activity_ref[0] = datetime.now()
-            try:
-                mark_activity = getattr(agent, "mark_activity", None)
-                if callable(mark_activity):
-                    mark_activity()
-            except Exception:
-                pass
-
             if user_input.lower() in ("quit", "exit", "q"):
-                u = agent.get_token_usage()
+                u = await _get_token_usage()
                 if u["call_count"] > 0:
                     print()
                     cost_str = f"，约 ¥{u['cost_yuan']:.4f}" if u.get("cost_yuan") is not None else ""
@@ -454,7 +445,7 @@ async def run_interactive_loop(agent: Any) -> str:
                 return "quit"
 
             if user_input.lower() == "clear":
-                agent.clear_context()
+                await _call_method("clear_context")
                 print(hint("  对话历史已清空。"))
                 print(thin_separator())
                 continue
@@ -465,8 +456,11 @@ async def run_interactive_loop(agent: Any) -> str:
                 continue
 
             if user_input.lower() in ("usage", "stats", "tokens"):
-                print_token_usage(agent)
+                print_token_usage_data(await _get_token_usage())
                 print(thin_separator())
+                continue
+
+            if await _handle_session_command(user_input):
                 continue
 
             # ── 处理用户输入 ──
@@ -719,7 +713,7 @@ async def run_interactive_loop(agent: Any) -> str:
                         print(response)
                     print()
 
-                u = agent.get_token_usage()
+                u = await _get_token_usage()
                 delta = u["total_tokens"] - prev_total_tokens
                 prev_total_tokens = u["total_tokens"]
                 cost = u.get("cost_yuan")

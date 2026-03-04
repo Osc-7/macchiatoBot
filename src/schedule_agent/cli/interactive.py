@@ -7,6 +7,7 @@ CLI 交互式界面
 import asyncio
 import inspect
 import json
+import os
 import signal
 import sys
 import shutil
@@ -197,6 +198,7 @@ async def run_interactive_loop(agent: Any) -> str:
     processing_task: Optional[asyncio.Task[str]] = None
     is_processing = False
     interrupted_processing = False
+    show_reasoning = (os.getenv("SCHEDULE_SHOW_REASONING", "1").strip().lower() not in {"0", "false", "no"})
 
     async def _maybe_await(value: Any) -> Any:
         if inspect.isawaitable(value):
@@ -633,6 +635,8 @@ async def run_interactive_loop(agent: Any) -> str:
                 def on_reasoning_delta(delta: str) -> None:
                     """思维链：dim 文本逐行流式输出"""
                     nonlocal reasoning_buffer
+                    if not show_reasoning:
+                        return
                     if not delta or stream_started:
                         return
                     reasoning_buffer += delta

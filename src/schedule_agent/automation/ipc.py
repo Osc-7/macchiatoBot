@@ -110,6 +110,9 @@ class AutomationIPCServer:
                     req_id = req.get("id")
                     method = str(req.get("method") or "")
                     params = req.get("params") or {}
+                    if method == "run_turn_stream":
+                        await self._handle_run_turn_stream(req_id, params, writer)
+                        continue
                     result = await self._dispatch(method, params)
                     payload = {"id": req_id, "ok": True, "result": result}
                 except Exception as exc:
@@ -124,6 +127,71 @@ class AutomationIPCServer:
                 pass
             if peer is not None:
                 self._client_active_session.pop(str(peer), None)
+
+    async def _handle_run_turn_stream(
+        self,
+        req_id: Any,
+        params: Dict[str, Any],
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        client_id = str(params.get("client_id") or "default")
+        if client_id not in self._client_active_session:
+            self._client_active_session[client_id] = f"{self._source}:default"
+        active_session = self._client_active_session[client_id]
+        text = str(params.get("text") or "")
+        metadata = params.get("metadata")
+        trace_events: list[dict[str, Any]] = []
+
+        async def _send_event(event_type: str, payload: Dict[str, Any]) -> None:
+            line = {"id": req_id, "stream": True, "event": event_type, **payload}
+            writer.write((json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8"))
+            await writer.drain()
+
+        async def _on_trace_event(evt: Dict[str, Any]) -> None:
+            trace_events.append(evt)
+            await _send_event("trace", {"data": evt})
+
+        async def _on_assistant_delta(delta: str) -> None:
+            if not delta:
+                return
+            await _send_event("assistant_delta", {"delta": delta})
+
+        async def _on_reasoning_delta(delta: str) -> None:
+            if not delta:
+                return
+            await _send_event("reasoning_delta", {"delta": delta})
+
+        hooks = AgentHooks(
+            on_trace_event=_on_trace_event,
+            on_assistant_delta=_on_assistant_delta,
+            on_reasoning_delta=_on_reasoning_delta,
+        )
+
+        try:
+            result = await self._gateway.inject_message(
+                InjectMessageCommand(
+                    session_id=active_session,
+                    input=AgentRunInput(text=text, metadata=metadata if isinstance(metadata, dict) else None),
+                ),
+                hooks=hooks,
+            )
+            usage = self._gateway.get_token_usage(session_id=active_session)
+            turn_count = self._gateway.get_turn_count(session_id=active_session)
+            await _send_event(
+                "final",
+                {
+                    "ok": True,
+                    "result": {
+                        "output_text": result.output_text,
+                        "metadata": result.metadata,
+                        "trace_events": trace_events,
+                        "token_usage": usage,
+                        "turn_count": turn_count,
+                    },
+                },
+            )
+        except Exception as exc:
+            await _send_event("final", {"ok": False, "error": str(exc)})
 
     async def _dispatch(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         client_id = str(params.get("client_id") or "default")
@@ -301,19 +369,64 @@ class AutomationIPCClient:
         return self._turn_count_cache
 
     async def run_turn(self, agent_input: AgentRunInput, hooks: AgentHooks | None = None) -> AgentRunResult:
-        data = await self._request(
-            "run_turn",
-            {
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_unix_connection(self._socket_path),
+            timeout=self._timeout_seconds,
+        )
+        req = {
+            "id": f"{self._client_id}:run_turn_stream",
+            "method": "run_turn_stream",
+            "params": {
+                "client_id": self._client_id,
                 "text": agent_input.text,
                 "metadata": agent_input.metadata,
             },
-        )
-        trace_events = data.get("trace_events")
-        if isinstance(trace_events, list) and hooks and hooks.on_trace_event:
-            for event in trace_events:
-                maybe = hooks.on_trace_event(event)
-                if inspect.isawaitable(maybe):
-                    await maybe
+        }
+        writer.write((json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8"))
+        await writer.drain()
+
+        final_result: Optional[Dict[str, Any]] = None
+        try:
+            while True:
+                raw = await asyncio.wait_for(reader.readline(), timeout=self._timeout_seconds)
+                if not raw:
+                    break
+                payload = json.loads(raw.decode("utf-8"))
+                if not payload.get("stream"):
+                    continue
+                event_type = str(payload.get("event") or "")
+                if event_type == "assistant_delta":
+                    delta = str(payload.get("delta") or "")
+                    if hooks and hooks.on_assistant_delta:
+                        maybe = hooks.on_assistant_delta(delta)
+                        if inspect.isawaitable(maybe):
+                            await maybe
+                    continue
+                if event_type == "reasoning_delta":
+                    delta = str(payload.get("delta") or "")
+                    if hooks and hooks.on_reasoning_delta:
+                        maybe = hooks.on_reasoning_delta(delta)
+                        if inspect.isawaitable(maybe):
+                            await maybe
+                    continue
+                if event_type == "trace":
+                    evt = payload.get("data")
+                    if isinstance(evt, dict) and hooks and hooks.on_trace_event:
+                        maybe = hooks.on_trace_event(evt)
+                        if inspect.isawaitable(maybe):
+                            await maybe
+                    continue
+                if event_type == "final":
+                    if not payload.get("ok"):
+                        raise RuntimeError(str(payload.get("error") or "automation ipc error"))
+                    result_data = payload.get("result")
+                    final_result = result_data if isinstance(result_data, dict) else {}
+                    break
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+        data = final_result or {}
         usage = data.get("token_usage")
         if isinstance(usage, dict):
             self._token_usage_cache = usage
@@ -325,4 +438,3 @@ class AutomationIPCClient:
             output_text=str(data.get("output_text") or ""),
             metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else {},
         )
-

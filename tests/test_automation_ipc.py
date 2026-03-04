@@ -34,7 +34,17 @@ async def test_ipc_server_client_run_turn_and_session_commands(tmp_path: Path):
     default_core.close = AsyncMock()
 
     work_core = AsyncMock()
-    work_core.run_turn = AsyncMock(return_value=AgentRunResult(output_text="work-ok"))
+    async def _run_turn(agent_input, hooks=None):
+        if hooks and hooks.on_trace_event:
+            await hooks.on_trace_event({"type": "llm_request", "iteration": 1, "tool_count": 3})
+        if hooks and hooks.on_reasoning_delta:
+            await hooks.on_reasoning_delta("thinking...")
+        if hooks and hooks.on_assistant_delta:
+            await hooks.on_assistant_delta("hello ")
+            await hooks.on_assistant_delta("world")
+        return AgentRunResult(output_text="work-ok")
+
+    work_core.run_turn = AsyncMock(side_effect=_run_turn)
     work_core.get_session_state = MagicMock(return_value=MagicMock(turn_count=1))
     work_core.get_token_usage = MagicMock(
         return_value={
@@ -73,16 +83,30 @@ async def test_ipc_server_client_run_turn_and_session_commands(tmp_path: Path):
         assert client.active_session_id == "cli:work"
 
         trace_events: list[dict] = []
+        assistant_deltas: list[str] = []
+        reasoning_deltas: list[str] = []
 
         async def _on_trace_event(evt: dict) -> None:
             trace_events.append(evt)
 
+        async def _on_assistant_delta(delta: str) -> None:
+            assistant_deltas.append(delta)
+
+        async def _on_reasoning_delta(delta: str) -> None:
+            reasoning_deltas.append(delta)
+
         result = await client.run_turn(
             AgentRunInput(text="hello"),
-            hooks=AgentHooks(on_trace_event=_on_trace_event),
+            hooks=AgentHooks(
+                on_trace_event=_on_trace_event,
+                on_assistant_delta=_on_assistant_delta,
+                on_reasoning_delta=_on_reasoning_delta,
+            ),
         )
         assert result.output_text == "work-ok"
         assert isinstance(trace_events, list)
+        assert "".join(assistant_deltas) == "hello world"
+        assert reasoning_deltas == ["thinking..."]
 
         usage = await client.get_token_usage()
         assert usage["total_tokens"] == 15
@@ -93,4 +117,3 @@ async def test_ipc_server_client_run_turn_and_session_commands(tmp_path: Path):
         await client.close()
         await server.stop()
         await gateway.close()
-

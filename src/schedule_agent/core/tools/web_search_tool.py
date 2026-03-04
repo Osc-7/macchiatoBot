@@ -83,6 +83,46 @@ class WebSearchTool(BaseTool):
                     return full_name
         return None
 
+    def _looks_like_chat_history_query(self, query: str) -> bool:
+        """
+        粗略判断 query 是否更像是在查「自己和助手的历史对话」，而不是互联网公开信息。
+        命中时应优先使用 chat_search/chat_context/chat_scroll 等聊天历史工具，而非联网搜索。
+        """
+        q = (query or "").strip()
+        if not q:
+            return False
+
+        q_lower = q.lower()
+
+        # 明确提到聊天/对话历史的关键词
+        zh_keywords = [
+            "聊天记录",
+            "历史对话",
+            "历史聊天",
+            "对话历史",
+            "之前聊过",
+            "之前说过",
+            "上次说的",
+            "刚才说的",
+            "刚刚说的",
+        ]
+        en_keywords = [
+            "chat history",
+            "conversation history",
+            "previous chat",
+            "earlier conversation",
+        ]
+        if any(k in q for k in zh_keywords):
+            return True
+        if any(k in q_lower for k in en_keywords):
+            return True
+
+        # 含「你」「我」且带时间指代，大概率是在指代双方之前的对话
+        if "你" in q and "我" in q and any(t in q for t in ["之前", "刚才", "刚刚", "上次"]):
+            return True
+
+        return False
+
     async def execute(self, **kwargs) -> ToolResult:
         query = kwargs.get("query")
         max_results = kwargs.get("max_results")
@@ -94,6 +134,22 @@ class WebSearchTool(BaseTool):
                 success=False,
                 error="MISSING_QUERY",
                 message="缺少必需的参数：query",
+            )
+
+        # 防御性保护：当 query 明显是在查自己和助手的历史对话时，提示改用聊天历史工具。
+        if isinstance(query, str) and self._looks_like_chat_history_query(query):
+            return ToolResult(
+                success=False,
+                error="SHOULD_USE_CHAT_HISTORY_TOOLS",
+                message=(
+                    "当前问题看起来是在查找「你和用户自己的历史对话」或之前说过的内容，"
+                    "不适合使用联网搜索 web_search。\n\n"
+                    "请改用聊天历史相关工具：\n"
+                    "- chat_search：按关键词在 ChatHistoryDB 中搜索历史对话\n"
+                    "- chat_context：给定 message_id 查看前后上下文\n"
+                    "- chat_scroll：从某条消息向上/向下翻页浏览更多历史\n\n"
+                    "只有在需要查询互联网公开信息（新闻、资料、文档等）时，才使用 web_search。"
+                ),
             )
 
         remote_name = self._resolve_remote_tool_name()

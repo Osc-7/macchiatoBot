@@ -166,7 +166,6 @@ class AutomationIPCServer:
             on_assistant_delta=_on_assistant_delta,
             on_reasoning_delta=_on_reasoning_delta,
         )
-
         try:
             result = await self._gateway.inject_message(
                 InjectMessageCommand(
@@ -190,8 +189,29 @@ class AutomationIPCServer:
                     },
                 },
             )
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            # 客户端在流式对话过程中主动断开连接（例如用户 Ctrl+C 或退出 CLI），
+            # writer 已失效，继续写入只会产生噪音日志。此处记录一条调试信息后静默结束。
+            logger.info(
+                "automation ipc client disconnected during run_turn_stream "
+                "(session_id=%s, client_id=%s, error=%s)",
+                active_session,
+                client_id,
+                exc,
+            )
         except Exception as exc:
-            await _send_event("final", {"ok": False, "error": str(exc)})
+            # 非连接类错误：尽量向仍然存活的客户端发送 final 错误事件；
+            # 若此时连接也已断开，则忽略第二次 BrokenPipe/ConnectionReset。
+            try:
+                await _send_event("final", {"ok": False, "error": str(exc)})
+            except (BrokenPipeError, ConnectionResetError):
+                logger.warning(
+                    "failed to send error final event to disconnected client "
+                    "(session_id=%s, client_id=%s, error=%s)",
+                    active_session,
+                    client_id,
+                    exc,
+                )
 
     async def _dispatch(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         client_id = str(params.get("client_id") or "default")

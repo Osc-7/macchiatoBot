@@ -231,6 +231,19 @@ skills:
   enabled: []  # 为空展示全部；可填 [find-skills, coding] 仅展示指定
   cli_dir: "~/.agents/skills"  # Skills CLI 默认目录
 
+# 飞书集成配置（可选）
+# 若要在飞书中使用 Schedule Agent，请在飞书开放平台创建企业自建应用并填写下列字段。
+# 推荐使用环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_VERIFICATION_TOKEN / FEISHU_ENCRYPT_KEY 覆盖敏感信息。
+feishu:
+  enabled: false
+  # App ID 与 App Secret 建议通过环境变量配置，这里仅作占位示例
+  app_id: ""              # 飞书应用 App ID（可留空，使用 FEISHU_APP_ID）
+  app_secret: ""          # 飞书应用 App Secret（可留空，使用 FEISHU_APP_SECRET）
+  verification_token: ""  # 飞书事件订阅 Verification Token（可留空，使用 FEISHU_VERIFICATION_TOKEN）
+  encrypt_key: ""         # 飞书事件订阅 Encrypt Key（启用消息加密时必填，可留空使用 FEISHU_ENCRYPT_KEY）
+  base_url: "https://open.feishu.cn"  # 国际版可改为 https://open.larksuite.com
+  domain: "feishu"        # feishu(中国大陆版) | lark(国际版)
+
 # 记忆系统配置
 memory:
   enabled: true

@@ -581,6 +581,47 @@ class AutomationConfig(BaseModel):
     )
 
 
+class FeishuConfig(BaseModel):
+    """飞书集成配置。
+
+    用于在飞书机器人中接入 Schedule Agent。所有字段均为可选，默认关闭。
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="是否启用飞书集成（feishu_server.py 仅在启用且配置完整时对外提供服务）",
+    )
+    app_id: Optional[str] = Field(
+        default=None,
+        description="飞书应用的 App ID，可通过环境变量 FEISHU_APP_ID 覆盖",
+    )
+    app_secret: Optional[str] = Field(
+        default=None,
+        description="飞书应用的 App Secret，可通过环境变量 FEISHU_APP_SECRET 覆盖",
+    )
+    verification_token: Optional[str] = Field(
+        default=None,
+        description="飞书事件订阅 Verification Token，可通过环境变量 FEISHU_VERIFICATION_TOKEN 覆盖",
+    )
+    encrypt_key: Optional[str] = Field(
+        default=None,
+        description="飞书事件订阅 Encrypt Key（启用加密时必填），可通过环境变量 FEISHU_ENCRYPT_KEY 覆盖",
+    )
+    base_url: str = Field(
+        default="https://open.feishu.cn",
+        description="飞书开放平台 Base URL，国际版可配置为 https://open.larksuite.com",
+    )
+    domain: str = Field(
+        default="feishu",
+        description='部署区域标识: feishu(中国大陆版) | lark(国际版) 等，用于日志与后续扩展。',
+    )
+    timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        description="调用飞书开放平台 API 的默认超时时间（秒）。",
+    )
+
+
 class Config(BaseModel):
     """应用配置"""
 
@@ -634,6 +675,10 @@ class Config(BaseModel):
     automation: AutomationConfig = Field(
         default_factory=AutomationConfig,
         description="自动化定时任务配置（声明式配置 job_definitions）。",
+    )
+    feishu: FeishuConfig = Field(
+        default_factory=FeishuConfig,
+        description="飞书集成配置，用于在飞书聊天中接入 Schedule Agent。",
     )
 
 
@@ -731,6 +776,22 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     env_canvas_base_url = os.environ.get("CANVAS_BASE_URL")
     if env_canvas_base_url:
         raw_config["canvas"]["base_url"] = env_canvas_base_url
+
+    # 飞书配置支持环境变量覆盖
+    if "feishu" not in raw_config:
+        raw_config["feishu"] = {}
+    env_feishu_app_id = os.environ.get("FEISHU_APP_ID")
+    if env_feishu_app_id:
+        raw_config["feishu"]["app_id"] = env_feishu_app_id
+    env_feishu_app_secret = os.environ.get("FEISHU_APP_SECRET")
+    if env_feishu_app_secret:
+        raw_config["feishu"]["app_secret"] = env_feishu_app_secret
+    env_feishu_verification_token = os.environ.get("FEISHU_VERIFICATION_TOKEN")
+    if env_feishu_verification_token:
+        raw_config["feishu"]["verification_token"] = env_feishu_verification_token
+    env_feishu_encrypt_key = os.environ.get("FEISHU_ENCRYPT_KEY")
+    if env_feishu_encrypt_key:
+        raw_config["feishu"]["encrypt_key"] = env_feishu_encrypt_key
 
     # 兼容旧配置：user 已迁移至 prompts/system/user.md
     raw_config.pop("user", None)

@@ -238,7 +238,7 @@ async def test_fetch_canvas_overview_success(monkeypatch, tmp_path):
                 )
             ]
 
-        async def get_planner_items(self):
+        async def get_planner_items(self, filter: str | None = None):
             from canvas_integration.models import CanvasPlannerItem
 
             return [

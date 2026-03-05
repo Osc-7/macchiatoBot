@@ -12,6 +12,10 @@ openai>=1.0
 httpx>=0.24
 mcp>=1.0
 
+# Web / API server (Feishu integration, future web UI)
+fastapi>=0.115.0
+uvicorn>=0.30.0
+
 # Optional browser automation for SJTU JW login
 playwright>=1.49.0
 

@@ -16,6 +16,9 @@ mcp>=1.0
 fastapi>=0.115.0
 uvicorn>=0.30.0
 
+# Feishu / Lark SDK（长连接事件订阅）
+lark-oapi>=1.0.0
+
 # Optional browser automation for SJTU JW login
 playwright>=1.49.0
 

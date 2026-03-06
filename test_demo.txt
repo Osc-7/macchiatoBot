@@ -1,0 +1,13 @@
+这是工具调用演示文件
+
+创建时间：2026-03-06 02:24
+演示内容：
+- read_file ✅
+- run_command ✅
+- search_tools ✅
+- get_events ✅
+- web_search ✅
+- call_tool ✅
+- write_file ✅
+
+工具调用能力展示完成！

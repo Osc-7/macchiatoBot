@@ -168,7 +168,7 @@ class AutomationTaskLogger:
             "operation_count": len(operation_results),
         }
 
-    def log_task_end(self, status: TaskStatus, result: Optional[str], error: Optional[str]) -> None:
+    def log_task_end(self, status: TaskStatus, result: Optional[str], error: Optional[str]) -> Dict[str, Any]:
         self.finished_at = datetime.now()
         self._append_json_line(
             {
@@ -181,7 +181,7 @@ class AutomationTaskLogger:
                 "finished_at": self.finished_at.isoformat(),
             }
         )
-        self._append_activity_record(status=status, result=result, error=error)
+        return self._append_activity_record(status=status, result=result, error=error)
 
     # ------------------------------------------------------------------
     # Agent-visible activity summary
@@ -193,8 +193,8 @@ class AutomationTaskLogger:
         status: TaskStatus,
         result: Optional[str],
         error: Optional[str],
-    ) -> None:
-        """Write a compact (operation + result) summary to automation_activity.jsonl."""
+    ) -> Dict[str, Any]:
+        """Write a compact (operation + result) summary to automation_activity.jsonl and return the record."""
         activity_summary = self.build_agent_activity_summary()
         record: Dict[str, Any] = {
             "timestamp": (self.finished_at or datetime.now()).isoformat(),
@@ -216,4 +216,5 @@ class AutomationTaskLogger:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return record
 

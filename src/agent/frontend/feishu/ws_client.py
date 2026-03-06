@@ -93,6 +93,12 @@ async def _handle_im_message_event_async(data: Any) -> None:
         logger.debug("ignore empty text ws message")
         return
 
+    # 便于配置 automation_activity_chat_id：在日志中输出当前会话 chat_id
+    logger.info(
+        "feishu message received chat_id=%s (可填入 config.feishu.automation_activity_chat_id 以在此会话接收自动化通知)",
+        feishu_message.chat_id,
+    )
+
     session_id, meta = map_event_to_session(event_model)
     metadata = {
         **meta,

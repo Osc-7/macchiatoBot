@@ -1124,3 +1124,34 @@ tests/                   # 测试目录
 ### 备注:
 - 当前 CLI 优先使用 IPC，但保留本地 fallback 以兼容未启动 daemon 的场景。
 - 调度任务指令化链路已确认：内置 job_type（sync/summary）与 `create_scheduled_job` 自定义 instruction 均通过 scheduler -> queue -> agent 执行。
+
+## 2026-03-06 - 任务: USR-AUTO-003 将 automation 活动简报推送到飞书
+
+### 完成内容:
+- 扩展 `FeishuConfig`（`agent.config.FeishuConfig`）：
+  - 新增 `automation_activity_enabled` 开关（默认 `false`）。
+  - 新增 `automation_activity_chat_id` 字段，用于指定接收 automation 活动通知的目标 chat_id。
+  - 支持通过环境变量 `FEISHU_AUTOMATION_CHAT_ID` 覆盖目标 chat_id。
+- 更新配置示例 `config.example.yaml`：
+  - 在 `feishu` 段中增加 automation 活动推送配置示例与使用说明。
+- 扩展 `AutomationTaskLogger`（`agent.automation.logging_utils`）：
+  - `_append_activity_record` 现在返回写入 `automation_activity.jsonl` 的记录字典，便于上层复用。
+- 更新 `automation_daemon.py`：
+  - 在队列消费者 `_consume_loop` 中，任务结束后调用新的 `_maybe_notify_feishu_activity`。
+  - `_maybe_notify_feishu_activity` 会在 Feishu 集成启用且配置了 `automation_activity_enabled=true` 与有效 `automation_activity_chat_id` 时，
+    将刚写入的 automation 活动简报以一条文本消息（形如 `timestamp source result_message`）发送到指定飞书会话。
+  - 发送失败仅记录警告日志，不影响自动化任务本身的状态更新逻辑。
+- 新增测试 `tests/test_automation_feishu_activity.py`：
+  - 覆盖 Feishu 未启用/开关关闭时不发送任何消息。
+  - 覆盖启用并配置 chat_id 时会调用 Feishu 客户端，且输出文本包含 `source` 与摘要内容。
+- 运行自动化相关与配置相关测试：
+  - `pytest tests/test_automation_feishu_activity.py -v`（2 passed）。
+  - `pytest tests/test_automation_tools.py tests/test_automation_ipc.py -v`（8 passed）。
+  - `pytest tests/test_config.py -v`（29 passed）。
+
+### 测试:
+- 建议在本地实际启用飞书集成并设置 `feishu.automation_activity_enabled=true` 与 `feishu.automation_activity_chat_id=<目标 chat_id>` 后，
+  启动 `automation_daemon.py`，等待自动化定时任务运行，确认对应飞书会话可以收到简洁的 automation 活动通知。
+
+### 备注:
+- 推送链路依赖 automation Daemon 和 Feishu 网关/配置；若不希望在飞书中收到后台自动化通知，可保持 `automation_activity_enabled=false`（默认值）。

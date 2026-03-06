@@ -258,6 +258,16 @@ class AutomationScheduler:
         while self._running:
             await asyncio.sleep(self._reload_interval)
             try:
+                # 尝试从 config.automation.jobs 同步最新配置到 job_definitions.json，
+                # 这样在不重启 daemon 的情况下，修改 config.yaml 也能在约 60 秒内生效。
+                try:
+                    from .config_sync import sync_job_definitions_from_config
+
+                    sync_job_definitions_from_config(config=None, job_def_repo=self._job_def_repo)
+                except Exception:
+                    # 同步失败不应影响已有调度逻辑。
+                    pass
+
                 enabled_jobs = self._job_def_repo.get_enabled()
                 enabled_ids = {job.job_id for job in enabled_jobs}
 

@@ -27,12 +27,15 @@ from agent.automation import (
     SessionRegistry,
     default_socket_path,
 )
+from agent.automation.config_sync import sync_job_definitions_from_config
 from agent.automation.agent_task import TaskStatus
 from agent.automation.logging_utils import AutomationTaskLogger
 from agent.automation.repositories import JobDefinitionRepository, JobRunRepository
 from agent.config import get_config
 from agent.core import ScheduleAgent, ScheduleAgentAdapter
 from agent.utils.session_logger import SessionLogger
+
+from agent.frontend.feishu.client import FeishuClient
 
 from main import get_default_tools
 
@@ -68,6 +71,7 @@ async def _consume_loop(
             continue
         task_logger = AutomationTaskLogger(task)
         task_logger.log_task_start()
+        activity_record: dict[str, Any] | None = None
         try:
             async def on_trace_event(event: dict) -> None:
                 task_logger.log_trace_event(event)
@@ -81,15 +85,64 @@ async def _consume_loop(
             op_ok, op_problems = task_logger.evaluate_required_operations()
             if op_ok:
                 queue.update_status(task.task_id, TaskStatus.SUCCESS, result=result)
-                task_logger.log_task_end(status=TaskStatus.SUCCESS, result=result, error=None)
+                activity_record = task_logger.log_task_end(status=TaskStatus.SUCCESS, result=result, error=None)
             else:
                 error_msg = "; ".join(op_problems)
                 queue.update_status(task.task_id, TaskStatus.FAILED, result=result, error=error_msg)
-                task_logger.log_task_end(status=TaskStatus.FAILED, result=result, error=error_msg)
+                activity_record = task_logger.log_task_end(status=TaskStatus.FAILED, result=result, error=error_msg)
         except Exception as exc:
             logger.exception("Task %s failed: %s", task.task_id, exc)
-            task_logger.log_task_end(status=TaskStatus.FAILED, result=None, error=str(exc))
+            activity_record = task_logger.log_task_end(status=TaskStatus.FAILED, result=None, error=str(exc))
             queue.update_status(task.task_id, TaskStatus.FAILED, error=str(exc))
+        finally:
+            if activity_record is not None:
+                try:
+                    await _maybe_notify_feishu_activity(activity_record)
+                except Exception as notify_exc:  # noqa: BLE001
+                    logger.warning("Failed to send Feishu automation activity notification: %s", notify_exc)
+
+
+async def _maybe_notify_feishu_activity(record: dict[str, Any]) -> None:
+    """Optionally push a compact automation activity summary to Feishu.
+
+    This mirrors the CLI's [system] automation activity line, but sends it to a configurable
+    Feishu chat when enabled in config.feishu.
+    """
+    try:
+        cfg = get_config()
+    except Exception:
+        return
+
+    feishu_cfg = cfg.feishu
+    enabled = bool(feishu_cfg.enabled)
+    auto_enabled = bool(getattr(feishu_cfg, "automation_activity_enabled", False))
+    chat_id = getattr(feishu_cfg, "automation_activity_chat_id", "") or ""
+
+    if not (enabled and auto_enabled):
+        return
+    if not chat_id:
+        return
+
+    result = record.get("result") or {}
+    result_msg = ""
+    if isinstance(result, dict):
+        msg = result.get("message") or ""
+        if isinstance(msg, str):
+            result_msg = msg.strip()
+
+    ts = str(record.get("timestamp") or "")
+    source = str(record.get("source") or "")
+    prefix_ts = f"{ts} " if ts else ""
+    if result_msg:
+        text_out = f"{prefix_ts}{source} {result_msg}"
+    else:
+        text_out = f"{prefix_ts}{source}"
+
+    if not text_out.strip():
+        return
+
+    client = FeishuClient(timeout_seconds=feishu_cfg.timeout_seconds)
+    await client.send_text_message(chat_id=chat_id, text=text_out)
 
 
 async def _main() -> None:
@@ -117,6 +170,7 @@ async def _main() -> None:
 
     job_def_repo = JobDefinitionRepository()
     job_run_repo = JobRunRepository()
+    sync_job_definitions_from_config(config=cfg, job_def_repo=job_def_repo)
     scheduler = AutomationScheduler(job_def_repo=job_def_repo, job_run_repo=job_run_repo, task_queue=queue)
 
     session_manager = SessionManager(config=cfg, tools_factory=lambda: get_default_tools(config=cfg))

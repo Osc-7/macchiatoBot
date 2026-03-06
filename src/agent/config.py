@@ -7,10 +7,10 @@
 
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class SearchOptionsConfig(BaseModel):
@@ -571,6 +571,14 @@ class AutomationJobConfig(BaseModel):
         description="是否启用该任务。",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _interval_time_alias(cls, data: Any) -> Any:
+        """兼容 config 里写的 interval_time（与 interval_minutes 同义）。"""
+        if isinstance(data, dict) and "interval_minutes" not in data and "interval_time" in data:
+            data = {**data, "interval_minutes": data.get("interval_time")}
+        return data
+
 
 class AutomationConfig(BaseModel):
     """自动化定时任务整体配置。"""
@@ -619,6 +627,14 @@ class FeishuConfig(BaseModel):
         default=10.0,
         gt=0,
         description="调用飞书开放平台 API 的默认超时时间（秒）。",
+    )
+    automation_activity_enabled: bool = Field(
+        default=False,
+        description="是否将 automation_activity.jsonl 中的活动简报推送到飞书。",
+    )
+    automation_activity_chat_id: Optional[str] = Field(
+        default=None,
+        description="用于接收 automation 活动通知的飞书 chat_id；仅在 automation_activity_enabled=true 且非空时生效。",
     )
 
 
@@ -792,6 +808,9 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     env_feishu_encrypt_key = os.environ.get("FEISHU_ENCRYPT_KEY")
     if env_feishu_encrypt_key:
         raw_config["feishu"]["encrypt_key"] = env_feishu_encrypt_key
+    env_feishu_automation_chat_id = os.environ.get("FEISHU_AUTOMATION_CHAT_ID")
+    if env_feishu_automation_chat_id:
+        raw_config["feishu"]["automation_activity_chat_id"] = env_feishu_automation_chat_id
 
     # 兼容旧配置：user 已迁移至 prompts/system/user.md
     raw_config.pop("user", None)

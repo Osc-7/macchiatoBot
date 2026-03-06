@@ -124,6 +124,12 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
     if not text:
         return JSONResponse({"code": 0, "msg": "ignored_empty"})
 
+    # 便于配置 automation_activity_chat_id：在日志中输出当前会话 chat_id
+    logger.info(
+        "feishu message received chat_id=%s (可填入 config.feishu.automation_activity_chat_id 以在此会话接收自动化通知)",
+        msg.chat_id,
+    )
+
     session_id, meta = map_event_to_session(event)
     metadata: Dict[str, Any] = {
         **meta,

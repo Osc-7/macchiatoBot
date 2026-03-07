@@ -195,6 +195,9 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
     feishu_client = _build_feishu_client()
     try:
         await feishu_client.send_text_message(chat_id=msg.chat_id, text=result.output_text)
+        attachments = getattr(result, "attachments", None)
+        if attachments:
+            await feishu_client.send_reply_attachments(chat_id=msg.chat_id, attachments=attachments)
     except Exception as exc:  # noqa: BLE001
         logger.exception("failed to send feishu reply message: %s", exc)
 

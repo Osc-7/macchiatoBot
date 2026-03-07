@@ -13,6 +13,7 @@
 - **extract_web_content**：抓取网页内容
 - **memory_search_long_term** / **memory_search_content** / **memory_store** / **memory_ingest**：记忆检索与写入；用户偏好写 MEMORY.md 用 write_file/modify_file
 - **load_skill** : 加载技能完整内容。若工具库里没有能很好执行任务的工具，加载合适的技能或进行技能搜索，通过合适的技能执行任务。
+- **attach_image_to_reply**：当需要**把截图或图片随回复发给用户看**时使用。参数二选一：image_path（本地路径）或 image_url；调用后该图会随你的文字回复一起发送到对话（如飞书会收到图片消息）。与 attach_media 区别：attach_media 是给你下一轮分析用的，用户看不到；attach_image_to_reply 是发给用户看的。
 
 ## 工作流程
 

@@ -23,7 +23,7 @@ from .web_extractor_tool import WebExtractorTool
 from .web_search_tool import WebSearchTool
 from .command_tools import RunCommandTool
 from .memory_tools import MemorySearchContentTool, MemorySearchLongTermTool, MemoryStoreTool, MemoryIngestTool
-from .media_tools import AttachMediaTool
+from .media_tools import AttachMediaTool, AttachImageToReplyTool
 from .load_skill_tool import LoadSkillTool
 from .canvas_tools import SyncCanvasTool, FetchCanvasOverviewTool, FetchCanvasCourseContentTool
 from .automation_tools import (
@@ -70,6 +70,7 @@ __all__ = [
     "MemoryStoreTool",
     "MemoryIngestTool",
     "AttachMediaTool",
+    "AttachImageToReplyTool",
     "LoadSkillTool",
     "SyncCanvasTool",
     "FetchCanvasOverviewTool",

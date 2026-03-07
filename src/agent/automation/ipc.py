@@ -184,6 +184,7 @@ class AutomationIPCServer:
                     "result": {
                         "output_text": result.output_text,
                         "metadata": result.metadata,
+                        "attachments": getattr(result, "attachments", []),
                         "trace_events": trace_events,
                         "token_usage": usage,
                         "turn_count": turn_count,
@@ -482,7 +483,11 @@ class AutomationIPCClient:
             pass
         meta = data.get("metadata")
         meta_dict: Dict[str, Any] = meta if isinstance(meta, dict) else {}
+        attachments = data.get("attachments")
+        if not isinstance(attachments, list):
+            attachments = []
         return AgentRunResult(
             output_text=str(data.get("output_text") or ""),
             metadata=meta_dict,
+            attachments=attachments,
         )

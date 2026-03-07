@@ -96,7 +96,8 @@ class ScheduleAgentAdapter:
                 CoreEvent(name="assistant_final", payload={"content": output}),
             )
             await self._emit_event(hooks, CoreEvent(name="turn_end"))
-            return AgentRunResult(output_text=output)
+            attachments = getattr(self._agent, "get_outgoing_attachments", lambda: [])()
+            return AgentRunResult(output_text=output, attachments=attachments)
         except Exception as exc:
             await self._emit_event(
                 hooks,

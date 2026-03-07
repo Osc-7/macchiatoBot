@@ -49,6 +49,7 @@ from agent.core.tools import (
     MemoryStoreTool,
     MemoryIngestTool,
     AttachMediaTool,
+    AttachImageToReplyTool,
     SyncCanvasTool,
     FetchCanvasOverviewTool,
     FetchCanvasCourseContentTool,
@@ -133,9 +134,10 @@ def get_default_tools(config: Optional[Config] = None) -> List[BaseTool]:
         tools.append(MemoryStoreTool(content))
         tools.append(MemoryIngestTool(content))
 
-    # 多模态媒体挂载工具（声明下一轮需要附带的图片/视频）
+    # 多模态媒体挂载工具（声明下一轮需要附带的图片/视频）+ 回复附图工具（把图片随回复发给用户）
     if config and config.multimodal.enabled:
         tools.append(AttachMediaTool())
+        tools.append(AttachImageToReplyTool())
 
     # Canvas 工具（始终注册，便于 search_tools 发现；启用状态在工具内部校验）
     tools.append(SyncCanvasTool(config=config))

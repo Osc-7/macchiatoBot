@@ -158,6 +158,8 @@ class ScheduleAgent:
         self._last_snapshot = ToolSnapshot(version=-1, tool_names=[], openai_tools=[])
         self._current_visible_tools: set[str] = set()
         self._pending_multimodal_items: List[Dict[str, Any]] = []
+        # 本轮回复要附带发给用户的图片等附件（由 attach_image_to_reply 等工具登记）
+        self._outgoing_attachments: List[Dict[str, Any]] = []
         # 本会话 token 用量累计
         self._token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "call_count": 0}
         # 每次调用的 (prompt_tokens, completion_tokens)，用于阶梯计费
@@ -402,6 +404,8 @@ class ScheduleAgent:
 
         # 1. 添加用户消息到上下文
         self._context.add_user_message(user_input)
+        # 每轮开始时清空「本轮回复附件」，由本轮的 attach_image_to_reply 等工具重新登记
+        self._outgoing_attachments.clear()
 
         # 1.1 将前端解析的 content_items（如图片/视频）注入到下一轮 LLM 调用
         if content_items:
@@ -546,6 +550,7 @@ class ScheduleAgent:
                             )
                         self._context.add_tool_result(tool_call.id, result)
                         self._queue_media_for_next_call(result)
+                        self._collect_outgoing_attachment(result)
                         # 写入 ChatHistoryDB（工具内容截断到 500 字）
                         if self._memory_enabled:
                             msg_id = self._chat_history_db.write_message(
@@ -792,6 +797,22 @@ class ScheduleAgent:
             content_item, _err = resolve_media_to_content_item(media_path)
             if content_item:
                 self._pending_multimodal_items.append(content_item)
+
+    def _collect_outgoing_attachment(self, result: ToolResult) -> None:
+        """将工具结果中声明的「随回复发给用户的附件」加入本轮待发送列表。"""
+        if not result.success or not isinstance(result.metadata, dict):
+            return
+        att = result.metadata.get("outgoing_attachment")
+        if not att or not isinstance(att, dict):
+            return
+        if att.get("type") != "image":
+            return
+        if "path" in att or "url" in att:
+            self._outgoing_attachments.append(dict(att))
+
+    def get_outgoing_attachments(self) -> List[Dict[str, Any]]:
+        """返回本轮登记的要随回复一起发给用户的附件列表（只读副本）。"""
+        return list(self._outgoing_attachments)
 
     def _append_pending_multimodal_messages(
         self, messages: List[Dict[str, Any]]

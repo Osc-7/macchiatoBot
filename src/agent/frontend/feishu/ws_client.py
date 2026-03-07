@@ -165,6 +165,12 @@ async def _handle_im_message_event_async(data: Any) -> None:
             chat_id=feishu_message.chat_id,
             text=result.output_text,
         )
+        attachments = getattr(result, "attachments", None)
+        if attachments:
+            await feishu_client.send_reply_attachments(
+                chat_id=feishu_message.chat_id,
+                attachments=attachments,
+            )
     except Exception as exc:  # noqa: BLE001
         logger.exception("failed to send feishu ws reply: %s", exc)
 

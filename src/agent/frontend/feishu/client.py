@@ -3,15 +3,17 @@ from __future__ import annotations
 """
 飞书开放平台 HTTP 客户端封装。
 
-- 发送文本消息
+- 发送文本消息、图片消息
 - 下载消息中的资源文件（图片、视频、音频、文件）
 """
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import json
+import logging
 import httpx
 
 from .config import get_feishu_config
@@ -100,6 +102,98 @@ class FeishuClient:
         if int(data.get("code", 0)) != 0:
             # 失败时抛出异常，由上层记录日志并向用户返回友好错误
             raise RuntimeError(f"发送飞书消息失败: {data}")
+
+    async def upload_image(self, *, image_bytes: bytes, content_type: str = "image/png") -> str:
+        """
+        上传图片并返回 image_key，用于发送图片消息。
+
+        飞书接口: POST /open-apis/im/v1/images
+        限制：图片不超过 10M，支持 JPEG/PNG/WEBP/GIF 等。
+        """
+        token = await self._get_tenant_access_token()
+        url = f"{self._base_url}/open-apis/im/v1/images"
+        headers = {"Authorization": f"Bearer {token}"}
+        # 飞书要求 multipart: image_type=message, image=文件
+        files = {"image": ("image", image_bytes, content_type)}
+        data = {"image_type": "message"}
+        async with httpx.AsyncClient(timeout=max(self._timeout, 30.0)) as client:
+            resp = await client.post(url, headers=headers, data=data, files=files)
+            resp.raise_for_status()
+            result = resp.json()
+        if int(result.get("code", 0)) != 0:
+            raise RuntimeError(f"飞书上传图片失败: {result}")
+        key = (result.get("data") or {}).get("image_key")
+        if not key:
+            raise RuntimeError(f"飞书上传图片未返回 image_key: {result}")
+        return str(key)
+
+    async def send_image_message(self, *, chat_id: str, image_key: str) -> None:
+        """向指定 chat 发送图片消息（需先通过 upload_image 获得 image_key）。"""
+        if not chat_id or not image_key:
+            raise ValueError("chat_id 和 image_key 不能为空")
+        token = await self._get_tenant_access_token()
+        url = f"{self._base_url}/open-apis/im/v1/messages?receive_id_type=chat_id"
+        payload = {
+            "receive_id": chat_id,
+            "msg_type": "image",
+            "content": json.dumps({"image_key": image_key}, ensure_ascii=False),
+        }
+        headers = {"Authorization": f"Bearer {token}"}
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        if int(data.get("code", 0)) != 0:
+            raise RuntimeError(f"发送飞书图片消息失败: {data}")
+
+    async def send_reply_attachments(
+        self,
+        *,
+        chat_id: str,
+        attachments: List[Dict[str, Any]],
+    ) -> None:
+        """
+        将 Agent 返回的附件列表中的图片上传并发送到指定会话。
+
+        attachments 每项为 {"type": "image", "path": "..."} 或 {"type": "image", "url": "..."}
+        """
+        if not chat_id or not attachments:
+            return
+        for att in attachments:
+            if att.get("type") != "image":
+                continue
+            image_bytes: Optional[bytes] = None
+            content_type = "image/png"
+            if "path" in att:
+                path = Path(att["path"]).expanduser().resolve()
+                if not path.exists() or not path.is_file():
+                    continue
+                image_bytes = path.read_bytes()
+                suffix = path.suffix.lower()
+                if suffix in (".jpg", ".jpeg"):
+                    content_type = "image/jpeg"
+                elif suffix == ".gif":
+                    content_type = "image/gif"
+                elif suffix == ".webp":
+                    content_type = "image/webp"
+            elif "url" in att:
+                url_str = str(att["url"]).strip()
+                if url_str.startswith(("http://", "https://")):
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        resp = await client.get(url_str)
+                        resp.raise_for_status()
+                        image_bytes = resp.content
+                        ct = resp.headers.get("content-type", "")
+                        if "image/" in ct:
+                            content_type = ct.split(";")[0].strip()
+            if not image_bytes or len(image_bytes) > 10 * 1024 * 1024:
+                continue
+            try:
+                image_key = await self.upload_image(image_bytes=image_bytes, content_type=content_type)
+                await self.send_image_message(chat_id=chat_id, image_key=image_key)
+            except Exception as exc:
+                logging.getLogger(__name__).warning("飞书发送回复附图失败: %s", exc)
+                continue
 
     async def download_message_resource(
         self,

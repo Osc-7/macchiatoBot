@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .events import CoreEvent
 
@@ -22,6 +22,8 @@ class AgentRunResult:
 
     output_text: str
     metadata: Dict[str, Any] = field(default_factory=dict)
+    attachments: List[Dict[str, Any]] = field(default_factory=list)
+    """本轮回复要附带发给用户的附件，如 [{"type": "image", "path": "..."}] 或 {"type": "image", "url": "..."}"""
 
 
 @dataclass(frozen=True)

@@ -83,6 +83,14 @@ canvas:
 sjtu_jw:
   cookies_path: "./data/sjtu_jw_cookies.json"
 
+# 水源社区（上海交通大学 Discourse 论坛）配置
+# 获取 User-Api-Key：运行 python -m shuiyuan_integration.user_api_key，按提示在水源授权
+# 环境变量：SHUIYUAN_USER_API_KEY
+shuiyuan:
+  enabled: false
+  user_api_key: null
+  site_url: "https://shuiyuan.sjtu.edu.cn"
+
 # 自动化定时任务配置（可选）
 # 这里提供一个高层的“任务描述 + 时间间隔”入口，运行时会被转换为 automation 子系统的 JobDefinition，
 # 由 automation_daemon 在后台统一调度并周期性执行。

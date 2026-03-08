@@ -165,6 +165,23 @@ class SjtuJwConfig(BaseModel):
     )
 
 
+class ShuiyuanConfig(BaseModel):
+    """水源社区（上海交通大学 Discourse 论坛）配置"""
+
+    enabled: bool = Field(
+        default=False,
+        description="是否启用水源社区工具；需配置 user_api_key 或环境变量 SHUIYUAN_USER_API_KEY",
+    )
+    user_api_key: Optional[str] = Field(
+        default=None,
+        description="水源社区 User-Api-Key，用于 API 认证；优先使用环境变量 SHUIYUAN_USER_API_KEY",
+    )
+    site_url: str = Field(
+        default="https://shuiyuan.sjtu.edu.cn",
+        description="水源社区站点 URL",
+    )
+
+
 class TimeConfig(BaseModel):
     """时间配置"""
 
@@ -686,6 +703,10 @@ class Config(BaseModel):
         default_factory=SjtuJwConfig,
         description="上海交通大学教学信息服务网课表同步配置",
     )
+    shuiyuan: ShuiyuanConfig = Field(
+        default_factory=ShuiyuanConfig,
+        description="水源社区（Discourse）配置，用于 Agent 访问水源社区",
+    )
     # 注意：当前 automation.jobs 只作为高层声明入口，
     # 实际调度仍以 data/automation/job_definitions.json 为准。
     automation: AutomationConfig = Field(
@@ -822,6 +843,13 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     env_feishu_automation_chat_id = os.environ.get("FEISHU_AUTOMATION_CHAT_ID")
     if env_feishu_automation_chat_id:
         raw_config["feishu"]["automation_activity_chat_id"] = env_feishu_automation_chat_id
+
+    # 水源社区配置支持环境变量覆盖
+    if "shuiyuan" not in raw_config:
+        raw_config["shuiyuan"] = {}
+    env_shuiyuan_key = os.environ.get("SHUIYUAN_USER_API_KEY")
+    if env_shuiyuan_key:
+        raw_config["shuiyuan"]["user_api_key"] = env_shuiyuan_key
 
     # 兼容旧配置：user 已迁移至 prompts/system/user.md
     raw_config.pop("user", None)

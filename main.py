@@ -62,6 +62,8 @@ from agent.core.tools import (
     GetAutomationActivityTool,
     FetchSjtuUndergradScheduleTool,
     CreateScheduledJobTool,
+    ShuiyuanSearchTool,
+    ShuiyuanGetTopicTool,
 )
 from agent.core.memory import (
     ContentMemory,
@@ -156,6 +158,11 @@ def get_default_tools(config: Optional[Config] = None) -> List[BaseTool]:
 
     tools.append(SyncSourcesTool())
     tools.append(GetSyncStatusTool())
+
+    # 水源社区工具（只读：搜索、获取话题）
+    if config and config.shuiyuan.enabled:
+        tools.append(ShuiyuanSearchTool(config=config))
+        tools.append(ShuiyuanGetTopicTool(config=config))
     tools.append(GetDigestTool())
     tools.append(ListNotificationsTool())
     tools.append(AckNotificationTool())

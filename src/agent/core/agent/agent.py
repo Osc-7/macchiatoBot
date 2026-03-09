@@ -57,6 +57,7 @@ from agent.core.memory import (
 )
 
 if TYPE_CHECKING:
+    from agent.core.interfaces import AgentHooks, AgentRunResult
     from agent.utils.session_logger import SessionLogger
 
 
@@ -392,13 +393,10 @@ class ScheduleAgent:
         on_trace_event: Optional[Callable[[Dict[str, Any]], Any]] = None,
     ) -> str:
         """
-        处理用户输入。
+        向后兼容入口，内部委托给 AgentKernel。
 
-        这是 Agent 的主入口点，实现了工具驱动的对话循环：
-        1. 添加用户消息到上下文
-        2. 调用 LLM 获取响应
-        3. 如果有工具调用，执行工具并继续循环
-        4. 返回最终响应
+        这是 Agent 的公开主入口点，调用方无需感知 Kernel 架构，
+        行为与重构前完全一致。
 
         Args:
             user_input: 用户输入
@@ -410,13 +408,15 @@ class ScheduleAgent:
         Returns:
             Agent 的响应文本
         """
+        from agent.core.interfaces import AgentHooks
+        from agent.core.kernel.kernel import AgentKernel
+        from agent.core.kernel.loader import InternalLoader
+
         await self._sync_external_session_updates()
-        # 0. 递增轮次并记录用户消息
         self._current_turn_id += 1
         turn_id = self._current_turn_id
 
-        # 0.5 记忆检索 enrich（在添加用户消息之前收集上下文）
-        # 使用 to_thread 避免同步 recall 阻塞事件循环，确保 spinner 能及时显示
+        # 记忆检索 enrich
         if self._memory_enabled and self._recall_policy.should_recall(user_input):
             recall_result = await asyncio.to_thread(
                 self._recall_policy.recall,
@@ -428,19 +428,13 @@ class ScheduleAgent:
         else:
             self._last_recall_result = RecallResult()
 
-        # 1. 添加用户消息到上下文
+        # 准备上下文
         self._context.add_user_message(user_input)
-        # 每轮开始时清空「本轮回复附件」，由本轮的 attach_image_to_reply 等工具重新登记
         self._outgoing_attachments.clear()
-
-        # 1.1 将前端解析的 content_items（如图片/视频）注入到下一轮 LLM 调用
         if content_items:
             self._pending_multimodal_items.extend(content_items)
-
         if self._session_logger:
             self._session_logger.on_user_message(turn_id, user_input)
-
-        # 写入 ChatHistoryDB
         if self._memory_enabled:
             msg_id = self._chat_history_db.write_message(
                 session_id=self._session_id,
@@ -450,7 +444,7 @@ class ScheduleAgent:
             )
             self._last_history_id = max(self._last_history_id, int(msg_id))
 
-        # 1.5 工作记忆：若超阈值则启动并行总结（与 LLM 对话同时执行，结束后合并）
+        # 工作记忆并行总结
         summary_task: Optional[asyncio.Task] = None
         summary_recent_start: Optional[int] = None
         if self._memory_enabled and self._working_memory.check_threshold(
@@ -462,64 +456,62 @@ class ScheduleAgent:
             if result:
                 summary_task, summary_recent_start = result
 
-        # 2. Agent 主循环
-        final_response: Optional[str] = None
+        # 通过 AgentKernel 驱动 run_loop()
+        hooks = AgentHooks(
+            on_assistant_delta=on_stream_delta,
+            on_reasoning_delta=on_reasoning_delta,
+            on_trace_event=on_trace_event,
+        )
+        kernel = AgentKernel(
+            llm_client=self._llm_client,
+            tool_registry=self._tool_registry,
+            loader=InternalLoader(),
+            session_logger=self._session_logger,
+        )
+        run_result = await kernel.run(self, turn_id=turn_id, hooks=hooks)
+
+        # 后处理
+        await self._finalize_turn(run_result, summary_task, summary_recent_start)
+
+        return run_result.output_text
+
+    async def run_loop(
+        self,
+        turn_id: int = 0,
+        hooks: Optional["AgentHooks"] = None,
+    ):
+        """
+        AgentCore 状态机主循环（async generator）。
+
+        通过 yield KernelAction 声明需要什么 IO，
+        通过 asend(KernelEvent) 接收 Kernel 的执行结果。
+        自身不做任何网络调用，是纯粹的状态机。
+
+        由 AgentKernel.run() 驱动，不应直接调用。
+        """
+        from agent.core.interfaces import AgentHooks as _AgentHooks
+        from agent.core.kernel.action import (
+            LLMRequestAction,
+            LLMResponseEvent,
+            ReturnAction,
+            ToolCallAction,
+            ToolResultEvent,
+        )
+
         iteration = 0
         while iteration < self._max_iterations:
             iteration += 1
-            # 为本轮创建上下文快照，确保中断或错误时不会留下不完整的 tool 调用块
             previous_messages = self._context.get_messages()
 
             try:
-                system_prompt = self._build_system_prompt()
-                messages = self._context.get_messages()
-                if self._pending_multimodal_items:
-                    messages = self._append_pending_multimodal_messages(messages)
-                    self._pending_multimodal_items.clear()
-                if self._kernel_enabled:
-                    self._last_snapshot = self._working_set.build_snapshot(self._tool_registry)
-                    tools_defs = self._last_snapshot.openai_tools
-                    self._current_visible_tools = set(self._last_snapshot.tool_names)
-                else:
-                    tools_defs = self._tool_registry.get_all_definitions()
-                    self._current_visible_tools = set(self._tool_registry.list_names())
+                # 声明需要一次 LLM 思考（Kernel 负责组装 Payload 并调用 LLM）
+                event = yield LLMRequestAction()
 
-                if self._session_logger:
-                    self._session_logger.on_llm_request(
-                        turn_id=turn_id,
-                        iteration=iteration,
-                        message_count=len(messages),
-                        tool_count=len(tools_defs),
-                        system_prompt_len=len(system_prompt),
-                        system_prompt=system_prompt if self._session_logger.enable_detailed_log else None,
-                        messages=messages if self._session_logger.enable_detailed_log else None,
-                    )
-                if on_trace_event:
-                    maybe_awaitable = on_trace_event(
-                        {
-                            "type": "llm_request",
-                            "turn_id": turn_id,
-                            "iteration": iteration,
-                            "tool_count": len(tools_defs),
-                        }
-                    )
-                    if inspect.isawaitable(maybe_awaitable):
-                        await maybe_awaitable
+                assert isinstance(event, LLMResponseEvent), \
+                    f"run_loop: expected LLMResponseEvent, got {type(event)}"
+                response = event.response
 
-                # 2.1 调用 LLM
-                response = await self._llm_client.chat_with_tools(
-                    system_message=system_prompt,
-                    messages=messages,
-                    tools=tools_defs,
-                    tool_choice="auto",
-                    on_content_delta=on_stream_delta,
-                    on_reasoning_delta=on_reasoning_delta,
-                )
-
-                if self._session_logger:
-                    self._session_logger.on_llm_response(turn_id, iteration, response)
-
-                # 累计 token 用量（含 per-call 记录用于阶梯计费）
+                # 累计 token 用量
                 if response.usage:
                     pt, ct = response.usage.prompt_tokens, response.usage.completion_tokens
                     self._token_usage["prompt_tokens"] += pt
@@ -529,55 +521,26 @@ class ScheduleAgent:
                     self._usage_calls.append((pt, ct))
                     self._last_prompt_tokens = pt
 
-                # 2.2 处理工具调用
+                # 处理工具调用
                 if response.tool_calls:
-                    # 添加助手消息（包含工具调用）
                     self._add_assistant_message_with_tool_calls(response)
 
-                    # 执行所有工具调用
                     for tool_call in response.tool_calls:
-                        if on_trace_event:
-                            maybe_awaitable = on_trace_event(
-                                {
-                                    "type": "tool_call",
-                                    "turn_id": turn_id,
-                                    "iteration": iteration,
-                                    "tool_call_id": tool_call.id,
-                                    "name": tool_call.name,
-                                    "arguments": tool_call.arguments,
-                                }
-                            )
-                            if inspect.isawaitable(maybe_awaitable):
-                                await maybe_awaitable
-                        if self._session_logger:
-                            self._session_logger.on_tool_call(turn_id, iteration, tool_call)
-                        t0 = time.perf_counter()
-                        result = await self._execute_tool_call(tool_call)
-                        duration_ms = int((time.perf_counter() - t0) * 1000)
-                        if on_trace_event:
-                            maybe_awaitable = on_trace_event(
-                                {
-                                    "type": "tool_result",
-                                    "turn_id": turn_id,
-                                    "iteration": iteration,
-                                    "tool_call_id": tool_call.id,
-                                    "name": tool_call.name,
-                                    "success": result.success,
-                                    "message": result.message,
-                                    "duration_ms": duration_ms,
-                                    "error": result.error,
-                                }
-                            )
-                            if inspect.isawaitable(maybe_awaitable):
-                                await maybe_awaitable
-                        if self._session_logger:
-                            self._session_logger.on_tool_result(
-                                turn_id, iteration, tool_call.id, result, duration_ms
-                            )
+                        # 声明需要执行某工具（Kernel 负责实际调用）
+                        tool_event = yield ToolCallAction(
+                            tool_call_id=tool_call.id,
+                            tool_name=tool_call.name,
+                            arguments=tool_call.arguments,
+                        )
+
+                        assert isinstance(tool_event, ToolResultEvent), \
+                            f"run_loop: expected ToolResultEvent, got {type(tool_event)}"
+                        result = tool_event.result
+
                         self._context.add_tool_result(tool_call.id, result)
                         self._queue_media_for_next_call(result)
                         self._collect_outgoing_attachment(result)
-                        # 写入 ChatHistoryDB（工具内容截断到 500 字）
+
                         if self._memory_enabled:
                             msg_id = self._chat_history_db.write_message(
                                 session_id=self._session_id,
@@ -588,15 +551,13 @@ class ScheduleAgent:
                             )
                             self._last_history_id = max(self._last_history_id, int(msg_id))
 
-                    # 继续循环，让 LLM 处理工具结果
                     continue
 
-                # 2.3 最终响应
+                # 最终响应
                 if response.content:
                     self._context.add_assistant_message(content=response.content)
                     if self._session_logger:
                         self._session_logger.on_assistant_message(turn_id, response.content)
-                    # 写入 ChatHistoryDB
                     if self._memory_enabled:
                         msg_id = self._chat_history_db.write_message(
                             session_id=self._session_id,
@@ -605,37 +566,48 @@ class ScheduleAgent:
                             source=self._source,
                         )
                         self._last_history_id = max(self._last_history_id, int(msg_id))
-                    final_response = response.content
-                    break
+                    yield ReturnAction(
+                        message=response.content,
+                        status="completed",
+                        attachments=list(self._outgoing_attachments),
+                    )
+                    return
 
-                # 如果没有内容也没有工具调用，返回默认响应
+                # 没有内容也没有工具调用
                 fallback = "抱歉，我无法处理您的请求。请重试或换一种方式表达。"
                 if self._session_logger:
                     self._session_logger.on_assistant_message(turn_id, fallback)
-                final_response = fallback
-                break
+                yield ReturnAction(message=fallback, status="fallback")
+                return
+
             except asyncio.CancelledError:
-                # 中断时回滚上下文到本轮开始前，避免残留不完整的 tool 调用块
                 self._context.messages = previous_messages
                 raise
             except Exception:
-                # 其他异常同样回滚，防止留下非法消息序列
                 self._context.messages = previous_messages
                 raise
 
-        # 2.4 合并并行总结结果（若已启动）
-        if summary_task is not None and summary_recent_start is not None:
-            summary_text = await summary_task
-            self._working_memory.apply_summary(summary_text, summary_recent_start)
-
-        if final_response is not None:
-            return final_response
-
-        # 超过最大迭代次数
+        # 超出最大迭代次数
         overflow_msg = "抱歉，处理您的请求时超出了最大迭代次数。请简化您的问题或稍后重试。"
         if self._session_logger:
             self._session_logger.on_assistant_message(turn_id, overflow_msg)
-        return overflow_msg
+        yield ReturnAction(message=overflow_msg, status="overflow")
+
+    async def _finalize_turn(
+        self,
+        run_result: "AgentRunResult",
+        summary_task: Optional[asyncio.Task] = None,
+        summary_recent_start: Optional[int] = None,
+    ) -> None:
+        """
+        本轮后处理：合并工作记忆总结。
+
+        由 process_input() 和 KernelScheduler._run_and_route() 在
+        AgentKernel.run() 完成后调用。
+        """
+        if summary_task is not None and summary_recent_start is not None:
+            summary_text = await summary_task
+            self._working_memory.apply_summary(summary_text, summary_recent_start)
 
     def _build_system_prompt(self) -> str:
         """

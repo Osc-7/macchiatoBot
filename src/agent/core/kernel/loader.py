@@ -1,0 +1,65 @@
+"""
+InternalLoader — 在每次 LLM 调用前，动态组装完整的请求 Payload。
+
+对应架构图 Bottom Left 中 Loader 组件：
+    Prompt | Context | Messages | Tool Result
+
+职责边界：
+- 只做数据组装，不做任何网络 IO
+- 从 AgentCore 的公开属性读取状态，避免与 ScheduleAgent 强耦合
+- 供 AgentKernel 在每次 LLMRequestAction 时调用
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from agent.core.agent.agent import ScheduleAgent
+
+
+@dataclass
+class LLMPayload:
+    """组装好的 LLM 请求 Payload，供 LLMClient 直接使用。"""
+
+    system: str
+    messages: List[Dict[str, Any]]
+    tools: List[Dict[str, Any]]
+
+
+class InternalLoader:
+    """
+    内部 Loader：从 AgentCore 状态组装 LLM 请求 Payload。
+
+    类比 OS Kernel 在发起系统调用前的参数准备阶段，负责将：
+    - Prompt（系统提示、记忆上下文、摘要）
+    - Context（当前对话消息历史）
+    - Tools（当前可见工具快照）
+    打包成一次完整的 LLM 请求。
+    """
+
+    def assemble(self, agent: "ScheduleAgent") -> LLMPayload:
+        """
+        从 AgentCore 状态动态组装 LLMPayload。
+
+        每次 LLMRequestAction 时调用，确保 Prompt/Context/Tools 都是最新状态。
+        """
+        system_prompt = agent._build_system_prompt()
+        messages = agent._context.get_messages()
+
+        # 注入待处理的多模态内容（图片/视频）
+        if agent._pending_multimodal_items:
+            messages = agent._append_pending_multimodal_messages(messages)
+            agent._pending_multimodal_items.clear()
+
+        # 工具快照：kernel 模式取工作集，否则取全量
+        if agent._kernel_enabled:
+            agent._last_snapshot = agent._working_set.build_snapshot(agent._tool_registry)
+            tools = agent._last_snapshot.openai_tools
+            agent._current_visible_tools = set(agent._last_snapshot.tool_names)
+        else:
+            tools = agent._tool_registry.get_all_definitions()
+            agent._current_visible_tools = set(agent._tool_registry.list_names())
+
+        return LLMPayload(system=system_prompt, messages=messages, tools=tools)

@@ -568,6 +568,9 @@ class TestCLIIntegration:
             "quit",            # 退出
         ]
 
+        from agent.core.interfaces import AgentRunResult
+        from agent.automation.core_gateway import AutomationCoreGateway
+
         with patch('main.get_config', return_value=mock_config):
             with patch('main.ScheduleAgent') as MockAgent:
                 mock_agent = MagicMock()
@@ -578,11 +581,17 @@ class TestCLIIntegration:
                 mock_agent.get_token_usage = MagicMock(return_value={"call_count": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
                 MockAgent.return_value = mock_agent
 
-                with patch('builtins.input', side_effect=inputs):
-                    with patch('builtins.print'):
-                        await cli_module.main_async(["main.py", "--local"])
+                # Gateway 是 CLI 实际调用的对象；mock 其 run_turn 验证整合流程
+                mock_gateway_run_turn = AsyncMock(
+                    return_value=AgentRunResult(output_text="响应内容")
+                )
+                with patch.object(AutomationCoreGateway, 'run_turn', mock_gateway_run_turn):
+                    with patch('builtins.input', side_effect=inputs):
+                        with patch('builtins.print'):
+                            await cli_module.main_async(["main.py", "--local"])
 
-                mock_agent.process_input.assert_called_once()
-                assert mock_agent.process_input.call_args.args[0] == "hello"
-                assert "on_stream_delta" in mock_agent.process_input.call_args.kwargs
+                # CLI 通过 gateway.run_turn 调用 Agent
+                mock_gateway_run_turn.assert_called_once()
+                call_args = mock_gateway_run_turn.call_args
+                assert call_args.args[0].text == "hello"
                 mock_agent.clear_context.assert_called_once()

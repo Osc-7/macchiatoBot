@@ -1213,3 +1213,31 @@ tests/                   # 测试目录
 
 ### 备注:
 - 推送链路依赖 automation Daemon 和 Feishu 网关/配置；若不希望在飞书中收到后台自动化通知，可保持 `automation_activity_enabled=false`（默认值）。
+
+## [2026-03-09] - 任务: KERNEL-001 Kernel 层重构（操作系统内核架构）
+
+### 完成内容:
+
+#### Phase 1: 新建 src/agent/core/kernel/ 包（5 个文件）
+- `action.py` — 系统调用类型定义（类比 OS syscall）：LLMRequestAction、ToolCallAction、ReturnAction、LLMResponseEvent、ToolResultEvent、KernelRequest（带优先级 + 入队时间的请求结构）
+- `loader.py` — InternalLoader：在每次 LLM 调用前，从 AgentCore 状态动态组装 LLMPayload（Prompt + Context + Tools），不做任何 IO
+- `kernel.py` — AgentKernel（IO 控制器）：持有 LLMClient + ToolRegistry，通过 async generator asend/yield 协议驱动 AgentCore.run_loop()；所有 LLM 调用和工具执行均在 Kernel 内完成
+- `core_pool.py` — CorePool（进程加载器 + 进程表）：按 session_id 懒加载/复用/回收 AgentCore，带 per-session asyncio.Lock 防并发重复创建
+- `scheduler.py` — KernelScheduler + OutputRouter：asyncio.PriorityQueue 输入队列（按 priority + enqueued_at 排序）、create_task 并发分发、OutputRouter（request_id → Future 精准回传，"乱序完成 + 正确路由"）
+
+#### Phase 2: 重构 ScheduleAgent
+- `agent.py`：将原 process_input() 的 while 循环提取为 run_loop() async generator（纯状态机，通过 yield KernelAction 声明意图，通过 asend KernelEvent 接收结果，自身无任何 IO 调用）；新增 _finalize_turn() 处理后处理；保留 process_input() 作为向后兼容入口（内部委托给 AgentKernel）
+- `schedule_agent_adapter.py`：run_turn() 重构为直接使用 AgentKernel 驱动 run_loop()；添加 _is_kernel_compatible() 检测（检查 _current_turn_id 是否为真实 int，避免 mock 对象误判）；保留 _run_via_process_input() 兼容路径
+
+#### Phase 3: 升级 AutomationCoreGateway
+- `core_gateway.py`：添加 kernel_scheduler 可选参数和 attach_scheduler() 方法；run_turn() 在 Scheduler 挂载时通过 KernelRequest + OutputRouter 异步分发，未挂载时保持原有直接调用行为（零感知迁移）
+
+### 测试:
+- 全量测试：613 passed, 5 skipped（原有 613 个测试全部通过）
+- 修复 test_cli.py 测试以适应新架构（改为通过 gateway.run_turn 验证而非 process_input）
+- ScheduleAgentAdapter 的兼容路径确保 mock 场景测试不受影响
+
+### 备注:
+- AgentCore（ScheduleAgent）现在是真正的纯状态机，所有 IO 经由 Kernel 中介
+- KernelScheduler 目前为可选挂载，不影响现有 IPC/Daemon/飞书集成链路
+- 后续可通过 gateway.attach_scheduler(scheduler) 启用队列模式，支持跨 session 真并发

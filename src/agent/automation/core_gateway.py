@@ -7,7 +7,7 @@ import inspect
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Awaitable, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Dict, Optional
 
 from .session_registry import SessionRegistry
 from agent.core.interfaces import (
@@ -20,6 +20,9 @@ from agent.core.interfaces import (
     RunTurnCommand,
     merge_run_metadata,
 )
+
+if TYPE_CHECKING:
+    from agent.core.kernel.scheduler import KernelScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +41,14 @@ class AutomationCoreGateway:
     进程内 Automation 网关。
 
     将 CLI / 其他 channel 的输入先转成 Automation Command，再下发到 CoreSession。
+
+    支持两种运行模式：
+    1. 直接模式（默认）：直接 await CoreSession.run_turn()，保持原有行为。
+    2. Kernel 调度模式：通过 attach_scheduler() 挂载 KernelScheduler，
+       将请求投入 InputQueue，由 Scheduler 异步分发，支持跨 session 真并发
+       和"乱序完成精准路由"（OutputRouter）。
+
+    IPC 协议（AutomationIPCServer）和外部接口完全不变。
     """
 
     def __init__(
@@ -50,7 +61,9 @@ class AutomationCoreGateway:
         owner_id: str = "root",
         source: str = "cli",
         session_registry: Optional[SessionRegistry] = None,
+        kernel_scheduler: Optional["KernelScheduler"] = None,
     ):
+        self._kernel_scheduler: Optional["KernelScheduler"] = kernel_scheduler
         self._sessions: Dict[str, CoreSession] = {session_id: core_session}
         self._owned_sessions: set[str] = set()
         self._active_session_id = session_id
@@ -154,14 +167,60 @@ class AutomationCoreGateway:
         self.mark_activity(session_id)
         return created
 
+    def attach_scheduler(self, scheduler: "KernelScheduler") -> None:
+        """
+        挂载 KernelScheduler，启用异步队列调度模式。
+
+        挂载后，run_turn() 和 inject_message() 会将请求投入 InputQueue，
+        由 Scheduler 异步分发（create_task 真并发），通过 OutputRouter 精准路由结果。
+
+        不挂载时（默认）保持原有直接调用 CoreSession.run_turn() 的行为，零感知迁移。
+        """
+        self._kernel_scheduler = scheduler
+
     async def run_turn(
         self,
         agent_input: AgentRunInput,
         hooks: AgentHooks | None = None,
     ) -> AgentRunResult:
+        if self._kernel_scheduler is not None:
+            return await self._run_turn_via_scheduler(
+                self._active_session_id, agent_input, hooks
+            )
         command = RunTurnCommand(session_id=self._active_session_id, input=agent_input)
         result = await self._dispatch_run_turn(command, hooks=hooks)
         self.mark_activity(command.session_id)
+        return result
+
+    async def _run_turn_via_scheduler(
+        self,
+        session_id: str,
+        agent_input: AgentRunInput,
+        hooks: AgentHooks | None = None,
+    ) -> AgentRunResult:
+        """
+        通过 KernelScheduler 提交请求并等待结果。
+
+        使用 OutputRouter（Future）机制：submit() 返回 Future，await 等待结果。
+        不同 session 的请求并发执行，先完成先返回（乱序完成精准路由）。
+        """
+        from agent.core.kernel.action import KernelRequest
+
+        metadata = dict(agent_input.metadata)
+        metadata.setdefault("source", self._source)
+        metadata.setdefault("user_id", self._owner_id)
+        if hooks is not None:
+            metadata["_hooks"] = hooks
+
+        request = KernelRequest.create(
+            text=agent_input.text,
+            session_id=session_id,
+            frontend_id=self._source,
+            metadata=metadata,
+        )
+        future = await self._kernel_scheduler.submit(request)
+        result: AgentRunResult = await future
+        self.mark_activity(session_id)
         return result
 
     async def inject_message(

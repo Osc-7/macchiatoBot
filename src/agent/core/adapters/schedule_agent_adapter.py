@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from typing import Any, Dict, List, Optional
@@ -14,10 +15,20 @@ from agent.core.interfaces import (
     AgentSessionState,
     CoreEvent,
 )
+from agent.core.kernel.kernel import AgentKernel
+from agent.core.kernel.loader import InternalLoader
+
+logger = logging.getLogger(__name__)
 
 
 class ScheduleAgentAdapter:
-    """将现有 ScheduleAgent 映射为稳定 CoreSession 接口。"""
+    """
+    将现有 ScheduleAgent 映射为稳定 CoreSession 接口。
+
+    run_turn() 直接使用 AgentKernel 驱动 agent.run_loop()，
+    所有 IO（LLM 调用、工具执行）都经由 Kernel 中介，
+    AgentCore 只承担纯状态机职责。
+    """
 
     def __init__(self, agent: Any):
         self._agent = agent
@@ -33,7 +44,7 @@ class ScheduleAgentAdapter:
             await self._emit_event(hooks, CoreEvent(name="agent_start"))
             self._agent_started = True
 
-        # 若底层 Agent 使用 defer_mcp_connect，在首轮或后续轮次前确保 MCP 已连接
+        # 若底层 Agent 使用 defer_mcp_connect，首轮前确保 MCP 已连接
         ensure_mcp = getattr(self._agent, "ensure_mcp_connected", None)
         if callable(ensure_mcp):
             maybe = ensure_mcp()
@@ -41,35 +52,6 @@ class ScheduleAgentAdapter:
                 await maybe
 
         await self._emit_event(hooks, CoreEvent(name="turn_start"))
-
-        async def on_stream_delta(delta: str) -> None:
-            if hooks.on_assistant_delta:
-                maybe = hooks.on_assistant_delta(delta)
-                if inspect.isawaitable(maybe):
-                    await maybe
-            await self._emit_event(
-                hooks,
-                CoreEvent(name="assistant_delta", payload={"delta": delta}),
-            )
-
-        async def on_reasoning_delta(delta: str) -> None:
-            if hooks.on_reasoning_delta:
-                maybe = hooks.on_reasoning_delta(delta)
-                if inspect.isawaitable(maybe):
-                    await maybe
-            await self._emit_event(
-                hooks,
-                CoreEvent(name="reasoning_delta", payload={"delta": delta}),
-            )
-
-        async def on_trace_event(event: Dict[str, Any]) -> None:
-            if hooks.on_trace_event:
-                maybe = hooks.on_trace_event(event)
-                if inspect.isawaitable(maybe):
-                    await maybe
-            mapped = self._map_trace_event(event)
-            if mapped is not None:
-                await self._emit_event(hooks, mapped)
 
         # 解析 content_refs（如飞书图片/视频）为 LLM content items
         content_items: List[Dict[str, Any]] = []
@@ -79,31 +61,189 @@ class ScheduleAgentAdapter:
             try:
                 content_items = await resolve_content_refs(refs)
             except Exception as exc:
-                logging.getLogger(__name__).warning(
-                    "content_refs resolve failed: %s", exc
-                )
+                logger.warning("content_refs resolve failed: %s", exc)
+
+        # 包装 hooks，在流式回调中同时派发 CoreEvent
+        wrapped_hooks = self._wrap_hooks_with_events(hooks)
 
         try:
-            output = await self._agent.process_input(
-                agent_input.text,
-                content_items=content_items,
-                on_stream_delta=on_stream_delta,
-                on_reasoning_delta=on_reasoning_delta,
-                on_trace_event=on_trace_event,
-            )
+            if self._is_kernel_compatible():
+                # 新架构路径：直接使用 AgentKernel 驱动 run_loop()
+                run_result = await self._run_via_kernel(agent_input, content_items, wrapped_hooks)
+            else:
+                # 兼容路径：回退到 process_input()（用于 mock/非 ScheduleAgent 场景）
+                run_result = await self._run_via_process_input(agent_input, content_items, wrapped_hooks)
+
             await self._emit_event(
                 hooks,
-                CoreEvent(name="assistant_final", payload={"content": output}),
+                CoreEvent(name="assistant_final", payload={"content": run_result.output_text}),
             )
             await self._emit_event(hooks, CoreEvent(name="turn_end"))
-            attachments = getattr(self._agent, "get_outgoing_attachments", lambda: [])()
-            return AgentRunResult(output_text=output, attachments=attachments)
+
+            attachments = run_result.attachments or []
+            if not attachments:
+                attachments = getattr(self._agent, "get_outgoing_attachments", lambda: [])()
+            return AgentRunResult(output_text=run_result.output_text, attachments=attachments)
+
         except Exception as exc:
             await self._emit_event(
                 hooks,
                 CoreEvent(name="agent_error", payload={"error": str(exc)}),
             )
             raise
+
+    def _is_kernel_compatible(self) -> bool:
+        """判断底层 agent 是否支持新的 Kernel 接口（真实 ScheduleAgent，而非 mock）。"""
+        # 检查 _current_turn_id 是否为真实整数（MagicMock 属性不会是 int）
+        turn_id = getattr(self._agent, "_current_turn_id", None)
+        return (
+            isinstance(turn_id, int)
+            and callable(getattr(self._agent, "run_loop", None))
+            and hasattr(self._agent, "_llm_client")
+            and hasattr(self._agent, "_tool_registry")
+        )
+
+    async def _run_via_kernel(
+        self,
+        agent_input: AgentRunInput,
+        content_items: List[Dict[str, Any]],
+        hooks: AgentHooks,
+    ) -> AgentRunResult:
+        """新架构路径：通过 AgentKernel 驱动 run_loop()。"""
+        from agent.core.memory import RecallResult
+
+        await self._agent._sync_external_session_updates()
+        self._agent._current_turn_id += 1
+        turn_id = self._agent._current_turn_id
+
+        # 记忆检索
+        if self._agent._memory_enabled and self._agent._recall_policy.should_recall(agent_input.text):
+            recall_result = await asyncio.to_thread(
+                self._agent._recall_policy.recall,
+                query=agent_input.text,
+                long_term_memory=self._agent._long_term_memory,
+                content_memory=self._agent._content_memory,
+            )
+            self._agent._last_recall_result = recall_result
+        else:
+            self._agent._last_recall_result = RecallResult()
+
+        self._agent._context.add_user_message(agent_input.text)
+        self._agent._outgoing_attachments.clear()
+        if content_items:
+            self._agent._pending_multimodal_items.extend(content_items)
+        if self._agent._session_logger:
+            self._agent._session_logger.on_user_message(turn_id, agent_input.text)
+        if self._agent._memory_enabled:
+            msg_id = self._agent._chat_history_db.write_message(
+                session_id=self._agent._session_id,
+                role="user",
+                content=agent_input.text,
+                source=self._agent._source,
+            )
+            self._agent._last_history_id = max(self._agent._last_history_id, int(msg_id))
+
+        # 工作记忆并行总结
+        summary_task = None
+        summary_recent_start = None
+        if self._agent._memory_enabled and self._agent._working_memory.check_threshold(
+            actual_tokens=self._agent._last_prompt_tokens
+        ):
+            result = self._agent._working_memory.start_summarize(
+                self._agent._summary_llm_client, actual_tokens=self._agent._last_prompt_tokens
+            )
+            if result:
+                summary_task, summary_recent_start = result
+
+        # AgentKernel 驱动 run_loop()
+        kernel = AgentKernel(
+            llm_client=self._agent._llm_client,
+            tool_registry=self._agent._tool_registry,
+            loader=InternalLoader(),
+            session_logger=self._agent._session_logger,
+        )
+        run_result = await kernel.run(self._agent, turn_id=turn_id, hooks=hooks)
+
+        # 后处理
+        await self._agent._finalize_turn(run_result, summary_task, summary_recent_start)
+        return run_result
+
+    async def _run_via_process_input(
+        self,
+        agent_input: AgentRunInput,
+        content_items: List[Dict[str, Any]],
+        hooks: AgentHooks,
+    ) -> AgentRunResult:
+        """兼容路径：通过 process_input() 运行（支持 mock/非 ScheduleAgent）。"""
+        async def on_stream_delta(delta: str) -> None:
+            if hooks.on_assistant_delta:
+                maybe = hooks.on_assistant_delta(delta)
+                if inspect.isawaitable(maybe):
+                    await maybe
+
+        async def on_reasoning_delta(delta: str) -> None:
+            if hooks.on_reasoning_delta:
+                maybe = hooks.on_reasoning_delta(delta)
+                if inspect.isawaitable(maybe):
+                    await maybe
+
+        async def on_trace_event(event: Dict[str, Any]) -> None:
+            if hooks.on_trace_event:
+                maybe = hooks.on_trace_event(event)
+                if inspect.isawaitable(maybe):
+                    await maybe
+
+        output = await self._agent.process_input(
+            agent_input.text,
+            content_items=content_items,
+            on_stream_delta=on_stream_delta,
+            on_reasoning_delta=on_reasoning_delta,
+            on_trace_event=on_trace_event,
+        )
+        attachments = getattr(self._agent, "get_outgoing_attachments", lambda: [])()
+        return AgentRunResult(output_text=output, attachments=attachments)
+
+    def _wrap_hooks_with_events(self, hooks: AgentHooks) -> AgentHooks:
+        """
+        返回一个新 AgentHooks，在原有回调基础上额外派发 CoreEvent。
+
+        确保流式 delta 和 trace event 都能触发 hooks.on_event。
+        """
+        adapter = self
+
+        async def on_assistant_delta(delta: str) -> None:
+            if hooks.on_assistant_delta:
+                maybe = hooks.on_assistant_delta(delta)
+                if inspect.isawaitable(maybe):
+                    await maybe
+            await adapter._emit_event(
+                hooks, CoreEvent(name="assistant_delta", payload={"delta": delta})
+            )
+
+        async def on_reasoning_delta(delta: str) -> None:
+            if hooks.on_reasoning_delta:
+                maybe = hooks.on_reasoning_delta(delta)
+                if inspect.isawaitable(maybe):
+                    await maybe
+            await adapter._emit_event(
+                hooks, CoreEvent(name="reasoning_delta", payload={"delta": delta})
+            )
+
+        async def on_trace_event(event: Dict[str, Any]) -> None:
+            if hooks.on_trace_event:
+                maybe = hooks.on_trace_event(event)
+                if inspect.isawaitable(maybe):
+                    await maybe
+            mapped = adapter._map_trace_event(event)
+            if mapped is not None:
+                await adapter._emit_event(hooks, mapped)
+
+        return AgentHooks(
+            on_assistant_delta=on_assistant_delta,
+            on_reasoning_delta=on_reasoning_delta,
+            on_trace_event=on_trace_event,
+            on_event=hooks.on_event,
+        )
 
     async def finalize_session(self):
         return await self._agent.finalize_session()

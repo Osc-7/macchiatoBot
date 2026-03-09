@@ -34,12 +34,17 @@ def map_event_to_session(event: FeishuMessageEvent) -> Tuple[str, Dict[str, str]
         key = chat_id or open_id or user_id or "unknown"
         session_id = f"feishu:chat:{key}"
 
+    # user_id 用于记忆路径：p2p 用 open_id，群聊用 chat_id，供 data/memory/feishu/{user_id}/ 隔离
+    memory_user_id = open_id or user_id if chat_type == "p2p" else chat_id or open_id or user_id
+
     metadata: Dict[str, str] = {
         "feishu_open_id": open_id,
         "feishu_user_id": user_id,
         "feishu_chat_id": chat_id,
         "feishu_chat_type": chat_type,
         "feishu_session_id": session_id,
+        "source": "feishu",
+        "user_id": memory_user_id or "unknown",
     }
     return session_id, metadata
 

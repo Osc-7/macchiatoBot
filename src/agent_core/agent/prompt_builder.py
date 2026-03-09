@@ -16,7 +16,7 @@ def _visible_scopes(agent: Any) -> set:
     """返回当前 Core 可见的记忆 scope 集合；无 profile 时视为全部可见（向后兼容）。"""
     profile = getattr(agent, "_core_profile", None)
     if profile is None:
-        return {"working", "short_term", "long_term", "content", "chat"}
+        return {"working", "long_term", "content", "chat"}
     scopes = getattr(profile, "visible_memory_scopes", None) or []
     return set(scopes)
 
@@ -73,8 +73,8 @@ def build_agent_system_prompt(agent: Any) -> str:
                 excerpt = md_content if len(md_content) <= 1000 else md_content[:1000] + "\n..."
                 parts.append("\n## 核心记忆 (MEMORY.md)")
                 parts.append(excerpt)
-        # short_term / long_term / content: recall 结果
-        if any(s in scopes for s in ("short_term", "long_term", "content")):
+        # long_term / content: recall 结果
+        if any(s in scopes for s in ("long_term", "content")):
             recall_ctx = getattr(agent, "_last_recall_result", RecallResult())
             recall_text = recall_ctx.to_context_string()
             if recall_text:

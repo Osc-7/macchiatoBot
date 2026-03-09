@@ -45,7 +45,6 @@ from agent_core.tools.chat_history_tools import (
 )
 from agent_core.memory import (
     WorkingMemory,
-    ShortTermMemory,
     LongTermMemory,
     ContentMemory,
     RecallPolicy,
@@ -168,10 +167,6 @@ class ScheduleAgent:
             threshold=mem_cfg.working_summary_threshold,
             keep_recent=mem_cfg.working_keep_recent,
             hard_threshold_ratio=mem_cfg.working_summary_hard_ratio,
-        )
-        self._short_term_memory = ShortTermMemory(
-            storage_dir=source_paths["short_term_dir"],
-            k=mem_cfg.short_term_k,
         )
         self._long_term_memory = LongTermMemory(
             storage_dir=source_paths["long_term_dir"],

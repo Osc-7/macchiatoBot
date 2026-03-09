@@ -296,14 +296,8 @@ memory:
   working_summary_threshold: 0.8  # 软阈值：tokens 达此比例且消息数 > keep_recent*2 时总结
   working_summary_hard_ratio: null  # 硬阈值：设为数字(如 5)则 tokens >= max_working_tokens*此值时强制总结，不受条数限制
   working_keep_recent: 4          # 总结时保留最近几轮原始消息
-  # 短期记忆
-  short_term_k: 20                # 保留最近 K 个会话摘要
-  short_term_dir: "./data/memory/short_term"
-  # 长期记忆
-  long_term_dir: "./data/memory/long_term"
-  memory_md_path: "./MEMORY.md"
-  # 内容记忆
-  content_dir: "./data/memory/content"
+  # 记忆库路径（统一按 frontend/user 划分）
+  memory_base_dir: "./data/memory"  # 各 owner: {base}/{frontend}/{user}/ 含 content/、long_term/、chat_history.db
   # 检索策略
   recall_top_n: 5
   recall_score_threshold: 0.3

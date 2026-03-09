@@ -139,11 +139,7 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
     )
 
     session_id, meta = map_event_to_session(event)
-    metadata: Dict[str, Any] = {
-        **meta,
-        "source": "feishu",
-        "feishu_event_id": header.event_id,
-    }
+    metadata: Dict[str, Any] = {**meta, "feishu_event_id": header.event_id}
     if content_refs:
         metadata["content_refs"] = [r.to_dict() for r in content_refs]
 

@@ -245,6 +245,12 @@ class AutomationCoreGateway:
         command: InjectMessageCommand,
         hooks: AgentHooks | None = None,
     ) -> AgentRunResult:
+        if self._kernel_scheduler is not None:
+            return await self._run_turn_via_scheduler(
+                command.session_id,
+                command.input,
+                hooks=hooks,
+            )
         result = await self._dispatch_run_turn(
             RunTurnCommand(session_id=command.session_id, input=command.input, metadata=command.metadata),
             hooks=hooks,

@@ -34,8 +34,8 @@ class ScheduleToolsMCPServer:
         from agent_core.kernel_interface import CoreProfile
 
         base_profile = CoreProfile.default_full(
-            frontend_id="mcp",
-            dialog_window_id="mcp:tools",
+            frontend_id="cli",
+            dialog_window_id="root",
         )
         registry: VersionedToolRegistry = build_tool_registry(
             profile=base_profile,

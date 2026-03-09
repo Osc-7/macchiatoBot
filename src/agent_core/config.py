@@ -439,6 +439,11 @@ class MemoryConfig(BaseModel):
 
     enabled: bool = Field(default=True, description="是否启用记忆系统")
 
+    memory_base_dir: str = Field(
+        default="./data/memory",
+        description="记忆库根目录；各 owner 路径为 {base}/{frontend}/{user}/ 下含 content/、long_term/、chat_history.db",
+    )
+
     # 工作记忆
     max_working_tokens: int = Field(
         default=8000,
@@ -465,33 +470,23 @@ class MemoryConfig(BaseModel):
     short_term_k: int = Field(
         default=20,
         ge=1,
-        description="短期记忆队列容量（最近 K 个会话摘要）",
+        description="[已废弃] 短期记忆已移除，会话摘要直接写入 long_term recent_topics",
     )
-    short_term_dir: str = Field(
-        default="./data/memory/short_term",
-        description="短期记忆存储目录",
-    )
-
-    # 长期记忆
     long_term_dir: str = Field(
         default="./data/memory/long_term",
-        description="长期记忆存储目录",
+        description="[已废弃，由 memory_base_dir 推导] 长期记忆目录",
     )
     memory_md_path: str = Field(
-        default="./MEMORY.md",
-        description="核心人类可读记忆文件路径",
+        default="",
+        description="[已废弃] 空则用 {base}/{frontend}/{user}/long_term/MEMORY.md",
     )
-
-    # 对话历史数据库
     chat_history_db_path: str = Field(
         default="./data/memory/chat_history.db",
-        description="ChatHistoryDB SQLite 数据库文件路径",
+        description="[已废弃，由 memory_base_dir 推导] 对话历史库路径",
     )
-
-    # 内容记忆
     content_dir: str = Field(
         default="./data/memory/content",
-        description="内容记忆存储目录（Markdown 文档）",
+        description="[已废弃，由 memory_base_dir 推导] 内容记忆目录",
     )
 
     # Session 切分

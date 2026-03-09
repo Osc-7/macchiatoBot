@@ -108,7 +108,6 @@ async def _handle_im_message_event_async(data: Any) -> None:
     session_id, meta = map_event_to_session(event_model)
     metadata = {
         **meta,
-        "source": "feishu",
         "feishu_message_id": message_id,
         "feishu_chat_id": feishu_message.chat_id,
         "feishu_chat_type": feishu_message.chat_type,

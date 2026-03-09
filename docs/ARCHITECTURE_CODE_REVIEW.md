@@ -97,10 +97,10 @@
 ### 2.8 前端与记忆
 
 - **记忆路径**：
-  - `resolve_memory_owner_paths(user_id, source)` 决定记忆目录 ✅
-  - 水源场景：`source=="shuiyuan"` 使用独立路径 ✅
+  - 统一结构：`{memory_base_dir}/{frontend}/{user}/` 含 `content/`、`long_term/`、`short_term/`、`chat_history.db` ✅
+  - 水源场景：`source=="shuiyuan"` 使用 shuiyuan 配置的 base ✅
 - **长期记忆**：
-  - `LongTermMemory` 写入 `entries.jsonl`（与目标中的 entries.json 语义一致） ✅
+  - `LongTermMemory` 写入 `long_term/entries.jsonl`、`long_term/MEMORY.md` ✅
 
 ### 2.9 定时任务 / Cron
 
@@ -155,23 +155,13 @@
 
 **实现**：复用 AutomationScheduler + AgentTaskQueue，新增 `job_type: heartbeat.monitor`；`automation_daemon._consume_loop` 在 `task.source` 解析出 `heartbeat.*` 时使用 `CoreProfile.default_heartbeat()`；`_JOB_INSTRUCTIONS["heartbeat.monitor"]` 定义轻量检查指令（get_sync_status，有异常时 notify_owner）；config.example 增加 `heartbeat_monitor` 配置示例。
 
-### 4.3 多 dialog_window / 多前端的记忆隔离
+### 4.3 ~~多 dialog_window / 多前端的记忆隔离~~ ✅ 已实现
 
 **目标**：同一前端的多个对话窗口（如多群聊）应有独立记忆库；不同前端的记忆应隔离。
 
-**现状**：
-- `_run_and_route` 将 `profile.frontend_id` → `source`，`profile.dialog_window_id` → `user_id` 传入 `acquire`
-- `resolve_memory_owner_paths(user_id, source)` 对**非 shuiyuan** 场景**仅使用 user_id** 做路径命名空间
-- 即 `{long_term_dir}/{user_id}/`，`source`（frontend_id）未参与路径
-- 后果：两个不同前端（如 qq / wechat）若 `dialog_window_id` 相同，会共享同一记忆目录
-
-**建议**：在 `resolve_memory_owner_paths` 中当 `frontend_id` 与 `dialog_window_id` 均非空时，使用分层路径：
-
-```text
-{long_term_dir}/{frontend_id}/{dialog_window_id}/
-```
-
-需新增参数 `frontend_id`、`dialog_window_id`，并调整 `ScheduleAgent.__init__` 的调用方式。
+**实现**：`resolve_memory_owner_paths` 按 `frontend_id/user_id` 划分路径，例如：
+- `cli/root`、`feishu/root`、`shuiyuan/osc7`
+- 结构：`{base_dir}/{frontend_id}/{user_id}/`，记忆库不怕膨胀
 
 ---
 
@@ -190,7 +180,7 @@
 | 定时任务 | 95% | 已接入，profile 正确，记忆路径对齐 |
 | 心跳 | 100% | 复用 Cron 调度，heartbeat.monitor 使用 default_heartbeat |
 
-**综合评估**：约 **95%** 已实现。touch 时机、记忆路径（Cron 按 profile 对齐）、visible_memory_scopes、CorePool 工具装配、心跳等已完善；剩余主要是多 frontend/dialog_window 记忆隔离（4.3）等可选增强。
+**综合评估**：约 **98%** 已实现。touch 时机、记忆路径（frontend/user_id 隔离、Cron 按 profile 对齐）、visible_memory_scopes、CorePool 工具装配、心跳等已完善。
 
 ---
 
@@ -204,4 +194,4 @@
 | 每次 Return/Tool_call 刷新 TTL | `kernel.py` `_maybe_touch()` | ✅ |
 | 超时 kill → CoreStats → summarizer → entries | `core_pool.evict()` | ✅ |
 | 记忆库 = 工作记忆 + 长期记忆 + 聊天记录 | `memory/`, `chat_history_db` | ✅ |
-| 多 frontend/dialog_window 独立记忆路径 | `memory_paths.py` | ⚠️ 待增强 |
+| 多 frontend/user_id 独立记忆路径 | `memory_paths.py` | ✅ |

@@ -114,23 +114,23 @@ def get_default_tools(config: Optional[Config] = None) -> List[BaseTool]:
     if config and ((config.skills.enabled or []) or getattr(config.skills, "cli_dir", None)):
         tools.append(LoadSkillTool(config=config))
 
-    # 记忆系统工具（与 Agent 使用相同的按 user_id 命名空间路径；
-    # MEMORY.md 本身保持使用全局路径，避免出现多份长期偏好副本）
+    # 记忆系统工具（使用 resolve_memory_owner_paths，与 Agent 一致：data/memory/{frontend}/{user}/）
     if config and config.memory.enabled:
+        from agent_core.agent.memory_paths import resolve_memory_owner_paths
+
         mem_cfg = config.memory
         user_id = os.getenv("SCHEDULE_USER_ID", "root").strip() or "root"
-
-        long_term_dir = str(Path(mem_cfg.long_term_dir) / user_id)
-        content_dir = str(Path(mem_cfg.content_dir) / user_id)
+        source = os.getenv("SCHEDULE_SOURCE", "cli").strip() or "cli"
+        paths = resolve_memory_owner_paths(mem_cfg, user_id, config=config, source=source)
 
         long_term = LongTermMemory(
-            storage_dir=long_term_dir,
-            memory_md_path=mem_cfg.memory_md_path,
+            storage_dir=paths["long_term_dir"],
+            memory_md_path=paths["memory_md_path"],
             qmd_enabled=mem_cfg.qmd_enabled,
             qmd_command=mem_cfg.qmd_command,
         )
         content = ContentMemory(
-            content_dir=content_dir,
+            content_dir=paths["content_dir"],
             qmd_enabled=mem_cfg.qmd_enabled,
             qmd_command=mem_cfg.qmd_command,
         )

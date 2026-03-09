@@ -124,25 +124,34 @@ def _build_command_tools(config: Config) -> List[BaseTool]:
     return tools
 
 
-def _build_memory_tools(config: Config, *, memory_owner_id: Optional[str] = None) -> List[BaseTool]:
+def _build_memory_tools(
+    config: Config,
+    *,
+    memory_owner_id: Optional[str] = None,
+    memory_source: Optional[str] = None,
+) -> List[BaseTool]:
     tools: List[BaseTool] = []
     mem_cfg = getattr(config, "memory", None)
     if not mem_cfg or not getattr(mem_cfg, "enabled", False):
         return tools
 
     user_id = (memory_owner_id or os.getenv("SCHEDULE_USER_ID", "root")).strip() or "root"
+    source = (memory_source or os.getenv("SCHEDULE_SOURCE", "cli")).strip() or "cli"
 
-    long_term_dir = str(Path(mem_cfg.long_term_dir) / user_id)
-    content_dir = str(Path(mem_cfg.content_dir) / user_id)
+    from agent_core.agent.memory_paths import resolve_memory_owner_paths
+
+    paths = resolve_memory_owner_paths(
+        mem_cfg, user_id, config=config, source=source
+    )
 
     long_term = LongTermMemory(
-        storage_dir=long_term_dir,
-        memory_md_path=mem_cfg.memory_md_path,
+        storage_dir=paths["long_term_dir"],
+        memory_md_path=paths["memory_md_path"],
         qmd_enabled=mem_cfg.qmd_enabled,
         qmd_command=mem_cfg.qmd_command,
     )
     content = ContentMemory(
-        content_dir=content_dir,
+        content_dir=paths["content_dir"],
         qmd_enabled=mem_cfg.qmd_enabled,
         qmd_command=mem_cfg.qmd_command,
     )
@@ -205,6 +214,7 @@ def build_tool_registry(
     *,
     config: Optional[Config] = None,
     memory_owner_id: Optional[str] = None,
+    memory_source: Optional[str] = None,
 ) -> VersionedToolRegistry:
     """
     构建带版本号的工具注册表。
@@ -224,7 +234,13 @@ def build_tool_registry(
     tools.extend(_build_schedule_tools(cfg))
     tools.extend(_build_file_tools(cfg))
     tools.extend(_build_command_tools(cfg))
-    tools.extend(_build_memory_tools(cfg, memory_owner_id=memory_owner_id))
+    tools.extend(
+        _build_memory_tools(
+            cfg,
+            memory_owner_id=memory_owner_id,
+            memory_source=memory_source or (profile.frontend_id if profile else None),
+        )
+    )
     tools.extend(_build_multimodal_tools(cfg))
     tools.extend(_build_canvas_tools(cfg))
     tools.extend(_build_shuiyuan_tools(cfg))

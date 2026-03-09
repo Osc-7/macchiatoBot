@@ -38,7 +38,7 @@ class CoreProfile:
 
     visible_memory_scopes:
         允许 InternalLoader 加载的记忆层级。
-        可选值：working / short_term / long_term / content / chat
+        可选值：working / long_term / content / chat
         空列表表示不加载任何记忆（适合一次性无状态 Core）。
 
     max_context_tokens:
@@ -60,7 +60,7 @@ class CoreProfile:
     allow_dangerous_commands: bool = False
 
     visible_memory_scopes: List[str] = field(
-        default_factory=lambda: ["working", "short_term", "long_term", "content", "chat"]
+        default_factory=lambda: ["working", "long_term", "content", "chat"]
     )
 
     max_context_tokens: int = 80_000

@@ -43,7 +43,6 @@ from .shuiyuan_tools import (
     ShuiyuanPostReplyTool,
     ShuiyuanRetortTool,
     ShuiyuanSearchTool,
-    ShuiyuanSummarizeArchiveTool,
 )
 
 __all__ = [
@@ -97,5 +96,4 @@ __all__ = [
     "ShuiyuanGetTopicTool",
     "ShuiyuanRetortTool",
     "ShuiyuanPostReplyTool",
-    "ShuiyuanSummarizeArchiveTool",
 ]

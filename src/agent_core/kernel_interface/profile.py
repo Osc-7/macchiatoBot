@@ -17,7 +17,10 @@ mode 枚举语义：
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Literal, Optional
+from typing import TYPE_CHECKING, List, Literal, Optional
+
+if TYPE_CHECKING:
+    from agent_core.config import Config
 
 
 @dataclass
@@ -112,6 +115,32 @@ class CoreProfile:
         )
 
     @classmethod
+    def full_from_config(
+        cls,
+        config: "Config",
+        *,
+        frontend_id: str = "",
+        dialog_window_id: str = "",
+    ) -> "CoreProfile":
+        """cli/feishu 主对话：完整权限（无白名单，pinned_tools 全可访问），危险命令按配置放行。"""
+        agent_cfg = getattr(config, "agent", None)
+        cmd_cfg = getattr(config, "command_tools", None)
+        allow_dangerous = bool(
+            cmd_cfg
+            and getattr(cmd_cfg, "enabled", False)
+            and getattr(cmd_cfg, "allow_run", False)
+        )
+        return cls(
+            mode="full",
+            allowed_tools=None,  # 无白名单 = 全量工具（含 config.pinned_tools 全部）
+            allow_dangerous_commands=allow_dangerous,
+            frontend_id=frontend_id,
+            dialog_window_id=dialog_window_id,
+            max_context_tokens=getattr(agent_cfg, "max_context_tokens", 300000),
+            session_expired_seconds=getattr(agent_cfg, "session_expired_seconds", 3600),
+        )
+
+    @classmethod
     def default_sub(
         cls,
         allowed_tools: Optional[List[str]] = None,
@@ -149,6 +178,26 @@ class CoreProfile:
             session_expired_seconds=600,
             frontend_id=frontend_id,
             dialog_window_id=dialog_window_id,
+        )
+
+    @classmethod
+    def for_shuiyuan(
+        cls,
+        *,
+        dialog_window_id: str = "",
+        max_context_tokens: int = 200000,
+        session_expired_seconds: int = 1800,
+    ) -> "CoreProfile":
+        """水源社区受限 Core：仅 shuiyuan 工具，无危险命令，聊天历史由 per-user DB 管理。"""
+        return cls(
+            mode="sub",
+            allowed_tools=["shuiyuan_search", "shuiyuan_get_topic", "shuiyuan_post_retort","web_search","extract_web_content","memory_search_long_term","memory_search_content","chat_search","chat_context","chat_scroll","notify_owner"],
+            allow_dangerous_commands=False,
+            visible_memory_scopes=[],
+            frontend_id="shuiyuan",
+            dialog_window_id=dialog_window_id,
+            max_context_tokens=max_context_tokens,
+            session_expired_seconds=session_expired_seconds,
         )
 
     @classmethod

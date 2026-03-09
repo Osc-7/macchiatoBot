@@ -67,7 +67,8 @@ from agent_core.tools import (
     NotifyOwnerTool,
     ShuiyuanSearchTool,
     ShuiyuanGetTopicTool,
-    ShuiyuanSummarizeArchiveTool,
+    ShuiyuanRetortTool,
+    ShuiyuanPostReplyTool,
 )
 from agent_core.memory import (
     ContentMemory,
@@ -163,11 +164,12 @@ def get_default_tools(config: Optional[Config] = None) -> List[BaseTool]:
     tools.append(SyncSourcesTool())
     tools.append(GetSyncStatusTool())
 
-    # 水源社区工具（只读：搜索、获取话题；automation：归档总结）
+    # 水源社区工具（搜索、获取话题、贴表情、发帖）
     if config and config.shuiyuan.enabled:
         tools.append(ShuiyuanSearchTool(config=config))
         tools.append(ShuiyuanGetTopicTool(config=config))
-        tools.append(ShuiyuanSummarizeArchiveTool(config=config, batch_size=50))
+        tools.append(ShuiyuanRetortTool(config=config))
+        tools.append(ShuiyuanPostReplyTool(config=config))
     tools.append(GetDigestTool())
     tools.append(NotifyOwnerTool(config=config))
     tools.append(ListNotificationsTool())
@@ -321,6 +323,7 @@ async def main_async(args: Optional[List[str]] = None):
                 tools_factory=lambda: get_default_tools(config=config),
                 kernel=kernel,
                 summarizer=summarizer,
+                session_logger=session_logger,
             )
             scheduler_runtime = KernelScheduler(kernel=kernel, core_pool=core_pool)
             await scheduler_runtime.start()

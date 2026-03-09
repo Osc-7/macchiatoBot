@@ -27,14 +27,25 @@ class ConversationContext:
     max_messages: int = 100
     """最大消息数量（超出时会裁剪旧消息）"""
 
-    def add_user_message(self, content: str) -> None:
+    def add_user_message(
+        self,
+        content: str,
+        *,
+        media_items: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
         """
         添加用户消息。
 
         Args:
-            content: 消息内容
+            content: 消息文本内容
+            media_items: 可选，多模态内容（如图片 image_url），与文本合并为一条消息
         """
-        self._add_message({"role": "user", "content": content})
+        if media_items:
+            parts: List[Dict[str, Any]] = [{"type": "text", "text": content}]
+            parts.extend(media_items)
+            self._add_message({"role": "user", "content": parts})
+        else:
+            self._add_message({"role": "user", "content": content})
 
     def add_assistant_message(
         self,

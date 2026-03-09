@@ -206,6 +206,7 @@ async def _main() -> None:
         tools_factory=lambda: get_default_tools(config=cfg),
         kernel=kernel,
         summarizer=summarizer,
+        session_logger=session_logger,
     )
     scheduler_runtime = KernelScheduler(kernel=kernel, core_pool=core_pool)
     stop_event = asyncio.Event()

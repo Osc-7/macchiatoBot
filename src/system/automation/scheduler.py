@@ -36,11 +36,6 @@ _JOB_INSTRUCTIONS: Dict[str, str] = {
         "调用 get_digest(digest_type='weekly', generate_if_missing=true)。"
         "然后仅输出“操作 + 结果”，不要提出追问或建议。"
     ),
-    "shuiyuan.archive_summarize": (
-        "这是自动化定时任务。请只执行以下操作："
-        "调用 shuiyuan_summarize_archive() 总结水源归档的聊天记录。"
-        '然后仅输出"操作 + 结果"，不要提出追问或建议。'
-    ),
     "heartbeat.monitor": (
         "这是心跳/监控任务。请执行轻量检查："
         "调用 get_sync_status() 获取同步状态，如有异常再调用 get_events/get_tasks 简要确认。"

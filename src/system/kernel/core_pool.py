@@ -75,6 +75,7 @@ class CorePool:
         max_sessions: int = 100,
         kernel: Optional[Any] = None,
         summarizer: Optional[Any] = None,
+        session_logger: Optional[Any] = None,
     ) -> None:
         from agent_core.config import get_config
 
@@ -83,6 +84,7 @@ class CorePool:
         self._max_sessions = max_sessions
         self._kernel = kernel       # AgentKernel 实例，用于 kill()
         self._summarizer = summarizer  # SessionSummarizer 实例，用于摘要持久化
+        self._session_logger = session_logger  # 传入 ScheduleAgent，用于记录 session jsonl
         # session_id → CoreEntry
         self._pool: Dict[str, CoreEntry] = {}
         # per-session 锁，防止并发创建
@@ -185,9 +187,12 @@ class CorePool:
                 logger.warning("CorePool: finalize_session failed (session=%s): %s", session_id, exc)
 
         # ── Step 2: summarize — 写入长期记忆 ───────────────────────────────
+        # cron 会话不持久化摘要，避免创建 data/memory/cron:xxx 等目录
         if core_stats is not None and self._summarizer is not None:
             try:
-                long_term_memory = getattr(agent, "_long_term_memory", None)
+                long_term_memory = None
+                if not (session_id or "").startswith("cron:"):
+                    long_term_memory = getattr(agent, "_long_term_memory", None)
                 messages = None
                 ctx = getattr(agent, "_context", None)
                 if ctx is not None:
@@ -252,12 +257,19 @@ class CorePool:
         from agent_core.kernel_interface import CoreProfile as _CoreProfile
 
         if profile is None:
-            profile = _CoreProfile.default_full(
-                frontend_id=source,
-                dialog_window_id=user_id,
-                max_context_tokens=getattr(self._config.agent, "max_context_tokens", 80_000),
-                session_expired_seconds=getattr(self._config.agent, "session_expired_seconds", 1_800),
-            )
+            if source in ("cli", "feishu"):
+                profile = _CoreProfile.full_from_config(
+                    self._config,
+                    frontend_id=source,
+                    dialog_window_id=user_id,
+                )
+            else:
+                profile = _CoreProfile.default_full(
+                    frontend_id=source,
+                    dialog_window_id=user_id,
+                    max_context_tokens=getattr(self._config.agent, "max_context_tokens", 80_000),
+                    session_expired_seconds=getattr(self._config.agent, "session_expired_seconds", 1_800),
+                )
 
         # 优先使用 system.tools.build_tool_registry，与 Kernel/MCP 工具装配一致
         from system.tools import build_tool_registry
@@ -277,6 +289,7 @@ class CorePool:
             timezone=self._config.time.timezone,
             user_id=user_id,
             source=source,
+            session_logger=self._session_logger,
         )
 
         await agent.__aenter__()

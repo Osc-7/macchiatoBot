@@ -2,11 +2,10 @@
 水源社区回复流程。
 
 当 Agent 被 @ 调用时：
-1. 读取 MEMORY.md（data/memory/long_term/shuiyuan）
-2. 读取该用户最近 100 条聊天记录（shuiyuan.db）
-3. 读取该楼最近 50 条帖子（Discourse API）
-4. 组装 LLM 上下文
-5. 限流检查后发帖并记录
+1. 读取该用户最近 N 条聊天记录（每用户独立 DB）
+2. 读取该楼最近 N 条帖子（Discourse API）
+3. 组装 LLM 上下文
+4. 限流检查后发帖并记录
 """
 
 from __future__ import annotations
@@ -16,67 +15,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from .client import ShuiyuanClient, ShuiyuanClientPool
-from .db import ShuiyuanDB
-
-
-def load_shuiyuan_memory(memory_dir: str) -> str:
-    """加载水源社区长期记忆 MEMORY.md。"""
-    path = Path(memory_dir) / "MEMORY.md"
-    if path.exists():
-        return path.read_text(encoding="utf-8")
-    return ""
-
-
-def build_reply_context(
-    username: str,
-    topic_id: int,
-    reply_to_post_number: Optional[int],
-    *,
-    db: ShuiyuanDB,
-    client: ShuiyuanClient,
-    memory_dir: str,
-    thread_posts_count: int = 50,
-) -> List[dict[str, Any]]:
-    """
-    组装水源回复的 LLM 消息上下文。
-
-    Returns:
-        messages 列表，可直接传入 LLM chat 接口
-    """
-    messages: List[dict[str, Any]] = []
-
-    # 1. 系统提示：长期记忆 + 水源规则
-    memory = load_shuiyuan_memory(memory_dir)
-    system_content = "## 水源社区 Agent 长期记忆\n\n" + (memory or "（暂无）") + "\n\n---\n\n"
-    system_content += "你是水源社区中的 AI 助手，被 @ 调用后需根据该楼上下文和用户历史聊天记录，生成自然、友善的回复。"
-    messages.append({"role": "system", "content": system_content})
-
-    # 2. 该楼最近 N 条帖子（作为上文）
-    posts = client.get_topic_recent_posts(topic_id, limit=thread_posts_count)
-    thread_lines: List[str] = []
-    for p in posts:
-        pn = p.get("post_number", 0)
-        uname = p.get("username", "")
-        raw = p.get("raw", p.get("cooked", ""))[:500]
-        thread_lines.append(f"[{pn}L] @{uname}: {raw}")
-    if thread_lines:
-        messages.append({
-            "role": "user",
-            "content": "## 该楼最近帖子\n\n" + "\n".join(thread_lines),
-        })
-        messages.append({
-            "role": "assistant",
-            "content": "已了解该楼上下文。",
-        })
-
-    # 3. 该用户与 Agent 的聊天历史
-    chat_rows = db.get_chat(username)
-    for row in chat_rows:
-        role = row.get("role", "user")
-        content = row.get("content", "")
-        messages.append({"role": role, "content": content})
-
-    return messages
+from .db import ShuiyuanDB, get_shuiyuan_db_path_for_user
 
 
 def post_reply(
@@ -133,11 +72,13 @@ def record_user_message(
     db.append_chat(username, topic_id, "user", content, post_id=post_id)
 
 
-def get_shuiyuan_db_from_config(config: Any) -> ShuiyuanDB:
-    """从 config 构建 ShuiyuanDB。"""
+def get_shuiyuan_db_for_user(config: Any, username: str) -> ShuiyuanDB:
+    """从 config 构建该用户的 ShuiyuanDB（每用户独立 DB）。"""
     cfg = config.shuiyuan
+    base_dir = getattr(cfg, "db_base_dir", None) or "./data/shuiyuan"
+    db_path = get_shuiyuan_db_path_for_user(base_dir, username)
     return ShuiyuanDB(
-        db_path=cfg.db_path,
+        db_path=db_path,
         chat_limit_per_user=cfg.memory.chat_limit_per_user,
         replies_per_minute=cfg.rate_limit.replies_per_minute,
     )
@@ -161,9 +102,9 @@ def get_shuiyuan_client_from_config(config: Any) -> Optional[ShuiyuanClient]:
     if not keys:
         return None
 
-    # 在数据库同目录下持久化 Key 状态，保证进程重启后冷却时间仍生效
-    db_path = Path(cfg.db_path)
-    state_path = db_path.with_name("user_api_keys_state.json")
+    # 在数据根目录下持久化 Key 状态，保证进程重启后冷却时间仍生效
+    base_dir = Path(getattr(cfg, "db_base_dir", None) or "./data/shuiyuan")
+    state_path = base_dir / "user_api_keys_state.json"
 
     # 无论是单 Key 还是多 Key，都通过 ShuiyuanClientPool 管理，统一支持日级限流切换
     return ShuiyuanClientPool(

@@ -166,17 +166,13 @@ class SjtuJwConfig(BaseModel):
 
 
 class ShuiyuanMemoryConfig(BaseModel):
-    """水源社区记忆配置"""
+    """水源社区记忆配置（每用户独立 DB，无长期记忆）"""
 
     chat_limit_per_user: int = Field(
         default=100,
         ge=1,
         le=1000,
         description="每用户保留的最近聊天记录条数",
-    )
-    long_term_dir: str = Field(
-        default="./data/memory/long_term/shuiyuan",
-        description="长期记忆目录，存放 MEMORY.md（与主 Agent 隔离，可手动维护）",
     )
     thread_posts_count: int = Field(
         default=50,
@@ -222,9 +218,9 @@ class ShuiyuanConfig(BaseModel):
         default="https://shuiyuan.sjtu.edu.cn",
         description="水源社区站点 URL",
     )
-    db_path: str = Field(
-        default="./data/shuiyuan/shuiyuan.db",
-        description="水源社区 SQLite 数据库路径，用于聊天记录与限流",
+    db_base_dir: str = Field(
+        default="./data/shuiyuan",
+        description="水源社区数据根目录，每用户 DB 为 {base}/users/{username}/shuiyuan.db",
     )
     memory: ShuiyuanMemoryConfig = Field(
         default_factory=ShuiyuanMemoryConfig,
@@ -942,6 +938,11 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     env_shuiyuan_key = os.environ.get("SHUIYUAN_USER_API_KEY")
     if env_shuiyuan_key:
         raw_config["shuiyuan"]["user_api_key"] = env_shuiyuan_key
+    # 兼容旧 db_path：迁移为 db_base_dir（取 db_path 的父目录）
+    shuiyuan_raw = raw_config["shuiyuan"]
+    if isinstance(shuiyuan_raw, dict) and "db_path" in shuiyuan_raw and "db_base_dir" not in shuiyuan_raw:
+        p = Path(str(shuiyuan_raw["db_path"]))
+        shuiyuan_raw["db_base_dir"] = str(p.parent)
 
     # 兼容旧配置：user 已迁移至 prompts/system/user.md
     raw_config.pop("user", None)

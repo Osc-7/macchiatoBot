@@ -286,10 +286,8 @@ class KernelScheduler:
             turn_id = agent._current_turn_id
 
             content_items = request.metadata.get("content_items")
-            agent._context.add_user_message(request.text)
+            agent._context.add_user_message(request.text, media_items=content_items or None)
             agent._outgoing_attachments.clear()
-            if content_items:
-                agent._pending_multimodal_items.extend(content_items)
 
             # session_logger 写入用户消息
             if agent._session_logger:

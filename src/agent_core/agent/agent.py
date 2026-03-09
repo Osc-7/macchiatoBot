@@ -377,11 +377,9 @@ class ScheduleAgent:
         else:
             self._last_recall_result = RecallResult()
 
-        # 准备上下文
-        self._context.add_user_message(user_input)
+        # 准备上下文（图片等多模态内容合并进用户消息，当轮首条 LLM 即可看到）
+        self._context.add_user_message(user_input, media_items=content_items or None)
         self._outgoing_attachments.clear()
-        if content_items:
-            self._pending_multimodal_items.extend(content_items)
         if self._session_logger:
             self._session_logger.on_user_message(turn_id, user_input)
         if self._memory_enabled:

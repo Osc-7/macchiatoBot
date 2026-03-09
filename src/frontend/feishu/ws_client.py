@@ -57,9 +57,9 @@ async def _handle_im_message_event_async(data: Any) -> None:
         logger.warning("Received unexpected Feishu ws event payload, skip: %r", data)
         return
 
-    # 支持 text / image / file / media / audio
+    # 支持 text / image / file / media / audio / post（富文本内嵌图片）
     message_type = getattr(msg, "message_type", None) or ""
-    supported_types = ("text", "image", "file", "media", "audio")
+    supported_types = ("text", "image", "file", "media", "audio", "post")
     if message_type not in supported_types:
         logger.debug("ignore unsupported ws message_type=%s", message_type)
         return
@@ -90,11 +90,19 @@ async def _handle_im_message_event_async(data: Any) -> None:
     )
     event_model = FeishuMessageEvent(sender=feishu_sender, message=feishu_message)
 
+    raw_content = getattr(msg, "content", "") or ""
     content_refs, text = parse_feishu_message(
         message_id=message_id,
         message_type=message_type,
-        content=getattr(msg, "content", "") or "",
+        content=raw_content,
     )
+    # 图片/富文本消息若未解析出 content_refs，记录便于排查
+    if message_type in ("image", "post") and not content_refs and raw_content:
+        logger.debug(
+            "feishu %s message parsed but no content_refs: content_preview=%s",
+            message_type,
+            (raw_content[:200] + "..." if len(raw_content) > 200 else raw_content),
+        )
     if not text and not content_refs:
         logger.debug("ignore empty ws message")
         return

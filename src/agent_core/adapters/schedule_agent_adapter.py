@@ -127,10 +127,10 @@ class ScheduleAgentAdapter:
         else:
             self._agent._last_recall_result = RecallResult()
 
-        self._agent._context.add_user_message(agent_input.text)
+        self._agent._context.add_user_message(
+            agent_input.text, media_items=content_items or None
+        )
         self._agent._outgoing_attachments.clear()
-        if content_items:
-            self._agent._pending_multimodal_items.extend(content_items)
         if self._agent._session_logger:
             self._agent._session_logger.on_user_message(turn_id, agent_input.text)
         if self._agent._memory_enabled:

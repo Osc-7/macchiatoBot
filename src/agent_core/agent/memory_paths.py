@@ -35,11 +35,7 @@ def resolve_memory_owner_paths(
     frontend_id = _ns_segment(source, "cli")
     uid = _ns_segment(user_id, "root")
 
-    if source == "shuiyuan" and config and getattr(config, "shuiyuan", None):
-        shuiyuan_cfg = config.shuiyuan
-        if shuiyuan_cfg.enabled and shuiyuan_cfg.memory:
-            base = Path(shuiyuan_cfg.memory.long_term_dir).parent
-
+    # 统一按 data/memory/{frontend}/{user}/ 划分，不使用 data/memory/long_term/shuiyuan
     owner_dir = base / frontend_id / uid
     long_term_dir = owner_dir / "long_term"
     content_dir = owner_dir / "content"

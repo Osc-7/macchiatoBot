@@ -1,11 +1,10 @@
 """
 水源社区工具集。
 
-提供只读工具，供 Agent 访问上海交通大学水源社区（Discourse 论坛）：
+提供工具供 Agent 访问上海交通大学水源社区（Discourse 论坛）：
 - shuiyuan_search：搜索水源社区
 - shuiyuan_get_topic：获取单个话题详情
 - shuiyuan_post_reply：在水源社区话题中发帖/回复
-- shuiyuan_summarize_archive：总结归档聊天记录，写入 entries.jsonl
 """
 
 from __future__ import annotations
@@ -16,15 +15,6 @@ from typing import Any, List, Optional
 from agent_core.config import Config, ShuiyuanConfig
 
 from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
-
-_ARCHIVE_SUMMARIZE_PROMPT = """\
-你是一个会话摘要引擎。给定水源社区某用户与玛奇朵的若干条归档聊天记录，请提取核心内容，用 1-3 句话总结这段对话的主题和要点。
-
-规则：
-- 使用中文
-- 简洁、客观
-- 只输出摘要正文，不要输出 JSON 或其他格式
-"""
 
 
 def _get_shuiyuan_client(config: Optional[Config]) -> Optional[Any]:
@@ -486,8 +476,12 @@ class ShuiyuanPostReplyTool(BaseTool):
             )
 
         cfg = self._config.shuiyuan
+        from frontend.shuiyuan_integration.db import get_shuiyuan_db_path_for_user
+
+        base_dir = getattr(cfg, "db_base_dir", None) or "./data/shuiyuan"
+        db_path = get_shuiyuan_db_path_for_user(base_dir, self._username)
         db = ShuiyuanDB(
-            db_path=cfg.db_path,
+            db_path=db_path,
             chat_limit_per_user=cfg.memory.chat_limit_per_user,
             replies_per_minute=cfg.rate_limit.replies_per_minute,
         )
@@ -504,101 +498,3 @@ class ShuiyuanPostReplyTool(BaseTool):
         return ToolResult(success=False, error="SHUIYUAN_POST_FAILED", message=msg)
 
 
-class ShuiyuanSummarizeArchiveTool(BaseTool):
-    """总结水源社区归档聊天记录，写入 entries.jsonl，供 automation 监控任务调用。"""
-
-    def __init__(self, config: Optional[Config] = None, batch_size: int = 50):
-        self._config = config
-        self._batch_size = max(50, min(100, batch_size))
-
-    @property
-    def name(self) -> str:
-        return "shuiyuan_summarize_archive"
-
-    def get_definition(self) -> ToolDefinition:
-        return ToolDefinition(
-            name="shuiyuan_summarize_archive",
-            description="""总结水源社区归档的聊天记录，批量（每用户 50 条）调用 LLM 生成摘要，写入长期记忆 entries.jsonl。
-
-适用场景：
-- automation 定时任务周期性调用
-- 归档表 shuiyuan_archive 中某用户记录数 >= 50 时触发总结
-
-工具会遍历归档表中满足条件的用户，每用户取最早 50 条，总结后写入 entries，并删除已总结的归档。""",
-            parameters=[],
-            usage_notes=[
-                "需配置 shuiyuan.enabled=true 和 shuiyuan.db_path",
-                "需配置 memory 和 LLM",
-            ],
-            tags=["水源", "水源社区", "归档", "总结", "automation"],
-        )
-
-    async def execute(self, **kwargs: Any) -> ToolResult:
-        if not self._config or not self._config.shuiyuan.enabled:
-            return ToolResult(
-                success=False,
-                error="SHUIYUAN_DISABLED",
-                message="水源社区未启用，请在 config.yaml 中设置 shuiyuan.enabled=true",
-            )
-        try:
-            from frontend.shuiyuan_integration.db import ShuiyuanDB
-
-            from agent_core.llm import LLMClient
-            from agent_core.memory import LongTermMemory
-        except ImportError as e:
-            return ToolResult(
-                success=False,
-                error="IMPORT_ERROR",
-                message=f"无法加载依赖: {e}",
-            )
-
-        cfg = self._config.shuiyuan
-        db = ShuiyuanDB(
-            db_path=cfg.db_path,
-            chat_limit_per_user=cfg.memory.chat_limit_per_user,
-            replies_per_minute=cfg.rate_limit.replies_per_minute,
-        )
-        long_term_dir = cfg.memory.long_term_dir
-        memory_md = os.path.join(long_term_dir, "MEMORY.md")
-        long_term = LongTermMemory(storage_dir=long_term_dir, memory_md_path=memory_md)
-
-        usernames: List[str] = db.list_usernames_with_archive(min_count=self._batch_size)
-        if not usernames:
-            return ToolResult(
-                success=True,
-                message="暂无满足条件的归档记录（每用户需 >= 50 条）",
-                data={"summarized_users": 0},
-            )
-
-        llm = LLMClient(self._config)
-        results: List[str] = []
-        for username in usernames:
-            batch = db.get_archive_oldest(username, limit=self._batch_size)
-            if len(batch) < self._batch_size:
-                continue
-            lines: List[str] = []
-            for r in batch:
-                role = r.get("role", "user")
-                content = (r.get("content") or "")[:500]
-                lines.append(f"[{role}]: {content}")
-            input_text = "\n".join(lines)
-            response = await llm.chat(
-                messages=[{"role": "user", "content": input_text}],
-                system_message=_ARCHIVE_SUMMARIZE_PROMPT,
-            )
-            summary = (response.content or "").strip()
-            if summary:
-                long_term.add_recent_topic(
-                    summary=summary,
-                    session_id="shuiyuan:archive",
-                    owner_id=username,
-                )
-                ids = [r["id"] for r in batch]
-                deleted = db.delete_archive_by_ids(ids)
-                results.append(f"用户 {username}: 总结 {len(batch)} 条，删除 {deleted} 条")
-
-        return ToolResult(
-            success=True,
-            message="; ".join(results) if results else "无满足条件的归档",
-            data={"summarized_users": len(results), "details": results},
-        )

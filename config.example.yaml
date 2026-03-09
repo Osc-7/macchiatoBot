@@ -94,10 +94,9 @@ shuiyuan:
   enabled: false
   user_api_key: null
   site_url: "https://shuiyuan.sjtu.edu.cn"
-  db_path: "./data/shuiyuan/shuiyuan.db"
+  db_base_dir: "./data/shuiyuan"  # 每用户 DB: {base}/users/{username}/shuiyuan.db
   memory:
     chat_limit_per_user: 100
-    long_term_dir: "./data/memory/long_term/shuiyuan"
     thread_posts_count: 50
     tool_max_posts: 50  # 水源工具 search/get_topic 返回的最大帖子数
   rate_limit:
@@ -122,14 +121,6 @@ automation:
       job_type: "sync.email"
       user_id: "default"
       enabled: true
-    # 水源归档总结：每 5 分钟检查 shuiyuan_archive，满足 50 条/用户时触发 LLM 总结并写入 entries
-    # 需 shuiyuan.enabled=true；任务状态持久化在 job_definitions.json，daemon 重启后不重置
-    - name: "shuiyuan_archive_summarize"
-      description: "调用 shuiyuan_summarize_archive() 总结水源归档的聊天记录。"
-      interval_minutes: 5
-      job_type: "shuiyuan.archive_summarize"
-      user_id: "default"
-      enabled: false  # 启用水源后设为 true
     # 心跳/监控：轻量检查同步状态，仅在有异常时通知；使用 CoreProfile.default_heartbeat（只读权限、极短 TTL）
     - name: "heartbeat_monitor"
       description: "这是心跳/监控任务。请调用 get_sync_status() 获取同步状态，如有异常再调用 get_events/get_tasks 简要确认，仅在需要人工关注时调用 notify_owner。然后仅输出检查结果（1-2 句）。"

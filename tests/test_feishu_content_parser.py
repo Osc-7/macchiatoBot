@@ -42,3 +42,33 @@ def test_parse_media_message():
     assert refs[0].key == "file_abc"
     assert refs[0].extra == {"message_id": "om_3"}
     assert text == "[用户发送了一段视频]"
+
+
+def test_parse_post_message_with_image():
+    """富文本 post 消息内嵌图片解析"""
+    content = '{"zh_cn":{"title":"架构图","content":[[{"tag":"text","text":"见下图"}],[{"tag":"img","image_key":"img_abc123"}]]}}'
+    refs, text = parse_feishu_message(
+        message_id="om_4",
+        message_type="post",
+        content=content,
+    )
+    assert len(refs) == 1
+    assert refs[0].source == "feishu"
+    assert refs[0].ref_type == "image"
+    assert refs[0].key == "img_abc123"
+    assert refs[0].extra == {"message_id": "om_4"}
+    assert "架构图" in text
+    assert "见下图" in text
+
+
+def test_parse_post_message_image_only():
+    """富文本 post 仅图片无文字"""
+    content = '{"zh_cn":{"title":"","content":[[{"tag":"img","image_key":"img_only"}]]}}'
+    refs, text = parse_feishu_message(
+        message_id="om_5",
+        message_type="post",
+        content=content,
+    )
+    assert len(refs) == 1
+    assert refs[0].key == "img_only"
+    assert text == "[用户发送了一张图片]"

@@ -337,7 +337,7 @@ class NotifyOwnerTool(BaseTool):
             )
 
         try:
-            from agent_core.frontend.feishu.client import FeishuClient
+            from frontend.feishu.client import FeishuClient
         except ImportError as e:
             return ToolResult(
                 success=False,

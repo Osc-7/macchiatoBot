@@ -218,7 +218,12 @@ class AutomationCoreGateway:
 
         使用 OutputRouter（Future）机制：submit() 返回 Future，await 等待结果。
         不同 session 的请求并发执行，先完成先返回（乱序完成精准路由）。
+
+        注意：Scheduler 只消费 metadata["content_items"]，不解析 content_refs。
+        飞书等前端传 content_refs，此处需先解析为 content_items 再交给 Scheduler，
+        确保当轮首条 LLM 请求即包含图片等多模态内容，而非让 AI 调用 attach_media。
         """
+        from agent_core.content import ContentReference, resolve_content_refs
         from agent_core.kernel_interface import KernelRequest
 
         metadata = dict(agent_input.metadata)
@@ -227,11 +232,29 @@ class AutomationCoreGateway:
         if hooks is not None:
             metadata["_hooks"] = hooks
 
+        # 将 content_refs（飞书 image_key 等）解析为 content_items，供 Scheduler 注入首轮 LLM
+        raw_refs = metadata.get("content_refs")
+        if isinstance(raw_refs, list) and raw_refs:
+            try:
+                refs = [ContentReference.from_dict(r) for r in raw_refs]
+                content_items = await resolve_content_refs(refs)
+                if content_items:
+                    metadata["content_items"] = content_items
+            except Exception as exc:
+                logger.warning("content_refs resolve failed before scheduler: %s", exc)
+
         profile = metadata.pop("_core_profile", None)
+        frontend_id = self._source
+        if profile is None and (session_id or "").startswith("shuiyuan:"):
+            username = session_id.split(":", 1)[1] if ":" in session_id else "default"
+            from agent_core.kernel_interface import CoreProfile
+            profile = CoreProfile.for_shuiyuan(dialog_window_id=username)
+            frontend_id = "shuiyuan"
+            metadata.setdefault("user_id", username)
         request = KernelRequest.create(
             text=agent_input.text,
             session_id=session_id,
-            frontend_id=self._source,
+            frontend_id=frontend_id,
             metadata=metadata,
             profile=profile,
         )

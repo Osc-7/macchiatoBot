@@ -1,5 +1,57 @@
 # Schedule Agent 开发进度
 
+## 2026-03-10 - 飞书图片当轮注入修复（content_refs→content_items + 合并进用户消息）
+
+### 问题:
+- 用户发图后，AI 收到占位文本 "[用户发送了一张图片]" 但看不到图，转而调用 attach_media 工具
+- 正确行为：图片应在当轮首条 LLM 请求中作为多模态输入直接注入，由模型直接识图
+
+### 根因:
+1. **Scheduler 路径未解析 content_refs**：Gateway 的 _run_turn_via_scheduler 将 metadata（含 content_refs）原样传给 KernelScheduler，而 Scheduler 只读取 metadata["content_items"]，导致图片从未注入
+2. **用户图片错误走 _pending_multimodal_items**：即使用 content_items 被传入，原逻辑是 extend 到 _pending_multimodal_items，由 append_pending_multimodal_messages 加一条「工具请求附加的媒体」消息，语义错误且与 attach_media 的流程混用
+
+### 完成内容:
+- `src/system/automation/core_gateway.py`：_run_turn_via_scheduler 在创建 KernelRequest 前，将 content_refs 解析为 content_items 并写入 metadata
+- `src/agent_core/context/conversation.py`：add_user_message 新增 media_items 参数，支持多模态用户消息
+- `src/system/kernel/scheduler.py`：add_user_message(text, media_items=content_items)，图片合并进用户消息
+- `src/agent_core/adapters/schedule_agent_adapter.py`：同上
+- `src/agent_core/agent/agent.py`：process_input 同上
+
+### 测试:
+- pytest tests/test_agent.py tests/test_content_resolver.py tests/test_automation_core_gateway.py tests/test_kernel_runtime.py 全部通过
+
+---
+
+## 2026-03-10 - 飞书图片消息收不到 content_refs 修复（支持 post 富文本内嵌图）
+
+### 问题:
+- 用户发图后，AI 反馈「没有收到图片附件的 metadata，也没有多模态输入挂载」
+- 系统侧 content_refs 为空，多模态输入未挂载
+
+### 根因:
+- 飞书移动端/部分场景下，图片可能以 **post** 类型（富文本）发送，而非纯 **image** 类型
+- 原逻辑仅支持 text/image/file/media/audio，**post 类型被整条忽略**，导致带图消息被丢弃
+- 若用户随后发文字「你再看看能加载吗」，Agent 只处理文字，回复「看不到图」，但第一条图已丢失
+
+### 完成内容:
+- `src/frontend/feishu/content_parser.py`
+  - 新增 `parse_feishu_post_to_refs()`：解析 post 富文本内嵌图片（img 标签）和文本
+  - `parse_feishu_message()` 支持 `post` 类型，调用上述解析
+- `src/frontend/feishu/ws_client.py` 与 `router.py`
+  - 将 `post` 加入 `supported_types`，不再忽略 post 消息
+  - 新增调试日志：image/post 解析后若无 content_refs 则记录 content 预览，便于后续排查
+- `tests/test_feishu_content_parser.py`
+  - 新增 `test_parse_post_message_with_image`、`test_parse_post_message_image_only`
+
+### 测试:
+- `pytest tests/test_feishu_content_parser.py -v` 全部 5 个测试通过
+
+### 备注:
+- 若仍无法看图，可将 ws_client 日志 level 调到 DEBUG，复现后查看 `content_preview` 是否为预期 JSON 结构
+- 飞书 post 结构: `{"zh_cn":{"content":[[{"tag":"img","image_key":"img_xxx"}]]}}`
+
+---
+
 ## 2026-03-09 - 任务: Kernel 架构 review 问题修复（TTL 误杀防护 + profile 热更新 + 压缩边界）
 
 ### 完成内容:

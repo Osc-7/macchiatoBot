@@ -22,14 +22,20 @@ Feishu long-connection gateway.
 from __future__ import annotations
 
 import logging
+import sys
 
-from frontend.feishu.ws_client import run_ws_client
-
-
+# 必须在其他导入前配置 logging，避免 lark-oapi 等库先初始化
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True,
 )
+# 确保 frontend.feishu 的 logger 输出到 stdout
+logging.getLogger("frontend.feishu").setLevel(logging.INFO)
+
+from frontend.feishu.ws_client import run_ws_client
+
 logger = logging.getLogger("feishu_ws_gateway")
 
 

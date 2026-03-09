@@ -8,8 +8,7 @@ from .client import ShuiyuanClient
 from .db import ShuiyuanDB
 from .reply import (
     get_shuiyuan_client_from_config,
-    get_shuiyuan_db_from_config,
-    load_shuiyuan_memory,
+    get_shuiyuan_db_for_user,
     post_reply,
     record_user_message,
 )
@@ -24,8 +23,7 @@ __all__ = [
     "ShuiyuanDB",
     "run_shuiyuan_reply",
     "get_shuiyuan_client_from_config",
-    "get_shuiyuan_db_from_config",
-    "load_shuiyuan_memory",
+    "get_shuiyuan_db_for_user",
     "post_reply",
     "record_user_message",
     "generate_user_api_key",

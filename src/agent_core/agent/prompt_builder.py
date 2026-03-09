@@ -28,24 +28,7 @@ def build_agent_system_prompt(agent: Any) -> str:
     scopes = _visible_scopes(agent)
 
     if agent._source == "shuiyuan":
-        mem_dir = getattr(
-            getattr(getattr(agent._config, "shuiyuan", None), "memory", None),
-            "long_term_dir",
-            "./data/memory/long_term/shuiyuan",
-        )
-        recent_topics: List[Any] = []
-        if agent._memory_enabled:
-            recall_n = getattr(agent._config.memory, "recall_top_n", 5) or 5
-            recent_topics = agent._long_term_memory.get_recent_topics(
-                n=recall_n,
-                owner_id=agent._user_id,
-            )
-        return build_shuiyuan_system_prompt(
-            time_context=time_str,
-            config=agent._config,
-            memory_dir=mem_dir,
-            recent_topics=recent_topics,
-        )
+        return build_shuiyuan_system_prompt(time_context=time_str, config=agent._config)
 
     prompt = build_prompt(
         time_context=time_str,

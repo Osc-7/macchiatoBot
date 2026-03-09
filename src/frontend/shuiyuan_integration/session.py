@@ -86,7 +86,45 @@ def is_invocation_valid_from_raw(raw_message: str, *, config: Optional[Config] =
 
 
 from agent_core import ScheduleAgent
+from agent_core.interfaces import AgentHooks, AgentRunInput
 from agent_core.tools import ShuiyuanGetTopicTool, ShuiyuanRetortTool, ShuiyuanSearchTool
+
+from system.automation import AutomationIPCClient, default_socket_path
+
+
+async def _run_via_daemon(
+    username: str,
+    topic_id: int,
+    ctx_user: str,
+    reply_to_post_number: Optional[int],
+    db: Any,
+    client: Any,
+) -> Optional[str]:
+    """通过 daemon IPC 运行，使用 per-user 受限 Core。成功返回 str（可为空），daemon 不可用时返回 None。"""
+    try:
+        ipc = AutomationIPCClient(owner_id=username, source="shuiyuan", socket_path=default_socket_path())
+        if not await ipc.ping():
+            return None
+    except Exception:
+        return None
+
+    await ipc.switch_session(f"shuiyuan:{username}", create_if_missing=True)
+    result = await ipc.run_turn(AgentRunInput(text=ctx_user))
+    reply_text = (result.output_text or "").strip()
+    if reply_text:
+        from .reply import post_reply
+        success, msg = post_reply(
+            username=username,
+            topic_id=topic_id,
+            raw=reply_text,
+            reply_to_post_number=reply_to_post_number,
+            db=db,
+            client=client,
+        )
+        if not success:
+            import logging
+            logging.getLogger("shuiyuan_session").warning("发帖失败: %s", msg)
+    return reply_text
 
 
 async def run_shuiyuan_reply(
@@ -127,11 +165,10 @@ async def run_shuiyuan_reply(
 
     try:
         from frontend.shuiyuan_integration import (
-            ShuiyuanDB,
             get_shuiyuan_client_from_config,
             record_user_message,
         )
-        from frontend.shuiyuan_integration.reply import post_reply
+        from frontend.shuiyuan_integration.reply import post_reply, get_shuiyuan_db_for_user
     except ImportError as e:
         return f"无法加载水源集成: {e}"
 
@@ -139,11 +176,7 @@ async def run_shuiyuan_reply(
     if not client:
         return "水源社区未配置 User-Api-Key，请设置 shuiyuan.user_api_key 或 SHUIYUAN_USER_API_KEY"
 
-    db = ShuiyuanDB(
-        db_path=cfg.shuiyuan.db_path,
-        chat_limit_per_user=cfg.shuiyuan.memory.chat_limit_per_user,
-        replies_per_minute=cfg.shuiyuan.rate_limit.replies_per_minute,
-    )
+    db = get_shuiyuan_db_for_user(cfg, username)
     record_user_message(username, topic_id, user_message, db=db)
 
     # 组装初始上下文：该楼最近 N 条 + 用户聊天历史
@@ -208,6 +241,18 @@ async def run_shuiyuan_reply(
         + user_identity
         + f"，说了：\n\n{user_message}\n\n请根据上文理解语境，直接输出你的回复正文（automation 层会自动发帖，不要调用发帖工具）。"
     )
+
+    # 优先通过 daemon IPC（per-user 受限 Core），不可用时回退到本地 Agent
+    via_daemon = await _run_via_daemon(
+        username=username,
+        topic_id=topic_id,
+        ctx_user=ctx_user,
+        reply_to_post_number=reply_to_post_number,
+        db=db,
+        client=client,
+    )
+    if via_daemon is not None:
+        return via_daemon
 
     # 水源 session 日志（与主 Agent 分开，存到 logs/sessions/shuiyuan/）
     session_logger = None

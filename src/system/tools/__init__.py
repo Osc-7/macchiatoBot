@@ -8,6 +8,7 @@ System-level tool registry assembly.
 - schedule: 日程 / 任务 / 时间解析 / 规划器
 - file: 文件读写与修改
 - web: （预留，当前由 MCP 工具负责）
+- memory: 长期记忆、内容记忆、chat_history 检索
 - canvas: Canvas 课表与作业同步 / 查询
 - shuiyuan: 水源社区相关工具
 - automation: 自动化调度、摘要、通知等
@@ -25,9 +26,12 @@ from typing import List, Optional
 
 from agent_core.config import Config, get_config
 from agent_core.kernel_interface import CoreProfile
+from agent_core.orchestrator import ToolWorkingSetManager
 from agent_core.memory import ContentMemory, LongTermMemory
 from agent_core.tools import (
     BaseTool,
+    CallToolTool,
+    SearchToolsTool,
     VersionedToolRegistry,
     AddEventTool,
     AddTaskTool,
@@ -65,8 +69,13 @@ from agent_core.tools import (
     ShuiyuanPostReplyTool,
     ShuiyuanRetortTool,
     ShuiyuanSearchTool,
-    ShuiyuanSummarizeArchiveTool,
     AckNotificationTool,
+)
+from agent_core.memory.chat_history_db import ChatHistoryDB
+from agent_core.tools.chat_history_tools import (
+    ChatContextTool,
+    ChatScrollTool,
+    ChatSearchTool,
 )
 
 __all__ = [
@@ -163,6 +172,36 @@ def _build_memory_tools(
     return tools
 
 
+def _build_chat_history_tools(
+    config: Config,
+    *,
+    memory_owner_id: Optional[str] = None,
+    memory_source: Optional[str] = None,
+) -> List[BaseTool]:
+    """对话历史检索工具：chat_search、chat_context、chat_scroll。"""
+    tools: List[BaseTool] = []
+    mem_cfg = getattr(config, "memory", None)
+    if not mem_cfg or not getattr(mem_cfg, "enabled", False):
+        return tools
+
+    user_id = (memory_owner_id or os.getenv("SCHEDULE_USER_ID", "root")).strip() or "root"
+    source = (memory_source or os.getenv("SCHEDULE_SOURCE", "cli")).strip() or "cli"
+
+    from agent_core.agent.memory_paths import resolve_memory_owner_paths
+
+    paths = resolve_memory_owner_paths(
+        mem_cfg, user_id, config=config, source=source
+    )
+    chat_db = ChatHistoryDB(
+        paths["chat_history_db_path"],
+        default_source=None,
+    )
+    tools.append(ChatSearchTool(chat_db))
+    tools.append(ChatContextTool(chat_db))
+    tools.append(ChatScrollTool(chat_db))
+    return tools
+
+
 def _build_multimodal_tools(config: Config) -> List[BaseTool]:
     tools: List[BaseTool] = []
     mm_cfg = getattr(config, "multimodal", None)
@@ -190,7 +229,6 @@ def _build_shuiyuan_tools(config: Config) -> List[BaseTool]:
         tools.append(ShuiyuanGetTopicTool(config=config))
         tools.append(ShuiyuanRetortTool(config=config))
         tools.append(ShuiyuanPostReplyTool(config=config))
-        tools.append(ShuiyuanSummarizeArchiveTool(config=config, batch_size=50))
     return tools
 
 
@@ -241,6 +279,13 @@ def build_tool_registry(
             memory_source=memory_source or (profile.frontend_id if profile else None),
         )
     )
+    tools.extend(
+        _build_chat_history_tools(
+            cfg,
+            memory_owner_id=memory_owner_id,
+            memory_source=memory_source or (profile.frontend_id if profile else None),
+        )
+    )
     tools.extend(_build_multimodal_tools(cfg))
     tools.extend(_build_canvas_tools(cfg))
     tools.extend(_build_shuiyuan_tools(cfg))
@@ -254,5 +299,18 @@ def build_tool_registry(
     else:
         for tool in tools:
             registry.register(tool)
+
+    # kernel 模式核心工具：search_tools、call_tool（Kernel 调度时需在此注册）
+    agent_cfg = getattr(cfg, "agent", None)
+    pinned = list(getattr(agent_cfg, "pinned_tools", None) or ["search_tools", "call_tool"])
+    for core in ["search_tools", "call_tool"]:
+        if core not in pinned:
+            pinned.append(core)
+    working_set_size = int(getattr(agent_cfg, "working_set_size", 6) or 6)
+    working_set = ToolWorkingSetManager(pinned_tools=pinned, working_set_size=working_set_size)
+    if not registry.has("search_tools"):
+        registry.register(SearchToolsTool(registry=registry, working_set=working_set))
+    if not registry.has("call_tool"):
+        registry.register(CallToolTool(registry=registry))
 
     return registry

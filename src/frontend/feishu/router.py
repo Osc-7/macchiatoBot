@@ -117,8 +117,8 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
 
     event = envelope.event
     msg = event.message
-    # 支持 text / image / file / media / audio
-    supported_types = ("text", "image", "file", "media", "audio")
+    # 支持 text / image / file / media / audio / post（富文本内嵌图片）
+    supported_types = ("text", "image", "file", "media", "audio", "post")
     if msg.message_type not in supported_types:
         logger.debug("ignore unsupported message_type=%s", msg.message_type)
         return JSONResponse({"code": 0, "msg": "ignored_unsupported"})

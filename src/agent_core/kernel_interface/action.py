@@ -2,13 +2,17 @@
 Kernel 层系统调用类型定义。
 
 类比操作系统的 syscall 接口：
-- AgentCore直接持有 LLMClient，在内部自旋完成多轮 LLM 推理（类比 CPU 自主执行）
-- 只有两类操作需要向 Kernel 发出系统调用：
-    1. ToolCallAction  — 外部 IO（工具执行），Kernel 是唯一有权调用外部工具的实体
-    2. ReturnAction    — 进程退出，通知 Kernel 本轮处理完成，交还控制权
+- AgentCore 直接持有 LLMClient，在内部自旋完成多轮 LLM 推理（类比 CPU 自主执行）
+- 向 Kernel 发出系统调用的时机：
+    1. ToolCallAction        — 外部 IO（工具执行），Kernel 是唯一有权调用外部工具的实体
+    2. ReturnAction          — 进程退出，通知 Kernel 本轮处理完成，交还控制权
+    3. ContextOverflowAction — 上下文窗口达到压缩阈值，请求 Kernel 暂停并压缩后恢复
+    4. CoreStatsAction       — Core 被 kill 前上报资源统计，供 Kernel 调摘要器和计费
 
-这样 Kernel 不会被 LLM 推理的每一轮都打断，仅在真正的 IO 边界介入，
-类比 CPU 自主执行指令流，只在 IO 中断时才陷入内核态。
+Kernel 向 AgentCore 回传的事件（syscall 返回值）：
+    1. ToolResultEvent       — 工具执行结果
+    2. ContextCompressedEvent — 上下文压缩完成，Core 可恢复执行
+    3. KillEvent             — Kernel 要求 Core 优雅关闭
 
 同时定义 KernelRequest：前端层向 Kernel 提交的输入请求。
 """
@@ -56,7 +60,38 @@ class ReturnAction:
     attachments: List[Dict[str, Any]] = field(default_factory=list)
 
 
-KernelAction = Union[ToolCallAction, ReturnAction]
+@dataclass
+class ContextOverflowAction:
+    """Core 上下文窗口达到压缩阈值，请求 Kernel 暂停并压缩。
+
+    约定：只在完整 thought→tools→observations 循环结束后发出，
+    不在 tool_result 尚未全部收集期间触发，避免截断中途工具调用链。
+
+    Kernel 收到后执行压缩，完成后以 ContextCompressedEvent 通知 Core 恢复。
+    """
+
+    type: Literal["context_overflow"] = field(default="context_overflow", init=False)
+    current_tokens: int = 0
+    threshold_tokens: int = 0
+    session_id: str = ""
+
+
+@dataclass
+class CoreStatsAction:
+    """Core 被 kill 前上报本次 session 的资源统计。
+
+    Kernel 拿到后调用摘要器生成 session 摘要并写入长期记忆，
+    再完成进程回收。
+    """
+
+    type: Literal["core_stats"] = field(default="core_stats", init=False)
+    token_usage: Dict[str, int] = field(default_factory=dict)
+    session_start_time: str = ""
+    turn_count: int = 0
+    session_id: str = ""
+
+
+KernelAction = Union[ToolCallAction, ReturnAction, ContextOverflowAction, CoreStatsAction]
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +107,31 @@ class ToolResultEvent:
     result: "ToolResult"
 
 
-KernelEvent = ToolResultEvent
+@dataclass
+class ContextCompressedEvent:
+    """Kernel 完成上下文压缩后通知 Core 恢复执行。
+
+    compressed_summary 是被压缩掉的旧消息的摘要文本，
+    Core 可将其注入 working_memory 或系统提示以保留语义连续性。
+    messages_kept 是压缩后保留的完整轮次数量（供 Core 更新内部计数）。
+    """
+
+    compressed_summary: str = ""
+    messages_kept: int = 0
+
+
+@dataclass
+class KillEvent:
+    """Kernel 要求 Core 优雅关闭。
+
+    Core 收到后应 yield CoreStatsAction 完成资源上报，然后退出 run_loop_kill()。
+    reason 枚举：session_expired | manual | system_shutdown
+    """
+
+    reason: str = "session_expired"
+
+
+KernelEvent = Union[ToolResultEvent, ContextCompressedEvent, KillEvent]
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +148,7 @@ class KernelRequest:
     - 同优先级内按入队时间 FIFO
 
     request_id 用于 OutputRouter 精准回传结果（乱序完成 + 正确路由）。
+    profile 字段可选，前端/automation 创建请求时传入，覆盖 CorePool 默认值。
     """
 
     priority: int = 0
@@ -99,6 +159,7 @@ class KernelRequest:
     session_id: str = field(default="", compare=False)
     text: str = field(default="", compare=False)
     metadata: Dict[str, Any] = field(default_factory=dict, compare=False)
+    profile: Optional["CoreProfile"] = field(default=None, compare=False)  # noqa: F821
 
     @classmethod
     def create(
@@ -110,6 +171,7 @@ class KernelRequest:
         priority: int = 0,
         metadata: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        profile: Optional["CoreProfile"] = None,  # noqa: F821
     ) -> "KernelRequest":
         """便捷工厂方法，自动填充 enqueued_at 和 request_id。"""
         return cls(
@@ -120,4 +182,5 @@ class KernelRequest:
             session_id=session_id,
             text=text,
             metadata=metadata or {},
+            profile=profile,
         )

@@ -1,28 +1,52 @@
 """
-CorePool — 进程加载器 + 进程表。
+CorePool — 进程加载器 + 进程表（PCB 池）。
 
 类比操作系统的进程控制块（PCB）池：
 - acquire(): 懒加载或复用 AgentCore（带 per-session 锁防重复创建）
-- release(): 持久 session 保持活跃，临时 session 立即 evict
-- evict(): finalize_session() + close()，彻底回收资源
+- touch():   每次请求完成后刷新 last_active_ts，维持 TTL
+- evict():   kill() + summarizer + close()，彻底回收资源
+- scan_expired(): 返回超过 TTL 的 session_id 列表，供 KernelScheduler 调用
 
-CorePool 是 Loader 职责的实现处：
-  创建（_load）和回收（evict）是同一资源的两面，放在同一个类里
-  保证 AgentCore 生命周期清晰，不会出现悬空 Core 或重复创建。
+每个 CoreEntry 持有：
+  agent            — AgentCore 实例
+  profile          — CoreProfile（权限 + TTL 配置）
+  last_active_ts   — 最近活跃时间（monotonic），用于 TTL 判断
+  session_start_ts — session 创建时间（monotonic）
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 if TYPE_CHECKING:
     from agent_core.config import Config
     from agent_core.agent.agent import ScheduleAgent
     from agent_core.tools import BaseTool
+    from agent_core.kernel_interface import CoreProfile
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class CoreEntry:
+    """进程控制块（PCB）— 一个 AgentCore 实例的完整元数据。"""
+
+    agent: "ScheduleAgent"
+    profile: "CoreProfile"
+    last_active_ts: float = field(default_factory=time.monotonic)
+    session_start_ts: float = field(default_factory=time.monotonic)
+
+    def is_expired(self) -> bool:
+        """根据 profile.session_expired_seconds 判断是否超时。"""
+        return (time.monotonic() - self.last_active_ts) > self.profile.session_expired_seconds
+
+    def touch(self) -> None:
+        """刷新最近活跃时间。"""
+        self.last_active_ts = time.monotonic()
 
 
 class CorePool:
@@ -31,7 +55,8 @@ class CorePool:
 
     - 按 session_id 隔离
     - 懒加载：首次 acquire 时创建，后续复用
-    - 支持 ephemeral（用完即销毁）和 persistent（保持活跃）两种策略
+    - 每次请求完成后调用 touch() 刷新 TTL
+    - scan_expired() 返回超时 session，由 KernelScheduler TTL 循环驱动 evict
     - 带 per-session asyncio.Lock 防止并发 acquire 时重复创建
 
     Usage::
@@ -39,9 +64,8 @@ class CorePool:
         pool = CorePool(config=config, tools_factory=lambda: get_tools(config))
         agent = await pool.acquire("sess-001")
         # ... 使用 agent ...
-        # persistent: 保持活跃，下次 acquire 直接复用
-        # ephemeral: 使用完后主动 evict
-        await pool.evict("sess-001")
+        pool.touch("sess-001")       # 刷新活跃时间
+        await pool.evict("sess-001") # 主动回收
     """
 
     def __init__(
@@ -49,14 +73,18 @@ class CorePool:
         config: Optional["Config"] = None,
         tools_factory: Optional[Callable[[], List["BaseTool"]]] = None,
         max_sessions: int = 100,
+        kernel: Optional[Any] = None,
+        summarizer: Optional[Any] = None,
     ) -> None:
         from agent_core.config import get_config
 
         self._config = config or get_config()
         self._tools_factory = tools_factory
         self._max_sessions = max_sessions
-        # session_id → ScheduleAgent
-        self._pool: Dict[str, "ScheduleAgent"] = {}
+        self._kernel = kernel       # AgentKernel 实例，用于 kill()
+        self._summarizer = summarizer  # SessionSummarizer 实例，用于摘要持久化
+        # session_id → CoreEntry
+        self._pool: Dict[str, CoreEntry] = {}
         # per-session 锁，防止并发创建
         self._locks: Dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
@@ -68,50 +96,107 @@ class CorePool:
         source: str = "cli",
         user_id: str = "root",
         create_if_missing: bool = True,
+        profile: Optional["CoreProfile"] = None,
     ) -> "ScheduleAgent":
         """
         获取或创建指定 session 的 AgentCore。
 
         对同一 session_id 的并发 acquire 是安全的：
         内部使用 per-session Lock 保证只创建一次。
+        返回 ScheduleAgent 实例（不含 CoreEntry，调用方不需要感知 PCB 细节）。
         """
         if session_id in self._pool:
-            return self._pool[session_id]
+            return self._pool[session_id].agent
 
         lock = await self._get_lock(session_id)
         async with lock:
-            # 双重检查（在获取锁之前可能另一个协程已经创建了）
             if session_id in self._pool:
-                return self._pool[session_id]
+                return self._pool[session_id].agent
 
             if not create_if_missing:
                 raise KeyError(f"CorePool: session not found: {session_id}")
 
-            agent = await self._load(session_id, source=source, user_id=user_id)
-            self._pool[session_id] = agent
+            agent, entry_profile = await self._load(
+                session_id, source=source, user_id=user_id, profile=profile
+            )
+            self._pool[session_id] = CoreEntry(agent=agent, profile=entry_profile)
             logger.debug("CorePool: loaded session %s (pool_size=%d)", session_id, len(self._pool))
             return agent
+
+    def touch(self, session_id: str) -> None:
+        """刷新指定 session 的 last_active_ts，维持 TTL 倒计时。"""
+        entry = self._pool.get(session_id)
+        if entry is not None:
+            entry.touch()
+
+    def get_entry(self, session_id: str) -> Optional[CoreEntry]:
+        """返回指定 session 的 CoreEntry（含 profile 和时间戳）。"""
+        return self._pool.get(session_id)
+
+    def scan_expired(self) -> List[str]:
+        """
+        返回所有已超过 TTL 的 session_id 列表。
+
+        由 KernelScheduler 的 _ttl_loop() 定期调用，触发 evict 流程。
+        """
+        return [sid for sid, entry in self._pool.items() if entry.is_expired()]
 
     async def evict(self, session_id: str) -> None:
         """
         终结并移除指定 session 的 AgentCore。
 
-        执行 finalize_session()（写长期记忆摘要）后 close() 释放资源。
-        对应 OS 中的进程终止（exit syscall）。
+        完整 Kill 流程（KNL-003）：
+        1. AgentKernel.kill(agent)   → 收集 CoreStatsAction（token 用量等）
+        2. SessionSummarizer         → 生成摘要写入长期记忆
+        3. agent.close()             → 释放 MCP 连接等资源
+        4. 清理 PCB（_pool + _locks）
+
+        若未注入 kernel/summarizer，退化为旧版 finalize_session() + close()。
         """
-        agent = self._pool.pop(session_id, None)
-        if agent is None:
+        entry = self._pool.pop(session_id, None)
+        if entry is None:
             return
+        agent = entry.agent
 
-        try:
-            finalize = getattr(agent, "finalize_session", None)
-            if callable(finalize):
-                result = finalize()
-                if asyncio.isfuture(result) or asyncio.iscoroutine(result):
-                    await result
-        except Exception as exc:
-            logger.warning("CorePool: finalize_session failed (session=%s): %s", session_id, exc)
+        # ── Step 1: kill — 收集 CoreStats ──────────────────────────────────
+        core_stats = None
+        if self._kernel is not None:
+            try:
+                core_stats = await self._kernel.kill(agent)
+            except Exception as exc:
+                logger.warning("CorePool: kernel.kill failed (session=%s): %s", session_id, exc)
+        else:
+            # 向后兼容：无 kernel 时走旧的 finalize_session
+            try:
+                finalize = getattr(agent, "finalize_session", None)
+                if callable(finalize):
+                    result = finalize()
+                    if asyncio.isfuture(result) or asyncio.iscoroutine(result):
+                        await result
+            except Exception as exc:
+                logger.warning("CorePool: finalize_session failed (session=%s): %s", session_id, exc)
 
+        # ── Step 2: summarize — 写入长期记忆 ───────────────────────────────
+        if core_stats is not None and self._summarizer is not None:
+            try:
+                long_term_memory = getattr(agent, "_long_term_memory", None)
+                messages = None
+                ctx = getattr(agent, "_context", None)
+                if ctx is not None:
+                    get_msgs = getattr(ctx, "get_messages", None)
+                    if callable(get_msgs):
+                        messages = get_msgs()
+                owner_id = getattr(agent, "_user_id", None)
+                await self._summarizer.summarize_and_persist(
+                    stats=core_stats,
+                    long_term_memory=long_term_memory,
+                    messages=messages,
+                    owner_id=owner_id,
+                )
+            except Exception as exc:
+                logger.warning("CorePool: summarizer failed (session=%s): %s", session_id, exc)
+
+        # ── Step 3: close — 释放资源 ───────────────────────────────────────
         try:
             close = getattr(agent, "close", None)
             if callable(close):
@@ -121,7 +206,7 @@ class CorePool:
         except Exception as exc:
             logger.warning("CorePool: close failed (session=%s): %s", session_id, exc)
 
-        # 清理 per-session 锁
+        # ── Step 4: 清理 PCB ───────────────────────────────────────────────
         async with self._global_lock:
             self._locks.pop(session_id, None)
 
@@ -147,14 +232,24 @@ class CorePool:
         *,
         source: str = "cli",
         user_id: str = "root",
-    ) -> "ScheduleAgent":
+        profile: Optional["CoreProfile"] = None,
+    ) -> tuple["ScheduleAgent", "CoreProfile"]:
         """
         Loader 职责：从 DB 加载记忆、创建并初始化 AgentCore。
 
-        对应架构图中 Loader 从 Database 加载数据并实例化 AgentCore 的步骤。
+        返回 (agent, profile) 元组，profile 优先使用传入值，
+        否则根据 source 生成默认 CoreProfile。
         """
-        # 延迟导入，避免循环依赖
         from agent_core.agent.agent import ScheduleAgent
+        from agent_core.kernel_interface import CoreProfile as _CoreProfile
+
+        if profile is None:
+            profile = _CoreProfile.default_full(
+                frontend_id=source,
+                dialog_window_id=user_id,
+                max_context_tokens=getattr(self._config.agent, "max_context_tokens", 80_000),
+                session_expired_seconds=getattr(self._config.agent, "session_expired_seconds", 1_800),
+            )
 
         tools = self._tools_factory() if self._tools_factory else []
         agent = ScheduleAgent(
@@ -166,17 +261,19 @@ class CorePool:
             source=source,
         )
 
-        # 确保 MCP 连接（首次创建时通过 __aenter__ 建立）
         await agent.__aenter__()
 
-        # 从持久化历史恢复会话上下文
+        # 将 CoreProfile 注入 agent，供 InternalLoader 过滤工具列表
+        # 和 AgentKernel 进行内核态权限校验
+        agent._core_profile = profile
+
         activate = getattr(agent, "activate_session", None)
         if callable(activate):
             result = activate(session_id)
             if asyncio.isfuture(result) or asyncio.iscoroutine(result):
                 await result
 
-        return agent
+        return agent, profile
 
     async def _get_lock(self, session_id: str) -> asyncio.Lock:
         """获取或创建指定 session 的锁（线程安全）。"""

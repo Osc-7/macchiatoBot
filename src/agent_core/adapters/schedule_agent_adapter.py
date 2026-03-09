@@ -5,16 +5,16 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 from agent_core.content import ContentReference, resolve_content_refs
 from agent_core.interfaces import (
     AgentHooks,
     AgentRunInput,
-    AgentRunResult,
     AgentSessionState,
     CoreEvent,
 )
+from agent_core.interfaces.models import AgentRunResult
 from system.kernel import AgentKernel
 
 logger = logging.getLogger(__name__)
@@ -24,9 +24,9 @@ class ScheduleAgentAdapter:
     """
     将现有 ScheduleAgent 映射为稳定 CoreSession 接口。
 
-    run_turn() 直接使用 AgentKernel 驱动 agent.run_loop()，
-    所有 IO（LLM 调用、工具执行）都经由 Kernel 中介，
-    AgentCore 只承担纯状态机职责。
+    run_turn() 通过 AgentKernel 驱动 agent.run_loop()：
+    - AgentCore 直接持有 LLMClient，在 run_loop() 内自旋完成多轮 LLM 推理（无 Kernel 中介）
+    - 只有工具调用（ToolCallAction）和返回（ReturnAction）会 yield 到 Kernel，由 Kernel 统一执行工具 IO
     """
 
     def __init__(self, agent: Any):
@@ -281,7 +281,7 @@ class ScheduleAgentAdapter:
     def delete_session_history(self, session_id: str) -> int:
         fn = getattr(self._agent, "delete_session_history", None)
         if callable(fn):
-            return fn(session_id)
+            return cast(int, fn(session_id))
         return 0
 
     @property

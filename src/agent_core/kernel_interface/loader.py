@@ -43,7 +43,8 @@ class InternalLoader:
         """
         从 AgentCore 状态动态组装 LLMPayload。
 
-        每次 LLMRequestAction 时调用，确保 Prompt/Context/Tools 都是最新状态。
+        每次 LLM 调用前调用，确保 Prompt/Context/Tools 都是最新状态。
+        若 agent._core_profile 不为 None，则对工具列表进行用户态过滤（双重防御的第一层）。
         """
         system_prompt = agent._build_system_prompt()
         messages = agent._context.get_messages()
@@ -57,9 +58,21 @@ class InternalLoader:
         if agent._kernel_enabled:
             agent._last_snapshot = agent._working_set.build_snapshot(agent._tool_registry)
             tools = agent._last_snapshot.openai_tools
-            agent._current_visible_tools = set(agent._last_snapshot.tool_names)
+            visible_names: set = set(agent._last_snapshot.tool_names)
         else:
             tools = agent._tool_registry.get_all_definitions()
-            agent._current_visible_tools = set(agent._tool_registry.list_names())
+            visible_names = set(agent._tool_registry.list_names())
 
+        # 用户态权限过滤：根据 CoreProfile 限制 LLM 可见的工具集
+        profile = getattr(agent, "_core_profile", None)
+        if profile is not None:
+            tools = [
+                t for t in tools
+                if profile.is_tool_allowed(t.get("function", {}).get("name", ""))
+            ]
+            visible_names = {
+                name for name in visible_names if profile.is_tool_allowed(name)
+            }
+
+        agent._current_visible_tools = visible_names
         return LLMPayload(system=system_prompt, messages=messages, tools=tools)

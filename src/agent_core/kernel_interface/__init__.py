@@ -5,22 +5,37 @@ Agent Core 内核协议 — syscall 接口定义与 InternalLoader。
 """
 
 from .action import (
+    ContextCompressedEvent,
+    ContextOverflowAction,
+    CoreStatsAction,
     KernelAction,
     KernelEvent,
     KernelRequest,
+    KillEvent,
     ReturnAction,
     ToolCallAction,
     ToolResultEvent,
 )
 from .loader import InternalLoader, LLMPayload
+from .profile import CoreProfile
 
 __all__ = [
+    # Actions (Core → Kernel)
     "KernelAction",
-    "KernelEvent",
-    "KernelRequest",
-    "ReturnAction",
     "ToolCallAction",
+    "ReturnAction",
+    "ContextOverflowAction",
+    "CoreStatsAction",
+    # Events (Kernel → Core)
+    "KernelEvent",
     "ToolResultEvent",
+    "ContextCompressedEvent",
+    "KillEvent",
+    # Request (Frontend → Kernel)
+    "KernelRequest",
+    # Loader
     "InternalLoader",
     "LLMPayload",
+    # Profile
+    "CoreProfile",
 ]

@@ -199,6 +199,8 @@ class ScheduleAgent:
         self._session_id = _new_session_id()
         # ChatHistoryDB 最后同步到的消息 ID（用于跨终端增量同步）
         self._last_history_id: int = 0
+        # CoreProfile — Kernel 注入的权限配置；None 表示无限制（向后兼容）
+        self._core_profile: Optional[Any] = None
 
         # 四层记忆系统
         mem_cfg: MemoryConfig = self._config.memory
@@ -489,7 +491,10 @@ class ScheduleAgent:
 
         由 AgentKernel.run() 驱动，不应直接调用。
         """
-        from agent_core.kernel_interface import ReturnAction, ToolCallAction, ToolResultEvent, InternalLoader
+        from agent_core.kernel_interface import (
+            ReturnAction, ToolCallAction, ToolResultEvent, InternalLoader,
+            ContextOverflowAction, ContextCompressedEvent,
+        )
 
         loader = InternalLoader()
         iteration = 0
@@ -616,7 +621,7 @@ class ScheduleAgent:
 
                     continue
 
-                # ── 最终响应，系统调用：ReturnAction ──────────────────────
+                # ── 最终响应，先检查上下文溢出再 ReturnAction ─────────────
                 if response.content:
                     self._context.add_assistant_message(content=response.content)
                     if self._session_logger:
@@ -629,6 +634,28 @@ class ScheduleAgent:
                             source=self._source,
                         )
                         self._last_history_id = max(self._last_history_id, int(msg_id))
+
+                    # 上下文溢出检查（仅在完整 thought→tools→observations 循环结束后触发，
+                    # 不在 tool_result 期间中断，保证工具调用链的完整性）
+                    profile = getattr(self, "_core_profile", None)
+                    threshold = profile.max_context_tokens if profile else None
+                    if (
+                        threshold is not None
+                        and self._last_prompt_tokens is not None
+                        and self._last_prompt_tokens >= threshold
+                    ):
+                        compress_event = yield ContextOverflowAction(
+                            current_tokens=self._last_prompt_tokens,
+                            threshold_tokens=threshold,
+                            session_id=self._session_id,
+                        )
+                        # Kernel 完成压缩后发回 ContextCompressedEvent，Core 继续
+                        if isinstance(compress_event, ContextCompressedEvent):
+                            if compress_event.compressed_summary:
+                                # 将 Kernel 生成的摘要写入工作记忆的 running_summary，
+                                # 下一次 _build_system_prompt 时会自动注入到系统提示
+                                self._working_memory._running_summary = compress_event.compressed_summary
+
                     yield ReturnAction(
                         message=response.content,
                         status="completed",
@@ -969,6 +996,29 @@ class ScheduleAgent:
         )
 
         return session_summary
+
+    async def run_loop_kill(self):  # type: ignore[return]
+        """
+        Kill 专用 async generator。
+
+        Kernel 发出 KillEvent 后调用此方法：
+        Core 完成资源统计，yield CoreStatsAction，然后退出。
+        Kernel 拿到 CoreStatsAction 后调用摘要器并完成进程回收。
+
+        用法（由 AgentKernel.kill() 驱动）::
+
+            gen = agent.run_loop_kill()
+            action = await gen.__anext__()   # 拿到 CoreStatsAction
+            # 不需要 asend，直接关闭 generator
+        """
+        from agent_core.kernel_interface.action import CoreStatsAction
+
+        yield CoreStatsAction(
+            token_usage=dict(self._token_usage),
+            session_start_time=self._session_start_time,
+            turn_count=self._current_turn_id,
+            session_id=self._session_id,
+        )
 
     async def activate_session(self, session_id: str, replay_messages_limit: Optional[int] = 0) -> None:
         """

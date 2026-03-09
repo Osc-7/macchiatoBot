@@ -15,63 +15,41 @@ from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 
 from agent_core.config import Config, get_config
-from agent_core.tools import (
-    AddEventTool,
-    AddTaskTool,
-    BaseTool,
-    DeleteScheduleDataTool,
-    GetEventsTool,
-    GetFreeSlotsTool,
-    GetTasksTool,
-    ModifyFileTool,
-    ParseTimeTool,
-    PlanTasksTool,
-    ReadFileTool,
-    ToolRegistry,
-    ToolResult,
-    UpdateEventTool,
-    UpdateTaskTool,
-    WriteFileTool,
-)
-
-
-def get_default_mcp_tools(config: Optional[Config] = None) -> List[BaseTool]:
-    """获取 MCP Server 默认暴露的工具列表。"""
-    tools: List[BaseTool] = [
-        ParseTimeTool(),
-        AddEventTool(),
-        AddTaskTool(),
-        GetEventsTool(),
-        GetTasksTool(),
-        UpdateEventTool(),
-        UpdateTaskTool(),
-        DeleteScheduleDataTool(),
-        GetFreeSlotsTool(),
-        PlanTasksTool(),
-    ]
-
-    if config and config.file_tools.enabled:
-        tools.append(ReadFileTool(config=config))
-        tools.append(WriteFileTool(config=config))
-        tools.append(ModifyFileTool(config=config))
-
-    return tools
+from agent_core.tools import ToolResult
+from system.tools import VersionedToolRegistry, build_tool_registry
 
 
 class ScheduleToolsMCPServer:
-    """将现有工具注册为 MCP Server 的适配器。"""
+    """将 system 层工具注册表以 MCP Server 形式暴露。"""
 
     def __init__(
         self,
         config: Optional[Config] = None,
-        tools: Optional[List[BaseTool]] = None,
+        tools: Optional[List[Any]] = None,
         server_name: str = "schedule-agent-tools",
         server_version: str = "0.1.0",
     ):
         self._config = config or get_config()
-        self._registry = ToolRegistry()
-        for tool in tools or get_default_mcp_tools(config=self._config):
-            self._registry.register(tool)
+        # 基于 CoreProfile 默认 full 权限构建系统级工具注册表
+        from agent_core.kernel_interface import CoreProfile
+
+        base_profile = CoreProfile.default_full(
+            frontend_id="mcp",
+            dialog_window_id="mcp:tools",
+        )
+        registry: VersionedToolRegistry = build_tool_registry(
+            profile=base_profile,
+            config=self._config,
+        )
+        # 允许调用方额外注入自定义工具
+        if tools:
+            from agent_core.tools.base import BaseTool as _BaseTool  # 仅作类型检查
+
+            for tool in tools:
+                if isinstance(tool, _BaseTool) and not registry.has(tool.name):
+                    registry.register(tool)
+
+        self._registry = registry
 
         self._server_name = server_name
         self._server_version = server_version
@@ -98,7 +76,8 @@ class ScheduleToolsMCPServer:
     def list_tools(self) -> List[types.Tool]:
         """返回 MCP Tool 列表。"""
         result: List[types.Tool] = []
-        for tool in self._registry.get_all_tools():
+        _version, tools = self._registry.list_tools()
+        for tool in tools.values():
             definition = tool.get_definition()
             result.append(
                 types.Tool(

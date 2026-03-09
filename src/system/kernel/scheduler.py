@@ -111,36 +111,42 @@ class KernelScheduler:
         core_pool: "CorePool",
         *,
         hooks_factory: Optional[Callable[[KernelRequest], AgentHooks]] = None,
+        ttl_scan_interval: float = 30.0,
     ) -> None:
         self._kernel = kernel
         self._core_pool = core_pool
         self._hooks_factory = hooks_factory
+        self._ttl_scan_interval = ttl_scan_interval
         self._queue: asyncio.PriorityQueue[KernelRequest] = asyncio.PriorityQueue()
         self._router = OutputRouter()
         self._dispatch_task: Optional[asyncio.Task] = None
+        self._ttl_task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
         self._active_tasks: set[asyncio.Task] = set()
 
     async def start(self) -> None:
-        """启动调度器的后台分发循环。"""
+        """启动调度循环和 TTL 扫描后台任务。"""
         if self._dispatch_task is not None and not self._dispatch_task.done():
             return
         self._stopped.clear()
         self._dispatch_task = asyncio.create_task(
             self._dispatch_loop(), name="kernel-scheduler-dispatch"
         )
-        logger.info("KernelScheduler: started")
+        self._ttl_task = asyncio.create_task(
+            self._ttl_loop(), name="kernel-scheduler-ttl"
+        )
+        logger.info("KernelScheduler: started (ttl_scan_interval=%.0fs)", self._ttl_scan_interval)
 
     async def stop(self) -> None:
         """停止调度器，等待所有活跃任务完成。"""
         self._stopped.set()
-        if self._dispatch_task and not self._dispatch_task.done():
-            self._dispatch_task.cancel()
-            try:
-                await self._dispatch_task
-            except asyncio.CancelledError:
-                pass
-        # 等待所有活跃的任务完成
+        for task in (self._dispatch_task, self._ttl_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         if self._active_tasks:
             await asyncio.gather(*self._active_tasks, return_exceptions=True)
         self._router.cancel_all()
@@ -188,6 +194,33 @@ class KernelScheduler:
             self._active_tasks.add(task)
             task.add_done_callback(self._active_tasks.discard)
 
+    async def _ttl_loop(self) -> None:
+        """
+        TTL 扫描后台循环。
+
+        每隔 ttl_scan_interval 秒扫描一次 CorePool，
+        将超过 session_expired_seconds 的 Core 触发 evict 流程。
+        """
+        while not self._stopped.is_set():
+            try:
+                await asyncio.sleep(self._ttl_scan_interval)
+            except asyncio.CancelledError:
+                break
+            await self._evict_expired()
+
+    async def _evict_expired(self) -> None:
+        """扫描并驱逐所有超时 session。"""
+        expired = self._core_pool.scan_expired()
+        if not expired:
+            return
+        logger.info("KernelScheduler: TTL scan found %d expired session(s): %s", len(expired), expired)
+        for session_id in expired:
+            try:
+                await self._core_pool.evict(session_id)
+                logger.info("KernelScheduler: evicted expired session %s", session_id)
+            except Exception as exc:
+                logger.warning("KernelScheduler: evict failed (session=%s): %s", session_id, exc)
+
     async def _run_and_route(self, request: KernelRequest) -> None:
         """
         执行单个请求并将结果路由到对应 Future。
@@ -209,6 +242,7 @@ class KernelScheduler:
                 request.session_id,
                 source=source,
                 user_id=user_id,
+                profile=request.profile,
             )
 
             # 准备本轮输入（注入到 agent 的上下文）
@@ -251,6 +285,9 @@ class KernelScheduler:
 
             # 后处理
             await agent._finalize_turn(run_result, summary_task, summary_recent_start)
+
+            # 刷新 TTL（每次请求完成后更新活跃时间）
+            self._core_pool.touch(request.session_id)
 
             # 路由结果
             await self._router.deliver(request.request_id, run_result)

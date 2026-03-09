@@ -6,8 +6,8 @@ import base64
 import logging
 from typing import Any, Dict, Optional
 
-from agent_core.frontend.feishu.client import FeishuClient
-from agent_core.frontend.feishu.config import get_feishu_config
+from frontend.feishu.client import FeishuClient
+from frontend.feishu.config import get_feishu_config
 
 from ..models import ContentReference
 from ..resolver import ContentResolver

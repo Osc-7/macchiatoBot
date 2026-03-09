@@ -1,5 +1,41 @@
 # Schedule Agent 开发进度
 
+## 2026-03-09 - 任务: KNL-001 ~ KNL-005 OS-Kernel 架构重构（Phase 1-5）
+
+### 完成内容:
+
+**KNL-001 — Kernel 协议骨架扩展**
+- `agent_core/kernel_interface/action.py`：新增 `ContextOverflowAction`、`CoreStatsAction`（Core→Kernel）；`ContextCompressedEvent`、`KillEvent`（Kernel→Core）；扩展 KernelAction/KernelEvent union；`KernelRequest` 新增 `profile` 字段
+- `agent_core/kernel_interface/profile.py`（新建）：`CoreProfile` dataclass，含 mode / allowed_tools / deny_tools / allow_dangerous_commands / visible_memory_scopes / max_context_tokens / session_expired_seconds / frontend_id / dialog_window_id；`is_tool_allowed()` / `filter_tools()` / 4 个工厂方法
+
+**KNL-002 — TTL 会话超时管理**
+- `system/kernel/core_pool.py`：新增 `CoreEntry` dataclass（agent + profile + last_active_ts + session_start_ts）；`_pool` 改为 `Dict[str, CoreEntry]`；新增 `touch()` / `scan_expired()` / `get_entry()`；`_load()` 接收并注入 CoreProfile；`__init__` 接受 `kernel` / `summarizer` 参数
+- `system/kernel/scheduler.py`：新增 `_ttl_loop()` 后台任务（默认 30s 扫描）；`_evict_expired()` 批量 evict 超时 session；`_run_and_route()` 完成后调用 `touch()`；`acquire()` 传入 `profile`
+
+**KNL-003 — Kill 流程 + CoreStats 资源回收**
+- `agent_core/agent/agent.py`：新增 `run_loop_kill()` async generator，yield `CoreStatsAction`（token_usage / turn_count / session_id）
+- `system/kernel/kernel.py`：新增 `kill(agent)` async 方法，驱动 `run_loop_kill()` 收集 CoreStats
+- `system/kernel/summarizer.py`（新建）：`SessionSummarizer`，`summarize_and_persist()` 调用 LLM 生成摘要写入长期记忆；退化摘要兜底
+- `system/kernel/core_pool.py` `evict()`：完整 Kill 三步流程（kill → summarize → close）
+
+**KNL-004 — ContextOverflow 上下文压缩暂停/恢复**
+- `agent_core/agent/agent.py` `run_loop()`：在完整 thought→tools→observations 循环结束后（ReturnAction 前）检查 token 阈值，超出则 yield `ContextOverflowAction`，收到 `ContextCompressedEvent` 后将摘要写入 `_working_memory._running_summary`
+- `system/kernel/kernel.py`：`run()` 新增 ContextOverflowAction 分支；新增 `_compress_context()` 保留最近 6 轮 / 截断旧消息 / 调用 summary LLM；`_summarize_messages()` 静态辅助
+
+**KNL-005 — CoreProfile 权限系统**
+- `system/kernel/kernel.py` `run()`：ToolCallAction 分支加内核态权限校验 `profile.is_tool_allowed()`，越权调用返回 PERMISSION_DENIED ToolResult
+- `agent_core/kernel_interface/loader.py` `assemble()`：用 `profile.is_tool_allowed()` 过滤暴露给 LLM 的工具列表（用户态防御）
+- `agent_core/agent/agent.py`：新增 `_core_profile` 属性（默认 None，由 CorePool._load() 注入）
+- `system/kernel/core_pool.py` `_load()`：创建 agent 后 `agent._core_profile = profile`
+
+### 测试:
+- 613 passed, 5 skipped, 0 failed（全量测试无回归）
+- 各 Phase 单独验证脚本均通过
+
+### 备注:
+- KNL-006（工具注册表迁移到 system 层）已在后续小节单独完成，用于统一 system 层工具装配与 MCP 暴露
+- `ScheduleAgent._core_profile` 默认 None 表示无限制（向后兼容）
+
 ## 2026-03-09 - 水源贴表情功能修复
 
 ### 完成内容:
@@ -1241,3 +1277,30 @@ tests/                   # 测试目录
 - AgentCore（ScheduleAgent）现在是真正的纯状态机，所有 IO 经由 Kernel 中介
 - KernelScheduler 目前为可选挂载，不影响现有 IPC/Daemon/飞书集成链路
 - 后续可通过 gateway.attach_scheduler(scheduler) 启用队列模式，支持跨 session 真并发
+
+## 2026-03-09 - 任务: KNL-006 工具注册表迁移到 system 层
+
+### 完成内容:
+
+- **system.tools 工厂**
+  - 新增 `src/system/tools/__init__.py`，提供 `build_tool_registry(profile: CoreProfile) -> VersionedToolRegistry` 工厂函数。
+  - 按类别拆分装配逻辑：schedule（时间解析 / 日程与任务 CRUD / 规划器）、file（文件读写与修改）、command（run_command）、memory（long_term/content + memory_search/store/ingest）、multimodal（attach_media/attach_image_to_reply）、canvas（Canvas 同步与只读查询）、shuiyuan（水源搜索/获取话题/表情/归档总结）、automation（同步 / 摘要 / 通知 / 策略 / 定时任务）。
+  - 默认通过 `CoreProfile.is_tool_allowed()` 过滤注册工具，allow_dangerous_commands=False 时 `run_command` 不会出现在注册表中。
+
+- **Kernel / MCP 对齐**
+  - `system.kernel.kernel.AgentKernel` 的类型注解改为从 `system.tools` 导入 `VersionedToolRegistry`，避免对 `agent_core.tools` 装配细节的直接依赖。
+  - `frontend/mcp_server/server.py` 的 `ScheduleToolsMCPServer` 不再维护本地 `ToolRegistry` + 手动工具列表，而是基于 `CoreProfile.default_full(frontend_id="mcp", dialog_window_id="mcp:tools")` 调用 `build_tool_registry()` 获取统一的 `VersionedToolRegistry`，并通过注册表的 `list_tools()` / `execute()` 暴露给 MCP。
+  - 保留可选扩展点：构造 `ScheduleToolsMCPServer` 时如传入额外 BaseTool，会在不覆盖已有同名工具的前提下注入到注册表中。
+
+- **单元测试**
+  - 新增 `tests/test_system_tools_registry.py`：
+    - `test_build_tool_registry_returns_registry`: 断言返回类型为 `VersionedToolRegistry` 且包含核心 schedule 工具（parse_time/add_event/add_task/get_events/get_tasks/get_free_slots/plan_tasks）。
+    - `test_build_tool_registry_respects_profile_allowlist`: 验证 `CoreProfile.allowed_tools` 与 `allow_dangerous_commands=False` 时，仅白名单工具被注册，且 `run_command` 不出现在注册表中。
+
+### 测试:
+- `pytest tests/test_system_tools_registry.py tests/test_tool_kernel.py tests/test_web_search_tool.py tests/test_web_extractor_tool.py -q`
+  - 结果: 18 passed, 0 failed
+
+### 备注:
+- CorePool 当前仍通过旧的 tools_factory 机制为 ScheduleAgent 装配工具；Kernel 模式在后续接入时可以直接复用 `system.tools.build_tool_registry` 统一工具视图。
+- MCP Server 现已与 system 层工具注册表对齐，后续若扩展 KernelScheduler 接入，可复用相同注册表实例调度 ToolCallAction。

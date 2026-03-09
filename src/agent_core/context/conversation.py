@@ -163,16 +163,20 @@ class ConversationContext:
                 and len(block) == 1
             )
 
+        def _is_orphan_tool_block(block: List[Dict[str, Any]]) -> bool:
+            """孤立的 tool 块：tool 消息必须紧接 assistant+tool_calls 之后，否则 API 报错"""
+            return block and block[0].get("role") == "tool"
+
         # 保留最后若干块，使总条数 <= keep_count，且不以孤立 tool 开头
-        # 跳过不完整块（assistant+tool_calls 无 tool 结果），否则会产出非法 API 请求
+        # 跳过不完整块（assistant+tool_calls 无 tool 结果）、孤立 tool 块
         result: List[Dict[str, Any]] = []
         for block in reversed(blocks):
-            if _is_incomplete_block(block):
+            if _is_incomplete_block(block) or _is_orphan_tool_block(block):
                 continue
             if len(result) + len(block) > keep_count:
                 break
             result = block + result
-        # 若开头是孤立的 tool 块，丢弃
+        # 若开头是孤立的 tool 块（理论上已跳过，双重保险）
         while result and result[0].get("role") == "tool":
             result = result[1:]
         return result

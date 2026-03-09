@@ -404,7 +404,7 @@ class AutomationIPCClient:
         data = await self._request("get_token_usage", {})
         usage = data.get("usage")
         if isinstance(usage, dict):
-            self._token_usage_cache = usage
+            self._token_usage_cache = {**self._token_usage_cache, **usage}
         return dict(self._token_usage_cache)
 
     async def get_turn_count(self) -> int:

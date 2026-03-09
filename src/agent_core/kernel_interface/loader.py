@@ -19,6 +19,24 @@ if TYPE_CHECKING:
     from agent_core.agent.agent import ScheduleAgent
 
 
+def _strip_orphan_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    移除孤立的 tool 消息。
+    API 要求：tool 消息必须紧接在 assistant+tool_calls 之后。
+    """
+    out: List[Dict[str, Any]] = []
+    for m in messages:
+        role = m.get("role", "")
+        if role == "tool":
+            prev = out[-1] if out else {}
+            if prev.get("role") == "assistant" and prev.get("tool_calls"):
+                out.append(m)
+            # 否则跳过该 tool（孤立）
+        else:
+            out.append(m)
+    return out
+
+
 @dataclass
 class LLMPayload:
     """组装好的 LLM 请求 Payload，供 LLMClient 直接使用。"""
@@ -47,7 +65,8 @@ class InternalLoader:
         若 agent._core_profile 不为 None，则对工具列表进行用户态过滤（双重防御的第一层）。
         """
         system_prompt = agent._build_system_prompt()
-        messages = agent._context.get_messages()
+        messages = list(agent._context.get_messages())
+        messages = _strip_orphan_tool_messages(messages)
 
         # 注入待处理的多模态内容（图片/视频）
         if agent._pending_multimodal_items:

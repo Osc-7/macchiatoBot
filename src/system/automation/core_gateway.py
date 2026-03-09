@@ -337,6 +337,14 @@ class AutomationCoreGateway:
         if callable(clear_fn):
             clear_fn()
 
+    _DEFAULT_USAGE = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "call_count": 0,
+        "cost_yuan": 0.0,
+    }
+
     def get_token_usage(self, session_id: Optional[str] = None) -> dict:
         sid = session_id or self._active_session_id
         if self._kernel_scheduler is not None:
@@ -345,16 +353,18 @@ class AutomationCoreGateway:
                 fn = getattr(entry.agent, "get_token_usage", None)
                 if callable(fn):
                     result = fn()
-                    return result if isinstance(result, dict) else {}
-            return {}
+                    if isinstance(result, dict):
+                        return {**self._DEFAULT_USAGE, **result}
+            return dict(self._DEFAULT_USAGE)
         session = self._sessions.get(sid)
         if session is None:
-            return {}
+            return dict(self._DEFAULT_USAGE)
         fn = getattr(session, "get_token_usage", None)
         if callable(fn):
             result = fn()
-            return result if isinstance(result, dict) else {}
-        return {}
+            if isinstance(result, dict):
+                return {**self._DEFAULT_USAGE, **result}
+        return dict(self._DEFAULT_USAGE)
 
     def get_turn_count(self, session_id: Optional[str] = None) -> int:
         sid = session_id or self._active_session_id

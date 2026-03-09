@@ -25,6 +25,28 @@ NOTIFICATION_TYPE_MENTIONED = (1, "1", "mentioned")
 logger = logging.getLogger("shuiyuan_connector")
 
 
+def _safe_headers_for_log(headers: Any) -> dict:
+    """将响应头转换为适合日志输出的精简 dict，避免巨大输出。"""
+    if not headers:
+        return {}
+    try:
+        items = dict(headers).items()
+    except Exception:
+        return {}
+    # 只保留与限流相关的关键字段
+    keys = {
+        "X-RateLimit-Limit",
+        "X-RateLimit-Remaining",
+        "X-RateLimit-Reset",
+        "Retry-After",
+        "x-ratelimit-limit",
+        "x-ratelimit-remaining",
+        "x-ratelimit-reset",
+        "retry-after",
+    }
+    return {k: v for k, v in items if k in keys}
+
+
 def _collect_from_topic_watch(
     client: Any,
     config: Config,
@@ -56,23 +78,24 @@ def _collect_from_topic_watch(
         try:
             posts = client.get_topic_recent_posts(topic_id, limit=50)
         except Exception as e:
-            logger.debug("get_topic_recent_posts topic=%s 失败: %s", topic_id, e)
+            # 使用 warning 级别打印，避免异常静默导致看起来像“卡住”
+            logger.warning("get_topic_recent_posts topic=%s 失败，将跳过本轮: %r", topic_id, e)
             continue
 
-        posts_by_topic[topic_id] = posts
-        for p in posts:
-            pid = p.get("id")
-            pn = p.get("post_number", 1)
-            if pid is None or pid in seen:
-                continue
-            seen.add(int(pid))
-            if is_first:
-                continue
-            raw = (p.get("raw") or p.get("cooked") or "").strip()
-            ok, _ = is_invocation_valid_from_raw(raw, config=config)
-            if ok:
-                out.append((int(topic_id), int(pn), int(pid), p))
-        stream_map[topic_id] = seen
+    posts_by_topic[topic_id] = posts
+    for p in posts:
+        pid = p.get("id")
+        pn = p.get("post_number", 1)
+        if pid is None or pid in seen:
+            continue
+        seen.add(int(pid))
+        if is_first:
+            continue
+        raw = (p.get("raw") or p.get("cooked") or "").strip()
+        ok, _ = is_invocation_valid_from_raw(raw, config=config)
+        if ok:
+            out.append((int(topic_id), int(pn), int(pid), p))
+    stream_map[topic_id] = seen
 
     out.sort(key=lambda x: x[2], reverse=True)
     return out, stream_map, posts_by_topic
@@ -358,7 +381,18 @@ async def run_connector_loop(
             try:
                 stream_map = await _poll_topic_watch(client, cfg, stream_map)
             except Exception as e:
-                logger.exception("轮询异常: %s", e)
+                # 特判限流异常，打印更详细信息
+                from .client import ShuiyuanRateLimitError
+
+                if isinstance(e, ShuiyuanRateLimitError):
+                    logger.warning(
+                        "轮询限流(429)：%s (path=%s, headers=%s)",
+                        getattr(e, "body_preview", ""),
+                        getattr(e, "path", ""),
+                        _safe_headers_for_log(getattr(e, "headers", None)),
+                    )
+                else:
+                    logger.exception("轮询异常: %s", e)
             try:
                 await asyncio.wait_for(stop.wait(), timeout=poll_interval_seconds)
             except asyncio.TimeoutError:
@@ -376,7 +410,17 @@ async def run_connector_loop(
         try:
             stream_list = await _poll_once(client, cfg, stream_list)
         except Exception as e:
-            logger.exception("轮询异常: %s", e)
+            from .client import ShuiyuanRateLimitError
+
+            if isinstance(e, ShuiyuanRateLimitError):
+                logger.warning(
+                    "轮询限流(429)：%s (path=%s, headers=%s)",
+                    getattr(e, "body_preview", ""),
+                    getattr(e, "path", ""),
+                    _safe_headers_for_log(getattr(e, "headers", None)),
+                )
+            else:
+                logger.exception("轮询异常: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=poll_interval_seconds)
         except asyncio.TimeoutError:

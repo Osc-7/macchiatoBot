@@ -27,22 +27,27 @@ _ARCHIVE_SUMMARIZE_PROMPT = """\
 """
 
 
-def _get_shuiyuan_client(config: Optional[Config]) -> Optional[tuple[str, str]]:
+def _get_shuiyuan_client(config: Optional[Config]) -> Optional[Any]:
     """
-    获取水源社区 User-Api-Key 和 site_url。
+    获取水源社区客户端实例（支持单 Key 或多 Key 池）。
 
     Returns:
-        (user_api_key, site_url) 或 None（未配置或未启用）
+        ShuiyuanClient / ShuiyuanClientPool 实例，或 None（未配置或未启用）
     """
-    cfg: ShuiyuanConfig = config.shuiyuan if config else ShuiyuanConfig()
+    if config is None:
+        return None
+
+    cfg: ShuiyuanConfig = config.shuiyuan
     if not cfg.enabled:
         return None
 
-    key = cfg.user_api_key or os.environ.get("SHUIYUAN_USER_API_KEY")
-    if not key:
+    # 复用 shuiyuan_integration.reply 中的构造逻辑（支持 user_api_keys + 日级限流切换）
+    try:
+        from shuiyuan_integration.reply import get_shuiyuan_client_from_config
+    except ImportError:
         return None
 
-    return (key.strip(), cfg.site_url or "https://shuiyuan.sjtu.edu.cn")
+    return get_shuiyuan_client_from_config(config)
 
 
 class ShuiyuanSearchTool(BaseTool):
@@ -109,8 +114,8 @@ class ShuiyuanSearchTool(BaseTool):
         )
 
     async def execute(self, **kwargs) -> ToolResult:
-        client_info = _get_shuiyuan_client(self._config)
-        if client_info is None:
+        client = _get_shuiyuan_client(self._config)
+        if client is None:
             if self._config and self._config.shuiyuan.enabled:
                 return ToolResult(
                     success=False,
@@ -123,16 +128,6 @@ class ShuiyuanSearchTool(BaseTool):
                 message="水源社区工具未启用，请在 config.yaml 中设置 shuiyuan.enabled=true",
             )
 
-        try:
-            from shuiyuan_integration import ShuiyuanClient
-        except ImportError as e:
-            return ToolResult(
-                success=False,
-                error="SHUIYUAN_IMPORT_ERROR",
-                message=f"无法导入水源集成模块: {e}",
-            )
-
-        key, site_url = client_info
         q = kwargs.get("q", "").strip()
         if not q:
             return ToolResult(
@@ -144,7 +139,6 @@ class ShuiyuanSearchTool(BaseTool):
         page = int(kwargs.get("page", 1))
 
         try:
-            client = ShuiyuanClient(user_api_key=key, site_url=site_url)
             result = client.search(q=q, page=page)
         except Exception as e:
             return ToolResult(
@@ -218,8 +212,8 @@ class ShuiyuanGetTopicTool(BaseTool):
         )
 
     async def execute(self, **kwargs) -> ToolResult:
-        client_info = _get_shuiyuan_client(self._config)
-        if client_info is None:
+        client = _get_shuiyuan_client(self._config)
+        if client is None:
             if self._config and self._config.shuiyuan.enabled:
                 return ToolResult(
                     success=False,
@@ -232,16 +226,6 @@ class ShuiyuanGetTopicTool(BaseTool):
                 message="水源社区工具未启用，请在 config.yaml 中设置 shuiyuan.enabled=true",
             )
 
-        try:
-            from shuiyuan_integration import ShuiyuanClient
-        except ImportError as e:
-            return ToolResult(
-                success=False,
-                error="SHUIYUAN_IMPORT_ERROR",
-                message=f"无法导入水源集成模块: {e}",
-            )
-
-        key, site_url = client_info
         topic_id = kwargs.get("topic_id")
         if topic_id is None:
             return ToolResult(
@@ -260,7 +244,6 @@ class ShuiyuanGetTopicTool(BaseTool):
             )
 
         try:
-            client = ShuiyuanClient(user_api_key=key, site_url=site_url)
             topic = client.get_topic(topic_id)
         except Exception as e:
             return ToolResult(
@@ -350,8 +333,8 @@ post_id 可从 shuiyuan_get_topic 返回的 posts 中的 id 字段获取。""",
         )
 
     async def execute(self, **kwargs) -> ToolResult:
-        client_info = _get_shuiyuan_client(self._config)
-        if client_info is None:
+        client = _get_shuiyuan_client(self._config)
+        if client is None:
             if self._config and self._config.shuiyuan.enabled:
                 return ToolResult(
                     success=False,
@@ -364,16 +347,6 @@ post_id 可从 shuiyuan_get_topic 返回的 posts 中的 id 字段获取。""",
                 message="水源社区工具未启用，请在 config.yaml 中设置 shuiyuan.enabled=true",
             )
 
-        try:
-            from shuiyuan_integration import ShuiyuanClient
-        except ImportError as e:
-            return ToolResult(
-                success=False,
-                error="SHUIYUAN_IMPORT_ERROR",
-                message=f"无法导入水源集成模块: {e}",
-            )
-
-        key, site_url = client_info
         post_id = kwargs.get("post_id")
         emoji_raw = (kwargs.get("emoji") or "").strip()
         topic_id = kwargs.get("topic_id")
@@ -408,7 +381,6 @@ post_id 可从 shuiyuan_get_topic 返回的 posts 中的 id 字段获取。""",
                 pass
 
         try:
-            client = ShuiyuanClient(user_api_key=key, site_url=site_url)
             ok, status, detail = client.toggle_retort(post_id, emoji_raw, topic_id_int)
         except Exception as e:
             return ToolResult(
@@ -473,8 +445,8 @@ class ShuiyuanPostReplyTool(BaseTool):
         )
 
     async def execute(self, **kwargs) -> ToolResult:
-        client_info = _get_shuiyuan_client(self._config)
-        if client_info is None:
+        client = _get_shuiyuan_client(self._config)
+        if client is None:
             return ToolResult(
                 success=False,
                 error="SHUIYUAN_DISABLED",
@@ -496,7 +468,6 @@ class ShuiyuanPostReplyTool(BaseTool):
             )
 
         try:
-            from shuiyuan_integration import ShuiyuanClient
             from shuiyuan_integration.db import ShuiyuanDB
             from shuiyuan_integration.reply import post_reply
         except ImportError as e:
@@ -506,13 +477,20 @@ class ShuiyuanPostReplyTool(BaseTool):
                 message=f"无法导入水源集成模块: {e}",
             )
 
+        # 理论上构造该 Tool 时一定会传入 Config，这里做一次防御性检查
+        if not self._config:
+            return ToolResult(
+                success=False,
+                error="SHUIYUAN_DISABLED",
+                message="水源社区未配置或未启用",
+            )
+
         cfg = self._config.shuiyuan
         db = ShuiyuanDB(
             db_path=cfg.db_path,
             chat_limit_per_user=cfg.memory.chat_limit_per_user,
             replies_per_minute=cfg.rate_limit.replies_per_minute,
         )
-        client = ShuiyuanClient(user_api_key=client_info[0], site_url=client_info[1])
         success, msg = post_reply(
             username=self._username,
             topic_id=self._topic_id,

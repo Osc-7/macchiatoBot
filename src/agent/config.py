@@ -208,11 +208,15 @@ class ShuiyuanConfig(BaseModel):
 
     enabled: bool = Field(
         default=False,
-        description="是否启用水源社区工具；需配置 user_api_key 或环境变量 SHUIYUAN_USER_API_KEY",
+        description="是否启用水源社区工具；需配置 user_api_key / user_api_keys 或环境变量 SHUIYUAN_USER_API_KEY",
     )
     user_api_key: Optional[str] = Field(
         default=None,
         description="水源社区 User-Api-Key，用于 API 认证；优先使用环境变量 SHUIYUAN_USER_API_KEY",
+    )
+    user_api_keys: List[str] = Field(
+        default_factory=list,
+        description="可选：多个水源社区 User-Api-Key；当某个 Key 触发日级限流时，自动切换到下一把 Key",
     )
     site_url: str = Field(
         default="https://shuiyuan.sjtu.edu.cn",

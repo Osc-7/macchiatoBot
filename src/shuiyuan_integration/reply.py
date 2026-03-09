@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 from typing import Any, List, Optional
 
-from .client import ShuiyuanClient
+from .client import ShuiyuanClient, ShuiyuanClientPool
 from .db import ShuiyuanDB
 
 
@@ -144,11 +144,30 @@ def get_shuiyuan_db_from_config(config: Any) -> ShuiyuanDB:
 
 
 def get_shuiyuan_client_from_config(config: Any) -> Optional[ShuiyuanClient]:
-    """从 config 构建 ShuiyuanClient。"""
-    key = config.shuiyuan.user_api_key or os.environ.get("SHUIYUAN_USER_API_KEY")
-    if not key:
+    """从 config 构建 ShuiyuanClient 或 ShuiyuanClientPool（支持多 Key 轮询与限流切换）。"""
+    cfg = config.shuiyuan
+
+    # 1. 优先使用配置中的 user_api_keys 列表
+    keys: List[str] = []
+    if getattr(cfg, "user_api_keys", None):
+        keys = [k.strip() for k in cfg.user_api_keys if k and isinstance(k, str) and k.strip()]
+
+    # 2. 回退到单个 user_api_key / 环境变量
+    if not keys:
+        single = cfg.user_api_key or os.environ.get("SHUIYUAN_USER_API_KEY")
+        if single:
+            keys = [single.strip()]
+
+    if not keys:
         return None
-    return ShuiyuanClient(
-        user_api_key=key.strip(),
-        site_url=config.shuiyuan.site_url,
+
+    # 在数据库同目录下持久化 Key 状态，保证进程重启后冷却时间仍生效
+    db_path = Path(cfg.db_path)
+    state_path = db_path.with_name("user_api_keys_state.json")
+
+    # 无论是单 Key 还是多 Key，都通过 ShuiyuanClientPool 管理，统一支持日级限流切换
+    return ShuiyuanClientPool(
+        user_api_keys=keys,
+        site_url=cfg.site_url,
+        state_path=state_path,
     )

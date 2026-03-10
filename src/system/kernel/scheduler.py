@@ -23,8 +23,8 @@ from agent_core.interfaces import AgentHooks, AgentRunResult
 from agent_core.kernel_interface import KernelRequest
 
 if TYPE_CHECKING:
-    from .kernel import AgentKernel
-    from .core_pool import CorePool
+        from .kernel import AgentKernel
+        from .core_pool import CorePool, CoreEntry
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +152,11 @@ class KernelScheduler:
                     pass
         if self._active_tasks:
             await asyncio.gather(*self._active_tasks, return_exceptions=True)
+        # Kernel 级停止时，确保回收所有仍在 CorePool 中的会话，避免遗留 active Core。
+        try:
+            await self._core_pool.evict_all()
+        except Exception as exc:
+            logger.warning("KernelScheduler: evict_all on stop failed: %s", exc)
         self._router.cancel_all()
         logger.info("KernelScheduler: stopped")
 
@@ -285,6 +290,15 @@ class KernelScheduler:
             agent._current_turn_id += 1
             turn_id = agent._current_turn_id
 
+            # Core 级生命周期日志：记录本轮输入
+            entry: Optional[CoreEntry] = self._core_pool.get_entry(session_id)  # type: ignore[assignment]
+            core_logger = getattr(entry, "logger", None) if entry is not None else None
+            if core_logger is not None:
+                try:
+                    core_logger.on_turn_start(turn_id, request.text)
+                except Exception:
+                    pass
+
             content_items = request.metadata.get("content_items")
             agent._context.add_user_message(request.text, media_items=content_items or None)
             agent._outgoing_attachments.clear()
@@ -326,6 +340,17 @@ class KernelScheduler:
 
             # 后处理
             await agent._finalize_turn(run_result, summary_task, summary_recent_start)
+
+            # Core 级生命周期日志：记录本轮输出
+            if core_logger is not None:
+                try:
+                    core_logger.on_turn_end(
+                        turn_id,
+                        output_text=run_result.output_text,
+                        metadata=run_result.metadata,
+                    )
+                except Exception:
+                    pass
 
             # 刷新 TTL（每次请求完成后更新活跃时间）
             self._core_pool.touch(session_id)

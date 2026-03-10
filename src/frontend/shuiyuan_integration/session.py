@@ -245,19 +245,8 @@ async def run_shuiyuan_reply(
     if via_daemon is not None:
         return via_daemon
 
-    # 水源 session 日志（与主 Agent 分开，存到 logs/sessions/shuiyuan/）
+    # 旧版水源前端 SessionLogger 已弃用，统一由 Kernel/CoreLifecycleLogger 记录。
     session_logger = None
-    if getattr(cfg, "logging", None) and getattr(cfg.logging, "enable_session_log", False):
-        from agent_core.utils.session_logger import SessionLogger
-        from pathlib import Path
-        log_dir = str(Path(getattr(cfg.logging, "session_log_dir", "./logs/sessions")).resolve() / "shuiyuan")
-        session_logger = SessionLogger(
-            log_dir=log_dir,
-            enable_detailed_log=getattr(cfg.logging, "enable_detailed_log", False),
-            max_system_prompt_log_len=getattr(cfg.logging, "max_system_prompt_log_len", 2000),
-        )
-        session_logger.on_session_start()
-
     # 水源 Agent 保留：联网搜索、URL 解析、水源搜索、获取话题（发帖由 automation 层负责）
     # web_search 和 extract_web_content 由 Agent 在 mcp.enabled 时自动注册
     max_posts = getattr(cfg.shuiyuan.memory, "tool_max_posts", 50) or 50
@@ -298,14 +287,4 @@ async def run_shuiyuan_reply(
                     logging.getLogger("shuiyuan_session").warning("发帖失败: %s", msg)
             return reply_text
     finally:
-        if session_logger is not None:
-            turn_count = 1
-            total_usage = None
-            if agent_ref is not None:
-                try:
-                    turn_count = agent_ref.get_turn_count()
-                    total_usage = agent_ref.get_token_usage()
-                except Exception:
-                    pass
-            session_logger.on_session_end(turn_count=turn_count, total_usage=total_usage)
-            session_logger.close()
+        return

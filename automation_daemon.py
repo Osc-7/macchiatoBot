@@ -34,8 +34,8 @@ from agent_core.config import get_config
 from agent_core import ScheduleAgent, ScheduleAgentAdapter
 from agent_core.interfaces import AgentHooks
 from system.kernel import AgentKernel, CorePool, CoreProfile, KernelRequest, KernelScheduler, SessionSummarizer
+from agent_core.llm.client import LLMClient
 from system.tools import build_tool_registry
-from agent_core.utils.session_logger import SessionLogger
 
 from frontend.feishu.client import FeishuClient
 
@@ -178,16 +178,6 @@ async def _main() -> None:
     source = (sys.argv[2].strip() if len(sys.argv) > 2 else "cli") or "cli"
     default_session_id = f"{source}:default"
 
-    # 会话日志记录器（daemon 级别）
-    session_logger: SessionLogger | None = None
-    if cfg.logging.enable_session_log:
-        session_logger = SessionLogger(
-            log_dir=cfg.logging.session_log_dir,
-            enable_detailed_log=cfg.logging.enable_detailed_log,
-            max_system_prompt_log_len=cfg.logging.max_system_prompt_log_len,
-        )
-        session_logger.on_session_start()
-
     queue = AgentTaskQueue()
     recovered = queue.recover_stale_running()
     if recovered:
@@ -200,13 +190,16 @@ async def _main() -> None:
 
     kernel_tool_registry = build_tool_registry(config=cfg)
     kernel = AgentKernel(tool_registry=kernel_tool_registry)
-    summarizer = SessionSummarizer()
+    # 使用轻量模型或与主模型相同的配置，为会话结束摘要提供专用 LLM 客户端。
+    # 如需单独的总结模型，可在此处通过 model_override 指定，例如 "qwen2.5-7b-instruct" 等。
+    summary_llm_client = LLMClient(config=cfg)
+    summarizer = SessionSummarizer(llm_client=summary_llm_client)
     core_pool = CorePool(
         config=cfg,
         tools_factory=lambda: get_default_tools(config=cfg),
         kernel=kernel,
         summarizer=summarizer,
-        session_logger=session_logger,
+        session_logger=None,
     )
     scheduler_runtime = KernelScheduler(kernel=kernel, core_pool=core_pool)
     stop_event = asyncio.Event()
@@ -223,7 +216,7 @@ async def _main() -> None:
         timezone=cfg.time.timezone,
         user_id=owner_id,
         source=source,
-        session_logger=session_logger,
+        session_logger=None,
         defer_mcp_connect=True,
     ) as core_agent:
         core_adapter = ScheduleAgentAdapter(core_agent)
@@ -236,7 +229,7 @@ async def _main() -> None:
                 timezone=cfg.time.timezone,
                 user_id=owner_id,
                 source=source,
-                session_logger=session_logger,
+                session_logger=None,
                 defer_mcp_connect=True,
             )
             await created_agent.__aenter__()
@@ -320,10 +313,7 @@ async def _main() -> None:
     consumer_task.cancel()
     await asyncio.gather(consumer_task, return_exceptions=True)
 
-    if session_logger is not None:
-        # Daemon 维度无法准确统计 turn_count / total_usage，这里仅记录会话结束事件。
-        session_logger.on_session_end(turn_count=0, total_usage=None)
-        session_logger.close()
+    # 旧版 daemon 级 SessionLogger 已关闭，核心会话日志改由 Kernel/CoreLifecycleLogger 管理。
 
 
 def main() -> None:

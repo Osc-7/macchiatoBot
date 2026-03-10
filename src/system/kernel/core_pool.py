@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from agent_core.agent.agent import ScheduleAgent
     from agent_core.tools import BaseTool
     from agent_core.kernel_interface import CoreProfile
+    from .core_logger import CoreLifecycleLogger
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class CoreEntry:
     profile: "CoreProfile"
     last_active_ts: float = field(default_factory=time.monotonic)
     session_start_ts: float = field(default_factory=time.monotonic)
+    logger: Optional["CoreLifecycleLogger"] = None
 
     def is_expired(self) -> bool:
         """根据 profile.session_expired_seconds 判断是否超时。"""
@@ -84,7 +86,7 @@ class CorePool:
         self._max_sessions = max_sessions
         self._kernel = kernel       # AgentKernel 实例，用于 kill()
         self._summarizer = summarizer  # SessionSummarizer 实例，用于摘要持久化
-        self._session_logger = session_logger  # 传入 ScheduleAgent，用于记录 session jsonl
+        self._session_logger = session_logger  # 旧版 SessionLogger（将逐步废弃）
         # session_id → CoreEntry
         self._pool: Dict[str, CoreEntry] = {}
         # per-session 锁，防止并发创建
@@ -126,10 +128,14 @@ class CorePool:
             if not create_if_missing:
                 raise KeyError(f"CorePool: session not found: {session_id}")
 
-            agent, entry_profile = await self._load(
+            agent, entry_profile, core_logger = await self._load(
                 session_id, source=source, user_id=user_id, profile=profile
             )
-            self._pool[session_id] = CoreEntry(agent=agent, profile=entry_profile)
+            self._pool[session_id] = CoreEntry(
+                agent=agent,
+                profile=entry_profile,
+                logger=core_logger,
+            )
             logger.debug("CorePool: loaded session %s (pool_size=%d)", session_id, len(self._pool))
             return agent
 
@@ -216,12 +222,34 @@ class CorePool:
                 result = close()
                 if asyncio.isfuture(result) or asyncio.iscoroutine(result):
                     await result
+        except RuntimeError as exc:
+            # anyio/mcp 在异步生成器关闭时可能抛出：
+            # RuntimeError: Attempted to exit cancel scope in a different task than it was entered in
+            # 这在 Core 已完成 evict 的情况下属于已知的无害噪音，这里与 automation_daemon 中的处理保持一致，
+            # 降级为 DEBUG 级别并视为正常关闭，避免误导性 WARNING。
+            msg = str(exc)
+            if "cancel scope" in msg:
+                logger.debug(
+                    "CorePool: close teardown (ignored cancel scope error for session=%s): %s",
+                    session_id,
+                    exc,
+                )
+            else:
+                logger.warning("CorePool: close failed (session=%s): %s", session_id, exc)
         except Exception as exc:
             logger.warning("CorePool: close failed (session=%s): %s", session_id, exc)
 
         # ── Step 4: 清理 PCB ───────────────────────────────────────────────
         async with self._global_lock:
             self._locks.pop(session_id, None)
+
+        # Core 生命周期日志：记录 core_end 并关闭文件
+        logger_obj = getattr(entry, "logger", None)
+        if logger_obj is not None:
+            try:
+                logger_obj.on_core_end(stats=core_stats)
+            except Exception:
+                pass
 
         logger.debug("CorePool: evicted session %s", session_id)
 
@@ -246,7 +274,7 @@ class CorePool:
         source: str = "cli",
         user_id: str = "root",
         profile: Optional["CoreProfile"] = None,
-    ) -> tuple["ScheduleAgent", "CoreProfile"]:
+    ) -> tuple["ScheduleAgent", "CoreProfile", Optional["CoreLifecycleLogger"]]:
         """
         Loader 职责：从 DB 加载记忆、创建并初始化 AgentCore。
 
@@ -255,6 +283,7 @@ class CorePool:
         """
         from agent_core.agent.agent import ScheduleAgent
         from agent_core.kernel_interface import CoreProfile as _CoreProfile
+        from .core_logger import CoreLifecycleLogger
 
         if profile is None:
             if source in ("cli", "feishu"):
@@ -289,10 +318,25 @@ class CorePool:
             timezone=self._config.time.timezone,
             user_id=user_id,
             source=source,
-            session_logger=self._session_logger,
+            session_logger=None,  # 关闭旧版会话日志，改用 Kernel 级 CoreLifecycleLogger
         )
 
         await agent.__aenter__()
+
+        # 为该 Core 创建独立生命周期日志（按 source/user_id 归档）
+        core_logger: Optional[CoreLifecycleLogger]
+        try:
+            log_cfg = getattr(self._config, "logging", None)
+            log_dir = getattr(log_cfg, "session_log_dir", "./logs/sessions") if log_cfg else "./logs/sessions"
+            core_logger = CoreLifecycleLogger(
+                base_dir=log_dir,
+                source=source,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            core_logger.on_core_start(profile=profile)
+        except Exception:
+            core_logger = None
 
         # 将 CoreProfile 注入 agent，供 InternalLoader 过滤工具列表
         # 和 AgentKernel 进行内核态权限校验
@@ -304,7 +348,7 @@ class CorePool:
             if asyncio.isfuture(result) or asyncio.iscoroutine(result):
                 await result
 
-        return agent, profile
+        return agent, profile, core_logger
 
     async def _hot_update_profile(
         self,

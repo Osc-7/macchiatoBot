@@ -24,11 +24,11 @@ from system.automation import (
     default_socket_path,
 )
 from system.kernel import AgentKernel, CorePool, KernelScheduler, SessionSummarizer
+from agent_core.llm.client import LLMClient
 from system.tools import build_tool_registry
 from agent_core import ScheduleAgent, ScheduleAgentAdapter
 from agent_core.interfaces import AgentHooks, AgentRunInput
 from frontend.cli import run_interactive_loop
-from agent_core.utils.session_logger import SessionLogger
 from agent_core.tools import (
     BaseTool,
     LoadSkillTool,
@@ -297,32 +297,20 @@ async def main_async(args: Optional[List[str]] = None):
                 await ipc_client.close()
             return
 
-        # 直连模式（--local）：在当前进程内启动 ScheduleAgent，不连接 daemon。
-        # 按 source 拆分 session 日志目录：logs/sessions/{source}/session-*.jsonl
-        if config.logging.enable_session_log:
-            from pathlib import Path
-
-            base_dir = Path(config.logging.session_log_dir or "./logs/sessions")
-            log_dir = str(base_dir / source)
-            session_logger = SessionLogger(
-                log_dir=log_dir,
-                enable_detailed_log=config.logging.enable_detailed_log,
-                max_system_prompt_log_len=config.logging.max_system_prompt_log_len,
-            )
-            session_logger.on_session_start()
-
         async with ScheduleAgent(
             config=config,
             tools=tools,
             max_iterations=config.agent.max_iterations,
             timezone=config.time.timezone,
-            session_logger=session_logger,
+            session_logger=None,
             user_id=user_id,
             source=source,
         ) as agent:
             kernel_tool_registry = build_tool_registry(config=config)
             kernel = AgentKernel(tool_registry=kernel_tool_registry)
-            summarizer = SessionSummarizer()
+            # 为本地 Kernel 运行时接入会话摘要 LLM 客户端，与 daemon 行为保持一致。
+            summary_llm_client = LLMClient(config=config)
+            summarizer = SessionSummarizer(llm_client=summary_llm_client)
             core_pool = CorePool(
                 config=config,
                 tools_factory=lambda: get_default_tools(config=config),
@@ -340,7 +328,7 @@ async def main_async(args: Optional[List[str]] = None):
                     tools=tools,
                     max_iterations=config.agent.max_iterations,
                     timezone=config.time.timezone,
-                    session_logger=session_logger,
+                    session_logger=None,
                     user_id=user_id,
                     source=source,
                 )
@@ -386,40 +374,7 @@ async def main_async(args: Optional[List[str]] = None):
                 await scheduler_runtime.stop()
                 await core_pool.evict_all()
     finally:
-        if session_logger:
-            turn_count: int = 0
-            total_usage: dict[str, int] | None = None
-            if agent_ref:
-                get_turn_count = getattr(agent_ref, "get_turn_count", None)
-                if callable(get_turn_count):
-                    get_turn_count_fn = cast(
-                        Callable[[], int | Awaitable[int] | None],
-                        get_turn_count,
-                    )
-                    maybe_turn = get_turn_count_fn()
-                    if isinstance(maybe_turn, int):
-                        turn_count = maybe_turn
-                    elif maybe_turn is not None:
-                        turn_count = int(await maybe_turn)
-
-                get_token_usage = getattr(agent_ref, "get_token_usage", None)
-                if callable(get_token_usage):
-                    get_token_usage_fn = cast(
-                        Callable[
-                            [],
-                            dict[str, int]
-                            | Awaitable[dict[str, int] | None]
-                            | None,
-                        ],
-                        get_token_usage,
-                    )
-                    maybe_usage = get_token_usage_fn()
-                    if isinstance(maybe_usage, dict) or maybe_usage is None:
-                        total_usage = maybe_usage
-                    else:
-                        total_usage = await maybe_usage
-            session_logger.on_session_end(turn_count, total_usage)
-            session_logger.close()
+        return
 
 
 def main():

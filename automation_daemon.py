@@ -79,25 +79,67 @@ async def _consume_loop(
                 task_logger.log_trace_event(event)
 
             hooks = AgentHooks(on_trace_event=on_trace_event)
-            # job_type 从 source 解析：cron:heartbeat.monitor -> heartbeat.monitor
-            job_type = task.source.split(":", 1)[1] if ":" in task.source else ""
-            is_heartbeat = (job_type or "").startswith("heartbeat")
-            profile = (
-                CoreProfile.default_heartbeat(
-                    frontend_id=task.source,
-                    dialog_window_id=task.user_id,
+
+            # 从任务 metadata 中读取显式 core_mode / memory_owner：
+            # - core_mode: full / sub / background（兼容旧值 cron/heartbeat → background）
+            # - memory_owner: 决定记忆 owner（如 feishu:uid / cli:default）
+            raw_mode = ""
+            raw_owner = ""
+            if isinstance(task.metadata, dict):
+                raw_mode = str(task.metadata.get("core_mode") or "").strip()
+                raw_owner = str(task.metadata.get("memory_owner") or "").strip()
+
+            mem_source = ""
+            mem_user = ""
+            if raw_owner and ":" in raw_owner:
+                mem_source, mem_user = raw_owner.split(":", 1)
+            elif raw_owner:
+                mem_source, mem_user = raw_owner, "default"
+
+            mode = (raw_mode or "").lower()
+            # 兼容老配置：cron / heartbeat 都视为 background
+            if mode in ("cron", "heartbeat"):
+                mode = "background"
+
+            frontend_id = mem_source or task.source
+            dialog_id = mem_user or task.user_id
+
+            if mode == "full":
+                # full 模式下对齐 cli/feishu 主对话的权限策略：
+                # - 是否允许 run_command 由 config.command_tools.allow_run 决定
+                # - 其余参数复用 agent 配置
+                cfg = get_config()
+                profile = CoreProfile.full_from_config(
+                    cfg,
+                    frontend_id=frontend_id,
+                    dialog_window_id=dialog_id,
                 )
-                if is_heartbeat
-                else CoreProfile.default_cron(
-                    frontend_id=task.source,
-                    dialog_window_id=task.user_id,
+            elif mode == "sub":
+                profile = CoreProfile.default_sub(
+                    allowed_tools=None,
+                    frontend_id=frontend_id,
+                    dialog_window_id=dialog_id,
                 )
-            )
+            else:
+                # 默认后台任务权限（定时任务 / 心跳）
+                profile = CoreProfile.default_background(
+                    frontend_id=frontend_id,
+                    dialog_window_id=dialog_id,
+                )
+
+            # 有 memory_owner 时，为该 Core 打开持久化记忆；否则仅使用工作记忆。
+            # 注意：full_from_config 默认 memory_enabled=True，因此必须显式设置为 False。
+            if raw_owner:
+                profile.memory_enabled = True
+            else:
+                profile.memory_enabled = False
             request = KernelRequest.create(
                 text=task.instruction,
                 session_id=task.session_id,
                 frontend_id=task.source,
                 metadata={
+                    # source/user_id 仍表示“逻辑触发方”（cron + user_id），
+                    # 实际记忆 owner 由 CoreProfile.frontend_id/dialog_window_id 决定。
                     "source": "cron",
                     "user_id": task.user_id,
                     "_hooks": hooks,

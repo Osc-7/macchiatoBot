@@ -121,7 +121,10 @@ class AgentKernel:
                     ))
                     continue
 
-                result = await self._tools.execute(
+                # 优先使用 agent 自身的 per-session registry（已过 CoreProfile 过滤），
+                # 避免 call_tool 通过全局 registry 绕过权限限制。
+                agent_registry = getattr(agent, "_tool_registry", None) or self._tools
+                result = await agent_registry.execute(
                     action.tool_name,
                     **self._parse_arguments(action.arguments),
                 )

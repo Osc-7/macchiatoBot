@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 # 全局 Resolver 注册表：source -> resolver 实例
 _resolvers: Dict[str, "ContentResolver"] = {}
+_builtins_loaded: bool = False
 
 
 class ContentResolver:
@@ -47,16 +48,13 @@ class ContentResolver:
 
 def _ensure_resolvers() -> None:
     """延迟导入并注册所有内置 Resolver。"""
-    if _resolvers:
+    global _builtins_loaded
+    if _builtins_loaded:
         return
+    _builtins_loaded = True
     try:
         from .resolvers.local import LocalContentResolver
-        _resolvers["local"] = LocalContentResolver()
-    except ImportError:
-        pass
-    try:
-        from .resolvers.feishu import FeishuContentResolver
-        _resolvers["feishu"] = FeishuContentResolver()
+        _resolvers.setdefault("local", LocalContentResolver())
     except ImportError:
         pass
 

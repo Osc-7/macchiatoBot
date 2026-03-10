@@ -7,7 +7,7 @@
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -662,7 +662,22 @@ class AutomationJobConfig(BaseModel):
     )
     user_id: str = Field(
         default="default",
-        description="逻辑用户 ID，用于区分不同用户的后台任务。",
+        description="逻辑用户 ID，用于区分不同用户的后台任务（通常与记忆库 owner 的 user 段一致，如 cli:default 中的 default）。",
+    )
+    memory_owner: Optional[str] = Field(
+        default=None,
+        description=(
+            "可选：记忆库 owner 标识，例如 \"cli:default\"、\"feishu:some_user\"。"
+            "配置后，自动化任务将在该 owner 的上下文和记忆下运行；未配置时，不加载任何长期/内容/对话历史记忆。"
+        ),
+    )
+    core_mode: Optional[Literal["full", "sub", "background", "cron", "heartbeat"]] = Field(
+        default=None,
+        description=(
+            "可选：CoreProfile.mode 权限模式。"
+            "推荐使用 full/sub/background；为兼容旧配置，仍接受 cron/heartbeat，"
+            "但会在内部统一映射为 background。未配置时，自动化队列默认使用 background。"
+        ),
     )
     enabled: bool = Field(
         default=True,

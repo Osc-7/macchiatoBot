@@ -10,8 +10,7 @@ CoreProfile — Core 实例的权限与配置描述符。
 mode 枚举语义：
   full       — 完整权限 Agent（主对话，默认）
   sub        — 子 Agent / 工具 Agent（受限工具集，通常无危险命令）
-  cron       — 定时任务触发的一次性 Core（按任务配置赋权）
-  heartbeat  — 心跳/监控 Core（只读权限，通常只能 notify/read）
+  background — 后台任务 Core（定时任务 / 心跳 / 监控，默认无记忆持久化，短 TTL）
 """
 
 from __future__ import annotations
@@ -54,9 +53,28 @@ class CoreProfile:
     frontend_id / dialog_window_id:
         绑定的记忆库标识。memory_key = (frontend_id, dialog_window_id)。
         CorePool._load() 用这两个字段定位该 Core 应加载哪个记忆库。
+    字段说明（除注释外的关键行为位）：
+
+    - allowed_tools / deny_tools:
+        工具白/黑名单，Kernel 在执行 ToolCallAction 时会再次校验。
+    - allow_dangerous_commands:
+        是否允许 run_command 等危险工具。
+    - visible_memory_scopes:
+        InternalLoader 允许加载的记忆层级（working / long_term / content / chat）。
+        空列表表示不加载任何记忆（适合一次性无状态 Core）。
+    - max_context_tokens:
+        触发 ContextOverflowAction 的 token 阈值。
+    - session_expired_seconds:
+        TTL 超时时间，超过后由 KernelScheduler 触发 evict。
+    - frontend_id / dialog_window_id:
+        绑定的记忆库标识，memory_key = (frontend_id, dialog_window_id)。
+        CorePool._load() 用这两个字段定位该 Core 应加载哪个记忆库。
+    - memory_enabled:
+        是否为该 Core 启用本地记忆库（data/memory/... 目录的创建与读写）。
+        False 时，Core 仍可运行，但不会为该 Core 创建任何 owner 记忆目录。
     """
 
-    mode: Literal["full", "sub", "cron", "heartbeat"] = "full"
+    mode: Literal["full", "sub", "background"] = "full"
 
     allowed_tools: Optional[List[str]] = None
     deny_tools: List[str] = field(default_factory=list)
@@ -65,6 +83,11 @@ class CoreProfile:
     visible_memory_scopes: List[str] = field(
         default_factory=lambda: ["working", "long_term", "content", "chat"]
     )
+
+    # 是否为该 Core 启用本地记忆库（data/memory 下的 owner 目录）。
+    # 关闭后，Agent 仍会运行，但不会创建 long_term/content/chat_history 等持久化目录，
+    # 适合 background 模式（定时任务 / 心跳）等一次性或只读任务。
+    memory_enabled: bool = True
 
     max_context_tokens: int = 80_000
     session_expired_seconds: int = 1_800
@@ -161,19 +184,20 @@ class CoreProfile:
         )
 
     @classmethod
-    def default_cron(
+    def default_background(
         cls,
         allowed_tools: Optional[List[str]] = None,
         *,
         frontend_id: str = "",
         dialog_window_id: str = "",
     ) -> "CoreProfile":
-        """定时任务 Core（一次性，无聊天记忆，按任务配置赋工具权限）。"""
+        """后台任务 Core（定时任务 / 心跳 / 监控；无记忆持久化，短 TTL）。"""
         return cls(
-            mode="cron",
+            mode="background",
             allowed_tools=allowed_tools,
             allow_dangerous_commands=False,
             visible_memory_scopes=["long_term"],
+            memory_enabled=False,
             max_context_tokens=40_000,
             session_expired_seconds=600,
             frontend_id=frontend_id,
@@ -201,21 +225,6 @@ class CoreProfile:
             session_expired_seconds=session_expired_seconds,
         )
 
-    @classmethod
-    def default_heartbeat(
-        cls,
-        *,
-        frontend_id: str = "",
-        dialog_window_id: str = "",
-    ) -> "CoreProfile":
-        """心跳/监控 Core（只读，只能通知，极短 TTL）。"""
-        return cls(
-            mode="heartbeat",
-            allowed_tools=["notify_owner", "get_events", "get_tasks", "get_sync_status"],
-            allow_dangerous_commands=False,
-            visible_memory_scopes=[],
-            max_context_tokens=20_000,
-            session_expired_seconds=120,
-            frontend_id=frontend_id,
-            dialog_window_id=dialog_window_id,
-        )
+    # 向后兼容别名
+    default_cron = default_background
+    default_heartbeat = default_background

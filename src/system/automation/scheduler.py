@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Optional
 from zoneinfo import ZoneInfo
 
 from .event_bus import AsyncEventBus
@@ -13,37 +13,6 @@ from .types import JobDefinition, JobRun, JobStatus
 
 if TYPE_CHECKING:
     from .task_queue import AgentTaskQueue
-
-# job_type → 给 Agent 的自然语言指令模板
-_JOB_INSTRUCTIONS: Dict[str, str] = {
-    "sync.course": (
-        "这是自动化定时任务。请只执行以下操作："
-        "调用 sync_canvas(days_ahead=30, write_tasks=true, write_deadline_events=true)。"
-        "然后仅输出“操作 + 结果”，不要提出追问或建议。"
-    ),
-    "sync.email": (
-        "这是自动化定时任务。请只执行以下操作："
-        "调用 sync_sources(source='email')。"
-        "然后仅输出“操作 + 结果”，不要提出追问或建议。"
-    ),
-    "summary.daily": (
-        "这是自动化定时任务。请只执行以下操作："
-        "调用 get_digest(digest_type='daily', generate_if_missing=true)。"
-        "然后仅输出“操作 + 结果”，不要提出追问或建议。"
-    ),
-    "summary.weekly": (
-        "这是自动化定时任务。请只执行以下操作："
-        "调用 get_digest(digest_type='weekly', generate_if_missing=true)。"
-        "然后仅输出“操作 + 结果”，不要提出追问或建议。"
-    ),
-    "heartbeat.monitor": (
-        "这是心跳/监控任务。请执行轻量检查："
-        "调用 get_sync_status() 获取同步状态，如有异常再调用 get_events/get_tasks 简要确认。"
-        "仅在发现需要人工关注的情况时调用 notify_owner 通知。"
-        '然后仅输出"检查结果"（1-2 句），不要追问或建议。'
-    ),
-}
-
 
 class AutomationScheduler:
     def __init__(
@@ -364,17 +333,33 @@ class AutomationScheduler:
         from .agent_task import make_cron_task
 
         payload = job.payload_template or {}
-        # 优先使用 job.payload_template 中显式配置的 instruction；
-        # 若缺失则回退到内置的 _JOB_INSTRUCTIONS 映射以兼容旧行为。
-        instruction = payload.get("instruction") or _JOB_INSTRUCTIONS.get(job.job_type)
+        # instruction 优先由配置/上层工具提供；
+        # 若缺失则对少数历史内置类型提供兼容文案（便于旧代码与测试），
+        # 其余情况退回通用提示。
+        instruction = payload.get("instruction")
+        if not instruction and job.job_type == "sync.course":
+            instruction = (
+                "这是自动化定时任务。请只执行以下操作："
+                "调用 sync_canvas(days_ahead=30, write_tasks=true, write_deadline_events=true)。"
+                "然后仅输出“操作 + 结果”，不要提出追问或建议。"
+            )
+        if not instruction:
+            instruction = (
+                f"这是自动化定时任务（类型: {job.job_type}）。"
+                "请根据任务类型执行适当的操作，并仅输出“操作 + 结果”。"
+            )
         if not instruction:
             return
 
         user_id = str(payload.get("user_id") or "default")
+        memory_owner = str(payload.get("memory_owner") or "").strip()
+        core_mode = str(payload.get("core_mode") or "").strip() or None
 
         task = make_cron_task(
             job_type=job.job_type,
             instruction=instruction,
             user_id=user_id,
+            memory_owner=memory_owner or None,
+            core_mode=core_mode,
         )
         self._task_queue.push(task)  # type: ignore[union-attr]

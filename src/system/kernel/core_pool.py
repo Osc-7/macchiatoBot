@@ -193,11 +193,14 @@ class CorePool:
                 logger.warning("CorePool: finalize_session failed (session=%s): %s", session_id, exc)
 
         # ── Step 2: summarize — 写入长期记忆 ───────────────────────────────
-        # cron 会话不持久化摘要，避免创建 data/memory/cron:xxx 等目录
+        # background 模式（包含历史上的 cron/heartbeat）不持久化摘要到长期记忆，
+        # 避免为每个后台任务创建独立 data/memory/ 前缀目录；旧版仍兼容 session_id 以
+        # \"cron:\" 开头的会话不写入长期记忆。
         if core_stats is not None and self._summarizer is not None:
             try:
                 long_term_memory = None
-                if not (session_id or "").startswith("cron:"):
+                profile_mode = getattr(getattr(entry, "profile", None), "mode", None)
+                if profile_mode != "background" and not (session_id or "").startswith("cron:"):
                     long_term_memory = getattr(agent, "_long_term_memory", None)
                 messages = None
                 ctx = getattr(agent, "_context", None)
@@ -311,6 +314,10 @@ class CorePool:
         tools = list(reg.list_tools()[1].values())
         if not tools and self._tools_factory:
             tools = self._tools_factory()
+        # 是否为该 Core 启用本地记忆库：默认跟随配置，
+        # 但允许 CoreProfile（如 cron/heartbeat）按 Core 粒度关闭，避免创建一次性 owner 目录。
+        memory_enabled = getattr(profile, "memory_enabled", True)
+
         agent = ScheduleAgent(
             config=self._config,
             tools=tools,
@@ -319,6 +326,7 @@ class CorePool:
             user_id=user_id,
             source=source,
             session_logger=None,  # 关闭旧版会话日志，改用 Kernel 级 CoreLifecycleLogger
+            memory_enabled=memory_enabled,
         )
 
         await agent.__aenter__()

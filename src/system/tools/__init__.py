@@ -274,10 +274,10 @@ def build_tool_registry(
     tools.extend(_build_command_tools(cfg))
 
     # 记忆与对话历史工具：
-    # - cron 模式下不注入，避免为每个 cron:{job} 创建独立 data/memory/cron:{job}/ 目录
-    # - 其余模式保持启用
-    profile_mode = getattr(profile, "mode", None)
-    if profile_mode != "cron":
+    # - CoreProfile.memory_enabled=False 时不注入，避免为每个一次性 Core 创建独立 data/memory/{source}/{user}/ 目录
+    # - memory_enabled=True 时启用（包括部分 background Core 显式打开记忆的场景）
+    memory_enabled = getattr(profile, "memory_enabled", True)
+    if memory_enabled:
         tools.extend(
             _build_memory_tools(
                 cfg,

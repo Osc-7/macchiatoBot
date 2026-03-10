@@ -1,4 +1,4 @@
-"""飞书消息资源 ContentResolver。"""
+"""飞书消息资源 ContentResolver（前端集成层）。"""
 
 from __future__ import annotations
 
@@ -6,11 +6,10 @@ import base64
 import logging
 from typing import Any, Dict, Optional
 
-from frontend.feishu.client import FeishuClient
-from frontend.feishu.config import get_feishu_config
+from agent_core.content import ContentReference, ContentResolver, register_resolver
 
-from ..models import ContentReference
-from ..resolver import ContentResolver
+from .client import FeishuClient
+from .config import get_feishu_config
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +43,13 @@ class FeishuContentResolver(ContentResolver):
                 file_key=ref.key,
                 resource_type=resource_type,
             )
-        except Exception as exc:
-            logger.warning("feishu download failed: message_id=%s file_key=%s: %s", message_id, ref.key, exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "feishu download failed: message_id=%s file_key=%s: %s",
+                message_id,
+                ref.key,
+                exc,
+            )
             return None
 
         if not raw_bytes:
@@ -61,3 +65,8 @@ class FeishuContentResolver(ContentResolver):
             return {"type": "image_url", "image_url": {"url": data_url}}
         # image 及未知类型统一按图片处理
         return {"type": "image_url", "image_url": {"url": data_url}}
+
+
+# 模块导入即向 agent_core 注册 FeishuContentResolver，供 resolve_content_refs 使用。
+register_resolver(FeishuContentResolver())
+

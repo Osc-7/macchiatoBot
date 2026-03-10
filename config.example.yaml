@@ -107,27 +107,12 @@ shuiyuan:
 # 由 automation_daemon 在后台统一调度并周期性执行。
 automation:
   jobs:
-    # 示例：每 6 小时同步课程（Canvas/course_stub）并生成系统级活动记录
-    - name: "sync_course_canvas"
-      description: "这是自动化定时任务。请调用 sync_canvas(days_ahead=30, write_tasks=true, write_deadline_events=true)，然后仅输出“操作 + 结果”。"
-      interval_minutes: 360   # 或使用 daily_time: "08:00" 表示每天早上 8 点执行
-      job_type: "sync.course"
-      user_id: "default"
+    # 示例：每天 15:00 同步记忆
+    - name: "daily_memory_sync"
+      description: "这是自动化定时任务。请查看反思文件和记忆文件，将尚未同步过的核心、长期的理解存到记忆中，然后仅输出“操作 + 结果”。"
+      daily_time: "15:00"
+      memory_owner: "cli:default"
       enabled: true
-    # 示例：每 2 小时同步邮件
-    - name: "sync_email_sources"
-      description: "这是自动化定时任务。请调用 sync_sources(source='email')，然后仅输出“操作 + 结果”。"
-      interval_minutes: 120
-      job_type: "sync.email"
-      user_id: "default"
-      enabled: true
-    # 心跳/监控：轻量检查同步状态，仅在有异常时通知；使用 CoreProfile.default_heartbeat（只读权限、极短 TTL）
-    - name: "heartbeat_monitor"
-      description: "这是心跳/监控任务。请调用 get_sync_status() 获取同步状态，如有异常再调用 get_events/get_tasks 简要确认，仅在需要人工关注时调用 notify_owner。然后仅输出检查结果（1-2 句）。"
-      interval_minutes: 15
-      job_type: "heartbeat.monitor"
-      user_id: "default"
-      enabled: false  # 按需启用
 
 # 时间配置
 time:

@@ -98,12 +98,12 @@ def _build_trigger_footer(
 ) -> str:
     """生成底部的触发楼描述 + 用户原话说明。"""
     trigger_post_id: Optional[int] = reply_to_post_id
-    user_identity = f"（该楼作者用户名为 @{username}）" if username else ""
+    user_identity = f"（该层作者用户名为 @{username}）" if username else ""
 
     footer = (
         f"---\n用户 @了你，在当前话题 {topic_id}"
         + (
-            f" 的第 {reply_to_post_number} 楼"
+            f" 的第 {reply_to_post_number} 层"
             + (f"（post_id={trigger_post_id}）" if trigger_post_id is not None else "")
             if reply_to_post_number is not None
             else ""
@@ -111,7 +111,7 @@ def _build_trigger_footer(
         + user_identity
         + "，说了：\n\n"
         f"{user_message}\n\n"
-        "请根据上文理解语境，直接输出你的回复正文（automation 层会自动发帖，不要调用发帖工具）。"
+        "请根据上文理解语境，直接输出你的回复正文。"
     )
     return footer
 

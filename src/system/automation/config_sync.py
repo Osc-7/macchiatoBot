@@ -20,9 +20,11 @@ from .types import JobDefinition
 logger = logging.getLogger(__name__)
 
 
-def _stable_job_id(name: str, job_type: str, user_id: str) -> str:
+def _stable_job_id(name: str, job_type: str, memory_owner: str) -> str:
     """为 config 来源的任务生成稳定 job_id，便于后续 upsert 更新。"""
-    key = f"{name}:{job_type}:{user_id}"
+    # 使用 memory_owner 作为稳定键的一部分：同一“记忆 owner”下的任务保持一致，
+    # 未配置 memory_owner 时回退到 user_id 以保持向后兼容。
+    key = f"{name}:{job_type}:{memory_owner}"
     h = hashlib.sha256(key.encode()).hexdigest()[:8]
     return f"job-config-{h}"
 
@@ -32,6 +34,8 @@ def _config_job_to_definition(cfg: Config, job_config: Any) -> JobDefinition:
     name = job_config.name
     job_type = job_config.job_type
     user_id = job_config.user_id or "default"
+    memory_owner = getattr(job_config, "memory_owner", None) or ""
+    core_mode = getattr(job_config, "core_mode", None)
     timezone = cfg.time.timezone
 
     run_at: Optional[datetime] = None
@@ -56,6 +60,11 @@ def _config_job_to_definition(cfg: Config, job_config: Any) -> JobDefinition:
         "instruction": job_config.description,
         "user_id": user_id,
     }
+    # 仅当配置了 memory_owner 时才写入 payload；缺省表示“不加载记忆”。
+    if memory_owner:
+        payload["memory_owner"] = memory_owner
+    if core_mode:
+        payload["core_mode"] = core_mode
     if job_config.daily_time:
         payload["daily_time"] = job_config.daily_time
     if job_config.times:
@@ -63,7 +72,8 @@ def _config_job_to_definition(cfg: Config, job_config: Any) -> JobDefinition:
     if job_config.start_time:
         payload["start_time"] = job_config.start_time
 
-    job_id = _stable_job_id(name, job_type, user_id)
+    stable_owner = memory_owner or user_id
+    job_id = _stable_job_id(name, job_type, stable_owner)
     return JobDefinition(
         job_id=job_id,
         job_type=job_type,
@@ -103,7 +113,11 @@ def sync_job_definitions_from_config(
     existing_by_key: dict[tuple, JobDefinition] = {}
     for item in repo.get_all():
         pt = item.payload_template or {}
-        key = (str(pt.get("name") or ""), item.job_type, str(pt.get("user_id") or "default"))
+        key = (
+            str(pt.get("name") or ""),
+            item.job_type,
+            str(pt.get("memory_owner") or pt.get("user_id") or "default"),
+        )
         if key[0]:
             if key not in existing_by_key or item.job_id.startswith("job-config-"):
                 existing_by_key[key] = item
@@ -114,8 +128,9 @@ def sync_job_definitions_from_config(
         try:
             job = _config_job_to_definition(cfg, job_config)
             name = job_config.name
-            user_id = job_config.user_id or "default"
-            key = (name, job.job_type, user_id)
+            memory_owner = getattr(job_config, "memory_owner", None) or ""
+            stable_owner = memory_owner or (job_config.user_id or "default")
+            key = (name, job.job_type, stable_owner)
             existing = existing_by_key.get(key)
             if existing is not None:
                 job.job_id = existing.job_id
@@ -136,7 +151,11 @@ def sync_job_definitions_from_config(
             logger.warning("sync config job %s to job_definitions failed: %s", getattr(job_config, "name", "?"), exc)
     for item in list(repo.get_all()):
         pt = item.payload_template or {}
-        k = (str(pt.get("name") or ""), item.job_type, str(pt.get("user_id") or "default"))
+        k = (
+            str(pt.get("name") or ""),
+            item.job_type,
+            str(pt.get("memory_owner") or pt.get("user_id") or "default"),
+        )
         # 同一 key 下如果存在多条记录，只保留本轮同步确定的那一条，其余删除，避免重复调度。
         if k in kept_id_for_key and kept_id_for_key[k] != item.job_id:
             repo.delete(item.job_id)

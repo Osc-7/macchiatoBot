@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -41,6 +41,7 @@ class AgentTask(BaseModel):
       - 社交平台:  social:{platform}:{uid}  (固定复用，persistent)
     """
     instruction: str
+    metadata: dict[str, Any] | None = None
     context_policy: ContextPolicy = ContextPolicy.EPHEMERAL
     status: TaskStatus = TaskStatus.PENDING
     result: Optional[str] = None
@@ -59,15 +60,31 @@ def make_cron_task(
     instruction: str,
     *,
     user_id: str = "default",
+    memory_owner: str | None = None,
+    core_mode: str | None = None,
 ) -> AgentTask:
-    """构造一个定时任务 AgentTask（ephemeral，session_id 含日期保证唯一性）。"""
+    """构造一个定时任务 AgentTask（ephemeral，session_id 含日期保证唯一性）。
+
+    memory_owner:
+        若提供（例如 "cli:default"），则用于决定该任务运行时加载哪一套记忆与上下文；
+        否则表示不加载任何长期/内容/对话历史记忆，仅使用工作记忆。
+    """
     today = date.today().isoformat()
+    source = f"cron:{job_type}"
+    metadata: dict = {}
+    if memory_owner:
+        metadata["memory_owner"] = memory_owner
+    if core_mode:
+        metadata["core_mode"] = core_mode
+
     return AgentTask(
-        source=f"cron:{job_type}",
+        source=source,
         user_id=user_id,
-        session_id=f"cron:{job_type}:{today}",
+        session_id=f"{source}:{today}",
         instruction=instruction,
         context_policy=ContextPolicy.EPHEMERAL,
+        # 将 memory_owner / core_mode 直接放入 metadata，后续由 automation_daemon / KernelScheduler 解析。
+        metadata=metadata,
     )
 
 

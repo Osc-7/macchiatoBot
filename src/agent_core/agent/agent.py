@@ -86,6 +86,8 @@ class ScheduleAgent:
         user_id: str = "root",
         source: str = "cli",
         defer_mcp_connect: bool = False,
+        *,
+        memory_enabled: Optional[bool] = None,
     ):
         """
         初始化 Agent。
@@ -99,6 +101,7 @@ class ScheduleAgent:
             user_id: 记忆命名空间用户 ID（同一 user_id 可跨终端共享记忆）
             source: 来源命名空间（如 cli/qq/whatsapp）
             defer_mcp_connect: 为 True 时 __aenter__ 不连接 MCP，需稍后调用 ensure_mcp_connected()（用于 daemon 先完成启动再连 MCP）
+            memory_enabled: 覆盖配置级 memory.enabled，用于按 Core 粒度关闭记忆（例如 cron/heartbeat）
         """
         self._config = config or get_config()
         self._user_id = user_id.strip() or "root"
@@ -156,11 +159,10 @@ class ScheduleAgent:
 
         # 四层记忆系统
         mem_cfg: MemoryConfig = self._config.memory
-        self._memory_enabled = mem_cfg.enabled
-        source_paths = resolve_memory_owner_paths(
-            mem_cfg, self._user_id, config=self._config, source=self._source
-        )
+        # 允许按 CoreProfile 粒度覆写 memory.enabled（例如 cron/heartbeat 不落盘）
+        self._memory_enabled = mem_cfg.enabled if memory_enabled is None else bool(memory_enabled)
 
+        # 工作记忆仅依赖内存中的对话上下文，不触发任何磁盘目录创建，始终可用。
         self._working_memory = WorkingMemory(
             context=self._context,
             max_tokens=mem_cfg.max_working_tokens,
@@ -168,26 +170,40 @@ class ScheduleAgent:
             keep_recent=mem_cfg.working_keep_recent,
             hard_threshold_ratio=mem_cfg.working_summary_hard_ratio,
         )
-        self._long_term_memory = LongTermMemory(
-            storage_dir=source_paths["long_term_dir"],
-            memory_md_path=source_paths["memory_md_path"],
-            qmd_enabled=mem_cfg.qmd_enabled,
-            qmd_command=mem_cfg.qmd_command,
-        )
-        self._content_memory = ContentMemory(
-            content_dir=source_paths["content_dir"],
-            qmd_enabled=mem_cfg.qmd_enabled,
-            qmd_command=mem_cfg.qmd_command,
-        )
         self._recall_policy = RecallPolicy(
             force_recall=mem_cfg.force_recall,
             top_n=mem_cfg.recall_top_n,
             score_threshold=mem_cfg.recall_score_threshold,
         )
-        self._chat_history_db = ChatHistoryDB(
-            source_paths["chat_history_db_path"],
-            default_source=None,
-        )
+
+        # 持久化记忆（长期 / 内容 / 对话历史）仅在 memory_enabled 为真时才初始化，
+        # 以避免为每个 cron:{job} / heartbeat Core 创建独立 data/memory/{source}/{user}/ 目录。
+        self._long_term_memory: Optional[LongTermMemory]
+        self._content_memory: Optional[ContentMemory]
+        self._chat_history_db: Optional[ChatHistoryDB]
+        if self._memory_enabled:
+            source_paths = resolve_memory_owner_paths(
+                mem_cfg, self._user_id, config=self._config, source=self._source
+            )
+            self._long_term_memory = LongTermMemory(
+                storage_dir=source_paths["long_term_dir"],
+                memory_md_path=source_paths["memory_md_path"],
+                qmd_enabled=mem_cfg.qmd_enabled,
+                qmd_command=mem_cfg.qmd_command,
+            )
+            self._content_memory = ContentMemory(
+                content_dir=source_paths["content_dir"],
+                qmd_enabled=mem_cfg.qmd_enabled,
+                qmd_command=mem_cfg.qmd_command,
+            )
+            self._chat_history_db = ChatHistoryDB(
+                source_paths["chat_history_db_path"],
+                default_source=None,
+            )
+        else:
+            self._long_term_memory = None
+            self._content_memory = None
+            self._chat_history_db = None
 
         # 注册工具
         if tools:
@@ -922,7 +938,8 @@ class ScheduleAgent:
             await self._mcp_manager.close()
             self._mcp_manager = None
             self._mcp_connected = False
-        self._chat_history_db.close()
+        if self._memory_enabled and self._chat_history_db is not None:
+            self._chat_history_db.close()
 
     async def __aenter__(self) -> "ScheduleAgent":
         """异步上下文管理器入口"""

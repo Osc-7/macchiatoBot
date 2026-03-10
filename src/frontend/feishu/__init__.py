@@ -7,5 +7,8 @@
 - 定义事件回调数据模型；
 - 将飞书会话映射到 Schedule Agent 会话；
 - 通过 AutomationIPCClient 将消息转发给 automation daemon。
+- 注册飞书专用的 ContentResolver。
 """
+
+from .content_resolver import FeishuContentResolver  # noqa: F401
 

@@ -90,9 +90,7 @@ def is_invocation_valid_from_raw(
 
     owner = (cfg.shuiyuan.owner_username or "").strip()
     trigger = (cfg.shuiyuan.invocation_trigger or "【玛奇朵】").strip()
-
     raw = (raw_message or "").strip()
-
     # 若正文中已包含自动回复标记，说明是本 Agent 之前的回复或被引用，直接跳过以避免递归调用。
     if AUTO_REPLY_MARK in raw:
         return False, "检测到自动回复标记，跳过以避免递归回复"

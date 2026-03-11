@@ -120,6 +120,7 @@ def _collect_from_topic_watch(
         return [], stream_map, {}
 
     from .session import is_invocation_valid_from_raw
+    from .reply import AUTO_REPLY_MARK
 
     out: List[Tuple[int, int, int, dict]] = []
     posts_by_topic: Dict[int, list] = {}
@@ -146,8 +147,23 @@ def _collect_from_topic_watch(
             seen.add(int(pid))
             if is_first:
                 continue
-            raw = (p.get("raw") or p.get("cooked") or "").strip()
-            ok, _ = is_invocation_valid_from_raw(raw, config=config)
+            # 始终通过 get_post_by_id 获取带 raw 的完整帖子，再做触发判断与递归防护。
+            full_raw = ""
+            try:
+                post_full = client.get_post_by_id(topic_id, int(pid))
+            except Exception:
+                post_full = None
+            if isinstance(post_full, dict):
+                full_raw = (
+                    (post_full.get("raw") or post_full.get("cooked") or "") or ""
+                ).strip()
+            if not full_raw:
+                continue
+            # 若完整 raw 中包含自动回复标记，则说明是本 Agent 之前的回复或被引用，直接跳过。
+            if AUTO_REPLY_MARK in full_raw:
+                continue
+
+            ok, _ = is_invocation_valid_from_raw(full_raw, config=config)
             if ok:
                 out.append((int(topic_id), int(pn), int(pid), p))
         stream_map[topic_id] = seen
@@ -386,6 +402,7 @@ async def _poll_once(
 
         # 使用正文解析规则判断是否满足调用条件（@主人 + trigger），
         # 兼容「别人 @ 你」和「自己 @ 自己」两种情况。
+
         ok, reason = is_invocation_valid_from_raw(raw, config=config)
         if not ok:
             logger.debug("跳过不满足规则 post_id=%s: %s", post_id, reason)

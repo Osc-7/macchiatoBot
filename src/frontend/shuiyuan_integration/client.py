@@ -442,12 +442,32 @@ class ShuiyuanClient:
         return r.json()
 
     def get_post_by_id(self, topic_id: int, post_id: int) -> Optional[dict[str, Any]]:
-        """根据 post_id 直接获取单条帖子（含 raw 正文）。用于长帖，不依赖 stream 分页。"""
-        data = self.get_topic_posts(topic_id, post_ids=[post_id])
-        if not data:
+        """
+        根据 post_id 直接获取单条帖子（含 raw 正文）。
+
+        注意：
+            - /t/{topic_id}/posts.json 返回的通常是 cooked 正文，不含 raw 字段；
+            - 要获取带 raw 的完整帖子，需要调用 /posts/{post_id}.json。
+
+        Args:
+            topic_id: 话题 ID（目前仅用于接口保持一致，不参与请求路径）
+            post_id: 帖子 ID
+
+        Returns:
+            单条帖子 JSON 字典，不存在则 None
+        """
+        _ensure_rate_limit()
+        r = requests.get(
+            f"{self._base}/posts/{post_id}.json",
+            headers=self._headers,
+            timeout=self._timeout,
+        )
+        if r.status_code == 404:
             return None
-        posts = data.get("post_stream", {}).get("posts") or []
-        return posts[0] if posts else None
+        if r.status_code == 429:
+            _raise_rate_limit(f"/posts/{post_id}.json", r)
+        r.raise_for_status()
+        return r.json()
 
     def get_post_by_number(
         self, topic_id: int, post_number: int

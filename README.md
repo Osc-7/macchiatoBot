@@ -1,16 +1,24 @@
 # machiattoBot
 
-基于 LLM 的AI助手，支持自然语言日程管理、自动化任务队列和多终端、多会话。
+中文 | [English](README_EN.md)
 
-## 当前能力
 
-- 自然语言创建/查询/修改事件与任务
-- 工具驱动主循环（LLM 决策，工具执行）
-- 多模型接入：`doubao`、`qwen`
-- 自动化链路：调度器 + 队列 + 常驻 Daemon（`automation_daemon.py`）
-- Core 抽象层：`core/interfaces` + `core/adapters`
-- CLI 多终端会话（推荐通过 automation IPC 连接常驻 Daemon）
-- MCP 客户端接入外部工具（按配置自动注册）
+一个基于 LLM 的人工智能助手，采用 **Tool-driven + Kernel 调度** 架构，强调可控、可扩展与长期运行稳定性。
+
+machiattoBot 将 AgentCore 的“推理”与 Kernel 的“执行/权限/回收”分离：
+
+- AgentCore 负责对话与决策
+- Kernel 负责工具调用、上下文压缩与生命周期管理
+- Scheduler 负责多会话并发与 TTL 回收
+
+设计了**内核化架构**：把推理与执行分离，并将调度、权限与回收纳入统一的 Kernel/Scheduler 体系中。
+
+- **Kernel 化架构**：推理与 IO 解耦，工具调用统一由 Kernel 执行
+- **多会话并发 + TTL 回收**：适合常驻进程与多终端协作
+- **自动化链路一体化**：定时任务、队列、IPC 一条链路贯通
+- **工具系统可扩展**：统一注册与权限过滤，支持 MCP 工具接入
+- **记忆与上下文策略**：工作记忆压缩、对话历史检索、长期记忆
+- **多端接入**
 
 ## 快速开始
 
@@ -26,8 +34,8 @@ cp config.example.yaml config.yaml
 python automation_daemon.py
 
 # 4) 启动前端
-python main.py #启动CLI
-python feishu_ws_gateway.py #启动飞书服务器
+python main.py # 启动 CLI
+python feishu_ws_gateway.py # 启动飞书服务器
 
 # 5) 单条命令模式
 python main.py 明天下午3点开会
@@ -43,6 +51,7 @@ SCHEDULE_USER_ID=root SCHEDULE_SOURCE=cli python main.py
 ```bash
 python automation_daemon.py
 ```
+
 ### 2) 交互式 CLI
 
 ```bash
@@ -50,6 +59,7 @@ python main.py
 ```
 
 Daemon 会执行：
+
 - 从 `config.yaml` 同步自动化 job 定义（沿用现有调度链路）
 - 调度器按规则入队，消费者执行队列任务
 - 暴露本地 IPC（Unix Socket）给 CLI / 其他前端
@@ -74,6 +84,7 @@ CLI 会话命令（通过 IPC 或本地模式）：
 ```
 
 说明：
+
 - 推荐通过 `automation_daemon.py` 运行，跨终端共享会话视图。
 - 会话列表通过共享注册表跨终端可见（同一 `SCHEDULE_USER_ID` + `SCHEDULE_SOURCE`）。
 - 记忆/对话历史默认按 `user_id` 命名空间隔离（默认 `root`）。
@@ -85,32 +96,44 @@ CLI 会话命令（通过 IPC 或本地模式）：
 
 常用字段：
 
-| 字段 | 说明 |
-|---|---|
-| `llm.provider` | `doubao` 或 `qwen` |
-| `llm.api_key` | LLM 密钥 |
-| `llm.model` | 模型名或端点 ID |
-| `time.timezone` | 时区（默认 `Asia/Shanghai`） |
-| `storage.data_dir` | 本地数据目录 |
-| `memory.*` | 会话总结与记忆策略 |
-| `automation.jobs` | 自动化任务定义 |
-| `mcp.enabled` / `mcp.servers` | MCP 客户端与远端工具 |
 
-## 项目结构（简版）
+| 字段                            | 说明                     |
+| ----------------------------- | ---------------------- |
+| `llm.provider`                | `doubao` 或 `qwen`      |
+| `llm.api_key`                 | LLM 密钥                 |
+| `llm.model`                   | 模型名或端点 ID              |
+| `time.timezone`               | 时区（默认 `Asia/Shanghai`） |
+| `storage.data_dir`            | 本地数据目录                 |
+| `memory.*`                    | 会话总结与记忆策略              |
+| `automation.jobs`             | 自动化任务定义                |
+| `mcp.enabled` / `mcp.servers` | MCP 客户端与远端工具           |
+
+
+## 架构一览
 
 ```text
-src/agent/
-├── automation/      # 调度/队列/SessionManager/Gateway
-├── cli/             # 交互式命令行
-├── core/
-│   ├── agent/       # Agent 主循环
-│   ├── interfaces/  # Core 协议与命令模型
-│   ├── adapters/    # Agent -> CoreSession 适配
-│   ├── tools/       # 工具系统
-│   ├── llm/         # LLM 客户端
-│   └── memory/      # 记忆与会话总结
-├── models/          # Event/Task
-└── storage/         # JSON 持久化
+User/Frontend
+   │
+   ▼
+Automation Core Gateway ── IPC ── CLI / Feishu / MCP
+   │
+   ▼
+KernelScheduler ── OutputRouter ── Futures
+   │
+   ▼
+AgentKernel ── ToolRegistry ── Tools (IO)
+   │
+   ▼
+AgentCore (LLM 推理 + 决策)
+```
+
+## 项目结构
+
+```text
+src/
+├── agent_core/    # AgentCore、Kernel 协议、工具与记忆
+├── system/        # KernelScheduler、CorePool、automation/runtime
+└── frontend/      # CLI、飞书、MCP 等多端接入
 ```
 
 ## 开发与测试

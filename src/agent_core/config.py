@@ -1012,17 +1012,9 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     # 将 Canvas 段回填到环境变量，方便 frontend.canvas_integration.CanvasConfig.from_env 使用 config.yaml
     try:
         canvas_cfg = cfg.canvas
-        if (
-            canvas_cfg
-            and canvas_cfg.api_key
-            and not os.environ.get("CANVAS_API_KEY")
-        ):
+        if canvas_cfg and canvas_cfg.api_key and not os.environ.get("CANVAS_API_KEY"):
             os.environ["CANVAS_API_KEY"] = canvas_cfg.api_key
-        if (
-            canvas_cfg
-            and canvas_cfg.base_url
-            and not os.environ.get("CANVAS_BASE_URL")
-        ):
+        if canvas_cfg and canvas_cfg.base_url and not os.environ.get("CANVAS_BASE_URL"):
             os.environ["CANVAS_BASE_URL"] = canvas_cfg.base_url
     except Exception:
         # 回填失败不影响主流程

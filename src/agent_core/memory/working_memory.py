@@ -82,7 +82,9 @@ class WorkingMemory:
         self._keep_recent = keep_recent
         self._soft_limit = int(max_tokens * threshold)
         self._hard_limit = (
-            int(max_tokens * hard_threshold_ratio) if hard_threshold_ratio is not None else None
+            int(max_tokens * hard_threshold_ratio)
+            if hard_threshold_ratio is not None
+            else None
         )
         self._running_summary: Optional[str] = None
         self._needs_summarize = False
@@ -116,9 +118,7 @@ class WorkingMemory:
         else:
             current_tokens = estimate_messages_tokens(self._context.get_messages())
         soft_ok = current_tokens >= self._soft_limit
-        hard_ok = (
-            self._hard_limit is not None and current_tokens >= self._hard_limit
-        )
+        hard_ok = self._hard_limit is not None and current_tokens >= self._hard_limit
         self._needs_summarize = soft_ok or hard_ok
         return self._needs_summarize
 
@@ -158,11 +158,19 @@ class WorkingMemory:
         else:
             recent_start = len(messages) - keep_count
         # 若保留段第一条是 tool，说明截在了工具块中间，前移 recent_start 到该块的 assistant
-        if recent_start > 0 and recent_start < len(messages) and messages[recent_start].get("role") == "tool":
+        if (
+            recent_start > 0
+            and recent_start < len(messages)
+            and messages[recent_start].get("role") == "tool"
+        ):
             i = recent_start - 1
             while i >= 0 and messages[i].get("role") == "tool":
                 i -= 1
-            if i >= 0 and messages[i].get("role") == "assistant" and messages[i].get("tool_calls"):
+            if (
+                i >= 0
+                and messages[i].get("role") == "assistant"
+                and messages[i].get("tool_calls")
+            ):
                 recent_start = i
         old_messages = messages[:recent_start]
         if not old_messages:
@@ -170,7 +178,9 @@ class WorkingMemory:
 
         summary_input = self._format_messages_for_summary(old_messages)
         if self._running_summary:
-            summary_input = f"之前的摘要：\n{self._running_summary}\n\n新增对话：\n{summary_input}"
+            summary_input = (
+                f"之前的摘要：\n{self._running_summary}\n\n新增对话：\n{summary_input}"
+            )
 
         async def _do_summarize() -> str:
             response = await llm_client.chat(
@@ -249,7 +259,13 @@ class WorkingMemory:
                 "tags": [],
             }
 
-        for key in ("summary", "decisions", "open_questions", "referenced_files", "tags"):
+        for key in (
+            "summary",
+            "decisions",
+            "open_questions",
+            "referenced_files",
+            "tags",
+        ):
             result.setdefault(key, [] if key != "summary" else "")
 
         return result
@@ -275,7 +291,9 @@ class WorkingMemory:
                 if tool_calls:
                     for tc in tool_calls:
                         fn = tc.get("function", {})
-                        parts.append(f"助手调用工具: {fn.get('name', '?')}({fn.get('arguments', '')})")
+                        parts.append(
+                            f"助手调用工具: {fn.get('name', '?')}({fn.get('arguments', '')})"
+                        )
             elif role == "tool":
                 tc_id = msg.get("tool_call_id", "?")
                 parts.append(f"工具结果[{tc_id}]: {content[:500]}")
@@ -283,4 +301,3 @@ class WorkingMemory:
                 parts.append(f"[{role}] {content}")
 
         return "\n".join(parts)
-

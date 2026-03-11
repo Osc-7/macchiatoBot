@@ -89,7 +89,17 @@ class RecallPolicy:
         result = RecallResult()
 
         if long_term_memory:
-            result.long_term = long_term_memory.search(query, self._top_n)
+            # 先取略多一些结果，再按 confidence 做阈值过滤
+            raw_entries = long_term_memory.search(query, self._top_n * 2)
+            if self._score_threshold is not None and self._score_threshold > 0:
+                filtered = [
+                    e
+                    for e in raw_entries
+                    if getattr(e, "confidence", 1.0) >= self._score_threshold
+                ]
+            else:
+                filtered = raw_entries
+            result.long_term = filtered[: self._top_n]
 
         if content_memory:
             hits = content_memory.search(query, self._top_n)

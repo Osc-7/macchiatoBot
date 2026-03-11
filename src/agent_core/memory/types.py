@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 
@@ -135,4 +134,3 @@ class MemoryEntry:
             lines.append("")
             lines.append(f"**标签**: {', '.join(self.tags)}")
         return "\n".join(lines)
-

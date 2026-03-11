@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 from pathlib import Path
@@ -19,7 +18,9 @@ class ContentMemory:
 
     VALID_CATEGORIES = ("docs", "meeting", "diary", "lessons", "notes", "code", "other")
 
-    def __init__(self, content_dir: str, qmd_enabled: bool = False, qmd_command: str = "qmd"):
+    def __init__(
+        self, content_dir: str, qmd_enabled: bool = False, qmd_command: str = "qmd"
+    ):
         self._dir = Path(content_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._qmd_enabled = qmd_enabled
@@ -127,6 +128,7 @@ class ContentMemory:
             )
             if result.returncode == 0 and result.stdout.strip():
                 import json
+
                 return json.loads(result.stdout)
         except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
             pass
@@ -137,6 +139,7 @@ class ContentMemory:
         """调用 markitdown 将文件转为 Markdown。"""
         try:
             from markitdown import MarkItDown
+
             converter = MarkItDown()
             result = converter.convert(file_path)
             return result.text_content

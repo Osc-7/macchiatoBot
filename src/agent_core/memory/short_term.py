@@ -1,7 +1,10 @@
 """
-短期记忆 - 最近 K 个会话摘要队列
+短期记忆 - 最近 K 个会话摘要队列（当前未接入主流程）
 
-FIFO 队列维护最近 K 个 SessionSummary，出队时触发长期记忆提炼。
+说明：
+- 提供基于 JSONL 的 SessionSummary FIFO 队列实现
+- 现有 Agent 记忆架构已采用 WorkingMemory + 会话级 SessionSummarizer 直接写入长期记忆
+- ShortTermMemory 暂未在运行时使用，仅作为未来扩展/实验用途保留
 """
 
 from __future__ import annotations
@@ -95,4 +98,3 @@ class ShortTermMemory:
             if entry.decisions:
                 parts.append("决策: " + "; ".join(entry.decisions))
         return "\n".join(parts)
-

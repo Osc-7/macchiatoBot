@@ -100,8 +100,12 @@ class ChatHistoryDB:
         cur = conn.execute("PRAGMA table_info(messages)")
         cols = {str(r[1]) for r in cur.fetchall()}
         if "source" not in cols:
-            conn.execute("ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT ''")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_source_session ON messages(source, session_id)")
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT ''"
+            )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_source_session ON messages(source, session_id)"
+        )
 
     @staticmethod
     def _truncate_tool_content(content: str) -> tuple[str, bool]:
@@ -150,9 +154,7 @@ class ChatHistoryDB:
             )
             return cur.lastrowid  # type: ignore[return-value]
 
-    def search(
-        self, query: str, top_k: int = 5
-    ) -> List[Dict[str, Any]]:
+    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """
         FTS5 关键词搜索，返回最相关的消息片段。
 
@@ -204,9 +206,7 @@ class ChatHistoryDB:
             for r in rows
         ]
 
-    def get_context(
-        self, message_id: int, n: int = 5
-    ) -> List[Dict[str, Any]]:
+    def get_context(self, message_id: int, n: int = 5) -> List[Dict[str, Any]]:
         """
         获取指定消息前后各 n 条（同一 session 内）。
 
@@ -287,7 +287,13 @@ class ChatHistoryDB:
                     ORDER BY id DESC
                     LIMIT ?
                     """,
-                    (session_id, self._default_source, self._default_source, message_id, n),
+                    (
+                        session_id,
+                        self._default_source,
+                        self._default_source,
+                        message_id,
+                        n,
+                    ),
                 )
                 rows = list(reversed(cur.fetchall()))
             else:
@@ -301,7 +307,13 @@ class ChatHistoryDB:
                     ORDER BY id ASC
                     LIMIT ?
                     """,
-                    (session_id, self._default_source, self._default_source, message_id, n),
+                    (
+                        session_id,
+                        self._default_source,
+                        self._default_source,
+                        message_id,
+                        n,
+                    ),
                 )
                 rows = cur.fetchall()
 
@@ -345,7 +357,13 @@ class ChatHistoryDB:
                   AND role IN ({placeholders})
                 ORDER BY id
             """
-            params: List[Any] = [session_id, self._default_source, self._default_source, int(after_id), *roles]
+            params: List[Any] = [
+                session_id,
+                self._default_source,
+                self._default_source,
+                int(after_id),
+                *roles,
+            ]
         else:
             sql = """
                 SELECT id, session_id, source, timestamp, role, content, tool_name, is_truncated
@@ -355,7 +373,12 @@ class ChatHistoryDB:
                   AND id > ?
                 ORDER BY id
             """
-            params = [session_id, self._default_source, self._default_source, int(after_id)]
+            params = [
+                session_id,
+                self._default_source,
+                self._default_source,
+                int(after_id),
+            ]
         if limit is not None:
             sql = f"{sql}\nLIMIT ?"
             params.append(limit)
@@ -364,7 +387,9 @@ class ChatHistoryDB:
             rows = cur.fetchall()
         return [_row_to_dict(r) for r in rows]
 
-    def delete_session_messages(self, session_id: str, *, source: Optional[str] = None) -> int:
+    def delete_session_messages(
+        self, session_id: str, *, source: Optional[str] = None
+    ) -> int:
         """删除某个 session 的所有历史消息。
 
         仅影响对话历史数据库，不影响长期记忆等其他存储。
@@ -372,7 +397,9 @@ class ChatHistoryDB:
         sid = str(session_id or "").strip()
         if not sid:
             return 0
-        source_filter = str(source).strip() if source is not None else self._default_source
+        source_filter = (
+            str(source).strip() if source is not None else self._default_source
+        )
         with self._cursor() as cur:
             if source_filter:
                 cur.execute(

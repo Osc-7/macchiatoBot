@@ -123,6 +123,48 @@ class ReadFileTool(BaseTool):
                 message="缺少必需参数: path",
             )
 
+        # 若 path 为 MEMORY.md，则根据前端 source + user_id 映射到
+        # data/memory/{frontend}/{user_id}/long_term/MEMORY.md，避免默认落到项目根目录。
+        try:
+            from agent_core.config import MemoryConfig  # 局部导入避免循环
+            from agent_core.agent.memory_paths import resolve_memory_owner_paths
+
+            if Path(path_str).name == "MEMORY.md":
+                source = (exec_ctx.get("source") or "").strip() or "cli"
+                user_id = (exec_ctx.get("user_id") or "").strip() or "root"
+                mem_cfg: MemoryConfig = (
+                    getattr(self._config, "memory", None) or MemoryConfig()
+                )
+                paths = resolve_memory_owner_paths(
+                    mem_cfg, user_id, config=self._config, source=source
+                )
+                path_str = paths["memory_md_path"]
+                kwargs["path"] = path_str
+        except Exception:
+            # 解析失败时退回原始 path_str 行为
+            pass
+
+        # 若 path 为 MEMORY.md，则根据前端 source + user_id 映射到
+        # data/memory/{frontend}/{user_id}/long_term/MEMORY.md，避免默认落到项目根目录。
+        try:
+            from agent_core.config import MemoryConfig  # 局部导入避免循环
+            from agent_core.agent.memory_paths import resolve_memory_owner_paths
+
+            if Path(path_str).name == "MEMORY.md":
+                source = (exec_ctx.get("source") or "").strip() or "cli"
+                user_id = (exec_ctx.get("user_id") or "").strip() or "root"
+                mem_cfg: MemoryConfig = (
+                    getattr(self._config, "memory", None) or MemoryConfig()
+                )
+                paths = resolve_memory_owner_paths(
+                    mem_cfg, user_id, config=self._config, source=source
+                )
+                path_str = paths["memory_md_path"]
+                kwargs["path"] = path_str
+        except Exception:
+            # 解析失败时退回原始 path_str 行为
+            pass
+
         if not self._ft_config.allow_read:
             return ToolResult(
                 success=False,
@@ -380,6 +422,27 @@ class WriteFileTool(BaseTool):
                 error="MISSING_CONTENT",
                 message="缺少必需参数: content",
             )
+
+        # 若 path 为 MEMORY.md，则根据前端 source + user_id 映射到
+        # data/memory/{frontend}/{user_id}/long_term/MEMORY.md，避免默认落到项目根目录。
+        try:
+            from agent_core.config import MemoryConfig  # 局部导入避免循环
+            from agent_core.agent.memory_paths import resolve_memory_owner_paths
+
+            if Path(path_str).name == "MEMORY.md":
+                source = (exec_ctx.get("source") or "").strip() or "cli"
+                user_id = (exec_ctx.get("user_id") or "").strip() or "root"
+                mem_cfg: MemoryConfig = (
+                    getattr(self._config, "memory", None) or MemoryConfig()
+                )
+                paths = resolve_memory_owner_paths(
+                    mem_cfg, user_id, config=self._config, source=source
+                )
+                path_str = paths["memory_md_path"]
+                kwargs["path"] = path_str
+        except Exception:
+            # 解析失败时退回原始 path_str 行为
+            pass
 
         if not self._ft_config.allow_write:
             return ToolResult(

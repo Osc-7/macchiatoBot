@@ -175,7 +175,9 @@ def load_skill_content(
 ) -> str:
     """
     加载技能完整内容（供 load_skill 工具调用）。
-    优先 prompts/skills，其次 cli_dir。超出 max_chars 时截断。
+
+    仅从 CLI skills 目录读取（例如 ~/.agents/skills/{skill_name}/SKILL.md），
+    不再从仓库内 prompts/skills/ 读取。超出 max_chars 时截断。
     """
     path = _resolve_skill_path(skill_name, cli_dir_path)
     if not path:

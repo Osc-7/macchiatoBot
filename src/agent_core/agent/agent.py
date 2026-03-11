@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from datetime import timezone as dt_timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, cast
 
 from agent_core.config import Config, MemoryConfig, MCPServerConfig, get_config
 from agent_core.context import ConversationContext
@@ -217,11 +217,12 @@ class ScheduleAgent:
                 self._tool_registry.register(tool)
 
         # 注册对话历史检索工具
-        if self._memory_enabled:
+        if self._memory_enabled and self._chat_history_db is not None:
+            db = self._chat_history_db
             for chat_tool in [
-                ChatSearchTool(self._chat_history_db),
-                ChatContextTool(self._chat_history_db),
-                ChatScrollTool(self._chat_history_db),
+                ChatSearchTool(db),
+                ChatContextTool(db),
+                ChatScrollTool(db),
             ]:
                 if not self._tool_registry.has(chat_tool.name):
                     self._tool_registry.register(chat_tool)
@@ -308,7 +309,9 @@ class ScheduleAgent:
         sid = (session_id or self._session_id or "").strip()
         if not sid or not self._memory_enabled:
             return 0
-        return self._chat_history_db.delete_session_messages(sid, source=self._source)
+        return self._require_chat_history_db().delete_session_messages(
+            sid, source=self._source
+        )
 
     def get_token_usage(self) -> dict:
         """
@@ -414,7 +417,7 @@ class ScheduleAgent:
         if self._session_logger:
             self._session_logger.on_user_message(turn_id, user_input)
         if self._memory_enabled:
-            msg_id = self._chat_history_db.write_message(
+            msg_id = self._require_chat_history_db().write_message(
                 session_id=self._session_id,
                 role="user",
                 content=user_input,
@@ -608,7 +611,7 @@ class ScheduleAgent:
                         self._collect_outgoing_attachment(result)
 
                         if self._memory_enabled:
-                            msg_id = self._chat_history_db.write_message(
+                            msg_id = self._require_chat_history_db().write_message(
                                 session_id=self._session_id,
                                 role="tool",
                                 content=result.to_json(),
@@ -629,7 +632,7 @@ class ScheduleAgent:
                             turn_id, response.content
                         )
                     if self._memory_enabled:
-                        msg_id = self._chat_history_db.write_message(
+                        msg_id = self._require_chat_history_db().write_message(
                             session_id=self._session_id,
                             role="assistant",
                             content=response.content,
@@ -852,7 +855,7 @@ class ScheduleAgent:
         owner_id: Optional[str] = None
         if self._source == "shuiyuan":
             owner_id = self._user_id
-        self._long_term_memory.add_recent_topic(
+        self._require_long_term_memory().add_recent_topic(
             summary=session_summary.summary,
             session_id=self._session_id,
             tags=session_summary.tags,
@@ -914,7 +917,7 @@ class ScheduleAgent:
         if not self._memory_enabled:
             return
 
-        history = self._chat_history_db.get_session_messages(sid)
+        history = self._require_chat_history_db().get_session_messages(sid)
         if not history:
             return
         replay_rows = [r for r in history if r.get("role") in {"user", "assistant"}]
@@ -940,7 +943,7 @@ class ScheduleAgent:
         """同步其他终端在同一 session 里新增的 user/assistant 消息。"""
         if not self._memory_enabled:
             return
-        new_rows = self._chat_history_db.get_session_messages_after(
+        new_rows = self._require_chat_history_db().get_session_messages_after(
             self._session_id,
             self._last_history_id,
             roles=["user", "assistant"],
@@ -993,6 +996,26 @@ class ScheduleAgent:
         if self._memory_enabled and self._chat_history_db is not None:
             self._chat_history_db.close()
 
+    def _require_chat_history_db(self) -> ChatHistoryDB:
+        """
+        返回非可选的 ChatHistoryDB。
+
+        仅在已确认记忆系统启用且 ChatHistoryDB 已初始化的路径中调用。
+        """
+        if self._chat_history_db is None:
+            raise RuntimeError("ChatHistoryDB is not initialized")
+        return self._chat_history_db
+
+    def _require_long_term_memory(self) -> LongTermMemory:
+        """
+        返回非可选的 LongTermMemory。
+
+        仅在已确认记忆系统启用且 LongTermMemory 已初始化的路径中调用。
+        """
+        if self._long_term_memory is None:
+            raise RuntimeError("LongTermMemory is not initialized")
+        return self._long_term_memory
+
     async def __aenter__(self) -> "ScheduleAgent":
         """异步上下文管理器入口"""
         if self._config.mcp.enabled and not self._mcp_connected:
@@ -1002,7 +1025,10 @@ class ScheduleAgent:
             self._mcp_manager = MCPClientManager(self._config.mcp)
             if not self._defer_mcp_connect:
                 await self._mcp_manager.connect()
-                self._tool_registry.update_tools(self._mcp_manager.get_proxy_tools())
+                proxy_tools = self._mcp_manager.get_proxy_tools()
+                self._tool_registry.update_tools(
+                    cast(List[BaseTool], proxy_tools)
+                )
                 self._mcp_connected = True
         return self
 
@@ -1015,7 +1041,8 @@ class ScheduleAgent:
         ):
             return self._mcp_connected
         await self._mcp_manager.connect()
-        self._tool_registry.update_tools(self._mcp_manager.get_proxy_tools())
+        proxy_tools = self._mcp_manager.get_proxy_tools()
+        self._tool_registry.update_tools(cast(List[BaseTool], proxy_tools))
         self._mcp_connected = True
         return True
 

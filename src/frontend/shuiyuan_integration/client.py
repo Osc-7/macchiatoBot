@@ -176,19 +176,16 @@ class ShuiyuanClientPool:
 
     def _select_key(self) -> str:
         now = time.time()
-        # 所有可用 key 的索引
-        available_indices = [
-            i
-            for i, k in enumerate(self._keys)
-            if self._blocked_until.get(k, 0.0) <= now
-        ]
-        if not available_indices:
+        # 所有可用 key 中，至少要有一把未处于日级冷却期
+        available = any(self._blocked_until.get(k, 0.0) <= now for k in self._keys)
+        if not available:
             raise RuntimeError("所有 User-Api-Key 已在冷却中，请稍后再试")
 
-        # 从上次位置开始轮询选择下一个可用 key
         n = len(self._keys)
+        # 严格轮询：每次从上一次使用位置的下一个开始，找到首个未在冷却期的 key
+        start = (self._current_index + 1) % n
         for offset in range(n):
-            idx = (self._current_index + offset) % n
+            idx = (start + offset) % n
             key = self._keys[idx]
             if self._blocked_until.get(key, 0.0) <= now:
                 self._current_index = idx

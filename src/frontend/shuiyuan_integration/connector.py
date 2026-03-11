@@ -267,25 +267,29 @@ async def _poll_topic_watch(
     client: Any,
     config: Config,
     stream_map: Dict[int, Set[int]],
-) -> Dict[int, Set[int]]:
+) -> tuple[Dict[int, Set[int]], bool]:
     """
     Topic 监控模式轮询一次。仅处理 allowed_topic_ids 中的新帖。
+
+    Returns:
+        (更新后的 stream_map, 本轮是否实际触发至少一次回复)
     """
     cfg = config.shuiyuan
     owner = (cfg.owner_username or "").strip()
     if not owner:
-        return stream_map
+        return stream_map, False
 
     items, stream_map, posts_by_topic = _collect_from_topic_watch(
         client, config, stream_map
     )
     if not items:
-        return stream_map
+        return stream_map, False
 
     logger.info("发现 %d 条新提及（topic 监控）", len(items))
 
     from .session import run_shuiyuan_reply
 
+    had_mention = False
     for topic_id, post_number, post_id, post in items:
         if not topic_id or not post_id:
             continue
@@ -306,6 +310,8 @@ async def _poll_topic_watch(
                 config=config,
                 thread_posts=thread_posts,
             )
+            # 只要有一次满足规则并调用了回复，就视为本轮有「活动」
+            had_mention = True
             if result:
                 logger.info("水源回复完成")
             else:
@@ -313,7 +319,7 @@ async def _poll_topic_watch(
         except Exception as e:
             logger.exception("水源回复失败: %s", e)
 
-    return stream_map
+    return stream_map, had_mention
 
 
 async def _poll_once(
@@ -447,7 +453,19 @@ async def run_connector_loop(
     if allowed:
         # 加载历史 stream_map，避免每次重启都从历史帖子重新初始化
         stream_map: Dict[int, Set[int]] = _load_stream_map()
-        backoff_until: float = 0.0
+        # 动态轮询节奏：根据最近是否有 @ 活动选择快/中/慢轮询
+        last_mention_ts: float | None = None
+        # 快速轮询：刚有人 @ 时，优先降低响应延迟
+        fast_interval = min(5.0, poll_interval_seconds / 2.0)
+        # 正常轮询：作为默认节奏
+        normal_interval = float(poll_interval_seconds)
+        # 慢速轮询：长时间无人 @ 时，降低日级总请求量
+        slow_interval = max(normal_interval * 3.0, normal_interval)
+        # 认为「最近有活动」的时间窗口（分钟）
+        active_window_minutes = 10.0
+        # 超过此时间仍无活动则视为「非常安静」
+        quiet_window_minutes = 60.0
+        backoff_until_topic: float = 0.0
         logger.info(
             "水源 connector 启动（topic 监控），owner=%s，topics=%s，轮询间隔 %s 秒",
             owner,
@@ -457,16 +475,20 @@ async def run_connector_loop(
         while not stop.is_set():
             # 若之前收到 Retry-After 等限流提示，则在冷却期内跳过主动轮询
             now = time.time()
-            if now < backoff_until:
-                wait_secs = max(0.0, backoff_until - now)
+            if now < backoff_until_topic:
+                wait_secs = max(0.0, backoff_until_topic - now)
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=wait_secs)
                 except asyncio.TimeoutError:
                     pass
                 continue
             try:
-                stream_map = await _poll_topic_watch(client, cfg, stream_map)
+                stream_map, had_mention = await _poll_topic_watch(
+                    client, cfg, stream_map
+                )
                 _save_stream_map(stream_map)
+                if had_mention:
+                    last_mention_ts = time.time()
             except Exception as e:
                 # 特判限流异常，打印更详细信息
                 from .client import ShuiyuanRateLimitError
@@ -476,14 +498,17 @@ async def run_connector_loop(
                     retry_after = headers.get("Retry-After") or headers.get(
                         "retry-after"
                     )
-                    delay: float = 0.0
-                    try:
-                        delay = float(retry_after)
-                    except Exception:
+                    if retry_after is not None:
+                        try:
+                            delay = float(retry_after)
+                        except Exception:
+                            delay = poll_interval_seconds * 3.0
+                    else:
                         # 若无 Retry-After，则退避为 3 倍轮询间隔
                         delay = poll_interval_seconds * 3.0
-                    backoff_until = max(
-                        backoff_until, time.time() + max(delay, poll_interval_seconds)
+                    backoff_until_topic = max(
+                        backoff_until_topic,
+                        time.time() + max(delay, poll_interval_seconds),
                     )
                     logger.warning(
                         "轮询限流(429)：%s (path=%s, headers=%s)，将在 %.0f 秒后重试",
@@ -495,14 +520,26 @@ async def run_connector_loop(
                 else:
                     logger.exception("轮询异常: %s", e)
             try:
-                await asyncio.wait_for(stop.wait(), timeout=poll_interval_seconds)
+                # 根据最近一次 @ 活动时间，动态选择下次轮询间隔
+                now = time.time()
+                if last_mention_ts is None:
+                    interval = normal_interval
+                else:
+                    delta_min = (now - last_mention_ts) / 60.0
+                    if delta_min <= active_window_minutes:
+                        interval = fast_interval
+                    elif delta_min <= quiet_window_minutes:
+                        interval = normal_interval
+                    else:
+                        interval = slow_interval
+                await asyncio.wait_for(stop.wait(), timeout=interval)
             except asyncio.TimeoutError:
                 pass
         return
 
     # 通知模式：user_actions + notifications
     stream_list: List[int] = []
-    backoff_until: float = 0.0
+    backoff_until_notify: float = 0.0
     logger.info(
         "水源 connector 启动（user_actions filter=7），owner=%s，轮询间隔 %s 秒",
         owner,
@@ -517,13 +554,16 @@ async def run_connector_loop(
             if isinstance(e, ShuiyuanRateLimitError):
                 headers = getattr(e, "headers", None) or {}
                 retry_after = headers.get("Retry-After") or headers.get("retry-after")
-                delay: float = 0.0
-                try:
-                    delay = float(retry_after)
-                except Exception:
+                if retry_after is not None:
+                    try:
+                        delay = float(retry_after)
+                    except Exception:
+                        delay = poll_interval_seconds * 3.0
+                else:
                     delay = poll_interval_seconds * 3.0
-                backoff_until = max(
-                    backoff_until, time.time() + max(delay, poll_interval_seconds)
+                backoff_until_notify = max(
+                    backoff_until_notify,
+                    time.time() + max(delay, poll_interval_seconds),
                 )
                 logger.warning(
                     "轮询限流(429)：%s (path=%s, headers=%s)，将在 %.0f 秒后重试",
@@ -537,8 +577,8 @@ async def run_connector_loop(
         try:
             now = time.time()
             # 如果处于限流冷却期，则优先等待冷却结束；否则按正常轮询间隔等待
-            if now < backoff_until:
-                wait_secs = max(0.0, backoff_until - now)
+            if now < backoff_until_notify:
+                wait_secs = max(0.0, backoff_until_notify - now)
             else:
                 wait_secs = poll_interval_seconds
             await asyncio.wait_for(stop.wait(), timeout=wait_secs)

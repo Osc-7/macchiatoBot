@@ -131,6 +131,12 @@ class NormalizationWriteService:
         elif kind == "task":
             await self._write_task(source_type, normalized)
 
+    @staticmethod
+    def _truncate(text: str | None, max_len: int = 2000) -> str | None:
+        if text and len(text) > max_len:
+            return text[:max_len]
+        return text
+
     async def _write_event(self, source_type: str, payload: dict) -> None:
         title = payload.get("title") or "[自动化] 未命名事件"
         start_raw = payload.get("start_time")
@@ -143,7 +149,7 @@ class NormalizationWriteService:
 
         event = Event(
             title=title,
-            description=payload.get("description"),
+            description=self._truncate(payload.get("description")),
             start_time=start_time,
             end_time=end_time,
             priority=EventPriority(payload.get("priority", "medium")),
@@ -163,7 +169,7 @@ class NormalizationWriteService:
         due_date = payload.get("due_date")
         task = Task(
             title=title,
-            description=payload.get("description"),
+            description=self._truncate(payload.get("description")),
             estimated_minutes=int(payload.get("estimated_minutes", 30)),
             due_date=due_date,
             priority=TaskPriority(payload.get("priority", "medium")),

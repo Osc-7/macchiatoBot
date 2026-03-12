@@ -14,6 +14,9 @@ from .reply import (
 )
 from .session import is_invocation_valid, run_shuiyuan_reply
 
+# 模块导入时自动注册 ShuiyuanContentResolver，确保 resolve_content_refs 能处理水源图片引用
+from . import content_resolver as _content_resolver  # noqa: F401
+
 # connector 可单独运行: python -m shuiyuan_integration.connector
 from .user_api_key import (
     generate_user_api_key,

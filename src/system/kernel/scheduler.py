@@ -334,6 +334,13 @@ class KernelScheduler:
                     pass
 
             content_items = request.metadata.get("content_items")
+            if content_items:
+                logger.info(
+                    "scheduler: injecting %d content_items into LLM context for session=%s (types=%s)",
+                    len(content_items),
+                    session_id,
+                    [str(i.get("type")) for i in content_items[:3]],
+                )
             agent._context.add_user_message(
                 request.text, media_items=content_items or None
             )

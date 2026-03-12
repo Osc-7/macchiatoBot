@@ -11,6 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+# base64 图片可能数 MB，默认 64KB readline limit 远远不够
+_STREAM_LIMIT = 32 * 1024 * 1024  # 32 MB
+
 from agent_core.interfaces import (
     AgentHooks,
     AgentRunInput,
@@ -67,7 +70,7 @@ class AutomationIPCServer:
         if path.exists():
             path.unlink()
         self._server = await asyncio.start_unix_server(
-            self._handle_client, path=str(path)
+            self._handle_client, path=str(path), limit=_STREAM_LIMIT
         )
         self._expire_task = asyncio.create_task(
             self._expire_loop(), name="automation-ipc-expire"
@@ -183,6 +186,13 @@ class AutomationIPCServer:
         )
         try:
             meta_dict: Dict[str, Any] = metadata if isinstance(metadata, dict) else {}
+            _ci = meta_dict.get("content_items")
+            if isinstance(_ci, list) and _ci:
+                logger.info(
+                    "ipc_server: run_turn_stream received %d content_items (types=%s)",
+                    len(_ci),
+                    [str(i.get("type")) for i in _ci[:3]],
+                )
             result = await self._gateway.inject_message(
                 InjectMessageCommand(
                     session_id=active_session,
@@ -375,7 +385,7 @@ class AutomationIPCClient:
 
     async def _request(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         reader, writer = await asyncio.wait_for(
-            asyncio.open_unix_connection(self._socket_path),
+            asyncio.open_unix_connection(self._socket_path, limit=_STREAM_LIMIT),
             timeout=self._timeout_seconds,
         )
         req = {
@@ -453,7 +463,7 @@ class AutomationIPCClient:
         self, agent_input: AgentRunInput, hooks: AgentHooks | None = None
     ) -> AgentRunResult:
         reader, writer = await asyncio.wait_for(
-            asyncio.open_unix_connection(self._socket_path),
+            asyncio.open_unix_connection(self._socket_path, limit=_STREAM_LIMIT),
             timeout=self._timeout_seconds,
         )
         req = {

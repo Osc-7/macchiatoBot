@@ -4,28 +4,111 @@
 设计：shuiyuan 前端 -> automation(connector) -> core(Agent) -> automation -> shuiyuan
 
 1. automation 层：connector 轮询 @ 提及，准备上下文，调用 core
-2. core 层：Agent 理解上下文，直接输出回复正文
-3. automation 层：收到输出后调用 post_reply 发帖到水源
+2. core 层：Agent 理解上下文，直接输出回复正文；可调用 attach_image_to_reply 登记附件
+3. automation 层：收到输出后，先将附件上传到水源（upload_file），再将图片 Markdown 拼入
+   正文并调用 post_reply 发帖到水源
 
 调用规则：必须同时满足「@ 主人」且「消息包含【玛奇朵】」才触发回复。
 """
 
 from __future__ import annotations
 
-from typing import Any, List, Optional
+import asyncio
+import logging
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from agent_core.config import Config, get_config
 from frontend.shuiyuan_integration.reply import AUTO_REPLY_MARK
 
 from agent_core import AgentCore
+from agent_core.content import ContentReference
 from agent_core.interfaces import AgentRunInput
 from agent_core.tools import (
+    AttachImageToReplyTool,
     ShuiyuanGetTopicTool,
     ShuiyuanRetortTool,
     ShuiyuanSearchTool,
 )
 
 from system.automation import AutomationIPCClient, default_socket_path
+
+logger = logging.getLogger("shuiyuan_session")
+
+_MIME_BY_EXT: Dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+
+async def _upload_and_embed_attachments(
+    attachments: List[Dict[str, Any]],
+    *,
+    client: Any,
+) -> str:
+    """
+    将 Agent 登记的附件逐一上传到水源，返回要追加到回复末尾的 Markdown 图片串。
+
+    若上传失败则跳过该附件并记录 warning，不影响文字回复。
+    """
+    if not attachments:
+        return ""
+
+    md_parts: List[str] = []
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        if att.get("type") != "image":
+            continue
+
+        img_path = att.get("path")
+        img_url = att.get("url")
+
+        try:
+            if img_path:
+                p = Path(img_path)
+                if not p.exists():
+                    logger.warning("attachment file not found: %s", img_path)
+                    continue
+                file_bytes = p.read_bytes()
+                filename = p.name
+                mime = _MIME_BY_EXT.get(p.suffix.lower(), "image/png")
+            elif img_url:
+                import requests as _req
+
+                resp = await asyncio.to_thread(_req.get, img_url, timeout=15.0)
+                resp.raise_for_status()
+                file_bytes = resp.content
+                ct = resp.headers.get("Content-Type", "image/png").split(";", 1)[0].strip()
+                mime = ct if ct and ct != "application/octet-stream" else "image/png"
+                url_path = img_url.rsplit("?", 1)[0]
+                filename = url_path.rsplit("/", 1)[-1] or "image.png"
+            else:
+                continue
+
+            upload_result = await asyncio.to_thread(
+                client.upload_file,
+                file_bytes,
+                filename,
+                mime_type=mime,
+            )
+            if upload_result and upload_result.get("short_url"):
+                short_url = upload_result["short_url"]
+                w = upload_result.get("width", "")
+                h = upload_result.get("height", "")
+                size = f"|{w}x{h}" if w and h else ""
+                md_parts.append(f"![image{size}]({short_url})")
+            else:
+                logger.warning(
+                    "upload_file returned no short_url for attachment: %s", att
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("failed to upload attachment %s: %s", att, exc)
+
+    return ("\n\n" + "\n".join(md_parts)) if md_parts else ""
 
 
 def is_invocation_valid(
@@ -115,6 +198,8 @@ async def _run_via_daemon(
     reply_to_post_number: Optional[int],
     db: Any,
     client: Any,
+    *,
+    content_refs: Optional[List[ContentReference]] = None,
 ) -> Optional[str]:
     """通过 daemon IPC 运行，使用 per-user 受限 Core。成功返回 str（可为空），daemon 不可用时返回 None。"""
     try:
@@ -127,8 +212,40 @@ async def _run_via_daemon(
         return None
 
     await ipc.switch_session(f"shuiyuan:{username}", create_if_missing=True)
-    # daemon 路径直接接收已经拼装好的 ctx_user 文本，Core 只负责记忆与工具调度。
-    result = await ipc.run_turn(AgentRunInput(text=ctx_user))
+
+    # daemon 进程不一定注册了 ShuiyuanContentResolver，因此在 connector
+    # 进程侧就地 resolve content_refs → content_items（base64 data URL），
+    # 通过 metadata["content_items"] 直接传给 CoreSessionAdapter。
+    metadata: Dict[str, Any] = {}
+    if content_refs:
+        try:
+            from agent_core.content import resolve_content_refs
+
+            logger.info(
+                "shuiyuan: resolving %d content_refs before IPC for user=%s topic=%s",
+                len(content_refs),
+                username,
+                topic_id,
+            )
+            resolved = await resolve_content_refs(content_refs)
+            if resolved:
+                # 只记录元信息，避免在日志里打印整段 base64
+                logger.info(
+                    "shuiyuan: resolved %d content_items before IPC (first_types=%s)",
+                    len(resolved),
+                    [str(i.get("type")) for i in resolved[:3]],
+                )
+                metadata["content_items"] = resolved
+            else:
+                logger.warning(
+                    "shuiyuan: resolve_content_refs returned empty for user=%s topic=%s",
+                    username,
+                    topic_id,
+                )
+        except Exception as exc:
+            logger.warning("resolve content_refs before IPC failed: %s", exc)
+
+    result = await ipc.run_turn(AgentRunInput(text=ctx_user, metadata=metadata))
     reply_text = (result.output_text or "").strip()
     if reply_text:
         from .reply import post_reply
@@ -203,6 +320,28 @@ async def run_shuiyuan_reply(
     db = get_shuiyuan_db_for_user(cfg, username)
     record_user_message(username, topic_id, user_message, db=db)
 
+    # 解析用户帖子中的图片 upload:// 引用，转为 LLM content_refs（供模型看图）
+    from .content_parser import parse_shuiyuan_raw_images
+
+    site_url = getattr(cfg.shuiyuan, "site_url", "") or "https://shuiyuan.sjtu.edu.cn"
+    content_refs, cleaned_message = parse_shuiyuan_raw_images(
+        user_message, site_url=site_url
+    )
+    if content_refs:
+        logger.info(
+            "shuiyuan: parsed %d image refs from raw post (site_url=%s, sample_keys=%s)",
+            len(content_refs),
+            site_url,
+            [r.key for r in content_refs[:3]],
+        )
+    else:
+        logger.info(
+            "shuiyuan: no image refs parsed from raw post for user=%s topic=%s",
+            username,
+            topic_id,
+        )
+    effective_message = cleaned_message if content_refs else user_message
+
     # 尝试获取话题主楼（OP）及标题，用于「当前话题主楼」段落。
     topic_op: Optional[dict] = None
     try:
@@ -252,7 +391,7 @@ async def run_shuiyuan_reply(
     }
     ctx_user = build_shuiyuan_prompt_from_context(
         context=shuiyuan_ctx,
-        user_message=user_message,
+        user_message=effective_message,
     )
 
     # 优先通过 daemon IPC（per-user 受限 Core），不可用时回退到本地 Agent
@@ -263,6 +402,7 @@ async def run_shuiyuan_reply(
         reply_to_post_number=reply_to_post_number,
         db=db,
         client=client,
+        content_refs=content_refs or None,
     )
     if via_daemon is not None:
         return via_daemon
@@ -276,6 +416,7 @@ async def run_shuiyuan_reply(
         ShuiyuanSearchTool(config=cfg, max_results=max_posts),
         ShuiyuanGetTopicTool(config=cfg, posts_limit=max_posts),
         ShuiyuanRetortTool(config=cfg),
+        AttachImageToReplyTool(),
     ]
     if extra_tools:
         tools.extend(extra_tools)
@@ -289,20 +430,38 @@ async def run_shuiyuan_reply(
         source="shuiyuan",
         session_logger=session_logger,
     ) as agent:
+        # 若存在图片引用，解析为 content_items 注入本轮多模态输入
+        content_items: List[Dict[str, Any]] = []
+        if content_refs:
+            try:
+                from agent_core.content import resolve_content_refs
+
+                content_items = await resolve_content_refs(content_refs)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("resolve_content_refs failed: %s", exc)
+
         # 本地 fallback：与 daemon 路径一样，直接使用前端拼装好的 ctx_user。
-        output = await agent.process_input(ctx_user)
+        output = await agent.process_input(
+            ctx_user, content_items=content_items or None
+        )
         reply_text = (output or "").strip()
-        if reply_text:
+
+        # 处理 attach_image_to_reply 登记的附件：上传并拼接 Markdown
+        attach_md = await _upload_and_embed_attachments(
+            agent.get_outgoing_attachments(),
+            client=client,
+        )
+        final_text = reply_text + attach_md
+
+        if final_text:
             success, msg = post_reply(
                 username=username,
                 topic_id=topic_id,
-                raw=reply_text,
+                raw=final_text,
                 reply_to_post_number=reply_to_post_number,
                 db=db,
                 client=client,
             )
             if not success:
-                import logging
-
-                logging.getLogger("shuiyuan_session").warning("发帖失败: %s", msg)
-        return reply_text
+                logger.warning("发帖失败: %s", msg)
+        return final_text

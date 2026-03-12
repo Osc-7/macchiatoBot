@@ -52,15 +52,31 @@ class CoreSessionAdapter:
 
         await self._emit_event(hooks, CoreEvent(name="turn_start"))
 
-        # 解析 content_refs（如飞书图片/视频）为 LLM content items
+        # 优先使用前端已 resolve 好的 content_items（避免 daemon 进程缺少对应 resolver）
         content_items: List[Dict[str, Any]] = []
-        raw_refs = agent_input.metadata.get("content_refs")
-        if isinstance(raw_refs, list) and raw_refs:
-            refs = [ContentReference.from_dict(r) for r in raw_refs]
-            try:
-                content_items = await resolve_content_refs(refs)
-            except Exception as exc:
-                logger.warning("content_refs resolve failed: %s", exc)
+        pre_resolved = agent_input.metadata.get("content_items") if agent_input.metadata else None
+        if isinstance(pre_resolved, list) and pre_resolved:
+            content_items = pre_resolved
+            logger.info(
+                "core_session_adapter: using pre-resolved content_items count=%d first_types=%s",
+                len(content_items),
+                [str(i.get("type")) for i in content_items[:3]],
+            )
+        else:
+            raw_refs = (
+                agent_input.metadata.get("content_refs") if agent_input.metadata else None
+            )
+            if isinstance(raw_refs, list) and raw_refs:
+                refs = [ContentReference.from_dict(r) for r in raw_refs]
+                try:
+                    content_items = await resolve_content_refs(refs)
+                    logger.info(
+                        "core_session_adapter: resolved %d content_items from %d refs",
+                        len(content_items),
+                        len(refs),
+                    )
+                except Exception as exc:
+                    logger.warning("content_refs resolve failed: %s", exc)
 
         # 包装 hooks，在流式回调中同时派发 CoreEvent
         wrapped_hooks = self._wrap_hooks_with_events(hooks)

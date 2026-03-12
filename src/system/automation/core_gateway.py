@@ -247,6 +247,15 @@ class AutomationCoreGateway:
         if hooks is not None:
             metadata["_hooks"] = hooks
 
+        # 前端可能已 pre-resolved content_items（避免 daemon 缺少对应 resolver）
+        pre_items = metadata.get("content_items")
+        if isinstance(pre_items, list) and pre_items:
+            logger.info(
+                "gateway: received pre-resolved content_items count=%d types=%s",
+                len(pre_items),
+                [str(i.get("type")) for i in pre_items[:3]],
+            )
+
         # 将 content_refs（飞书 image_key 等）解析为 content_items，供 Scheduler 注入首轮 LLM
         raw_refs = metadata.get("content_refs")
         if isinstance(raw_refs, list) and raw_refs:

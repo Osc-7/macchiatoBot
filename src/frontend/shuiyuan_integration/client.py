@@ -553,6 +553,42 @@ class ShuiyuanClient:
 
         return False, last_status, last_body
 
+    def upload_file(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        *,
+        mime_type: str = "image/png",
+    ) -> Optional[dict[str, Any]]:
+        """
+        上传文件到 Discourse（/uploads.json）。
+
+        Returns:
+            成功时返回 {"short_url": "upload://xxx", "width": ..., "height": ...} 等；
+            失败返回 None。
+        """
+        _ensure_rate_limit()
+        try:
+            r = requests.post(
+                f"{self._base}/uploads.json",
+                headers=self._headers,
+                files={"file": (filename, file_bytes, mime_type)},
+                data={"type": "composer", "synchronous_markdown": "true"},
+                timeout=max(self._timeout, 30.0),
+            )
+            if r.status_code in (200, 201):
+                return r.json()
+            import logging
+
+            logging.getLogger("shuiyuan_client").warning(
+                "upload_file failed: status=%d body=%s", r.status_code, r.text[:300]
+            )
+        except Exception as exc:
+            import logging
+
+            logging.getLogger("shuiyuan_client").warning("upload_file error: %s", exc)
+        return None
+
     def create_post(
         self,
         raw: str,

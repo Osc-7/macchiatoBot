@@ -219,6 +219,8 @@ class CoreProfile:
                 "shuiyuan_search",
                 "shuiyuan_get_topic",
                 "shuiyuan_post_retort",
+                "attach_media",
+                "attach_image_to_reply",
                 "web_search",
                 "extract_web_content",
                 "memory_search_long_term",

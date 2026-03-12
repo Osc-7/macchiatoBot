@@ -247,22 +247,28 @@ async def _run_via_daemon(
 
     result = await ipc.run_turn(AgentRunInput(text=ctx_user, metadata=metadata))
     reply_text = (result.output_text or "").strip()
-    if reply_text:
+
+    # 处理 attach_image_to_reply 登记的附件：上传并拼接 Markdown
+    attach_md = await _upload_and_embed_attachments(
+        list(getattr(result, "attachments", None) or []),
+        client=client,
+    )
+    final_text = reply_text + attach_md
+
+    if final_text:
         from .reply import post_reply
 
         success, msg = post_reply(
             username=username,
             topic_id=topic_id,
-            raw=reply_text,
+            raw=final_text,
             reply_to_post_number=reply_to_post_number,
             db=db,
             client=client,
         )
         if not success:
-            import logging
-
-            logging.getLogger("shuiyuan_session").warning("发帖失败: %s", msg)
-    return reply_text
+            logger.warning("发帖失败: %s", msg)
+    return final_text
 
 
 async def run_shuiyuan_reply(

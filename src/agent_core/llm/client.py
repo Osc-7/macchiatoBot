@@ -55,6 +55,60 @@ def _normalize_text_content(content: Any) -> Optional[str]:
     return str(content)
 
 
+import re
+import uuid
+
+_TOOL_CODE_RE = re.compile(
+    r"<tool_code>\s*(\w+)\((.*?)\)\s*</tool_code>",
+    re.DOTALL,
+)
+
+
+def _extract_tool_code_calls(
+    content: Optional[str],
+    existing_tool_calls: List["ToolCall"],
+) -> tuple[Optional[str], List["ToolCall"]]:
+    """
+    部分模型（如 Qwen thinking mode）偶尔会把工具调用写成文本
+    ``<tool_code>func_name(arg=val)</tool_code>`` 而不走正规 function calling。
+    如果已有真正的 tool_calls 则不处理；否则尝试从 content 中提取并转换。
+    返回 (cleaned_content, merged_tool_calls)。
+    """
+    if existing_tool_calls or not content:
+        return content, existing_tool_calls
+
+    matches = list(_TOOL_CODE_RE.finditer(content))
+    if not matches:
+        return content, existing_tool_calls
+
+    calls: List["ToolCall"] = []
+    for m in matches:
+        func_name = m.group(1)
+        raw_args = m.group(2).strip()
+        args: dict = {}
+        if raw_args:
+            try:
+                args = json.loads("{" + raw_args + "}")
+            except (json.JSONDecodeError, ValueError):
+                for part in raw_args.split(","):
+                    part = part.strip()
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip("\"'")
+                        args[k] = v
+        calls.append(
+            ToolCall(
+                id=f"toolcode-{uuid.uuid4().hex[:8]}",
+                name=func_name,
+                arguments=args,
+            )
+        )
+
+    cleaned = _TOOL_CODE_RE.sub("", content).strip()
+    return cleaned or None, calls
+
+
 @dataclass
 class TokenUsage:
     """单次调用的 token 用量"""
@@ -380,6 +434,8 @@ class LLMClient:
             _normalize_text_content(choice.message.content)
         )
 
+        content, tool_calls = _extract_tool_code_calls(content, tool_calls)
+
         return LLMResponse(
             content=content,
             tool_calls=tool_calls,
@@ -480,6 +536,8 @@ class LLMClient:
                 )
 
         usage = TokenUsage.from_usage(last_usage) if last_usage else None
+
+        content, tool_calls_list = _extract_tool_code_calls(content, tool_calls_list)
 
         return LLMResponse(
             content=content,

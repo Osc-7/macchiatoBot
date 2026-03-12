@@ -333,6 +333,10 @@ class KernelScheduler:
                 except Exception:
                     pass
 
+            # 将 core_logger 接入 agent 的 session_logger，记录中间过程
+            if core_logger is not None and agent._session_logger is None:
+                agent._session_logger = core_logger  # type: ignore[assignment]
+
             content_items = request.metadata.get("content_items")
             if content_items:
                 logger.info(

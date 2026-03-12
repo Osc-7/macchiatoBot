@@ -6,10 +6,14 @@ CoreLifecycleLogger — 以 Core 生命周期为单位的轻量日志。
 - 每个 Core（AgentCore 实例）一个独立的 JSONL 文件
 - 命名方式与记忆库 owner 一致：session-{source}:{user_id}-YYYYmmdd_HHMMSS.jsonl
 
-记录范围（精简版）：
+记录范围：
 - core_start: 创建 Core 时记录 source/user_id/session_id/profile.mode
-- turn: 每次请求的用户输入与最终输出（不记录完整 system prompt）
+- turn_start / turn_end: 每次请求的用户输入与最终输出
+- llm_request / llm_response: LLM 调用请求和响应摘要
+- tool_call / tool_result: 工具调用入参与结果
 - core_end: evict/kill 时记录 token 用量等摘要（CoreStatsAction）
+
+同时实现 SessionLogger 的鸭子类型接口，可直接赋给 AgentCore._session_logger。
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 def _safe_ns(value: str, default: str) -> str:
@@ -97,6 +101,154 @@ class CoreLifecycleLogger:
         if metadata:
             record["metadata"] = metadata
         self._write(record)
+
+    # ---- SessionLogger 鸭子类型接口（供 AgentCore._session_logger 使用）----
+
+    enable_detailed_log: bool = field(default=False, repr=False)
+
+    def on_user_message(self, turn_id: int, content: str) -> None:
+        self._write(
+            {
+                "event": "user_message",
+                "timestamp": self._timestamp(),
+                "session_id": self.session_id,
+                "turn_id": turn_id,
+                "content": content[:2000] + ("..." if len(content) > 2000 else ""),
+            }
+        )
+
+    def on_llm_request(
+        self,
+        turn_id: int,
+        iteration: int,
+        message_count: int,
+        tool_count: int,
+        system_prompt_len: int = 0,
+        system_prompt: Optional[str] = None,
+        messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        self._write(
+            {
+                "event": "llm_request",
+                "timestamp": self._timestamp(),
+                "session_id": self.session_id,
+                "turn_id": turn_id,
+                "iteration": iteration,
+                "message_count": message_count,
+                "tool_count": tool_count,
+                "system_prompt_len": system_prompt_len,
+            }
+        )
+
+    def on_llm_response(
+        self,
+        turn_id: int,
+        iteration: int,
+        response: Any,
+    ) -> None:
+        tool_calls: List[Dict[str, Any]] = []
+        for tc in getattr(response, "tool_calls", []) or []:
+            args = getattr(tc, "arguments", None)
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args) if args else {}
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            tool_calls.append(
+                {
+                    "id": getattr(tc, "id", ""),
+                    "name": getattr(tc, "name", ""),
+                    "arguments": args,
+                }
+            )
+        content = getattr(response, "content", None) or ""
+        record: Dict[str, Any] = {
+            "event": "llm_response",
+            "timestamp": self._timestamp(),
+            "session_id": self.session_id,
+            "turn_id": turn_id,
+            "iteration": iteration,
+            "content_preview": content[:500] + ("..." if len(content) > 500 else ""),
+            "tool_calls": tool_calls,
+            "finish_reason": getattr(response, "finish_reason", None),
+        }
+        usage = getattr(response, "usage", None)
+        if usage:
+            record["usage"] = {
+                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                "completion_tokens": getattr(usage, "completion_tokens", 0),
+            }
+        self._write(record)
+
+    def on_tool_call(
+        self,
+        turn_id: int,
+        iteration: int,
+        tool_call: Any,
+    ) -> None:
+        args = getattr(tool_call, "arguments", None)
+        if isinstance(args, str):
+            try:
+                args = json.loads(args) if args else {}
+            except (json.JSONDecodeError, TypeError):
+                args = {"_raw": args}
+        self._write(
+            {
+                "event": "tool_call",
+                "timestamp": self._timestamp(),
+                "session_id": self.session_id,
+                "turn_id": turn_id,
+                "iteration": iteration,
+                "tool_call_id": getattr(tool_call, "id", ""),
+                "name": getattr(tool_call, "name", ""),
+                "arguments": args,
+            }
+        )
+
+    def on_tool_result(
+        self,
+        turn_id: int,
+        iteration: int,
+        tool_call_id: str,
+        result: Any,
+        duration_ms: int,
+    ) -> None:
+        message = getattr(result, "message", "")
+        data_raw = getattr(result, "data", None)
+        data_str = ""
+        if data_raw is not None:
+            try:
+                data_str = json.dumps(data_raw, ensure_ascii=False, default=str)
+            except (TypeError, ValueError):
+                data_str = str(data_raw)
+        self._write(
+            {
+                "event": "tool_result",
+                "timestamp": self._timestamp(),
+                "session_id": self.session_id,
+                "turn_id": turn_id,
+                "iteration": iteration,
+                "tool_call_id": tool_call_id,
+                "success": getattr(result, "success", None),
+                "message": message,
+                "data_preview": data_str[:500] + ("..." if len(data_str) > 500 else ""),
+                "error": getattr(result, "error", None),
+                "duration_ms": duration_ms,
+            }
+        )
+
+    def on_assistant_message(self, turn_id: int, content: str) -> None:
+        self._write(
+            {
+                "event": "assistant_message",
+                "timestamp": self._timestamp(),
+                "session_id": self.session_id,
+                "turn_id": turn_id,
+                "content": content,
+            }
+        )
+
+    # ---- Core 生命周期事件 ---------------------------------------------------
 
     def on_core_end(self, *, stats: Any | None = None) -> None:
         payload: Dict[str, Any] = {

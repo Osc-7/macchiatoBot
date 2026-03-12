@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import defaultdict
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, Optional
 
 from agent_core.interfaces import AgentHooks, AgentRunResult
@@ -130,10 +132,27 @@ class KernelScheduler:
         self._inflight_sessions: Dict[str, int] = defaultdict(int)
 
     async def start(self) -> None:
-        """启动调度循环和 TTL 扫描后台任务。"""
+        """启动调度循环和 TTL 扫描后台任务。
+
+        启动前先执行进程表重建：扫描 checkpoint.json，将上次 kernel 关闭前
+        未过期的 Core 恢复到 pool 中，再交由 TTL 循环接管生命周期监控。
+        """
         if self._dispatch_task is not None and not self._dispatch_task.done():
             return
         self._stopped.clear()
+
+        # 进程表重建：扫描 checkpoints，恢复未过期 Core
+        try:
+            restored = await self._core_pool.restore_from_checkpoints()
+            if restored:
+                logger.info(
+                    "KernelScheduler: restored %d session(s) from checkpoint", restored
+                )
+        except Exception as exc:
+            logger.warning(
+                "KernelScheduler: restore_from_checkpoints failed: %s", exc
+            )
+
         self._dispatch_task = asyncio.create_task(
             self._dispatch_loop(), name="kernel-scheduler-dispatch"
         )
@@ -157,6 +176,14 @@ class KernelScheduler:
                     pass
         if self._active_tasks:
             await asyncio.gather(*self._active_tasks, return_exceptions=True)
+        # 关闭前写入 kernel 关闭时间戳，供下次启动用「关闭时间 - checkpoint 时间」判断是否过期
+        try:
+            from agent_core.agent.memory_paths import get_kernel_shutdown_at_path
+            path = get_kernel_shutdown_at_path(self._core_pool._config.memory)
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text(str(time.time()), encoding="utf-8")
+        except Exception as exc:
+            logger.warning("KernelScheduler: write kernel_last_shutdown_at failed: %s", exc)
         # Kernel 级停止时，确保回收所有仍在 CorePool 中的会话，避免遗留 active Core。
         try:
             await self._core_pool.evict_all()

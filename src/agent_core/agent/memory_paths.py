@@ -42,12 +42,26 @@ def resolve_memory_owner_paths(
     chat_db_path = owner_dir / "chat_history.db"
     memory_md_path = long_term_dir / "MEMORY.md"
 
+    checkpoint_path = owner_dir / "checkpoint.json"
+
     return {
         "long_term_dir": str(long_term_dir),
         "content_dir": str(content_dir),
         "chat_history_db_path": str(chat_db_path),
         "memory_md_path": str(memory_md_path),
+        "checkpoint_path": str(checkpoint_path),
     }
+
+
+def get_kernel_shutdown_at_path(mem_cfg: MemoryConfig) -> str:
+    """
+    Kernel 关闭时写入的时间戳文件路径（进程级单例）。
+
+    用于下次启动时计算 elapsed = shutdown_at - checkpoint.last_active_at，
+    判断 core 是否已过期并正确恢复剩余 TTL。
+    """
+    base = Path((mem_cfg.memory_base_dir or "./data/memory").strip())
+    return str(base / ".kernel_last_shutdown_at")
 
 
 def new_session_id() -> str:

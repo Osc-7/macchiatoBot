@@ -80,7 +80,7 @@ class AutomationScheduler:
             self._watch_task.cancel()
             try:
                 await self._watch_task
-            except Exception:
+            except (asyncio.CancelledError, Exception):
                 pass
             self._watch_task = None
 

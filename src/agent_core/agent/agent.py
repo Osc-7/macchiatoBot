@@ -56,6 +56,7 @@ from .media_helpers import (
     collect_outgoing_attachment,
     queue_media_for_next_call,
 )
+from .checkpoint import CoreCheckpoint, CoreCheckpointManager
 from .memory_paths import new_session_id, resolve_memory_owner_paths
 from .prompt_builder import build_agent_system_prompt
 
@@ -187,6 +188,7 @@ class ScheduleAgent:
         self._long_term_memory: Optional[LongTermMemory]
         self._content_memory: Optional[ContentMemory]
         self._chat_history_db: Optional[ChatHistoryDB]
+        self._checkpoint_manager: Optional[CoreCheckpointManager] = None
         if self._memory_enabled:
             source_paths = resolve_memory_owner_paths(
                 mem_cfg, self._user_id, config=self._config, source=self._source
@@ -205,6 +207,9 @@ class ScheduleAgent:
             self._chat_history_db = ChatHistoryDB(
                 source_paths["chat_history_db_path"],
                 default_source=None,
+            )
+            self._checkpoint_manager = CoreCheckpointManager(
+                source_paths["checkpoint_path"]
             )
         else:
             self._long_term_memory = None
@@ -711,14 +716,45 @@ class ScheduleAgent:
         summary_recent_start: Optional[int] = None,
     ) -> None:
         """
-        本轮后处理：合并工作记忆总结。
+        本轮后处理：合并工作记忆总结 + 写入检查点。
 
         由 process_input() 和 KernelScheduler._run_and_route() 在
         AgentKernel.run() 完成后调用。
+
+        检查点存 last_active_at（本 turn 结束时间）；是否过期由 kernel 下次启动时
+        用「kernel 关闭时间戳 - last_active_at」计算 elapsed 判断。
         """
         if summary_task is not None and summary_recent_start is not None:
             summary_text = await summary_task
             self._working_memory.apply_summary(summary_text, summary_recent_start)
+
+        # 每轮结束后写入检查点（last_active_at = now）；过期判断在 kernel 启动时用关闭时间戳计算
+        if self._checkpoint_manager is not None:
+            try:
+                profile = getattr(self, "_core_profile", None)
+                ttl = float(
+                    getattr(profile, "session_expired_seconds", None)
+                    or getattr(self._config.agent, "session_expired_seconds", 1800)
+                )
+                self._checkpoint_manager.write(
+                    CoreCheckpoint(
+                        session_id=self._session_id,
+                        owner_id=self._user_id,
+                        source=self._source,
+                        running_summary=self._working_memory.running_summary,
+                        recent_messages=list(self._context.get_messages()),
+                        last_active_at=time.time(),
+                        remaining_ttl_seconds=ttl,
+                        turn_count=self._current_turn_id,
+                        last_history_id=self._last_history_id,
+                        token_usage=dict(self._token_usage),
+                    )
+                )
+            except Exception as exc:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "AgentCore: checkpoint write failed: %s", exc
+                )
 
     def _build_system_prompt(self) -> str:
         """
@@ -938,6 +974,36 @@ class ScheduleAgent:
             first_ts = replay_rows[0].get("timestamp")
             if isinstance(first_ts, str) and first_ts.strip():
                 self._session_start_time = first_ts
+
+    def restore_from_checkpoint(self, checkpoint: CoreCheckpoint) -> None:
+        """
+        从检查点恢复会话状态，跳过 ChatHistoryDB 全量重放。
+
+        恢复内容：
+        - ConversationContext.messages（压缩后的上下文窗口）
+        - WorkingMemory._running_summary（压缩摘要）
+        - session_id、turn_count、last_history_id、token_usage
+
+        由 CorePool._load() 在读取到有效检查点时调用，
+        替代 activate_session() 的 ChatHistoryDB 重放路径。
+        """
+        self._session_id = checkpoint.session_id
+        self._current_turn_id = checkpoint.turn_count
+        self._last_history_id = checkpoint.last_history_id
+        self._token_usage = dict(checkpoint.token_usage)
+
+        self._context.clear()
+        for msg in checkpoint.recent_messages:
+            self._context.messages.append(dict(msg))
+
+        self._working_memory = WorkingMemory(
+            context=self._context,
+            max_tokens=self._config.memory.max_working_tokens,
+            threshold=self._config.memory.working_summary_threshold,
+            keep_recent=self._config.memory.working_keep_recent,
+            hard_threshold_ratio=self._config.memory.working_summary_hard_ratio,
+        )
+        self._working_memory._running_summary = checkpoint.running_summary
 
     async def _sync_external_session_updates(self) -> None:
         """同步其他终端在同一 session 里新增的 user/assistant 消息。"""

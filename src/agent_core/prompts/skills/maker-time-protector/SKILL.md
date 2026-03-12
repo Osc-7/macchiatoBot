@@ -2,7 +2,7 @@
 name: maker-time-protector
 description: 基于 Time Blocking 和 Deep Work 理念，帮助用户设计理想周、保护深度工作时间、复盘时间块执行情况的智能时间管理技能。
 version: 1.0.0
-author: 刘宇轩 & Machiatto
+author: 刘宇轩 & macchiato
 created: 2026-02-27
 platforms: [github-copilot-cli, claude-code, codex]
 category: productivity

@@ -7,7 +7,7 @@
   - `append`：在文件末尾追加
   - `overwrite`：覆盖整个文件
 
-**优先**：小范围修改用 modify_file search_replace；大范围或匹配失败时用 read_file + write_file。受 base_dir 与权限限制。**machiatto/** 为 Agent 专属文件夹，用于反思笔记、工作心得；可自由读写（在权限内）。
+**优先**：小范围修改用 modify_file search_replace；大范围或匹配失败时用 read_file + write_file。受 base_dir 与权限限制。**macchiato/** 为 Agent 专属文件夹，用于反思笔记、工作心得；可自由读写（在权限内）。
 
 ### 文件读写规范
 

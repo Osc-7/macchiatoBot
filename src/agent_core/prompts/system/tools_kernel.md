@@ -33,7 +33,7 @@
 3. **参数格式**：`call_tool` 的 `arguments` 是 JSON 对象，需符合目标工具的参数定义（search_tools 返回结果中有 parameters 概要）。
    - 查询某个具体日期的日程时，优先传 `{"date": "YYYY-MM-DD"}`，避免仅用 `query_type=today` 导致日期偏差。
 
-4. **记忆**：按 runtime_memory 决策框架检索；笔记/文件用 memory_store / memory_ingest；用户说「记住」时写 MEMORY.md；反思心得写 machiatto/。
+4. **记忆**：按 runtime_memory 决策框架检索；笔记/文件用 memory_store / memory_ingest；用户说「记住」时写 MEMORY.md；反思心得写 macchiato/。
 
 ## 注意事项
 

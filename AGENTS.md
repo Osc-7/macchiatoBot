@@ -5,13 +5,13 @@ alwaysApply: true
 
 # 开发规范
 
-本文档定义了 machiatto 项目的开发规范，基于 Anthropic 和 OpenAI 的官方指南以及业界最佳实践整理。
+本文档定义了 macchiato 项目的开发规范，基于 Anthropic 和 OpenAI 的官方指南以及业界最佳实践整理。
 
 ---
 
 ## 项目概述
 
-machiattoBot 是一个基于大语言模型的ai助手，采用**工具驱动（Tool-driven）**架构设计。
+macchiatoBot 是一个基于大语言模型的ai助手，采用**工具驱动（Tool-driven）**架构设计。
 
 ### 核心目标
 

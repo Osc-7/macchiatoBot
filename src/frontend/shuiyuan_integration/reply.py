@@ -18,9 +18,8 @@ from typing import Any, List, Optional
 from .client import ShuiyuanClient, ShuiyuanClientPool
 from .db import ShuiyuanDB, get_shuiyuan_db_path_for_user
 
-
 # 固定标记，用于识别由本集成发出的自动回复，避免递归触发。
-AUTO_REPLY_MARK = "MACHIATTO_SHUIYUAN_AUTO_REPLY"
+AUTO_REPLY_MARK = "macchiato_SHUIYUAN_AUTO_REPLY"
 
 
 def _generate_random_string(length: int = 20) -> str:
@@ -37,7 +36,7 @@ def _attach_hidden_marker(raw: str) -> str:
         原文
 
         <!-- <random> -->
-        <!-- MACHIATTO_SHUIYUAN_AUTO_REPLY -->
+        <!-- macchiato_SHUIYUAN_AUTO_REPLY -->
     """
     text = raw or ""
     if AUTO_REPLY_MARK in text:

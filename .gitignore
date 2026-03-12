@@ -55,7 +55,7 @@ src/agent_core/prompts/system/user.md
 data/
 !data/.gitkeep
 MEMORY.md
-machiatto/
+macchiato/
 
 user_file/
 pictures/

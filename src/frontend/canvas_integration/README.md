@@ -283,6 +283,6 @@ logger = logging.getLogger("canvas_integration")
 
 ---
 
-**作者**: Machiatto  
+**作者**: macchiato  
 **版本**: 1.0.0  
 **最后更新**: 2026-02-28

@@ -33,19 +33,19 @@ Modules:
     sync: 同步逻辑
 """
 
+from .client import CanvasAPIError, CanvasAuthError, CanvasClient, CanvasRateLimitError
 from .config import CanvasConfig
-from .client import CanvasClient, CanvasAPIError, CanvasAuthError, CanvasRateLimitError
 from .models import (
     CanvasAssignment,
     CanvasEvent,
-    CanvasPlannerItem,
     CanvasFile,
+    CanvasPlannerItem,
     SyncResult,
 )
 from .sync import CanvasSync, sync_canvas_to_schedule
 
 __version__ = "1.0.0"
-__author__ = "Machiatto"
+__author__ = "macchiato"
 
 __all__ = [
     # 配置

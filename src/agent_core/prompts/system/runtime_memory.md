@@ -54,7 +54,7 @@
 
 - **identity.md / soul.md**：身份与价值观，位于 `src/agent/prompts/system/`。可自由读写，适应用户偏好。更新时使用完整路径，不要写入根目录。
 - **MEMORY.md**：核心长期偏好（工作时间、提醒偏好、习惯、约束）。你有权限自由读写。用户说「记住」「记下来」「写进 MEMORY」「帮我记着」等指令时，用 **write_file** 或 **modify_file** 直接写入，无需确认。
-- **machiatto/**：你的专属文件夹。反思、教训、工作心得写在此处（如 `machiatto/journal/YYYY-MM-DD.md`）。详见 agents 反思与成长。
+- **macchiato/**：你的专属文件夹。反思、教训、工作心得写在此处（如 `macchiato/journal/YYYY-MM-DD.md`）。详见 agents 反思与成长。
 - **内容记忆**：笔记、会议记录、PDF 讲义等。用 `memory_store` 或 `memory_ingest`。
 
 ### 有明确日期的信息如何存放

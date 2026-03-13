@@ -46,7 +46,7 @@ from system.tools import build_tool_registry
 
 from frontend.feishu.client import FeishuClient
 
-from main import get_default_tools
+from agent_core.tools import get_default_tools
 
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)

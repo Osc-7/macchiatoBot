@@ -13,6 +13,8 @@ from typing import Any, Callable, Dict, List, Optional
 from openai import AsyncOpenAI  # type: ignore
 
 from agent_core.config import Config, get_config
+import re
+import uuid
 
 # Qwen 深度思考模式会将推理内容放在 content 中（有时与回复混合），用 ` <think>...</think>` 包裹。
 # 参见 https://www.alibabacloud.com/help/zh/model-studio/deep-thinking
@@ -54,9 +56,6 @@ def _normalize_text_content(content: Any) -> Optional[str]:
             return "\n".join(texts).strip()
     return str(content)
 
-
-import re
-import uuid
 
 _TOOL_CODE_RE = re.compile(
     r"<tool_code>\s*(\w+)\((.*?)\)\s*</tool_code>",

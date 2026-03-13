@@ -2,195 +2,24 @@
 """
 Schedule Agent CLI 入口
 
-提供命令行交互界面，允许用户通过自然语言与日程管理 Agent 进行交互。
-
-运行模式（由命令行参数决定）：
-- 默认：通过 UNIX socket 连接长驻 automation daemon；若 daemon 未运行则报错退出。
-- --local：在当前进程内直接启动 AgentCore（直连模式），不依赖 daemon。
+通过 UNIX socket 连接长驻 automation daemon，提供命令行交互界面。
+若 daemon 未运行则报错退出。
 """
 
 import argparse
 import asyncio
 import os
 import sys
-from typing import Any, Callable, Awaitable, List, Optional, cast
+from typing import Any, Awaitable, Callable, List, Optional, cast
 
-from agent_core.config import Config, get_config
-from system.automation import (
-    AutomationCoreGateway,
-    AutomationIPCClient,
-    SessionCutPolicy,
-    default_socket_path,
-)
-from system.kernel import AgentKernel, CorePool, KernelScheduler, SessionSummarizer
-from agent_core.llm.client import LLMClient
-from system.tools import build_tool_registry
-from agent_core import AgentCore, CoreSessionAdapter
+from agent_core.config import get_config, Config
 from agent_core.interfaces import AgentHooks, AgentRunInput
+from system.automation import AutomationIPCClient, default_socket_path
 from frontend.cli import run_interactive_loop
-from agent_core.tools import (
-    BaseTool,
-    LoadSkillTool,
-    ParseTimeTool,
-    AddEventTool,
-    AddTaskTool,
-    GetEventsTool,
-    GetTasksTool,
-    UpdateEventTool,
-    UpdateTaskTool,
-    DeleteScheduleDataTool,
-    ReadFileTool,
-    WriteFileTool,
-    ModifyFileTool,
-    GetFreeSlotsTool,
-    PlanTasksTool,
-    RunCommandTool,
-    MemorySearchLongTermTool,
-    MemorySearchContentTool,
-    MemoryStoreTool,
-    MemoryIngestTool,
-    AttachMediaTool,
-    AttachImageToReplyTool,
-    SyncCanvasTool,
-    FetchCanvasOverviewTool,
-    FetchCanvasCourseContentTool,
-    SyncSourcesTool,
-    GetSyncStatusTool,
-    GetDigestTool,
-    ListNotificationsTool,
-    AckNotificationTool,
-    ConfigureAutomationPolicyTool,
-    GetAutomationActivityTool,
-    FetchSjtuUndergradScheduleTool,
-    CreateScheduledJobTool,
-    NotifyOwnerTool,
-    ShuiyuanSearchTool,
-    ShuiyuanGetTopicTool,
-    ShuiyuanRetortTool,
-    ShuiyuanPostReplyTool,
-)
-from agent_core.memory import (
-    ContentMemory,
-    LongTermMemory,
-)
 
 
-def get_default_tools(config: Optional[Config] = None) -> List[BaseTool]:
-    """
-    获取默认的工具列表。
-
-    Args:
-        config: 配置对象，用于判断是否启用网页抓取、文件读写等工具
-
-    Returns:
-        工具实例列表
-    """
-    tools: List[BaseTool] = [
-        ParseTimeTool(),
-        AddEventTool(),
-        AddTaskTool(),
-        GetEventsTool(),
-        GetTasksTool(),
-        UpdateEventTool(),
-        UpdateTaskTool(),
-        DeleteScheduleDataTool(),
-        GetFreeSlotsTool(),
-        PlanTasksTool(planning_config=config.planning if config else None),
-    ]
-
-    # 文件读写工具（读取、写入、修改，写入/修改需配置允许）
-    if config and config.file_tools.enabled:
-        tools.append(ReadFileTool(config=config))
-        tools.append(WriteFileTool(config=config))
-        tools.append(ModifyFileTool(config=config))
-
-    # 终端命令执行工具
-    if config and config.command_tools.enabled:
-        tools.append(RunCommandTool(config=config))
-
-    # 联网工具（在启用 MCP 时由 Agent 内部注册）
-
-    # 技能按需加载工具（skills.enabled 或 skills.cli_dir 时注册）
-    if config and (
-        (config.skills.enabled or []) or getattr(config.skills, "cli_dir", None)
-    ):
-        tools.append(LoadSkillTool(config=config))
-
-    # 记忆系统工具（使用 resolve_memory_owner_paths，与 Agent 一致：data/memory/{frontend}/{user}/）
-    if config and config.memory.enabled:
-        from agent_core.agent.memory_paths import resolve_memory_owner_paths
-
-        mem_cfg = config.memory
-        user_id = os.getenv("SCHEDULE_USER_ID", "root").strip() or "root"
-        source = os.getenv("SCHEDULE_SOURCE", "cli").strip() or "cli"
-        paths = resolve_memory_owner_paths(
-            mem_cfg, user_id, config=config, source=source
-        )
-
-        long_term = LongTermMemory(
-            storage_dir=paths["long_term_dir"],
-            memory_md_path=paths["memory_md_path"],
-            qmd_enabled=mem_cfg.qmd_enabled,
-            qmd_command=mem_cfg.qmd_command,
-        )
-        content = ContentMemory(
-            content_dir=paths["content_dir"],
-            qmd_enabled=mem_cfg.qmd_enabled,
-            qmd_command=mem_cfg.qmd_command,
-        )
-        top_n = mem_cfg.recall_top_n
-        tools.append(MemorySearchLongTermTool(long_term, top_n))
-        tools.append(MemorySearchContentTool(content, top_n))
-        tools.append(MemoryStoreTool(content))
-        tools.append(MemoryIngestTool(content))
-
-    # 多模态媒体挂载工具（声明下一轮需要附带的图片/视频）+ 回复附图工具（把图片随回复发给用户）
-    if config and config.multimodal.enabled:
-        tools.append(AttachMediaTool())
-        tools.append(AttachImageToReplyTool())
-
-    # Canvas 工具（始终注册，便于 search_tools 发现；启用状态在工具内部校验）
-    tools.append(SyncCanvasTool(config=config))
-    tools.append(FetchCanvasOverviewTool(config=config))
-    tools.append(FetchCanvasCourseContentTool(config=config))
-    # 交大教学信息服务网课表同步工具（基于 Cookie，只读）
-    if config is not None:
-        tools.append(
-            FetchSjtuUndergradScheduleTool(
-                cookies_path=config.sjtu_jw.cookies_path,
-                config=config.sjtu_jw,
-            )
-        )
-    else:
-        tools.append(FetchSjtuUndergradScheduleTool())
-
-    tools.append(SyncSourcesTool())
-    tools.append(GetSyncStatusTool())
-
-    # 水源社区工具（搜索、获取话题、贴表情、发帖）
-    if config and config.shuiyuan.enabled:
-        tools.append(ShuiyuanSearchTool(config=config))
-        tools.append(ShuiyuanGetTopicTool(config=config))
-        tools.append(ShuiyuanRetortTool(config=config))
-        tools.append(ShuiyuanPostReplyTool(config=config))
-    tools.append(GetDigestTool())
-    tools.append(NotifyOwnerTool(config=config))
-    tools.append(ListNotificationsTool())
-    tools.append(AckNotificationTool())
-    tools.append(ConfigureAutomationPolicyTool())
-    tools.append(GetAutomationActivityTool())
-    tools.append(CreateScheduledJobTool())
-
-    return tools
-
-
-def _load_config() -> Optional[Config]:
-    """
-    加载配置文件。
-
-    Returns:
-        Config 对象，如果加载失败返回 None
-    """
+def _load_config() -> Config:
+    """加载配置文件，失败时退出进程。"""
     try:
         return get_config()
     except FileNotFoundError as e:
@@ -202,186 +31,71 @@ def _load_config() -> Optional[Config]:
         sys.exit(1)
 
 
-async def run_single_command(agent: Any, command: str) -> str:
+def _parse_args(argv: List[str]) -> List[str]:
     """
-    执行单条命令。
-
-    Args:
-        agent: AgentCore 实例
-        command: 命令字符串
+    解析命令行参数。
 
     Returns:
-        Agent 的响应
+        remaining_args: [script_name, ...] 形式，其中 script_name 后为可选的单条命令。
     """
-    if hasattr(agent, "run_turn"):
-        result = await agent.run_turn(AgentRunInput(text=command), hooks=AgentHooks())
-        return result.output_text
-    return await agent.process_input(command)
-
-
-def _parse_args(argv: List[str]) -> tuple[bool, List[str]]:
-    """
-    解析命令行参数，分离「是否直连模式」与剩余参数（用于单条命令）。
-
-    Returns:
-        (direct_mode, remaining_args): direct_mode 为 True 表示使用 --local 直连；
-        remaining_args 为 [script_name, ...] 形式，其中 script_name 后为可选的单条命令。
-    """
-    parser = argparse.ArgumentParser(
-        description="Schedule Agent CLI：默认连接 automation daemon，使用 --local 时在当前进程直连运行。"
-    )
-    parser.add_argument(
-        "--local",
-        action="store_true",
-        help="直连模式：在当前进程内直接启动 Agent，不连接 daemon（默认关闭）",
-    )
+    parser = argparse.ArgumentParser(description="Schedule Agent CLI")
     parser.add_argument(
         "command",
         nargs="*",
         help="单条要执行的命令（不传则进入交互模式）",
     )
     parsed, unknown = parser.parse_known_args(argv[1:] if len(argv) > 1 else [])
-    direct_mode = parsed.local
-    remaining = [argv[0]] + (getattr(parsed, "command", []) or []) + unknown
-    return direct_mode, remaining
+    return [argv[0]] + (getattr(parsed, "command", []) or []) + unknown
+
+
+async def run_single_command(agent: Any, command: str) -> str:
+    """执行单条命令并返回响应文本。"""
+    if hasattr(agent, "run_turn"):
+        result = await agent.run_turn(AgentRunInput(text=command), hooks=AgentHooks())
+        return result.output_text
+    return await agent.process_input(command)
+
+
+async def _dispatch(agent: Any, args: List[str]) -> None:
+    """根据命令行参数决定执行单条命令还是进入交互循环。"""
+    if args and len(args) > 1:
+        command = " ".join(args[1:])
+        response = await run_single_command(agent, command)
+        print(response)
+    else:
+        await run_interactive_loop(agent)
 
 
 async def main_async(args: Optional[List[str]] = None):
-    """
-    异步主函数。
-
-    Args:
-        args: 命令行参数（默认 sys.argv）；会在此处解析 --local 与单条命令。
-    """
+    """异步主函数：连接 daemon 并运行 CLI。"""
     raw_args = args if args is not None else sys.argv
     if not raw_args:
         raw_args = ["main.py"]
-    direct_mode, args = _parse_args(raw_args)
+    remaining = _parse_args(raw_args)
 
-    # 加载配置
-    config = _load_config()
-    if config is None:
-        return
+    _load_config()
 
-    # 获取默认工具
-    tools = get_default_tools(config=config)
     user_id = os.getenv("SCHEDULE_USER_ID", "root").strip() or "root"
     source = os.getenv("SCHEDULE_SOURCE", "cli").strip() or "cli"
-    default_session_id = f"{source}:default"
-
-    session_logger = None
-
-    agent_ref = None
     ipc_socket = (
         os.getenv("SCHEDULE_AUTOMATION_SOCKET", "").strip() or default_socket_path()
     )
 
+    ipc_client = AutomationIPCClient(
+        owner_id=user_id,
+        source=source,
+        socket_path=ipc_socket,
+    )
+    if not await ipc_client.ping():
+        print(f"错误: 未连接到 automation daemon ({ipc_socket})")
+        print("请先运行: python automation_daemon.py")
+        sys.exit(1)
+
+    await ipc_client.connect()
     try:
-        if not direct_mode:
-            # 默认：仅通过 daemon（IPC）；若 daemon 未运行则报错退出
-            ipc_client = AutomationIPCClient(
-                owner_id=user_id,
-                source=source,
-                socket_path=ipc_socket,
-            )
-            if not await ipc_client.ping():
-                print(f"错误: 未连接到 automation daemon ({ipc_socket})")
-                print("请先运行: python automation_daemon.py")
-                print("若需在当前进程直连运行，请使用: python main.py --local")
-                sys.exit(1)
-            await ipc_client.connect()
-            agent_ref = ipc_client
-            try:
-                if args and len(args) > 1:
-                    command = " ".join(args[1:])
-                    response = await run_single_command(ipc_client, command)
-                    print(response)
-                else:
-                    await run_interactive_loop(ipc_client)
-            finally:
-                await ipc_client.close()
-            return
-
-        async with AgentCore(
-            config=config,
-            tools=tools,
-            max_iterations=config.agent.max_iterations,
-            timezone=config.time.timezone,
-            session_logger=None,
-            user_id=user_id,
-            source=source,
-        ) as agent:
-            kernel_tool_registry = build_tool_registry(config=config)
-            kernel = AgentKernel(tool_registry=kernel_tool_registry)
-            # 为本地 Kernel 运行时接入会话摘要 LLM 客户端，与 daemon 行为保持一致。
-            summary_llm_client = LLMClient(config=config)
-            summarizer = SessionSummarizer(llm_client=summary_llm_client)
-            core_pool = CorePool(
-                config=config,
-                tools_factory=lambda: get_default_tools(config=config),
-                kernel=kernel,
-                summarizer=summarizer,
-                session_logger=session_logger,
-            )
-            scheduler_runtime = KernelScheduler(kernel=kernel, core_pool=core_pool)
-            await scheduler_runtime.start()
-            core_session = CoreSessionAdapter(agent)
-
-            async def _build_core_session(session_key: str) -> CoreSessionAdapter:
-                # 新会话使用独立 Agent，确保多会话上下文隔离。
-                created_agent = AgentCore(
-                    config=config,
-                    tools=tools,
-                    max_iterations=config.agent.max_iterations,
-                    timezone=config.time.timezone,
-                    session_logger=None,
-                    user_id=user_id,
-                    source=source,
-                )
-                await created_agent.__aenter__()
-                adapter = CoreSessionAdapter(created_agent)
-                # 不在 factory 里调用 activate_session，由 gateway._create_session 根据
-                # is_expired 状态决定 replay_messages_limit，避免全量历史被错误加载。
-                return adapter
-
-            try:
-                idle_timeout = int(config.memory.idle_timeout_minutes)
-            except Exception:
-                idle_timeout = 30
-            gateway = AutomationCoreGateway(
-                core_session,
-                session_id=default_session_id,
-                policy=SessionCutPolicy(
-                    idle_timeout_minutes=idle_timeout,
-                    daily_cutoff_hour=4,
-                ),
-                session_factory=_build_core_session,
-                owner_id=user_id,
-                source=source,
-            )
-            gateway.attach_scheduler(scheduler_runtime)
-            await gateway.activate_primary_session()
-            agent_ref = gateway
-            try:
-                # 检查是否有命令行参数
-                if args and len(args) > 1:
-                    # 执行单条命令
-                    command = " ".join(args[1:])
-                    response = await run_single_command(gateway, command)
-                    print(response)
-                else:
-                    # 运行交互式循环
-                    await run_interactive_loop(gateway)
-            finally:
-                if agent_ref:
-                    try:
-                        await agent_ref.close()
-                    except Exception:
-                        pass
-                await scheduler_runtime.stop()
-                await core_pool.evict_all()
+        await _dispatch(ipc_client, remaining)
     finally:
-        return
+        await ipc_client.close()
 
 
 def main():
@@ -391,7 +105,6 @@ def main():
         asyncio.set_event_loop(loop)
         loop.run_until_complete(main_async(sys.argv))
     except (KeyboardInterrupt, asyncio.CancelledError):
-        # 顶层兜底：避免事件循环边界的中断直接打出 traceback。
         return
     finally:
         try:

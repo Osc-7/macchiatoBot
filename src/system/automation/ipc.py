@@ -11,9 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# base64 图片可能数 MB，默认 64KB readline limit 远远不够
-_STREAM_LIMIT = 32 * 1024 * 1024  # 32 MB
-
 from agent_core.interfaces import (
     AgentHooks,
     AgentRunInput,
@@ -22,7 +19,8 @@ from agent_core.interfaces import (
 )
 
 from .core_gateway import AutomationCoreGateway
-
+# base64 图片可能数 MB，默认 64KB readline limit 远远不够
+_STREAM_LIMIT = 32 * 1024 * 1024  # 32 MB
 logger = logging.getLogger(__name__)
 
 

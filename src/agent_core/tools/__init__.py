@@ -53,8 +53,10 @@ from .shuiyuan_tools import (
     ShuiyuanRetortTool,
     ShuiyuanSearchTool,
 )
+from .factory import get_default_tools
 
 __all__ = [
+    "get_default_tools",
     "BaseTool",
     "ToolDefinition",
     "ToolParameter",

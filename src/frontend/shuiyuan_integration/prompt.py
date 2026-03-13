@@ -61,17 +61,31 @@ def _build_topic_op_section(topic_op: Dict[str, Any]) -> str:
     return "".join(lines)
 
 
+_BOT_REPLY_MARKER = "macchiato_SHUIYUAN_AUTO_REPLY"
+_BOT_RAW_LIMIT = 100
+_USER_RAW_LIMIT = 500
+
+
 def _build_thread_section(posts: List[Dict[str, Any]]) -> str:
-    """根据最近帖子列表生成「该楼最近帖子」段落。"""
+    """根据最近帖子列表生成「该楼最近帖子」段落。
+
+    Bot 自身的回复（含 AUTO_REPLY_MARK）截短到 100 字符，
+    避免历史回复中的过时模式被 LLM 当作 few-shot 示例。
+    """
     lines: List[str] = []
     for p in posts:
         pn = p.get("post_number", 0)
         pid = p.get("id")
         uname = p.get("username", "")
-        raw = (p.get("raw") or p.get("cooked", ""))[:500]
-        # 包含 post_id，供 shuiyuan_post_retort 使用（post_number≠post_id）
+        full_raw = p.get("raw") or p.get("cooked", "") or ""
+        is_bot = _BOT_REPLY_MARKER in full_raw
+        limit = _BOT_RAW_LIMIT if is_bot else _USER_RAW_LIMIT
+        raw = full_raw[:limit]
+        if len(full_raw) > limit:
+            raw += "…"
         pid_str = f" post_id={pid}" if pid is not None else ""
-        lines.append(f"[{pn}L]{pid_str} @{uname}: {raw}")
+        tag = " [bot]" if is_bot else ""
+        lines.append(f"[{pn}L]{pid_str} @{uname}{tag}: {raw}")
     if not lines:
         return ""
     return "## 该楼最近帖子\n\n" + "\n".join(lines) + "\n\n"

@@ -50,9 +50,10 @@ async def _upload_and_embed_attachments(
     client: Any,
 ) -> str:
     """
-    将 Agent 登记的附件逐一上传到水源，返回要追加到回复末尾的 Markdown 图片串。
+    将 Agent 登记的附件转成 Markdown 图片串追加到回复末尾。
 
-    若上传失败则跳过该附件并记录 warning，不影响文字回复。
+    - 外链 URL：直接嵌入 ``![image](url)``，由 Discourse 服务端拉取缓存。
+    - 本地路径：上传到水源后嵌入 ``![image](upload://xxx)``。
     """
     if not attachments:
         return ""
@@ -76,37 +77,23 @@ async def _upload_and_embed_attachments(
                 file_bytes = p.read_bytes()
                 filename = p.name
                 mime = _MIME_BY_EXT.get(p.suffix.lower(), "image/png")
+                upload_result = await asyncio.to_thread(
+                    client.upload_file, file_bytes, filename, mime_type=mime,
+                )
+                if upload_result and upload_result.get("short_url"):
+                    short_url = upload_result["short_url"]
+                    w = upload_result.get("width", "")
+                    h = upload_result.get("height", "")
+                    size = f"|{w}x{h}" if w and h else ""
+                    md_parts.append(f"![image{size}]({short_url})")
+                else:
+                    logger.warning("upload_file returned no short_url for local attachment: %s", img_path)
             elif img_url:
-                import requests as _req
-
-                resp = await asyncio.to_thread(_req.get, img_url, timeout=15.0)
-                resp.raise_for_status()
-                file_bytes = resp.content
-                ct = resp.headers.get("Content-Type", "image/png").split(";", 1)[0].strip()
-                mime = ct if ct and ct != "application/octet-stream" else "image/png"
-                url_path = img_url.rsplit("?", 1)[0]
-                filename = url_path.rsplit("/", 1)[-1] or "image.png"
+                md_parts.append(f"![image]({img_url})")
             else:
                 continue
-
-            upload_result = await asyncio.to_thread(
-                client.upload_file,
-                file_bytes,
-                filename,
-                mime_type=mime,
-            )
-            if upload_result and upload_result.get("short_url"):
-                short_url = upload_result["short_url"]
-                w = upload_result.get("width", "")
-                h = upload_result.get("height", "")
-                size = f"|{w}x{h}" if w and h else ""
-                md_parts.append(f"![image{size}]({short_url})")
-            else:
-                logger.warning(
-                    "upload_file returned no short_url for attachment: %s", att
-                )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("failed to upload attachment %s: %s", att, exc)
+            logger.warning("failed to process attachment %s: %s", att, exc)
 
     return ("\n\n" + "\n".join(md_parts)) if md_parts else ""
 

@@ -197,6 +197,11 @@ class AutomationCoreGateway:
         self.mark_activity(session_id)
         return created
 
+    @property
+    def has_scheduler(self) -> bool:
+        """是否已挂载 KernelScheduler（scheduler 模式下由 KernelScheduler._ttl_loop() 统一管理 session 生命周期）。"""
+        return self._kernel_scheduler is not None
+
     def attach_scheduler(self, scheduler: "KernelScheduler") -> None:
         """
         挂载 KernelScheduler，启用异步队列调度模式。

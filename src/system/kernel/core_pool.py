@@ -394,12 +394,13 @@ class CorePool:
                 continue
 
             # ② 判断是否超时：elapsed = shutdown_at - last_active_at
-            elapsed = shutdown_at - ckpt.last_active_at
+            # max(0.0, ...) 防御 NTP 时钟回拨导致 elapsed 为负（视为无时间流逝，session 不过期）
+            elapsed = max(0.0, shutdown_at - ckpt.last_active_at)
             session_ttl = ckpt.remaining_ttl_seconds or float(
                 getattr(self._config.agent, "session_expired_seconds", 1800)
             )
-            if elapsed < 0 or elapsed >= session_ttl:
-                # 超时（或时钟异常）：标记 expired=True，供下次启动清理
+            if elapsed >= session_ttl:
+                # 超时：标记 expired=True，供下次启动清理
                 mgr.mark_expired()
                 logger.debug(
                     "CorePool.restore_from_checkpoints: checkpoint expired session=%s "
@@ -488,6 +489,12 @@ class CorePool:
             memory_owner_id=user_id,
         )
         tools = list(reg.list_tools()[1].values())
+        # search_tools / call_tool 需绑定 AgentCore 自身的 ToolWorkingSetManager；
+        # build_tool_registry() 中创建的实例绑定的是外部 ToolWorkingSetManager，
+        # 若直接传入 AgentCore 会触发 has("search_tools") 守卫、跳过内部正确版本的创建，
+        # 导致 search_tools 更新的工作集被 InternalLoader 忽略。
+        # 解决方案：过滤掉这两个工具，AgentCore.__init__ 会用正确的 working_set 重新注册它们。
+        tools = [t for t in tools if t.name not in {"search_tools", "call_tool"}]
         if not tools and self._tools_factory:
             tools = self._tools_factory()
         # 是否为该 Core 启用本地记忆库：默认跟随配置，
@@ -575,9 +582,10 @@ class CorePool:
                         session_ttl = float(
                             getattr(profile, "session_expired_seconds", 1800)
                         )
-                        elapsed = shutdown_at - checkpoint.last_active_at
-                        if elapsed < 0 or elapsed >= session_ttl:
-                            # 超时（或时钟异常）：标记过期，冷启动
+                        # max(0.0, ...) 防御 NTP 时钟回拨（elapsed 为负时视为 0，保留 session）
+                        elapsed = max(0.0, shutdown_at - checkpoint.last_active_at)
+                        if elapsed >= session_ttl:
+                            # 超时：标记过期，冷启动
                             ckpt_mgr.mark_expired()
                             logger.debug(
                                 "CorePool._load: checkpoint expired (session=%s "

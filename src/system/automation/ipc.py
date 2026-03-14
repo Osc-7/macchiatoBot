@@ -98,6 +98,10 @@ class AutomationIPCServer:
                 break
             except asyncio.TimeoutError:
                 pass
+            # scheduler 模式下，session 生命周期由 KernelScheduler._ttl_loop() 统一管理，
+            # IPC 层不重复执行过期检查，避免两个循环同时 evict 同一 session 产生竞争。
+            if self._gateway.has_scheduler:
+                continue
             try:
                 for sid in self._gateway.list_sessions():
                     if self._gateway.should_expire_session(session_id=sid):

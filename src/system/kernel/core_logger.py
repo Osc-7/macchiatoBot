@@ -22,7 +22,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import IO, Any, Dict, List, Optional
 
 
 def _safe_ns(value: str, default: str) -> str:
@@ -38,6 +38,7 @@ class CoreLifecycleLogger:
 
     _file_path: Optional[Path] = field(default=None, repr=False)
     _closed: bool = field(default=False, repr=False)
+    _file: Optional[IO[str]] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         base = Path(self.base_dir or "./logs/sessions")
@@ -50,17 +51,25 @@ class CoreLifecycleLogger:
         uid = _safe_ns(self.user_id, "root")
         filename = f"session-{src}:{uid}-{ts}.jsonl"
         self._file_path = base / filename
+        # 保持文件句柄常开，避免每次 _write() 都 open/close 阻塞 event loop
+        try:
+            self._file = open(self._file_path, "a", encoding="utf-8")
+        except Exception:
+            self._file = None
 
     def _timestamp(self) -> str:
         dt = datetime.now().astimezone()
         return dt.isoformat(timespec="milliseconds")
 
     def _write(self, record: Dict[str, Any]) -> None:
-        if self._closed or self._file_path is None:
+        if self._closed or self._file is None:
             return
-        line = json.dumps(record, ensure_ascii=False) + "\n"
-        with open(self._file_path, "a", encoding="utf-8") as f:
-            f.write(line)
+        try:
+            line = json.dumps(record, ensure_ascii=False) + "\n"
+            self._file.write(line)
+            self._file.flush()
+        except Exception:
+            pass
 
     # ---- 事件接口 ---------------------------------------------------------
 
@@ -267,6 +276,13 @@ class CoreLifecycleLogger:
 
     def close(self) -> None:
         self._closed = True
+        if self._file is not None:
+            try:
+                self._file.flush()
+                self._file.close()
+            except Exception:
+                pass
+            self._file = None
 
     @property
     def file_path(self) -> Optional[Path]:

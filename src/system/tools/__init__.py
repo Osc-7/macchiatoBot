@@ -231,6 +231,22 @@ def _build_shuiyuan_tools(config: Config) -> List[BaseTool]:
     return tools
 
 
+def _build_skill_tools(config: Config) -> List[BaseTool]:
+    """LoadSkillTool：当配置了 skills.enabled 或 skills.cli_dir 时注册。"""
+    tools: List[BaseTool] = []
+    skills_cfg = getattr(config, "skills", None)
+    if skills_cfg is not None and (
+        getattr(skills_cfg, "enabled", None) or getattr(skills_cfg, "cli_dir", None)
+    ):
+        try:
+            from agent_core.tools.load_skill_tool import LoadSkillTool
+
+            tools.append(LoadSkillTool(config=config))
+        except Exception:
+            pass
+    return tools
+
+
 def _build_automation_tools(
     config: Config,
     *,
@@ -320,6 +336,7 @@ def build_tool_registry(
     tools.extend(_build_multimodal_tools(cfg))
     tools.extend(_build_canvas_tools(cfg))
     tools.extend(_build_shuiyuan_tools(cfg))
+    tools.extend(_build_skill_tools(cfg))
     tools.extend(
         _build_automation_tools(
             cfg,

@@ -163,7 +163,7 @@ async def test_scheduler_concurrent_requests_same_session_serialized() -> None:
 async def test_agent_prepare_turn_populates_recall_result(tmp_path) -> None:
     """prepare_turn 应在所有路径中执行 memory recall（包括 scheduler 路径之前缺失的情况）。"""
     from agent_core.agent.agent import AgentCore
-    from agent_core.config import Config, LLMConfig, AgentConfig, MemoryConfig
+    from agent_core.config import Config
 
     # 构造最小可用 Config（memory disabled，避免创建目录）
     config = MagicMock(spec=Config)

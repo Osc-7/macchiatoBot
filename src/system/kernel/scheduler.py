@@ -26,7 +26,7 @@ from agent_core.kernel_interface import KernelRequest
 
 if TYPE_CHECKING:
     from .kernel import AgentKernel
-    from .core_pool import CorePool, CoreEntry
+    from .core_pool import CorePool
 
 logger = logging.getLogger(__name__)
 

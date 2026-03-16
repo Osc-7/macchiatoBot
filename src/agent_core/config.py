@@ -422,6 +422,16 @@ class MCPServerConfig(BaseModel):
         ge=1,
         description="初始化和获取工具列表超时时间（秒）",
     )
+    init_retries: int = Field(
+        default=2,
+        ge=0,
+        description="初始化失败时的重试次数（0=不重试，仅尝试一次）",
+    )
+    init_retry_delay_seconds: float = Field(
+        default=2.0,
+        ge=0,
+        description="重试前等待秒数",
+    )
     call_timeout_seconds: int = Field(
         default=30,
         ge=1,

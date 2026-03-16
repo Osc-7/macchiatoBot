@@ -130,10 +130,16 @@ class AgentKernel:
                 # 优先使用 agent 自身的 per-session registry（已过 CoreProfile 过滤），
                 # 避免 call_tool 通过全局 registry 绕过权限限制。
                 agent_registry = getattr(agent, "_tool_registry", None) or self._tools
-                result = await agent_registry.execute(
-                    action.tool_name,
-                    **self._parse_arguments(action.arguments),
-                )
+                parsed_args = self._parse_arguments(action.arguments)
+                # 注入执行上下文：补全 AgentCore._execute_tool_call() 原本做的注入，
+                # 让 command_tools / file_tools 等能感知 tool_mode 和 source。
+                parsed_args["__execution_context__"] = {
+                    "tool_mode": getattr(agent, "_effective_tool_mode", "kernel"),
+                    "source": getattr(agent, "_source", ""),
+                    "user_id": getattr(agent, "_user_id", ""),
+                    "session_id": getattr(agent, "_session_id", ""),
+                }
+                result = await agent_registry.execute(action.tool_name, **parsed_args)
                 action = await gen.asend(
                     ToolResultEvent(
                         tool_call_id=action.tool_call_id,
@@ -211,7 +217,7 @@ class AgentKernel:
     async def _compress_context(
         self,
         agent: "AgentCore",
-        keep_recent_turns: int = 6,
+        keep_recent_turns: Optional[int] = None,
     ) -> tuple[str, int]:
         """
         压缩 agent 的对话上下文。
@@ -222,8 +228,21 @@ class AgentKernel:
         3. 将旧消息从 context 中截断（只保留 system-adjacent 部分 + 新消息）
         4. 返回 (摘要文本, 保留的完整消息数)
 
+        keep_recent_turns 优先从 CoreProfile 或 agent 配置读取；
+        未配置时退化为默认值 6。
         若 LLM 摘要失败，退化为不摘要的纯截断（保证 Kernel 不因摘要失败而卡住）。
         """
+        if keep_recent_turns is None:
+            profile = getattr(agent, "_core_profile", None)
+            keep_recent_turns = int(
+                getattr(profile, "compress_keep_recent_turns", None)
+                or getattr(
+                    getattr(agent, "_config", None),
+                    "compress_keep_recent_turns",
+                    6,
+                )
+                or 6
+            )
         ctx = getattr(agent, "_context", None)
         if ctx is None:
             return "", 0

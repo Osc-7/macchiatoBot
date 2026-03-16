@@ -74,4 +74,10 @@ class CallToolTool(BaseTool):
                 message=f"工具 '{name}' 不存在",
             )
 
+        # 透传 __execution_context__，否则内层工具（如 create_subagent）无法获取
+        # 调用方的 session_id，导致 parent_session_id 为空。
+        exec_ctx = kwargs.get("__execution_context__")
+        if exec_ctx is not None and "__execution_context__" not in arguments:
+            arguments = {**arguments, "__execution_context__": exec_ctx}
+
         return await self._registry.execute(name, **arguments)

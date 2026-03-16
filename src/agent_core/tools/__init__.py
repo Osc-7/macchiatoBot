@@ -48,15 +48,34 @@ from .automation_tools import (
 )
 from .sjtu_jw_tools import FetchSjtuUndergradScheduleTool
 from .shuiyuan_tools import (
+    ShuiyuanBrowseTopicTool,
+    ShuiyuanGetCategoriesTool,
+    ShuiyuanGetCategoryTopicsTool,
+    ShuiyuanGetLatestTool,
     ShuiyuanGetTopicTool,
+    ShuiyuanGetTopTool,
     ShuiyuanPostReplyTool,
     ShuiyuanRetortTool,
     ShuiyuanSearchTool,
 )
 from .factory import get_default_tools
+from .subagent_tools import (
+    CancelSubagentTool,
+    CreateParallelSubagentsTool,
+    CreateSubagentTool,
+    GetSubagentStatusTool,
+    ReplyToMessageTool,
+    SendMessageToAgentTool,
+)
 
 __all__ = [
     "get_default_tools",
+    "CancelSubagentTool",
+    "CreateParallelSubagentsTool",
+    "CreateSubagentTool",
+    "GetSubagentStatusTool",
+    "ReplyToMessageTool",
+    "SendMessageToAgentTool",
     "BaseTool",
     "ToolDefinition",
     "ToolParameter",
@@ -105,6 +124,11 @@ __all__ = [
     "FetchSjtuUndergradScheduleTool",
     "ShuiyuanSearchTool",
     "ShuiyuanGetTopicTool",
+    "ShuiyuanBrowseTopicTool",
+    "ShuiyuanGetLatestTool",
+    "ShuiyuanGetTopTool",
+    "ShuiyuanGetCategoriesTool",
+    "ShuiyuanGetCategoryTopicsTool",
     "ShuiyuanRetortTool",
     "ShuiyuanPostReplyTool",
 ]

@@ -422,7 +422,7 @@ async def run_interactive_loop(agent: Any) -> str:
             print()
 
     async def _automation_notifier_loop() -> None:
-        """后台轮询 automation_activity.jsonl，有新记录时打印 [system] 消息。
+        """后台轮询 automation_activity.jsonl 和 inject_turn push 队列，有新消息时打印。
 
         Agent 处理用户输入期间（is_processing=True）暂停打印，
         避免系统消息插入 spinner 或 streaming 输出中破坏 UI。
@@ -432,12 +432,30 @@ async def run_interactive_loop(agent: Any) -> str:
             try:
                 if not is_processing:
                     _print_pending_automation_system_messages()
+                    # 轮询 subagent 完成等 inject_turn 产生的主 agent 推送回复
+                    if hasattr(agent, "poll_push"):
+                        try:
+                            push_results = await agent.poll_push()
+                            for pr in push_results:
+                                output_text = (pr.get("output_text") or "").strip()
+                                if not output_text:
+                                    continue
+                                print()
+                                print(label("[agent 后台回复]"))
+                                print()
+                                if _HAS_RICH and _RICH_CONSOLE is not None:
+                                    _RICH_CONSOLE.print(Markdown(output_text))
+                                else:
+                                    print(output_text)
+                                print(thin_separator())
+                        except Exception:
+                            pass
             except Exception:
                 # 不让通知异常影响主循环
                 pass
             try:
                 await asyncio.wait_for(
-                    asyncio.shield(automation_stop_event.wait()), timeout=5.0
+                    asyncio.shield(automation_stop_event.wait()), timeout=2.0
                 )
             except asyncio.TimeoutError:
                 continue

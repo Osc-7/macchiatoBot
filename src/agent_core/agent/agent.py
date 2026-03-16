@@ -824,6 +824,14 @@ class AgentCore:
         """
         执行工具调用。
 
+        ⚠️  注意：此方法在主 Agent 循环中**不被调用**。
+        实际执行路径为：run_loop() → yield ToolCallAction → AgentKernel.run()
+        → agent_registry.execute()（Kernel 直接调用，不经过本方法）。
+
+        本方法仅在单元测试中用于直接测试参数解析和工具执行逻辑，
+        不应在生产代码中调用。可见性检查和 __execution_context__ 注入
+        均已在 AgentKernel 侧实现。
+
         Args:
             tool_call: 工具调用
 

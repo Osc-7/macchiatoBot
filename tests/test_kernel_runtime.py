@@ -3,15 +3,59 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from agent_core.context import ConversationContext
-from agent_core.kernel_interface import CoreProfile
+from agent_core.kernel_interface import CoreProfile, KernelRequest
 from agent_core.tools import VersionedToolRegistry
 from system.kernel import AgentKernel, CoreEntry, CorePool, KernelScheduler
+
+
+@pytest.mark.asyncio
+async def test_priority_queue_inject_before_user_request() -> None:
+    """验证 PriorityQueue 调度顺序：priority=-1（inject）应先于 priority=0（用户请求）被处理。"""
+    queue: asyncio.PriorityQueue[KernelRequest] = asyncio.PriorityQueue()
+
+    # 先入队用户请求（priority=0），再入队 inject（priority=-1）
+    user_req = KernelRequest.create(
+        text="用户消息",
+        session_id="cli:default",
+        priority=0,
+    )
+    inject_req = KernelRequest.create(
+        text="[子任务 abc 完成]\n\n结果",
+        session_id="cli:default",
+        frontend_id="subagent",
+        priority=-1,
+    )
+    await queue.put(user_req)
+    await queue.put(inject_req)
+
+    # get() 应返回最小的（priority 最小 = 最高优先级）
+    first = await queue.get()
+    assert first.priority == -1, "inject（priority=-1）应先于用户请求（priority=0）被处理"
+    assert "子任务" in (first.text or "")
+
+    second = await queue.get()
+    assert second.priority == 0
+    assert second.text == "用户消息"
+
+
+@pytest.mark.asyncio
+async def test_kernel_request_ordering_by_priority_then_enqueued_at() -> None:
+    """验证 KernelRequest 比较顺序：priority 优先，同优先级按 enqueued_at FIFO。"""
+    t = time.monotonic()
+    r_low = KernelRequest(priority=0, enqueued_at=t + 1, request_id="a")
+    r_high = KernelRequest(priority=-1, enqueued_at=t + 2, request_id="b")
+    assert r_high < r_low, "priority 越小越优先"
+
+    r_first = KernelRequest(priority=0, enqueued_at=t, request_id="a")
+    r_second = KernelRequest(priority=0, enqueued_at=t + 1, request_id="b")
+    assert r_first < r_second, "同优先级按 enqueued_at FIFO"
 
 
 @pytest.mark.asyncio
@@ -49,7 +93,7 @@ async def test_core_pool_acquire_hot_updates_profile(
 
     captured: dict = {}
 
-    def _fake_build_tool_registry(*, profile=None, config=None, memory_owner_id=None):  # type: ignore[no-untyped-def]
+    def _fake_build_tool_registry(*, profile=None, config=None, memory_owner_id=None, subagent_registry=None, core_pool=None):  # type: ignore[no-untyped-def]
         captured["profile"] = profile
         captured["memory_owner_id"] = memory_owner_id
         return fake_registry

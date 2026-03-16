@@ -213,6 +213,15 @@ class AutomationCoreGateway:
         """
         self._kernel_scheduler = scheduler
 
+    def poll_push_result(self, session_id: str) -> Optional[AgentRunResult]:
+        """非阻塞：弹出 inject_turn 为该 session 产生的下一条推送结果，无则返回 None。
+
+        典型使用方：IPC server 的 poll_push 接口，CLI 后台轮询循环。
+        """
+        if self._kernel_scheduler is None:
+            return None
+        return self._kernel_scheduler.poll_push(session_id)
+
     async def run_turn(
         self,
         agent_input: AgentRunInput,

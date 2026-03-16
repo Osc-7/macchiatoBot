@@ -21,7 +21,11 @@ System-level tool registry assembly.
 from __future__ import annotations
 
 import os
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
+
+if TYPE_CHECKING:
+    from system.kernel.subagent_registry import SubagentRegistry
+    from system.kernel.core_pool import CorePool
 
 from agent_core.config import Config, get_config
 from agent_core.kernel_interface import CoreProfile
@@ -30,7 +34,13 @@ from agent_core.memory import ContentMemory, LongTermMemory
 from agent_core.tools import (
     BaseTool,
     CallToolTool,
+    CancelSubagentTool,
+    CreateParallelSubagentsTool,
+    CreateSubagentTool,
+    GetSubagentStatusTool,
+    ReplyToMessageTool,
     SearchToolsTool,
+    SendMessageToAgentTool,
     VersionedToolRegistry,
     AddEventTool,
     AddTaskTool,
@@ -286,12 +296,121 @@ def _build_automation_tools(
     return tools
 
 
+def _build_subagent_tools(
+    profile: Optional[CoreProfile] = None,
+    *,
+    subagent_registry: Optional["SubagentRegistry"] = None,
+    core_pool: Optional["CorePool"] = None,
+) -> List[BaseTool]:
+    """
+    装配 multi-agent 通信工具。
+
+    mode="sub" 时只注册通信工具（send_message_to_agent + reply_to_message），
+    防止子 Agent 无限孵化。
+    mode="full" / 其他时注册完整 5 个工具（需要 registry + core_pool + scheduler）。
+    """
+    tools: List[BaseTool] = []
+    if subagent_registry is None:
+        return tools
+
+    # scheduler 通过 registry 持有（registry.set_scheduler 后绑定），
+    # 工具初始化时直接引用 registry._scheduler（懒取值）。
+    # 为保持解耦，scheduler 在工具 execute() 时通过 registry 获取。
+    # 但 SendMessageToAgentTool / ReplyToMessageTool 需要直接持有 scheduler 引用，
+    # 在 registry 后绑定后从 registry._scheduler 取。
+    mode = getattr(profile, "mode", "full") if profile else "full"
+
+    if mode == "sub":
+        # Sub agent 只能通信，不能孵化
+        tools.append(_LazySchedulerSendMessageTool(subagent_registry))
+        tools.append(_LazySchedulerReplyToMessageTool(subagent_registry))
+    else:
+        # Full / background agent：完整 5 个工具
+        if core_pool is not None:
+            tools.append(
+                CreateSubagentTool(
+                    registry=subagent_registry,
+                    core_pool=core_pool,
+                    scheduler=_SchedulerProxy(subagent_registry),
+                )
+            )
+            tools.append(
+                CreateParallelSubagentsTool(
+                    registry=subagent_registry,
+                    core_pool=core_pool,
+                    scheduler=_SchedulerProxy(subagent_registry),
+                )
+            )
+        tools.append(_LazySchedulerSendMessageTool(subagent_registry))
+        tools.append(_LazySchedulerReplyToMessageTool(subagent_registry))
+        tools.append(GetSubagentStatusTool(registry=subagent_registry))
+        tools.append(CancelSubagentTool(registry=subagent_registry))
+
+    return tools
+
+
+class _SchedulerProxy:
+    """
+    懒加载 scheduler 代理。
+
+    SubagentRegistry.set_scheduler() 在 daemon 初始化末尾调用（后绑定），
+    工具在此之前已被装配。使用代理在 execute() 时才真正访问 scheduler，
+    保证时序正确。
+    """
+
+    def __init__(self, registry: "SubagentRegistry") -> None:
+        self._registry = registry
+
+    def inject_turn(self, request) -> None:  # type: ignore[override]
+        s = self._registry._scheduler
+        if s is None:
+            raise RuntimeError("KernelScheduler not yet bound to SubagentRegistry")
+        s.inject_turn(request)
+
+    async def submit(self, request):  # type: ignore[override]
+        s = self._registry._scheduler
+        if s is None:
+            raise RuntimeError("KernelScheduler not yet bound to SubagentRegistry")
+        return await s.submit(request)
+
+
+class _LazySchedulerSendMessageTool(SendMessageToAgentTool):
+    """send_message_to_agent：通过 registry 懒加载 scheduler。"""
+
+    def __init__(self, registry: "SubagentRegistry") -> None:
+        self._registry = registry
+        # 不调用父类 __init__（scheduler 懒加载）
+
+    @property
+    def _scheduler(self):  # type: ignore[override]
+        s = self._registry._scheduler
+        if s is None:
+            raise RuntimeError("KernelScheduler not yet bound to SubagentRegistry")
+        return s
+
+
+class _LazySchedulerReplyToMessageTool(ReplyToMessageTool):
+    """reply_to_message：通过 registry 懒加载 scheduler。"""
+
+    def __init__(self, registry: "SubagentRegistry") -> None:
+        self._registry = registry
+
+    @property
+    def _scheduler(self):  # type: ignore[override]
+        s = self._registry._scheduler
+        if s is None:
+            raise RuntimeError("KernelScheduler not yet bound to SubagentRegistry")
+        return s
+
+
 def build_tool_registry(
     profile: Optional[CoreProfile] = None,
     *,
     config: Optional[Config] = None,
     memory_owner_id: Optional[str] = None,
     memory_source: Optional[str] = None,
+    subagent_registry: Optional["SubagentRegistry"] = None,
+    core_pool: Optional["CorePool"] = None,
 ) -> VersionedToolRegistry:
     """
     构建带版本号的工具注册表。
@@ -343,6 +462,13 @@ def build_tool_registry(
             profile=profile,
             memory_owner_id=memory_owner_id,
             memory_source=memory_source or (profile.frontend_id if profile else None),
+        )
+    )
+    tools.extend(
+        _build_subagent_tools(
+            profile=profile,
+            subagent_registry=subagent_registry,
+            core_pool=core_pool,
         )
     )
 

@@ -5,6 +5,7 @@ Agent Core 内核协议 — syscall 接口定义与 InternalLoader。
 """
 
 from .action import (
+    AgentMessage,
     ContextCompressedEvent,
     ContextOverflowAction,
     CoreStatsAction,
@@ -33,6 +34,8 @@ __all__ = [
     "KillEvent",
     # Request (Frontend → Kernel)
     "KernelRequest",
+    # Agent communication protocol
+    "AgentMessage",
     # Loader
     "InternalLoader",
     "LLMPayload",

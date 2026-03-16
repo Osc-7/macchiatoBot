@@ -40,6 +40,7 @@ from system.kernel import (
     KernelRequest,
     KernelScheduler,
     SessionSummarizer,
+    SubagentRegistry,
 )
 from agent_core.llm.client import LLMClient
 from system.tools import build_tool_registry
@@ -236,10 +237,11 @@ async def _maybe_notify_feishu_activity(record: dict[str, Any]) -> None:
 
 async def _main() -> None:
     cfg = get_config()
-    # 工具在 daemon 进程内加载；修改工具实现/定义（如 file_tools.read_file）后需重启本 daemon 才能生效
-    tools = get_default_tools(config=cfg)
     owner_id = (sys.argv[1].strip() if len(sys.argv) > 1 else "root") or "root"
     source = (sys.argv[2].strip() if len(sys.argv) > 2 else "cli") or "cli"
+    # 工具在 daemon 进程内加载；修改工具实现/定义（如 file_tools.read_file）后需重启本 daemon 才能生效
+    # 传入 owner_id 和 source 确保记忆工具指向正确的用户目录
+    tools = get_default_tools(config=cfg, user_id=owner_id, source=source)
     default_session_id = f"{source}:default"
 
     queue = AgentTaskQueue()
@@ -260,14 +262,20 @@ async def _main() -> None:
     # 如需单独的总结模型，可在此处通过 model_override 指定，例如 "qwen2.5-7b-instruct" 等。
     summary_llm_client = LLMClient(config=cfg)
     summarizer = SessionSummarizer(llm_client=summary_llm_client)
+    # SubagentRegistry 先创建，在 scheduler 就绪后通过 set_scheduler 后绑定（避免循环依赖）
+    sub_registry = SubagentRegistry()
     core_pool = CorePool(
         config=cfg,
         tools_factory=lambda: get_default_tools(config=cfg),
         kernel=kernel,
         summarizer=summarizer,
         session_logger=None,
+        subagent_registry=sub_registry,
     )
     scheduler_runtime = KernelScheduler(kernel=kernel, core_pool=core_pool)
+    # 后绑定 scheduler：工具装配在 CorePool._load() 时已引用 registry，
+    # 此时 scheduler 已初始化，可以安全绑定。
+    sub_registry.set_scheduler(scheduler_runtime)
     stop_event = asyncio.Event()
     consumer_task = asyncio.create_task(
         _consume_loop(queue, scheduler_runtime, stop_event),

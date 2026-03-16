@@ -310,6 +310,26 @@ class AutomationIPCServer:
             turn_count = self._gateway.get_turn_count(session_id=active_session)
             return {"turn_count": turn_count}
 
+        if method == "poll_push":
+            # 非阻塞轮询：批量取出该 session 所有待推送的 inject_turn 结果
+            results = []
+            if hasattr(self._gateway, "poll_push_result"):
+                while True:
+                    result = self._gateway.poll_push_result(active_session)
+                    if result is None:
+                        break
+                    results.append(
+                        {
+                            "output_text": result.output_text,
+                            "metadata": (
+                                result.metadata
+                                if isinstance(result.metadata, dict)
+                                else {}
+                            ),
+                        }
+                    )
+            return {"results": results, "session_id": active_session}
+
         if method == "run_turn":
             text = str(params.get("text") or "")
             metadata = params.get("metadata")
@@ -463,6 +483,16 @@ class AutomationIPCClient:
         except Exception:
             self._turn_count_cache = 0
         return self._turn_count_cache
+
+    async def poll_push(self) -> list:
+        """非阻塞轮询当前 session 的 inject_turn 推送结果列表（空则返回 []）。
+
+        供 CLI 后台通知循环调用：有新的 subagent 完成通知时，主 agent 会在后台处理
+        并通过 inject_turn 产生回复，该回复通过此接口推送给前端展示。
+        """
+        data = await self._request("poll_push", {})
+        results = data.get("results")
+        return results if isinstance(results, list) else []
 
     async def run_turn(
         self, agent_input: AgentRunInput, hooks: AgentHooks | None = None

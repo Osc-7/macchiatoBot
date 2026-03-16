@@ -13,7 +13,7 @@ import os
 import sys
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from agent_core.config import MCPConfig, MCPServerConfig
 from agent_core.tools.base import ToolResult
@@ -37,6 +37,7 @@ class MCPClientManager:
     def __init__(self, config: MCPConfig):
         self._config = config
         self._exit_stack = AsyncExitStack()
+        self._server_stacks: List[AsyncExitStack] = []  # 每个成功连接的 server 一个 stack，便于重试时只清理单次尝试
         self._servers: Dict[str, _ServerRuntime] = {}
         self._proxy_tools: List[MCPProxyTool] = []
         self._connected = False
@@ -64,87 +65,131 @@ class MCPClientManager:
             args_preview = " ".join(server.args)
             if len(args_preview) > 60:
                 args_preview = args_preview[:57] + "..."
-            logger.info(
-                "Connecting to MCP server: %s (%s %s)...",
-                server.name,
-                server.command,
-                args_preview,
-            )
-            try:
-                # 合并环境变量：确保 stderr 被重定向，避免 MCP server 日志污染 CLI
-                merged_env = {**os.environ, **(server.env or {})}
-                # 使用 NODE_OPTIONS 禁用 Node.js 的警告输出
-                merged_env["NODE_NO_WARNINGS"] = "1"
-                merged_env["NODE_ENV"] = "production"
+            max_attempts = 1 + getattr(server, "init_retries", 0)
+            retry_delay = getattr(server, "init_retry_delay_seconds", 2.0)
 
-                server_params = StdioServerParameters(
-                    command=server.command,
-                    args=server.args,
-                    env=merged_env,
-                    cwd=server.cwd,
-                )
-
-                # 对 mcp-remote 进程静默 stderr，避免其调试日志污染主 CLI 输出。
-                if server.command == "npx" and any(
-                    arg == "mcp-remote" for arg in server.args
-                ):
-                    errlog = self._exit_stack.enter_context(open(os.devnull, "w"))
-                else:
-                    errlog = sys.stderr
-
-                read_stream, write_stream = await self._exit_stack.enter_async_context(
-                    stdio_client(server_params, errlog=errlog)
-                )
-                session = await self._exit_stack.enter_async_context(
-                    ClientSession(read_stream, write_stream)
-                )
-
-                await asyncio.wait_for(
-                    session.initialize(),
-                    timeout=server.init_timeout_seconds,
-                )
-
-                self._servers[server.name] = _ServerRuntime(
-                    config=server, session=session
-                )
-
-                tool_resp = await asyncio.wait_for(
-                    session.list_tools(),
-                    timeout=server.init_timeout_seconds,
-                )
-                tools = getattr(tool_resp, "tools", []) or []
-                for tool in tools:
-                    remote_name = getattr(tool, "name", "")
-                    if not remote_name:
-                        continue
-                    local_prefix = server.tool_name_prefix or server.name
-                    local_name = f"{local_prefix}.{remote_name}"
-                    if any(t.name == local_name for t in self._proxy_tools):
-                        raise ValueError(f"MCP 工具名冲突: {local_name}")
-
-                    self._proxy_tools.append(
-                        MCPProxyTool(
-                            manager=self,
-                            local_name=local_name,
-                            server_name=server.name,
-                            remote_name=remote_name,
-                            description=getattr(tool, "description", "")
-                            or "MCP 远程工具",
-                            input_schema=getattr(tool, "inputSchema", None)
-                            or getattr(tool, "input_schema", None)
-                            or {"type": "object", "properties": {}},
-                        )
+            for attempt in range(max_attempts):
+                if attempt > 0:
+                    logger.info(
+                        "MCP server %s retry %s/%s in %.1fs...",
+                        server.name,
+                        attempt + 1,
+                        max_attempts,
+                        retry_delay,
                     )
-            except Exception as exc:
-                logger.warning(
-                    "MCP server %s failed: %s (%s)",
-                    server.name,
-                    type(exc).__name__,
-                    exc,
-                )
-                raise RuntimeError(f"MCP server '{server.name}' failed: {exc}") from exc
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.info(
+                        "Connecting to MCP server: %s (%s %s)...",
+                        server.name,
+                        server.command,
+                        args_preview,
+                    )
+
+                attempt_stack: Optional[AsyncExitStack] = None
+                try:
+                    # 合并环境变量：确保 stderr 被重定向，避免 MCP server 日志污染 CLI
+                    merged_env = {**os.environ, **(server.env or {})}
+                    merged_env["NODE_NO_WARNINGS"] = "1"
+                    merged_env["NODE_ENV"] = "production"
+
+                    server_params = StdioServerParameters(
+                        command=server.command,
+                        args=server.args,
+                        env=merged_env,
+                        cwd=server.cwd,
+                    )
+
+                    # 单次尝试使用独立 stack，失败时可整栈关闭后重试
+                    attempt_stack = AsyncExitStack()
+                    await attempt_stack.__aenter__()
+
+                    if server.command == "npx" and any(
+                        arg == "mcp-remote" for arg in server.args
+                    ):
+                        errlog = attempt_stack.enter_context(open(os.devnull, "w"))
+                    else:
+                        errlog = sys.stderr
+
+                    read_stream, write_stream = await attempt_stack.enter_async_context(
+                        stdio_client(server_params, errlog=errlog)
+                    )
+                    session = await attempt_stack.enter_async_context(
+                        ClientSession(read_stream, write_stream)
+                    )
+
+                    await asyncio.wait_for(
+                        session.initialize(),
+                        timeout=server.init_timeout_seconds,
+                    )
+
+                    self._servers[server.name] = _ServerRuntime(
+                        config=server, session=session
+                    )
+
+                    tool_resp = await asyncio.wait_for(
+                        session.list_tools(),
+                        timeout=server.init_timeout_seconds,
+                    )
+                    tools = getattr(tool_resp, "tools", []) or []
+                    for tool in tools:
+                        remote_name = getattr(tool, "name", "")
+                        if not remote_name:
+                            continue
+                        local_prefix = server.tool_name_prefix or server.name
+                        local_name = f"{local_prefix}.{remote_name}"
+                        if any(t.name == local_name for t in self._proxy_tools):
+                            raise ValueError(f"MCP 工具名冲突: {local_name}")
+
+                        self._proxy_tools.append(
+                            MCPProxyTool(
+                                manager=self,
+                                local_name=local_name,
+                                server_name=server.name,
+                                remote_name=remote_name,
+                                description=getattr(tool, "description", "")
+                                or "MCP 远程工具",
+                                input_schema=getattr(tool, "inputSchema", None)
+                                or getattr(tool, "input_schema", None)
+                                or {"type": "object", "properties": {}},
+                            )
+                        )
+
+                    self._server_stacks.append(attempt_stack)
+                    attempt_stack = None  # 所有权已交给 _server_stacks，不再在 except 里关闭
+                    break
+
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt_stack is not None:
+                        await attempt_stack.aclose()
+                        attempt_stack = None
+                    if attempt < max_attempts - 1:
+                        logger.warning(
+                            "MCP server %s attempt %s failed (will retry): %s (%s)",
+                            server.name,
+                            attempt + 1,
+                            type(exc).__name__,
+                            exc,
+                        )
+                    else:
+                        logger.warning(
+                            "MCP server %s failed after %s attempt(s) (skipping): %s (%s)",
+                            server.name,
+                            max_attempts,
+                            type(exc).__name__,
+                            exc,
+                        )
 
         self._connected = True
+        if self._servers:
+            logger.info(
+                "MCP connect done: %d server(s) ready, %d tool(s)",
+                len(self._servers),
+                len(self._proxy_tools),
+            )
+        else:
+            logger.warning("MCP connect done: no servers available (all failed or disabled)")
 
     def get_proxy_tools(self) -> List[MCPProxyTool]:
         """获取已构建的 MCP 代理工具列表。"""
@@ -192,6 +237,9 @@ class MCPClientManager:
         """关闭所有 MCP 连接。"""
         if not self._connected:
             return
+        for stack in self._server_stacks:
+            await stack.aclose()
+        self._server_stacks.clear()
         await self._exit_stack.aclose()
         self._servers.clear()
         self._proxy_tools.clear()

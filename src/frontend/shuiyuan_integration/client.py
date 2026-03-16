@@ -623,3 +623,177 @@ class ShuiyuanClient:
             body = ""
 
         return None, r.status_code, body
+
+    def get_latest_topics(
+        self,
+        page: int = 0,
+        per_page: int = 30,
+        order: str = "default",
+        filter_category_id: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """
+        获取最新话题列表（首页）。
+
+        Args:
+            page: 页码，从0开始
+            per_page: 每页数量，默认30，最大50
+            order: 排序方式，可选 "default", "created", "activity"
+            filter_category_id: 可选，筛选特定类别
+
+        Returns:
+            Discourse /latest.json 返回的 JSON 字典，包含话题列表、用户列表等
+        """
+        _ensure_rate_limit()
+        params: dict[str, Any] = {"page": page, "per_page": min(50, max(1, per_page))}
+        if order in ("created", "activity"):
+            params["order"] = order
+        if filter_category_id is not None:
+            params["category_id"] = filter_category_id
+
+        url = f"{self._base}/latest.json"
+        r = requests.get(url, params=params, headers=self._headers, timeout=self._timeout)
+        r.raise_for_status()
+        return r.json()
+
+    def get_top_topics(
+        self,
+        period: str = "daily",
+        page: int = 0,
+        per_page: int = 30,
+    ) -> dict[str, Any]:
+        """
+        获取热门/置顶话题列表。
+
+        Args:
+            period: 时间范围，可选 "daily"(今日), "weekly"(本周), "monthly"(本月), "yearly"(年度), "all"(全部)
+            page: 页码，从0开始
+            per_page: 每页数量，默认30，最大50
+
+        Returns:
+            Discourse /top.json 或 /top/{period}.json 返回的 JSON 字典
+        """
+        _ensure_rate_limit()
+        valid_periods = ("daily", "weekly", "monthly", "yearly", "all")
+        if period not in valid_periods:
+            period = "daily"
+
+        params: dict[str, Any] = {"page": page, "per_page": min(50, max(1, per_page))}
+
+        if period == "daily":
+            url = f"{self._base}/top.json"
+        else:
+            url = f"{self._base}/top/{period}.json"
+
+        r = requests.get(url, params=params, headers=self._headers, timeout=self._timeout)
+        r.raise_for_status()
+        return r.json()
+
+    def get_categories(
+        self,
+        include_subcategories: bool = True,
+    ) -> dict[str, Any]:
+        """
+        获取类别（板块）列表。
+
+        Args:
+            include_subcategories: 是否包含子类别
+
+        Returns:
+            Discourse /categories.json 返回的 JSON 字典
+        """
+        _ensure_rate_limit()
+        params: dict[str, Any] = {}
+        if include_subcategories:
+            params["include_subcategories"] = "true"
+
+        r = requests.get(
+            f"{self._base}/categories.json",
+            params=params,
+            headers=self._headers,
+            timeout=self._timeout,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def get_category_topics(
+        self,
+        category_id: int,
+        page: int = 0,
+        per_page: int = 30,
+        order: str = "default",
+    ) -> dict[str, Any]:
+        """
+        获取特定类别下的话题列表。
+
+        Args:
+            category_id: 类别ID
+            page: 页码，从0开始
+            per_page: 每页数量，默认30，最大50
+            order: 排序方式，可选 "default", "created", "activity"
+
+        Returns:
+            Discourse /c/{category_id}.json 返回的 JSON 字典
+        """
+        _ensure_rate_limit()
+        params: dict[str, Any] = {"page": page, "per_page": min(50, max(1, per_page))}
+        if order in ("created", "activity"):
+            params["order"] = order
+
+        r = requests.get(
+            f"{self._base}/c/{category_id}.json",
+            params=params,
+            headers=self._headers,
+            timeout=self._timeout,
+        )
+        if r.status_code == 404:
+            return {"error": "CATEGORY_NOT_FOUND", "category_id": category_id}
+        r.raise_for_status()
+        return r.json()
+
+    def get_topic_posts_paged(
+        self,
+        topic_id: int,
+        post_number_start: int = 1,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """
+        按楼层号范围获取话题帖子（支持翻页浏览）。
+
+        区别于 get_topic_recent_posts（获取最近N条），此方法按楼层顺序获取，
+        适合"从第N楼开始看"的场景。
+
+        Args:
+            topic_id: 话题ID
+            post_number_start: 起始楼层号（从1开始）
+            limit: 获取数量，默认50，最大100
+
+        Returns:
+            帖子列表，按楼层号排序
+        """
+        topic = self.get_topic(topic_id)
+        if not topic:
+            return []
+
+        stream = topic.get("post_stream", {}).get("stream") or []
+        if not stream:
+            return []
+
+        # 转换为0-based索引
+        start_idx = max(0, post_number_start - 1)
+        max_limit = min(100, max(1, limit))
+
+        # 获取指定范围的post_ids
+        post_ids = stream[start_idx : start_idx + max_limit]
+        if not post_ids:
+            return []
+
+        all_posts: list[dict[str, Any]] = []
+        batch_size = 20
+        for i in range(0, len(post_ids), batch_size):
+            batch = post_ids[i : i + batch_size]
+            data = self.get_topic_posts(topic_id, post_ids=batch)
+            if data:
+                posts = data.get("post_stream", {}).get("posts") or []
+                all_posts.extend(posts)
+
+        return sorted(all_posts, key=lambda p: p.get("post_number", 0))

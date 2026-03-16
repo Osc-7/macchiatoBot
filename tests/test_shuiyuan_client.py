@@ -103,3 +103,223 @@ def test_toggle_retort_fallbacks_to_discourse_reactions(monkeypatch):
         "/discourse-reactions/posts/789/custom-reactions/%2B1/toggle.json"
         in calls[-1][1]
     )
+
+
+def test_get_latest_topics(monkeypatch):
+    """测试获取最新话题列表API"""
+    calls = []
+
+    fake_response = {
+        "topic_list": {
+            "topics": [
+                {"id": 1, "title": "Test 1", "posts_count": 10},
+                {"id": 2, "title": "Test 2", "posts_count": 5},
+            ],
+            "more_topics_url": "/latest?page=1",
+        },
+        "users": [{"id": 1, "username": "user1"}],
+    }
+
+    class _FakeResp:
+        status_code = 200
+
+        def json(self):
+            return fake_response
+
+        def raise_for_status(self):
+            pass
+
+    def _fake_get(url, **kwargs):
+        calls.append((url, kwargs.get("params", {})))
+        return _FakeResp()
+
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client._ensure_rate_limit", lambda: None
+    )
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client.requests.get", _fake_get
+    )
+
+    client = ShuiyuanClient(user_api_key="k")
+    result = client.get_latest_topics(page=0, per_page=30)
+
+    assert result["topic_list"]["topics"][0]["id"] == 1
+    assert calls[0][0].endswith("/latest.json")
+    assert calls[0][1]["page"] == 0
+
+
+def test_get_top_topics(monkeypatch):
+    """测试获取热门话题列表API"""
+    calls = []
+
+    fake_response = {
+        "topic_list": {
+            "topics": [
+                {"id": 1, "title": "Hot Topic", "views": 1000},
+            ],
+        },
+        "users": [],
+    }
+
+    class _FakeResp:
+        status_code = 200
+
+        def json(self):
+            return fake_response
+
+        def raise_for_status(self):
+            pass
+
+    def _fake_get(url, **kwargs):
+        calls.append((url, kwargs.get("params", {})))
+        return _FakeResp()
+
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client._ensure_rate_limit", lambda: None
+    )
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client.requests.get", _fake_get
+    )
+
+    client = ShuiyuanClient(user_api_key="k")
+    result = client.get_top_topics(period="weekly", page=0)
+
+    assert result["topic_list"]["topics"][0]["views"] == 1000
+    assert "/top/weekly.json" in calls[0][0]
+
+
+def test_get_categories(monkeypatch):
+    """测试获取类别列表API"""
+    calls = []
+
+    fake_response = {
+        "category_list": {
+            "categories": [
+                {
+                    "id": 1,
+                    "name": "水源开发者",
+                    "description": "开发讨论",
+                    "topic_count": 100,
+                },
+            ],
+        },
+    }
+
+    class _FakeResp:
+        status_code = 200
+
+        def json(self):
+            return fake_response
+
+        def raise_for_status(self):
+            pass
+
+    def _fake_get(url, **kwargs):
+        calls.append((url, kwargs.get("params", {})))
+        return _FakeResp()
+
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client._ensure_rate_limit", lambda: None
+    )
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client.requests.get", _fake_get
+    )
+
+    client = ShuiyuanClient(user_api_key="k")
+    result = client.get_categories(include_subcategories=True)
+
+    assert result["category_list"]["categories"][0]["name"] == "水源开发者"
+    assert "/categories.json" in calls[0][0]
+
+
+def test_get_category_topics(monkeypatch):
+    """测试获取特定类别下的话题列表API"""
+    calls = []
+
+    fake_response = {
+        "topic_list": {
+            "topics": [
+                {"id": 1, "title": "Category Topic", "posts_count": 5},
+            ],
+        },
+        "users": [],
+    }
+
+    class _FakeResp:
+        status_code = 200
+
+        def json(self):
+            return fake_response
+
+        def raise_for_status(self):
+            pass
+
+    def _fake_get(url, **kwargs):
+        calls.append((url, kwargs.get("params", {})))
+        return _FakeResp()
+
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client._ensure_rate_limit", lambda: None
+    )
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client.requests.get", _fake_get
+    )
+
+    client = ShuiyuanClient(user_api_key="k")
+    result = client.get_category_topics(category_id=42, page=0)
+
+    assert result["topic_list"]["topics"][0]["title"] == "Category Topic"
+    assert "/c/42.json" in calls[0][0]
+
+
+def test_get_topic_posts_paged(monkeypatch):
+    """测试翻页获取话题帖子API"""
+    calls = []
+
+    topic_response = {
+        "id": 123,
+        "title": "Test Topic",
+        "post_stream": {
+            "stream": [101, 102, 103, 104, 105, 106, 107, 108, 109, 110],
+        },
+    }
+
+    posts_response = {
+        "post_stream": {
+            "posts": [
+                {"id": 101, "post_number": 1, "raw": "First post"},
+                {"id": 102, "post_number": 2, "raw": "Second post"},
+            ],
+        },
+    }
+
+    class _FakeResp:
+        def __init__(self, data):
+            self._data = data
+            self.status_code = 200
+
+        def json(self):
+            return self._data
+
+        def raise_for_status(self):
+            pass
+
+    def _fake_get(url, **kwargs):
+        calls.append(url)
+        if "/t/123.json" in url:
+            return _FakeResp(topic_response)
+        return _FakeResp(posts_response)
+
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client._ensure_rate_limit", lambda: None
+    )
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client.requests.get", _fake_get
+    )
+
+    client = ShuiyuanClient(user_api_key="k")
+    result = client.get_topic_posts_paged(topic_id=123, post_number_start=1, limit=5)
+
+    assert len(result) == 2
+    assert result[0]["post_number"] == 1
+    assert result[1]["post_number"] == 2

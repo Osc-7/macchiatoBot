@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from agent_core.tools import BaseTool
     from agent_core.kernel_interface import CoreProfile
     from .core_logger import CoreLifecycleLogger
+    from .subagent_registry import SubagentRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ class CorePool:
         kernel: Optional[Any] = None,
         summarizer: Optional[Any] = None,
         session_logger: Optional[Any] = None,
+        subagent_registry: Optional["SubagentRegistry"] = None,
     ) -> None:
         from agent_core.config import get_config
 
@@ -93,6 +95,7 @@ class CorePool:
         self._kernel = kernel  # AgentKernel 实例，用于 kill()
         self._summarizer = summarizer  # SessionSummarizer 实例，用于摘要持久化
         self._session_logger = session_logger  # 旧版 SessionLogger（将逐步废弃）
+        self._subagent_registry = subagent_registry  # SubagentRegistry，用于 subagent 工具装配
         # session_id → CoreEntry
         self._pool: Dict[str, CoreEntry] = {}
         # per-session 锁，防止并发创建
@@ -497,6 +500,8 @@ class CorePool:
             profile=profile,
             config=self._config,
             memory_owner_id=user_id,
+            subagent_registry=self._subagent_registry,
+            core_pool=self,
         )
         tools = list(reg.list_tools()[1].values())
         # search_tools / call_tool 需绑定 AgentCore 自身的 ToolWorkingSetManager；
@@ -665,6 +670,8 @@ class CorePool:
             profile=profile,
             config=self._config,
             memory_owner_id=user_id,
+            subagent_registry=self._subagent_registry,
+            core_pool=self,
         )
         entry.agent._tool_registry = reg
         entry.agent._source = source

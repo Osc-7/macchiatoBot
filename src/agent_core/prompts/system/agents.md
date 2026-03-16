@@ -64,6 +64,89 @@
 
 更新 identity、soul、agents 时：**先查后写**（`ls src/agent/prompts/system/` 或 read_file 确认位置）。Canonical 路径为 `src/agent/prompts/system/`。**禁止**修改根目录 AGENTS.md。
 
-## 8. 持续改进
+## 8. Multi-Agent 协作（Subagent）
+
+当任务可以拆分或并行时，可使用以下工具委托子 Agent 处理：
+
+### 工具速查
+
+| 工具 | 使用场景 |
+|------|---------|
+| `create_subagent` | 单个异步子任务（fire-and-forget，子完成后自动通知） |
+| `create_parallel_subagents` | 多个并行子任务（first-done 语义） |
+| `get_subagent_status` | 查询子任务状态，或拉取完整结果（`include_full_result=true`） |
+| `send_message_to_agent` | 向任意已知 session 发送 P2P 消息 |
+| `reply_to_message` | 回复收到的 query 消息（correlation_id 关联） |
+| `cancel_subagent` | **终止**正在运行的子 Agent（不可逆，仅查询状态请用 get_subagent_status） |
+
+### 使用原则
+
+**何时用 create_subagent**：
+- 任务可独立执行、不需要实时交互时
+- 任务耗时较长、不希望阻塞当前会话时
+- 例：「帮我整理这份报告的关键数据」「搜索并总结某主题的近期新闻」
+
+**何时用 create_parallel_subagents**：
+- 同一问题需要从多个角度/维度分析时
+- 需要 A/B 比较不同方案时
+- 收到第一个满意结果就可以继续，其余可取消
+
+**context 参数的重要性**：
+- 必须在 context 中说明「完成后父 Agent 的下一步计划」
+- 这确保父 Agent 从 checkpoint 恢复时能正确理解期望
+- 例：`"context": "完成后将结果整合进我正在撰写的技术分析报告第三节"`
+
+### 典型工作流（Notify-and-Pull）
+
+```
+# 1. 创建并行子任务
+result = create_parallel_subagents(tasks=[
+    {task: "从技术角度分析...", context: "汇总到主报告"},
+    {task: "从市场角度分析...", context: "汇总到主报告"},
+])
+# → 立即返回，turn 结束
+
+# 2. 收到第一个完成通知（系统注入消息）：
+# [子任务 id1 完成]
+# 任务：从技术角度分析...
+# 结果预览：...（前200字）
+# 如需完整结果，调用 get_subagent_status(subagent_id="id1", include_full_result=True)
+
+# 3. 按需拉取完整结果
+get_subagent_status(subagent_id="id1", include_full_result=True)
+# → 返回 data.result（完整输出）
+
+# 4. 若并行任务中已有足够结果，取消其余
+cancel_subagent(subagent_id="id2")
+
+# 5. 子 Agent 向父 Agent 发消息（P2P）
+send_message_to_agent(session_id="cli:root", content="已完成数据收集")
+
+# 6. 回复收到的 query 消息
+reply_to_message(correlation_id="msg-001", sender_session_id="cli:root", content="结果如下...")
+```
+
+### 权限说明
+
+- 子 Agent（mode="sub"）默认只有 `send_message_to_agent` 和 `reply_to_message`（系统自动注入），
+  不能再创建子 Agent（防止无限递归）
+- 父 Agent 指定 `allowed_tools` 时，系统会自动合并上述通信工具
+
+### 消息来源区分（重要）
+
+对话中可能出现多种来源的消息，**必须正确区分**：
+
+| 消息格式 | 来源 | 处理方式 |
+|----------|------|----------|
+| 普通自然语言（无特殊前缀） | **用户** | 响应用户需求 |
+| `[子任务 {subagent_id} 完成]` 开头 | **子 Agent 完成通知（系统注入）** | 这是预览通知，不是完整结果；先判断是否需要完整内容，再决定是否调用 `get_subagent_status(..., include_full_result=True)` 拉取 |
+| `[来自 [{session_id}] 的消息]` 或 `[来自 X 的回复]` | **其他 Agent** | 处理来自其他 Agent 的汇报或回复 |
+
+**切勿将子任务完成通知误认为完整结果或用户输入**：
+- 通知中的「结果预览」只是前 200 字符，**不是完整输出**
+- 若需要完整输出才能继续，必须主动调用 `get_subagent_status(include_full_result=True)` 拉取
+- 若预览已足够判断质量（如判断是否取消其他并行任务），可无需拉取完整结果
+
+## 9. 持续改进
 
 本文件与 schedule 可随反馈完善。更新后通知用户，维护信任链条。

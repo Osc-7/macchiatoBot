@@ -28,6 +28,7 @@ from agent_core.kernel_interface import (
 from .core_pool import CoreEntry, CorePool
 from .kernel import AgentKernel
 from .scheduler import KernelScheduler, OutputRouter
+from .subagent_registry import SubagentInfo, SubagentRegistry
 from .summarizer import SessionSummarizer
 
 __all__ = [
@@ -52,4 +53,6 @@ __all__ = [
     "KernelScheduler",
     "OutputRouter",
     "SessionSummarizer",
+    "SubagentInfo",
+    "SubagentRegistry",
 ]

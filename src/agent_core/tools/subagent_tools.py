@@ -1,0 +1,983 @@
+"""
+Subagent 工具集 — 通用异步 multi-agent 通信。
+
+提供 6 个工具：
+  1. create_subagent            — 创建单个子 agent 执行任务（fire-and-forget）
+  2. create_parallel_subagents  — 并行创建多个子 agent（first-done 语义）
+  3. send_message_to_agent      — 向任意已知 session 发送 P2P 消息
+  4. reply_to_message           — 回复收到的 query 消息
+  5. get_subagent_status        — 查询子 agent 状态（只读，不取消）
+  6. cancel_subagent            — 取消正在运行的子 agent
+
+设计原则：
+- 工具本身不阻塞：create_subagent 立即返回 {subagent_id, status:"running"}
+- first-done 天然成立：每个 subagent 完成后独立 inject_turn 唤醒父 session
+- P2P 寻址：通过 session_id 直接向任意已知 agent 发送消息
+- Sub agent 只注册 send_message_to_agent + reply_to_message（mode="sub" 时防递归孵化）
+
+执行上下文（由 Kernel 注入到 __execution_context__）：
+  - session_id: 当前 agent 所在 session（用作 sender / parent）
+  - source: 前端标识
+  - user_id: 用户 ID
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import uuid
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+
+if TYPE_CHECKING:
+    from system.kernel.subagent_registry import SubagentRegistry
+    from system.kernel.core_pool import CorePool
+    from system.kernel.scheduler import KernelScheduler
+
+logger = logging.getLogger(__name__)
+
+# 子 Agent 必须能调用的通信工具，用于向父 Agent 汇报结果。创建 subagent 时若指定了
+# allowed_tools，会自动合并此列表，避免父 Agent 配置遗漏导致子 Agent 无法汇报。
+SUBAGENT_COMMUNICATION_TOOLS = ["send_message_to_agent", "reply_to_message"]
+
+
+def _merge_allowed_tools_for_subagent(allowed_tools: Optional[List[str]]) -> Optional[List[str]]:
+    """
+    合并 allowed_tools，确保子 Agent 始终能向父 Agent 汇报。
+
+    若父 Agent 指定了 allowed_tools 但遗漏 send_message_to_agent / reply_to_message，
+    子 Agent 将无法发送结果。此函数自动补全，避免配置错误。
+    """
+    if allowed_tools is None:
+        return None
+    result = list(allowed_tools)
+    for t in SUBAGENT_COMMUNICATION_TOOLS:
+        if t not in result:
+            result.append(t)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 共用的后台 subagent 任务函数
+# ---------------------------------------------------------------------------
+
+
+async def _run_subagent_task(
+    *,
+    subagent_id: str,
+    sub_session_id: str,
+    task_description: str,
+    parent_session_id: str,
+    registry: "SubagentRegistry",
+    core_pool: "CorePool",
+    scheduler: "KernelScheduler",
+    allowed_tools: Optional[List[str]] = None,
+    context: Optional[str] = None,
+    max_iterations: int = 8,
+) -> None:
+    """
+    后台运行 subagent 的完整生命周期。
+
+    1. 通过 KernelScheduler.submit() 驱动 sub_session 处理任务
+    2. 完成后调用 registry.on_complete() → inject_turn 唤醒父 session
+    3. 失败后调用 registry.on_fail() → inject_turn 通知父 session
+    4. 无论成功失败，最后 evict 清理资源
+    """
+    from agent_core.kernel_interface import KernelRequest, CoreProfile
+
+    # 构造 subagent 的 CoreProfile（mode="sub"，按 allowed_tools 限制）
+    # 自动合并 send_message_to_agent + reply_to_message，确保子 Agent 能向父汇报
+    effective_allowed = _merge_allowed_tools_for_subagent(allowed_tools)
+    profile = CoreProfile.default_sub(
+        allowed_tools=effective_allowed,
+        frontend_id="subagent",
+        dialog_window_id=subagent_id,
+    )
+    # 24h TTL 保护（任务完成后主动 evict，不依赖 TTL 扫描）
+    profile.session_expired_seconds = 86400
+
+    # 构建任务文本（若有 context，前置说明）
+    task_text = task_description
+    if context:
+        task_text = f"{context}\n\n---\n\n{task_text}"
+    # 在 context 中注入父 session_id，供 subagent 通过 send_message_to_agent / reply_to_message 回调
+    task_text = (
+        f"[系统信息] 你是子 Agent，subagent_id={subagent_id}，"
+        f"父 session_id={parent_session_id}。"
+        f"完成后可用 send_message_to_agent 或 reply_to_message 向父 session 发送消息。\n\n"
+        + task_text
+    )
+
+    task_preview = (task_description or "")[:60].replace("\n", " ")
+    logger.info(
+        "subagent task started subagent_id=%s parent_session_id=%s task_preview=%s",
+        subagent_id,
+        parent_session_id,
+        task_preview + ("..." if len(task_description or "") > 60 else ""),
+        extra={"subagent_id": subagent_id, "parent_session_id": parent_session_id},
+    )
+
+    request = KernelRequest.create(
+        text=task_text,
+        session_id=sub_session_id,
+        frontend_id="subagent",
+        priority=-1,
+        metadata={"source": "subagent", "user_id": subagent_id},
+        profile=profile,
+    )
+
+    try:
+        logger.debug(
+            "subagent submitting request subagent_id=%s sub_session_id=%s",
+            subagent_id,
+            sub_session_id,
+        )
+        future = await scheduler.submit(request)
+        run_result = await future
+        result_text = run_result.output_text or ""
+        logger.info(
+            "subagent task finished successfully subagent_id=%s parent_session_id=%s result_len=%s",
+            subagent_id,
+            parent_session_id,
+            len(result_text),
+            extra={"subagent_id": subagent_id, "parent_session_id": parent_session_id},
+        )
+        registry.on_complete(subagent_id, result_text)
+    except asyncio.CancelledError:
+        logger.info(
+            "subagent task cancelled subagent_id=%s parent_session_id=%s",
+            subagent_id,
+            parent_session_id,
+            extra={"subagent_id": subagent_id, "parent_session_id": parent_session_id},
+        )
+        # CancelledError 会由 registry.cancel() 更新状态，不调用 on_fail
+        raise
+    except Exception as exc:
+        logger.exception(
+            "subagent task failed subagent_id=%s parent_session_id=%s error=%s",
+            subagent_id,
+            parent_session_id,
+            exc,
+            extra={"subagent_id": subagent_id, "parent_session_id": parent_session_id},
+        )
+        registry.on_fail(subagent_id, str(exc))
+    finally:
+        # 清理 subagent session 资源（无论成功/失败/取消）
+        try:
+            await core_pool.evict(sub_session_id)
+        except Exception as exc:
+            logger.debug(
+                "_run_subagent_task: evict failed for session %s: %s",
+                sub_session_id,
+                exc,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Tool 1: create_subagent
+# ---------------------------------------------------------------------------
+
+
+class CreateSubagentTool(BaseTool):
+    """创建单个子 Agent 异步执行任务，立即返回 subagent_id。"""
+
+    def __init__(
+        self,
+        registry: "SubagentRegistry",
+        core_pool: "CorePool",
+        scheduler: "KernelScheduler",
+    ) -> None:
+        self._registry = registry
+        self._core_pool = core_pool
+        self._scheduler = scheduler
+
+    @property
+    def name(self) -> str:
+        return "create_subagent"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="create_subagent",
+            description=(
+                "创建单个子 Agent（subagent）异步执行任务，立即返回 subagent_id。\n\n"
+                "子 Agent 在后台独立运行，完成后会自动通知当前 Agent。\n"
+                "适合需要分步执行、异步等待或并行化的复杂任务。\n\n"
+                "执行完后父 Agent 会收到一条系统消息，格式为：\n"
+                "  [子任务 {subagent_id} 完成]\n  {result}\n\n"
+                "父 Agent 可以继续做其他事，直到收到完成通知再处理结果。"
+            ),
+            parameters=[
+                ToolParameter(
+                    name="task",
+                    type="string",
+                    description="子 Agent 需要执行的任务描述（自然语言，详细说明目标与约束）",
+                    required=True,
+                ),
+                ToolParameter(
+                    name="allowed_tools",
+                    type="array",
+                    description=(
+                        "子 Agent 可用的工具名称列表。留空（null）表示 sub 模式默认工具集。\n\n"
+                        "⚠️ 权限配置说明：\n"
+                        "- 系统会**自动加入** send_message_to_agent、reply_to_message，确保子 Agent 能向父汇报\n"
+                        "- run_command 在 sub 模式下**始终禁用**（安全策略）\n"
+                        "- 常用组合示例：[\"read_file\", \"search_tools\"] 用于代码/文档分析；[\"web_search\", \"extract_web_content\"] 用于调研"
+                    ),
+                    required=False,
+                ),
+                ToolParameter(
+                    name="context",
+                    type="string",
+                    description=(
+                        "传递给子 Agent 的背景信息或约束（例如：'分析角度为技术可行性'）。"
+                        "建议包含「完成后下一步操作」的说明，便于父 Agent 基于 checkpoint 恢复时理解期望。"
+                    ),
+                    required=False,
+                ),
+                ToolParameter(
+                    name="max_iterations",
+                    type="integer",
+                    description="子 Agent 最大迭代次数（默认 8）",
+                    required=False,
+                    default=8,
+                ),
+            ],
+            examples=[
+                {
+                    "description": "异步分析一份文档",
+                    "params": {
+                        "task": "阅读 /data/report.md 并提取关键数据点，以结构化列表输出",
+                        "context": "完成后将结果汇总到主 Agent 正在撰写的分析报告中",
+                    },
+                },
+                {
+                    "description": "限制工具集的子任务",
+                    "params": {
+                        "task": "搜索近期关于量子计算的新闻并总结",
+                        "allowed_tools": ["search_web"],
+                    },
+                },
+            ],
+            usage_notes=[
+                "create_subagent 立即返回，不等待子 Agent 完成",
+                "子 Agent 完成后，父 Agent 会收到仅含预览（前200字）的通知，而非完整结果",
+                "收到 [子任务 xxx 完成] 通知后，调用 get_subagent_status(include_full_result=True) 拉取完整输出",
+                "查询状态用 get_subagent_status（只读），终止任务用 cancel_subagent（不可逆）",
+                "sub 模式的子 Agent 不能再创建子 Agent（防止无限递归）",
+                "若需并行多个子任务，使用 create_parallel_subagents 更高效",
+            ],
+            tags=["multi-agent", "subagent", "async"],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        task = kwargs.get("task", "").strip()
+        if not task:
+            return ToolResult(
+                success=False,
+                message="缺少 task 参数",
+                error="MISSING_TASK",
+            )
+
+        allowed_tools: Optional[List[str]] = kwargs.get("allowed_tools")
+        context: Optional[str] = kwargs.get("context")
+        max_iterations: int = int(kwargs.get("max_iterations") or 8)
+
+        # 从 __execution_context__ 读取父 session_id
+        exec_ctx: Dict[str, Any] = kwargs.get("__execution_context__") or {}
+        parent_session_id: str = exec_ctx.get("session_id", "")
+
+        if not parent_session_id:
+            logger.error(
+                "create_subagent: parent_session_id is empty — __execution_context__ not injected. "
+                "This happens when called via call_tool without __execution_context__ forwarding."
+            )
+            return ToolResult(
+                success=False,
+                message="无法创建子 Agent：父 session_id 为空（__execution_context__ 未正确传递）",
+                error="MISSING_PARENT_SESSION",
+            )
+
+        subagent_id = str(uuid.uuid4())[:12]
+        sub_session_id = f"sub:{subagent_id}"
+
+        from system.kernel.subagent_registry import SubagentInfo
+
+        info = SubagentInfo(
+            subagent_id=subagent_id,
+            parent_session_id=parent_session_id,
+            task_description=task,
+        )
+        self._registry.register(info)
+
+        bg = asyncio.create_task(
+            _run_subagent_task(
+                subagent_id=subagent_id,
+                sub_session_id=sub_session_id,
+                task_description=task,
+                parent_session_id=parent_session_id,
+                registry=self._registry,
+                core_pool=self._core_pool,
+                scheduler=self._scheduler,
+                allowed_tools=allowed_tools,
+                context=context,
+                max_iterations=max_iterations,
+            ),
+            name=f"subagent-{subagent_id}",
+        )
+        info.bg_task = bg
+
+        task_preview = (task or "")[:50].replace("\n", " ")
+        logger.info(
+            "create_subagent: spawned subagent_id=%s parent_session_id=%s task_preview=%s",
+            subagent_id,
+            parent_session_id,
+            task_preview + ("..." if len(task) > 50 else ""),
+            extra={"subagent_id": subagent_id, "parent_session_id": parent_session_id},
+        )
+
+        return ToolResult(
+            success=True,
+            data={"subagent_id": subagent_id, "status": "running"},
+            message=f"子 Agent 已创建，subagent_id={subagent_id}，正在后台执行任务。",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tool 2: create_parallel_subagents
+# ---------------------------------------------------------------------------
+
+
+class CreateParallelSubagentsTool(BaseTool):
+    """并行创建多个子 Agent，各自独立完成任务（first-done 语义）。"""
+
+    def __init__(
+        self,
+        registry: "SubagentRegistry",
+        core_pool: "CorePool",
+        scheduler: "KernelScheduler",
+    ) -> None:
+        self._registry = registry
+        self._core_pool = core_pool
+        self._scheduler = scheduler
+
+    @property
+    def name(self) -> str:
+        return "create_parallel_subagents"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="create_parallel_subagents",
+            description=(
+                "并行创建多个子 Agent，各自独立执行任务（first-done 语义）。\n\n"
+                "所有子 Agent 同时启动，每个完成后立即通知父 Agent。\n"
+                "父 Agent 可以在收到第一个结果后取消其余子 Agent，\n"
+                "也可以继续等待所有结果再汇总。\n\n"
+                "适合：多角度分析、A/B 比较、并行搜索等场景。"
+            ),
+            parameters=[
+                ToolParameter(
+                    name="tasks",
+                    type="array",
+                    description=(
+                        "任务列表，每项为对象，包含：\n"
+                        "  - task (string, 必填): 任务描述\n"
+                        "  - allowed_tools (array, 可选): 工具列表；系统会自动加入 send_message_to_agent、reply_to_message\n"
+                        "  - context (string, 可选): 背景信息\n"
+                        "  - max_iterations (integer, 可选): 最大迭代次数，默认 8"
+                    ),
+                    required=True,
+                ),
+            ],
+            examples=[
+                {
+                    "description": "从三个角度并行分析同一主题",
+                    "params": {
+                        "tasks": [
+                            {"task": "从技术可行性角度分析量子计算的商业化前景"},
+                            {"task": "从市场规模角度分析量子计算的商业化前景"},
+                            {"task": "从竞争格局角度分析量子计算的商业化前景"},
+                        ]
+                    },
+                },
+            ],
+            usage_notes=[
+                "各子 Agent 相互独立，先完成的先唤醒父 Agent（first-done）",
+                "完成通知仅含结果预览，需调用 get_subagent_status(include_full_result=True) 拉取完整输出",
+                "父 Agent 收到第一个满意结果后可调用 cancel_subagent 取消其余（终止操作，不可逆）",
+                "任务数量建议不超过 5 个，避免资源过度消耗",
+            ],
+            tags=["multi-agent", "parallel", "async"],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        import json as _json
+        tasks_raw = kwargs.get("tasks")
+        # LLM 有时会把 tasks 序列化成 JSON 字符串，尝试解析
+        if isinstance(tasks_raw, str):
+            try:
+                tasks_raw = _json.loads(tasks_raw)
+            except Exception:
+                pass
+        if not tasks_raw or not isinstance(tasks_raw, list):
+            return ToolResult(
+                success=False,
+                message="缺少 tasks 参数或格式不正确（需为数组）",
+                error="MISSING_TASKS",
+            )
+
+        exec_ctx: Dict[str, Any] = kwargs.get("__execution_context__") or {}
+        parent_session_id: str = exec_ctx.get("session_id", "")
+
+        if not parent_session_id:
+            logger.error(
+                "create_parallel_subagents: parent_session_id is empty — __execution_context__ not injected. "
+                "This happens when called via call_tool without __execution_context__ forwarding."
+            )
+            return ToolResult(
+                success=False,
+                message="无法创建子 Agent：父 session_id 为空（__execution_context__ 未正确传递）",
+                error="MISSING_PARENT_SESSION",
+            )
+
+        from system.kernel.subagent_registry import SubagentInfo
+
+        subagent_ids = []
+        for item in tasks_raw:
+            if not isinstance(item, dict):
+                continue
+            task_desc = (item.get("task") or "").strip()
+            if not task_desc:
+                continue
+
+            subagent_id = str(uuid.uuid4())[:12]
+            sub_session_id = f"sub:{subagent_id}"
+            allowed_tools = item.get("allowed_tools")
+            context = item.get("context")
+            max_iterations = int(item.get("max_iterations") or 8)
+
+            info = SubagentInfo(
+                subagent_id=subagent_id,
+                parent_session_id=parent_session_id,
+                task_description=task_desc,
+            )
+            self._registry.register(info)
+
+            bg = asyncio.create_task(
+                _run_subagent_task(
+                    subagent_id=subagent_id,
+                    sub_session_id=sub_session_id,
+                    task_description=task_desc,
+                    parent_session_id=parent_session_id,
+                    registry=self._registry,
+                    core_pool=self._core_pool,
+                    scheduler=self._scheduler,
+                    allowed_tools=allowed_tools,
+                    context=context,
+                    max_iterations=max_iterations,
+                ),
+                name=f"subagent-{subagent_id}",
+            )
+            info.bg_task = bg
+            subagent_ids.append(subagent_id)
+
+        if not subagent_ids:
+            return ToolResult(
+                success=False,
+                message="tasks 列表中没有有效任务",
+                error="NO_VALID_TASKS",
+            )
+
+        logger.info(
+            "create_parallel_subagents: spawned count=%s parent_session_id=%s subagent_ids=%s",
+            len(subagent_ids),
+            parent_session_id,
+            subagent_ids,
+            extra={"parent_session_id": parent_session_id, "subagent_ids": subagent_ids, "count": len(subagent_ids)},
+        )
+
+        return ToolResult(
+            success=True,
+            data={"subagent_ids": subagent_ids, "count": len(subagent_ids), "status": "running"},
+            message=(
+                f"已并行创建 {len(subagent_ids)} 个子 Agent："
+                f"{subagent_ids}。各自完成后将依次通知。"
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tool 3: send_message_to_agent
+# ---------------------------------------------------------------------------
+
+
+class SendMessageToAgentTool(BaseTool):
+    """向任意已知 session 发送 P2P 消息（fire-and-forget，可选 require_reply）。"""
+
+    def __init__(self, scheduler: "KernelScheduler") -> None:
+        self._scheduler = scheduler
+
+    @property
+    def name(self) -> str:
+        return "send_message_to_agent"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="send_message_to_agent",
+            description=(
+                "向任意已知 session 发送 P2P 消息。\n\n"
+                "消息立即投递（inject_turn），目标 session 会被唤醒处理消息。\n"
+                "发送方不等待回复，立即返回 message_id。\n"
+                "若 require_reply=True，目标 Agent 应使用 reply_to_message 回复。\n\n"
+                "可用于：父 → 子的指令、子 → 父的汇报、兄弟 Agent 间的协调。"
+            ),
+            parameters=[
+                ToolParameter(
+                    name="session_id",
+                    type="string",
+                    description=(
+                        "目标 Agent 的 session_id（如 'cli:root', 'shuiyuan:Osc7', 'sub:abc123'）"
+                    ),
+                    required=True,
+                ),
+                ToolParameter(
+                    name="content",
+                    type="string",
+                    description="消息内容（自然语言）",
+                    required=True,
+                ),
+                ToolParameter(
+                    name="require_reply",
+                    type="boolean",
+                    description=(
+                        "是否需要对方回复（默认 False）。"
+                        "True 时对方应调用 reply_to_message 返回 correlation_id。"
+                    ),
+                    required=False,
+                    default=False,
+                ),
+            ],
+            examples=[
+                {
+                    "description": "子 Agent 向父 Agent 汇报进度",
+                    "params": {
+                        "session_id": "cli:root",
+                        "content": "已完成数据收集阶段，共获取 42 条记录",
+                    },
+                },
+                {
+                    "description": "向另一个 Agent 发起查询请求（需要回复）",
+                    "params": {
+                        "session_id": "shuiyuan:Osc7",
+                        "content": "请告知当前水源最热门的技术类帖子前 3 条",
+                        "require_reply": True,
+                    },
+                },
+            ],
+            usage_notes=[
+                "send_message_to_agent 是 fire-and-forget，不等待目标响应",
+                "若需等待回复，在 content 中说明期望，并设置 require_reply=True",
+                "目标 session 必须已存在（在 CorePool 中或可从 checkpoint 恢复）",
+                "子 Agent 可从 __execution_context__.session_id 获取自身 session_id",
+            ],
+            tags=["multi-agent", "p2p", "messaging"],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        target_session_id = (kwargs.get("session_id") or "").strip()
+        content = (kwargs.get("content") or "").strip()
+        require_reply = bool(kwargs.get("require_reply", False))
+
+        if not target_session_id:
+            return ToolResult(
+                success=False, message="缺少 session_id 参数", error="MISSING_SESSION_ID"
+            )
+        if not content:
+            return ToolResult(
+                success=False, message="缺少 content 参数", error="MISSING_CONTENT"
+            )
+
+        exec_ctx: Dict[str, Any] = kwargs.get("__execution_context__") or {}
+        sender_session_id: str = exec_ctx.get("session_id", "unknown")
+
+        from agent_core.kernel_interface.action import AgentMessage, KernelRequest
+
+        message_id = str(uuid.uuid4())
+        msg_type = "query" if require_reply else "notify"
+        agent_msg = AgentMessage(
+            message_id=message_id,
+            sender_session=sender_session_id,
+            receiver_session=target_session_id,
+            message_type=msg_type,
+            require_reply=require_reply,
+        )
+
+        # 构建发往目标 session 的文本
+        sender_label = f"来自 [{sender_session_id}] 的消息"
+        if require_reply:
+            inject_text = (
+                f"[{sender_label}（message_id={message_id}，需要回复）]\n\n{content}"
+            )
+        else:
+            inject_text = f"[{sender_label}]\n\n{content}"
+
+        request = KernelRequest.create(
+            text=inject_text,
+            session_id=target_session_id,
+            frontend_id="agent_msg",
+            priority=-1,
+            metadata={"_agent_message": agent_msg},
+        )
+
+        try:
+            self._scheduler.inject_turn(request)
+        except Exception as exc:
+            logger.exception(
+                "send_message_to_agent: inject_turn failed target=%s: %s",
+                target_session_id,
+                exc,
+            )
+            return ToolResult(
+                success=False,
+                message=f"消息投递失败：{exc}",
+                error="INJECT_FAILED",
+            )
+
+        logger.info(
+            "send_message_to_agent: %s → %s message_id=%s require_reply=%s",
+            sender_session_id,
+            target_session_id,
+            message_id,
+            require_reply,
+        )
+
+        return ToolResult(
+            success=True,
+            data={"message_id": message_id, "target_session": target_session_id},
+            message=f"消息已发送至 {target_session_id}（message_id={message_id}）",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tool 4: reply_to_message
+# ---------------------------------------------------------------------------
+
+
+class ReplyToMessageTool(BaseTool):
+    """回复收到的 query 消息，通过 correlation_id 关联原消息。"""
+
+    def __init__(self, scheduler: "KernelScheduler") -> None:
+        self._scheduler = scheduler
+
+    @property
+    def name(self) -> str:
+        return "reply_to_message"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="reply_to_message",
+            description=(
+                "回复收到的消息，将 content 发回原发送方。\n\n"
+                "需要提供收到消息的 correlation_id（即原消息的 message_id）\n"
+                "以及原发送方的 sender_session_id，这两个值在接收消息时系统会提供。\n\n"
+                "使用场景：当收到带 require_reply=True 的 query 消息时调用此工具回复。"
+            ),
+            parameters=[
+                ToolParameter(
+                    name="correlation_id",
+                    type="string",
+                    description="原消息的 message_id（从收到的消息信息中获取）",
+                    required=True,
+                ),
+                ToolParameter(
+                    name="sender_session_id",
+                    type="string",
+                    description="原消息发送方的 session_id（从收到的消息信息中获取）",
+                    required=True,
+                ),
+                ToolParameter(
+                    name="content",
+                    type="string",
+                    description="回复内容",
+                    required=True,
+                ),
+            ],
+            examples=[
+                {
+                    "description": "回复一条查询请求",
+                    "params": {
+                        "correlation_id": "abc123-uuid",
+                        "sender_session_id": "cli:root",
+                        "content": "水源今日最热门技术帖：1. XXX 2. YYY 3. ZZZ",
+                    },
+                },
+            ],
+            usage_notes=[
+                "correlation_id 即收到消息时的 message_id，可从消息元数据中读取",
+                "sender_session_id 在收到消息时由系统注入（[来自 {sender} 的消息]）",
+                "reply_to_message 也是 fire-and-forget，不等待对方处理完成",
+            ],
+            tags=["multi-agent", "p2p", "messaging"],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        correlation_id = (kwargs.get("correlation_id") or "").strip()
+        sender_session_id = (kwargs.get("sender_session_id") or "").strip()
+        content = (kwargs.get("content") or "").strip()
+
+        if not correlation_id:
+            return ToolResult(
+                success=False, message="缺少 correlation_id 参数", error="MISSING_CORRELATION_ID"
+            )
+        if not sender_session_id:
+            return ToolResult(
+                success=False,
+                message="缺少 sender_session_id 参数",
+                error="MISSING_SENDER_SESSION",
+            )
+        if not content:
+            return ToolResult(
+                success=False, message="缺少 content 参数", error="MISSING_CONTENT"
+            )
+
+        exec_ctx: Dict[str, Any] = kwargs.get("__execution_context__") or {}
+        my_session_id: str = exec_ctx.get("session_id", "unknown")
+
+        from agent_core.kernel_interface.action import AgentMessage, KernelRequest
+
+        reply_message_id = str(uuid.uuid4())
+        agent_msg = AgentMessage(
+            message_id=reply_message_id,
+            sender_session=my_session_id,
+            receiver_session=sender_session_id,
+            message_type="reply",
+            correlation_id=correlation_id,
+        )
+
+        inject_text = (
+            f"[来自 [{my_session_id}] 的回复（correlation_id={correlation_id}）]\n\n{content}"
+        )
+
+        request = KernelRequest.create(
+            text=inject_text,
+            session_id=sender_session_id,
+            frontend_id="agent_msg",
+            priority=-1,
+            metadata={"_agent_message": agent_msg},
+        )
+
+        try:
+            self._scheduler.inject_turn(request)
+        except Exception as exc:
+            logger.exception(
+                "reply_to_message: inject_turn failed target=%s: %s",
+                sender_session_id,
+                exc,
+            )
+            return ToolResult(
+                success=False,
+                message=f"回复投递失败：{exc}",
+                error="INJECT_FAILED",
+            )
+
+        logger.info(
+            "reply_to_message: %s → %s correlation_id=%s",
+            my_session_id,
+            sender_session_id,
+            correlation_id,
+        )
+
+        return ToolResult(
+            success=True,
+            data={"message_id": reply_message_id, "correlation_id": correlation_id},
+            message=f"回复已发送至 {sender_session_id}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tool 5: get_subagent_status
+# ---------------------------------------------------------------------------
+
+
+class GetSubagentStatusTool(BaseTool):
+    """查询子 Agent 状态（只读，不会取消或修改任务）。"""
+
+    def __init__(self, registry: "SubagentRegistry") -> None:
+        self._registry = registry
+
+    @property
+    def name(self) -> str:
+        return "get_subagent_status"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="get_subagent_status",
+            description=(
+                "查询子 Agent（subagent）的当前状态，**只读**，不会取消或修改任务。\n\n"
+                "默认返回状态摘要和结果预览（前 500 字符）。\n"
+                "设置 include_full_result=true 可获取子 Agent 的**完整输出**，适合在收到完成通知后按需拉取。\n\n"
+                "若需**终止**正在运行的子 Agent，应使用 cancel_subagent。"
+            ),
+            parameters=[
+                ToolParameter(
+                    name="subagent_id",
+                    type="string",
+                    description="要查询的子 Agent 的 subagent_id（由 create_subagent 返回）",
+                    required=True,
+                ),
+                ToolParameter(
+                    name="include_full_result",
+                    type="boolean",
+                    description=(
+                        "是否返回子 Agent 的完整输出结果。\n"
+                        "false（默认）：仅返回结果预览（前 500 字符）；\n"
+                        "true：返回完整结果，在确认需要整合结果后使用。"
+                    ),
+                    required=False,
+                ),
+            ],
+            examples=[
+                {
+                    "description": "检查子 Agent 是否已完成（只看状态）",
+                    "params": {"subagent_id": "5c1d8838-453"},
+                },
+                {
+                    "description": "收到完成通知后，拉取子 Agent 的完整结果",
+                    "params": {"subagent_id": "5c1d8838-453", "include_full_result": True},
+                },
+            ],
+            usage_notes=[
+                "仅查询状态，不会取消任务；取消请用 cancel_subagent",
+                "只能查询本 Agent 创建的子 Agent",
+                "status 可能为：running、completed、failed、cancelled",
+                "收到 [子任务 xxx 完成] 通知后，调用 include_full_result=true 拉取完整结果再进行整合",
+            ],
+            tags=["multi-agent", "subagent", "query"],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        subagent_id = (kwargs.get("subagent_id") or "").strip()
+        if not subagent_id:
+            return ToolResult(
+                success=False, message="缺少 subagent_id 参数", error="MISSING_SUBAGENT_ID"
+            )
+
+        include_full_result = bool(kwargs.get("include_full_result", False))
+
+        info = self._registry.get(subagent_id)
+        if info is None:
+            return ToolResult(
+                success=False,
+                message=f"未找到 subagent_id={subagent_id}",
+                error="SUBAGENT_NOT_FOUND",
+            )
+
+        data: Dict[str, Any] = {
+            "subagent_id": subagent_id,
+            "status": info.status,
+            "parent_session_id": info.parent_session_id,
+            "task_description": (info.task_description or "")[:100],
+            "created_at": info.created_at,
+        }
+        if info.completed_at is not None:
+            data["completed_at"] = info.completed_at
+        if info.result is not None:
+            if include_full_result:
+                data["result"] = info.result
+            else:
+                data["result_preview"] = (info.result or "")[:500] + (
+                    "..." if len(info.result or "") > 500 else ""
+                )
+        if info.error is not None:
+            data["error"] = info.error
+
+        msg_suffix = "（完整结果）" if include_full_result and info.result is not None else ""
+        return ToolResult(
+            success=True,
+            data=data,
+            message=f"子 Agent {subagent_id} 状态：{info.status}{msg_suffix}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tool 6: cancel_subagent
+# ---------------------------------------------------------------------------
+
+
+class CancelSubagentTool(BaseTool):
+    """取消正在运行的子 Agent。"""
+
+    def __init__(self, registry: "SubagentRegistry") -> None:
+        self._registry = registry
+
+    @property
+    def name(self) -> str:
+        return "cancel_subagent"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="cancel_subagent",
+            description=(
+                "**取消**正在运行的子 Agent（subagent），会终止其任务。\n\n"
+                "在并行子任务中，收到第一个满意结果后可取消其余子 Agent 节省资源。\n"
+                "已完成、失败或已取消的子 Agent 调用此工具不会报错。\n\n"
+                "⚠️ 仅查询状态（不取消）请用 get_subagent_status。"
+            ),
+            parameters=[
+                ToolParameter(
+                    name="subagent_id",
+                    type="string",
+                    description="要取消的子 Agent 的 subagent_id（由 create_subagent 返回）",
+                    required=True,
+                ),
+            ],
+            examples=[
+                {
+                    "description": "在收到第一个结果后取消其余并行子任务",
+                    "params": {"subagent_id": "abc123456789"},
+                },
+            ],
+            usage_notes=[
+                "只能取消本 Agent 创建的子 Agent",
+                "取消操作是尽力而为（best-effort），任务可能已完成",
+                "取消后不会再收到该子 Agent 的完成通知",
+            ],
+            tags=["multi-agent", "subagent", "cancel"],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        subagent_id = (kwargs.get("subagent_id") or "").strip()
+        if not subagent_id:
+            return ToolResult(
+                success=False, message="缺少 subagent_id 参数", error="MISSING_SUBAGENT_ID"
+            )
+
+        info = self._registry.get(subagent_id)
+        if info is None:
+            return ToolResult(
+                success=False,
+                message=f"未找到 subagent_id={subagent_id}",
+                error="SUBAGENT_NOT_FOUND",
+            )
+
+        cancelled = self._registry.cancel(subagent_id)
+        final_status = self._registry.get(subagent_id)
+        status_str = final_status.status if final_status else "unknown"
+        parent_session_id = info.parent_session_id if info else ""
+
+        logger.info(
+            "cancel_subagent: subagent_id=%s parent_session_id=%s cancelled=%s final_status=%s",
+            subagent_id,
+            parent_session_id,
+            cancelled,
+            status_str,
+            extra={"subagent_id": subagent_id, "parent_session_id": parent_session_id, "status": status_str},
+        )
+
+        return ToolResult(
+            success=True,
+            data={"subagent_id": subagent_id, "status": status_str},
+            message=(
+                f"子 Agent {subagent_id} 已{'取消' if cancelled else '处理'}（当前状态：{status_str}）"
+            ),
+        )

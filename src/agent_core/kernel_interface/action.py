@@ -97,6 +97,42 @@ KernelAction = Union[
 
 
 # ---------------------------------------------------------------------------
+# AgentMessage — Agent 间通信协议信封
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AgentMessage:
+    """Agent 间 P2P 消息信封，附加在 KernelRequest.metadata["_agent_message"] 中。
+
+    用途：
+    - create_subagent / create_parallel_subagents 完成后由 SubagentRegistry 注入
+    - send_message_to_agent / reply_to_message 实现 P2P 双向通信
+    - inject_turn() 携带此信封，使接收方 agent 能感知消息来源与类型
+
+    与 A2A 协议对应关系（便于日后接 A2A 网关）：
+    - message_id       ↔ A2A Task.id / Message.id
+    - sender_session   ↔ A2A client agent endpoint
+    - receiver_session ↔ A2A server agent endpoint
+    - correlation_id   ↔ A2A contextId（回复链关联）
+    - subagent_id      ↔ A2A Task.id（子任务追踪）
+    """
+
+    message_id: str                  # 唯一 ID（uuid）
+    sender_session: str              # 发送方 session_id
+    receiver_session: str            # 接收方 session_id
+    message_type: Literal[
+        "task",    # subagent 任务完成通知（subagent → parent）
+        "reply",   # 回复某条 query 消息
+        "notify",  # 单向通知（无需回复）
+        "query",   # 需要对方 reply_to_message 回复
+    ] = "notify"
+    correlation_id: Optional[str] = None   # reply 时填入原 message_id
+    subagent_id: Optional[str] = None      # task/reply 类型时记录对应子任务 ID
+    require_reply: bool = False
+
+
+# ---------------------------------------------------------------------------
 # KernelEvent — Kernel 向 AgentCore 回传的事件（syscall 返回值）
 # ---------------------------------------------------------------------------
 

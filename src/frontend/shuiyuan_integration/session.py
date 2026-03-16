@@ -26,7 +26,12 @@ from agent_core.content import ContentReference
 from agent_core.interfaces import AgentRunInput
 from agent_core.tools import (
     AttachImageToReplyTool,
+    ShuiyuanBrowseTopicTool,
+    ShuiyuanGetCategoriesTool,
+    ShuiyuanGetCategoryTopicsTool,
+    ShuiyuanGetLatestTool,
     ShuiyuanGetTopicTool,
+    ShuiyuanGetTopTool,
     ShuiyuanRetortTool,
     ShuiyuanSearchTool,
 )
@@ -408,6 +413,11 @@ async def run_shuiyuan_reply(
     tools: List[Any] = [
         ShuiyuanSearchTool(config=cfg, max_results=max_posts),
         ShuiyuanGetTopicTool(config=cfg, posts_limit=max_posts),
+        ShuiyuanBrowseTopicTool(config=cfg, posts_limit=max_posts),
+        ShuiyuanGetLatestTool(config=cfg, max_results=30),
+        ShuiyuanGetTopTool(config=cfg, max_results=30),
+        ShuiyuanGetCategoriesTool(config=cfg),
+        ShuiyuanGetCategoryTopicsTool(config=cfg, max_results=30),
         ShuiyuanRetortTool(config=cfg),
         AttachImageToReplyTool(),
     ]

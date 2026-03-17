@@ -27,6 +27,8 @@ from .event_models import FeishuChallengeRequest, FeishuEventEnvelope
 from .ipc_bridge import (
     AutomationDaemonUnavailable,
     FeishuIPCBridge,
+    get_feishu_push_forwarder,
+    register_feishu_push_session,
     try_handle_slash_command_via_ipc,
 )
 from .session_mapping import map_event_to_session
@@ -220,6 +222,15 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
             )
     except Exception as exc:  # noqa: BLE001
         logger.exception("failed to send feishu reply message: %s", exc)
+
+    # 注册 push 转发：subagent 完成等 inject_turn 结果将经 [out] 队列推送到本会话
+    if msg.chat_id:
+        get_feishu_push_forwarder().start()
+        register_feishu_push_session(
+            session_id=session_id,
+            chat_id=msg.chat_id,
+            ttl_seconds=300.0,
+        )
 
     # 按飞书约定返回 200 + code/msg
     return JSONResponse({"code": 0, "msg": "ok"})

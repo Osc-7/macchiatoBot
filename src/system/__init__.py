@@ -3,7 +3,7 @@ System 层 — 调度、会话管理、内核执行。
 
 包含：
 - automation：会话管理、IPC、任务队列、CoreGateway
-- kernel：AgentKernel、CorePool、KernelScheduler、OutputRouter
+- kernel：AgentKernel、CorePool、KernelScheduler、OutputBus
 """
 
 from .automation import (
@@ -27,7 +27,7 @@ from .kernel import (
     CorePool,
     KernelRequest,
     KernelScheduler,
-    OutputRouter,
+    OutputBus,
 )
 
 __all__ = [
@@ -35,7 +35,7 @@ __all__ = [
     "CorePool",
     "KernelRequest",
     "KernelScheduler",
-    "OutputRouter",
+    "OutputBus",
     "AgentTask",
     "AgentTaskQueue",
     "AutomationCoreGateway",

@@ -185,7 +185,7 @@ class KernelRequest:
     - priority 越小越优先（0=normal, -1=high）
     - 同优先级内按入队时间 FIFO
 
-    request_id 用于 OutputRouter 精准回传结果（乱序完成 + 正确路由）。
+    request_id 用于 OutputBus 精准回传结果（乱序完成 + 正确路由）。
     profile 字段可选，前端/automation 创建请求时传入，覆盖 CorePool 默认值。
     """
 

@@ -516,10 +516,13 @@ class CorePool:
         # 但允许 CoreProfile（如 cron/heartbeat）按 Core 粒度关闭，避免创建一次性 owner 目录。
         memory_enabled = getattr(profile, "memory_enabled", True)
 
+        max_iter = self._config.agent.max_iterations
+        if profile is not None and getattr(profile, "max_iterations_override", None) is not None:
+            max_iter = profile.max_iterations_override
         agent = AgentCore(
             config=self._config,
             tools=tools,
-            max_iterations=self._config.agent.max_iterations,
+            max_iterations=max_iter,
             timezone=self._config.time.timezone,
             user_id=user_id,
             source=source,
@@ -541,11 +544,21 @@ class CorePool:
                     if log_cfg
                     else "./logs/sessions"
                 )
+                enable_detailed = (
+                    getattr(log_cfg, "enable_detailed_log", False) if log_cfg else False
+                )
+                max_sp_len = (
+                    getattr(log_cfg, "max_system_prompt_log_len", 2000)
+                    if log_cfg
+                    else 2000
+                )
                 core_logger = CoreLifecycleLogger(
                     base_dir=log_dir,
                     source=source,
                     user_id=user_id,
                     session_id=session_id,
+                    enable_detailed_log=enable_detailed,
+                    max_system_prompt_log_len=max_sp_len,  # -1 表示不截断
                 )
                 core_logger.on_core_start(profile=profile)
             except Exception:

@@ -39,7 +39,7 @@
 **可能可用（取决于配置）**
 - **web_search**：联网搜索（MCP 启用时）
 - **extract_web_content**：抓取网页内容（MCP 启用时）
-- **read_file**：读取本地文件（非破坏性，select mode 下可启用）
+- **read_file**：读取本地文件（非破坏性，sub 模式下可启用）
 - **notify_owner**：向主人发送飞书消息；遇到不确定、敏感或需人工介入时调用
 
 **多模态**

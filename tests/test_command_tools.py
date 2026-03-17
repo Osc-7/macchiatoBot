@@ -14,29 +14,30 @@ def _make_config(
     *,
     enabled: bool = True,
     allow_run: bool = True,
-    allow_run_in_select_mode: bool = False,
-    select_mode_command_whitelist: Optional[list] = None,
+    allow_run_for_subagent: bool = False,
+    subagent_command_whitelist: Optional[list] = None,
     base_dir: str = ".",
     default_timeout_seconds: float = 2.0,
     max_timeout_seconds: float = 10.0,
     default_output_limit: int = 2000,
     max_output_limit: int = 5000,
 ) -> Config:
+    cmd = CommandToolsConfig(
+        enabled=enabled,
+        allow_run=allow_run,
+        allow_run_for_subagent=allow_run_for_subagent,
+        subagent_command_whitelist=subagent_command_whitelist
+        if subagent_command_whitelist is not None
+        else ["ls", "pwd", "cat", "head", "tail", "grep", "find", "echo"],
+        base_dir=base_dir,
+        default_timeout_seconds=default_timeout_seconds,
+        max_timeout_seconds=max_timeout_seconds,
+        default_output_limit=default_output_limit,
+        max_output_limit=max_output_limit,
+    )
     return Config(
         llm=LLMConfig(api_key="test", model="test"),
-        command_tools=CommandToolsConfig(
-            enabled=enabled,
-            allow_run=allow_run,
-            allow_run_in_select_mode=allow_run_in_select_mode,
-            select_mode_command_whitelist=select_mode_command_whitelist
-            if select_mode_command_whitelist is not None
-            else ["ls", "pwd", "cat", "head", "tail", "echo"],
-            base_dir=base_dir,
-            default_timeout_seconds=default_timeout_seconds,
-            max_timeout_seconds=max_timeout_seconds,
-            default_output_limit=default_output_limit,
-            max_output_limit=max_output_limit,
-        ),
+        command_tools=cmd,
     )
 
 
@@ -141,51 +142,51 @@ class TestRunCommandTool:
         assert result.error == "PERMISSION_DENIED"
 
     @pytest.mark.asyncio
-    async def test_run_command_select_mode_denied(self, tmp_path):
-        """select mode 下默认禁止 run_command"""
+    async def test_run_command_sub_mode_denied(self, tmp_path):
+        """sub 模式下默认禁止 run_command"""
         config = _make_config(base_dir=str(tmp_path))
         tool = RunCommandTool(config=config)
         result = await tool.execute(
             command="echo hi",
-            __execution_context__={"tool_mode": "select", "source": "shuiyuan"},
+            __execution_context__={"tool_mode": "sub", "source": "shuiyuan"},
         )
         assert not result.success
         assert result.error == "PERMISSION_DENIED"
-        assert "select mode" in result.message
+        assert "allow_run_for_subagent" in result.message
 
     @pytest.mark.asyncio
-    async def test_run_command_select_mode_allowed(self, tmp_path):
-        """select mode 下白名单内命令可执行"""
-        config = _make_config(base_dir=str(tmp_path), allow_run_in_select_mode=True)
+    async def test_run_command_sub_mode_allowed(self, tmp_path):
+        """sub 模式下 allow_run_for_subagent 开启后白名单内命令可执行"""
+        config = _make_config(base_dir=str(tmp_path), allow_run_for_subagent=True)
         tool = RunCommandTool(config=config)
         result = await tool.execute(
             command="echo ok",
-            __execution_context__={"tool_mode": "select", "source": "shuiyuan"},
+            __execution_context__={"tool_mode": "sub", "source": "shuiyuan"},
         )
         assert result.success
         assert "ok" in result.data["stdout"]
 
     @pytest.mark.asyncio
-    async def test_run_command_select_mode_not_whitelisted(self, tmp_path):
-        """select mode 下非白名单命令拒绝"""
-        config = _make_config(base_dir=str(tmp_path), allow_run_in_select_mode=True)
+    async def test_run_command_sub_mode_not_whitelisted(self, tmp_path):
+        """sub 模式下非白名单命令拒绝"""
+        config = _make_config(base_dir=str(tmp_path), allow_run_for_subagent=True)
         tool = RunCommandTool(config=config)
         result = await tool.execute(
             command="rm -rf /tmp/test",
-            __execution_context__={"tool_mode": "select", "source": "shuiyuan"},
+            __execution_context__={"tool_mode": "sub", "source": "shuiyuan"},
         )
         assert not result.success
         assert result.error == "COMMAND_NOT_WHITELISTED"
         assert "白名单" in result.message
 
     @pytest.mark.asyncio
-    async def test_run_command_select_mode_shell_operator_denied(self, tmp_path):
-        """select mode 下禁止管道等 shell 运算符"""
-        config = _make_config(base_dir=str(tmp_path), allow_run_in_select_mode=True)
+    async def test_run_command_sub_mode_shell_operator_denied(self, tmp_path):
+        """sub 模式下禁止管道等 shell 运算符"""
+        config = _make_config(base_dir=str(tmp_path), allow_run_for_subagent=True)
         tool = RunCommandTool(config=config)
         result = await tool.execute(
             command="ls | grep x",
-            __execution_context__={"tool_mode": "select", "source": "shuiyuan"},
+            __execution_context__={"tool_mode": "sub", "source": "shuiyuan"},
         )
         assert not result.success
         assert result.error == "COMMAND_NOT_WHITELISTED"
@@ -200,3 +201,80 @@ class TestRunCommandTool:
         result = await tool.execute(command="echo hi")
         assert result.success
         assert "hi" in result.data["stdout"]
+
+    @pytest.mark.asyncio
+    async def test_run_command_subagent_denied_by_default(self, tmp_path):
+        """subagent 默认不允许 run_command（需配置 allow_run_for_subagent）"""
+        config = _make_config(base_dir=str(tmp_path))
+        tool = RunCommandTool(config=config)
+        result = await tool.execute(
+            command="ls -la",
+            __execution_context__={"source": "subagent", "tool_mode": "kernel"},
+        )
+        assert not result.success
+        assert result.error == "PERMISSION_DENIED"
+        assert "allow_run_for_subagent" in result.message
+
+    @pytest.mark.asyncio
+    async def test_run_command_subagent_allowed_whitelist(self, tmp_path):
+        """subagent 开启后仅允许白名单内命令"""
+        config = _make_config(
+            base_dir=str(tmp_path),
+            allow_run_for_subagent=True,
+            subagent_command_whitelist=["ls", "pwd", "echo", "find"],
+        )
+        tool = RunCommandTool(config=config)
+        result = await tool.execute(
+            command="echo ok",
+            __execution_context__={"source": "subagent", "tool_mode": "kernel"},
+        )
+        assert result.success
+        assert "ok" in result.data["stdout"]
+
+    @pytest.mark.asyncio
+    async def test_run_command_subagent_find_allowed(self, tmp_path):
+        """subagent 白名单含 find 时可执行单条 find 命令"""
+        config = _make_config(
+            base_dir=str(tmp_path),
+            allow_run_for_subagent=True,
+            subagent_command_whitelist=["ls", "find", "echo"],
+        )
+        tool = RunCommandTool(config=config)
+        result = await tool.execute(
+            command="find . -maxdepth 1 -type f",
+            __execution_context__={"source": "subagent", "tool_mode": "kernel"},
+        )
+        assert result.success
+
+    @pytest.mark.asyncio
+    async def test_run_command_subagent_pipe_denied(self, tmp_path):
+        """subagent 禁止管道等 shell 运算符"""
+        config = _make_config(
+            base_dir=str(tmp_path),
+            allow_run_for_subagent=True,
+        )
+        tool = RunCommandTool(config=config)
+        result = await tool.execute(
+            command="ls | head -5",
+            __execution_context__={"source": "subagent", "tool_mode": "kernel"},
+        )
+        assert not result.success
+        assert result.error == "COMMAND_NOT_WHITELISTED"
+        assert "|" in result.message or "shell" in result.message
+
+    @pytest.mark.asyncio
+    async def test_run_command_subagent_dangerous_denied(self, tmp_path):
+        """subagent 禁止危险命令（不可 confirm 绕过）"""
+        config = _make_config(
+            base_dir=str(tmp_path),
+            allow_run_for_subagent=True,
+            subagent_command_whitelist=["ls", "rm"],
+        )
+        tool = RunCommandTool(config=config)
+        result = await tool.execute(
+            command="rm -rf /tmp/foo",
+            __execution_context__={"source": "subagent", "tool_mode": "kernel"},
+        )
+        assert not result.success
+        assert result.error == "COMMAND_DENIED"
+        assert "危险" in result.message

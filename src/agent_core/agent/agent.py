@@ -65,6 +65,28 @@ if TYPE_CHECKING:
     from agent_core.utils.session_logger import SessionLogger
 
 
+def _format_subagent_limit_msg(
+    *,
+    reason: str,
+    subagent_id: str,
+    log_path: Optional[Path] = None,
+    log_dir: str = "./logs/sessions",
+    limit_type: str,
+) -> str:
+    """构建子任务被系统限制终止时的完整提示，含取消原因、日志位置与主 Agent 建议。"""
+    if log_path is not None:
+        path_hint = str(log_path)
+    else:
+        path_hint = f"{log_dir}/session-subagent:{subagent_id}-*.jsonl（可用 ls -t ... | head -1 取最新）"
+    return (
+        f"[子任务 {subagent_id} 被系统终止]\n\n"
+        f"**取消原因**: {reason}\n\n"
+        f"**日志位置**: {path_hint}\n\n"
+        f"**建议主 Agent**: 使用 run_command 执行 `tail -n 100 <日志路径>` 读取日志尾部，"
+        f"检查子任务进展后决定是否调整 config 中的 {limit_type} 限额并重启子任务。"
+    )
+
+
 class AgentCore:
     """
     日程管理 Agent。
@@ -80,7 +102,7 @@ class AgentCore:
         self,
         config: Optional[Config] = None,
         tools: Optional[List[BaseTool]] = None,
-        max_iterations: int = 10,
+        max_iterations: Optional[int] = 10,
         timezone: str = "Asia/Shanghai",
         session_logger: Optional["SessionLogger"] = None,
         user_id: str = "root",
@@ -255,6 +277,8 @@ class AgentCore:
         self._mcp_manager: Optional[MCPClientManager] = None
         self._mcp_connected = False
         self._defer_mcp_connect = defer_mcp_connect
+        # 为 True 表示 MCP 已由“连接所在任务”关闭（用于 daemon 后台任务同任务 close，避免 anyio 跨任务 exit）
+        self._mcp_closed_by_owner = False
 
         # 联网工具（基于 Tavily MCP）
         if self._config.mcp.enabled:
@@ -571,6 +595,51 @@ class AgentCore:
                     self._token_usage["call_count"] += 1
                     self._usage_calls.append((pt, ct))
                     self._last_prompt_tokens = pt
+
+                # 子 Agent token 上限：超限则强制结束，防止卡住
+                profile = getattr(self, "_core_profile", None)
+                if (
+                    profile is not None
+                    and getattr(profile, "mode", None) == "sub"
+                    and getattr(profile, "max_total_tokens", None) is not None
+                ):
+                    limit = profile.max_total_tokens
+                    if self._token_usage["total_tokens"] >= limit:
+                        reason = (
+                            f"子任务已达到 token 上限（{self._token_usage['total_tokens']} >= {limit}），已强制结束"
+                        )
+                        log_path = (
+                            getattr(self._session_logger, "file_path", None)
+                            if self._session_logger
+                            else None
+                        )
+                        log_dir = getattr(
+                            getattr(self._config, "logging", None),
+                            "session_log_dir",
+                            "./logs/sessions",
+                        )
+                        subagent_id = (
+                            (self._session_id or "").replace("sub:", "", 1)
+                            if (self._session_id or "").startswith("sub:")
+                            else (self._session_id or "")
+                        )
+                        overflow_msg = _format_subagent_limit_msg(
+                            reason=reason,
+                            subagent_id=subagent_id,
+                            log_path=log_path,
+                            log_dir=log_dir,
+                            limit_type="subagent_max_tokens",
+                        )
+                        if self._session_logger:
+                            self._session_logger.on_assistant_message(
+                                turn_id, overflow_msg
+                            )
+                        yield ReturnAction(
+                            message=overflow_msg,
+                            status="overflow",
+                            attachments=list(self._outgoing_attachments),
+                        )
+                        return
 
                 # ── 处理工具调用 ─────────────────────────────────────────
                 if response.tool_calls:
@@ -1093,13 +1162,25 @@ class AgentCore:
             hard_threshold_ratio=self._config.memory.working_summary_hard_ratio,
         )
 
+    async def close_mcp_only(self) -> None:
+        """仅关闭 MCP 连接。供“连接所在任务”在退出时调用，保证 anyio cancel scope 同任务 enter/exit。"""
+        if self._mcp_manager is None:
+            return
+        await self._mcp_manager.close()
+        self._mcp_manager = None
+        self._mcp_connected = False
+        self._mcp_closed_by_owner = True
+
     async def close(self) -> None:
         """关闭 Agent，释放资源"""
         await self._llm_client.close()
         if self._summary_llm_client is not self._llm_client:
             await self._summary_llm_client.close()
-        if self._mcp_manager:
+        if self._mcp_manager and not self._mcp_closed_by_owner:
             await self._mcp_manager.close()
+            self._mcp_manager = None
+            self._mcp_connected = False
+        elif self._mcp_closed_by_owner:
             self._mcp_manager = None
             self._mcp_connected = False
         if self._memory_enabled and self._chat_history_db is not None:

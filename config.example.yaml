@@ -176,21 +176,26 @@ file_tools:
 command_tools:
   enabled: true       # 是否启用 run_command 工具
   allow_run: true     # 是否允许执行终端命令
-  allow_run_in_select_mode: false  # select mode 下是否允许 run_command；开启后仅执行白名单内命令
-  # select mode 白名单（仅非破坏性命令，可自定义）
-  # select_mode_command_whitelist: ["ls", "pwd", "cat", "head", "tail", "grep", "echo", "which", "file", "stat", "wc", "date", "whoami", "id"]
+  # 受限模式（subagent、tool_mode=sub 如水源）是否允许 run_command；开启后仅可执行 subagent_command_whitelist 内命令
+  allow_run_for_subagent: false
+  # 受限模式命令白名单（默认含 find 等只读命令；可在此追加）
+  # subagent_command_whitelist: ["ls", "pwd", "cat", "head", "tail", "grep", "find", "echo", "which", "file", "stat", "wc", "date", "whoami", "id", "env", "printenv"]
 
 # Agent 配置
 agent:
   max_iterations: 10
+  # 子 Agent 限制（防止卡住、无限循环）
+  subagent_max_seconds: 600      # 单次运行最大时长（秒），超时强制终止
+  subagent_max_tokens: 500000    # 累计 token 上限，超限强制结束；null 表示不限制
+  subagent_max_iterations: 15    # 默认最大迭代次数（工具未传 max_iterations 时使用）
   enable_debug: true
   # 工具暴露模式：
   # - kernel: 核心工具 search_tools/call_tool + pinned + working set（CLI/飞书）
-  # - select: 仅使用传入的工具列表（水源等小内核场景）
+  # - sub: 受限模式，仅使用传入工具，禁止写入/危险命令（水源等小内核场景）
   tool_mode: "kernel"
-  # 按 source 覆盖 tool_mode；水源使用 select，cli/feishu 默认 kernel
+  # 按 source 覆盖 tool_mode；水源使用 sub，cli/feishu 默认 kernel
   source_overrides:
-    shuiyuan: "select"
+    shuiyuan: "sub"
   # kernel 模式下 LRU 工作集大小（不含 pinned_tools）
   working_set_size: 6
   # 核心工具 + pinned_tools，kernel 模式下始终暴露
@@ -286,8 +291,9 @@ memory:
 logging:
   session_log_dir: "./logs/sessions"
   enable_session_log: true
-  enable_detailed_log: false
-  max_system_prompt_log_len: 2000
+  # 行为追踪需开启：记录完整 system_prompt 与 messages 到 session JSONL
+  enable_detailed_log: true
+  max_system_prompt_log_len: 2000  # -1 表示不截断
 
 # CLI 可视化配置
 ui:

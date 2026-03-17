@@ -36,6 +36,8 @@ from .event_models import (
 from .ipc_bridge import (
     AutomationDaemonUnavailable,
     FeishuIPCBridge,
+    get_feishu_push_forwarder,
+    register_feishu_push_session,
     try_handle_slash_command_via_ipc,
 )
 from .router import _is_duplicate_event  # 复用去重缓存
@@ -195,6 +197,15 @@ async def _handle_im_message_event_async(data: Any) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.exception("failed to send feishu ws reply: %s", exc)
 
+    # 注册 push 转发：subagent 完成等 inject_turn 结果将经 [out] 队列推送到本会话
+    chat_id = feishu_message.chat_id
+    if chat_id:
+        register_feishu_push_session(
+            session_id=session_id,
+            chat_id=chat_id,
+            ttl_seconds=300.0,
+        )
+
 
 def _run_handler_in_thread(data: Any) -> None:
     """在独立线程中运行异步事件处理，避免与 SDK 内部事件循环冲突。"""
@@ -250,6 +261,7 @@ def build_ws_client() -> lark.ws.Client:
 
 def run_ws_client() -> None:
     """启动飞书长连接客户端（阻塞调用）。"""
+    get_feishu_push_forwarder().start()
     client = build_ws_client()
     logger.info("Starting Feishu long-connection client...")
     client.start()

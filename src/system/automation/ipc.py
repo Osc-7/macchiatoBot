@@ -311,15 +311,17 @@ class AutomationIPCServer:
             return {"turn_count": turn_count}
 
         if method == "poll_push":
-            # 非阻塞轮询：批量取出该 session 所有待推送的 inject_turn 结果
+            # 非阻塞轮询：批量取出该 session 所有 [out] 队列结果（统一出口）
             results = []
             if hasattr(self._gateway, "poll_push_result"):
                 while True:
-                    result = self._gateway.poll_push_result(active_session)
-                    if result is None:
+                    envelope = self._gateway.poll_push_result(active_session)
+                    if envelope is None:
                         break
+                    request_id, result = envelope
                     results.append(
                         {
+                            "request_id": request_id,
                             "output_text": result.output_text,
                             "metadata": (
                                 result.metadata

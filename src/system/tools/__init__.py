@@ -373,6 +373,12 @@ class _SchedulerProxy:
             raise RuntimeError("KernelScheduler not yet bound to SubagentRegistry")
         return await s.submit(request)
 
+    async def wait_result(self, request_id: str, timeout_seconds: float | None = None):  # type: ignore[override]
+        s = self._registry._scheduler
+        if s is None:
+            raise RuntimeError("KernelScheduler not yet bound to SubagentRegistry")
+        return await s.wait_result(request_id, timeout_seconds=timeout_seconds)
+
 
 class _LazySchedulerSendMessageTool(SendMessageToAgentTool):
     """send_message_to_agent：通过 registry 懒加载 scheduler。"""

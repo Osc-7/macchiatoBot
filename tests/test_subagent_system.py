@@ -247,33 +247,33 @@ class TestSubagentRegistry:
 
 
 # ---------------------------------------------------------------------------
-# inject_turn + OutputRouter.has_pending
+# inject_turn + OutputBus.has_waiter
 # ---------------------------------------------------------------------------
 
 
 class TestInjectTurn:
-    def test_has_pending_returns_false_for_inject_turn_request(self):
-        from system.kernel.scheduler import OutputRouter
+    def test_has_waiter_returns_false_for_unregistered_request(self):
+        from system.kernel.scheduler import OutputBus
 
-        router = OutputRouter()
-        assert router.has_pending("some-random-id") is False
+        bus = OutputBus()
+        assert bus.has_waiter("some-random-id") is False
 
-    def test_has_pending_returns_true_after_register(self):
-        from system.kernel.scheduler import OutputRouter
+    def test_has_waiter_returns_true_after_register(self):
+        from system.kernel.scheduler import OutputBus
 
         loop = asyncio.new_event_loop()
         try:
             async def _run():
-                router = OutputRouter()
-                router.register("req-001")
-                assert router.has_pending("req-001") is True
-                assert router.has_pending("req-002") is False
+                bus = OutputBus()
+                bus.register_waiter("req-001")
+                assert bus.has_waiter("req-001") is True
+                assert bus.has_waiter("req-002") is False
 
             loop.run_until_complete(_run())
         finally:
             loop.close()
 
-    def test_inject_turn_puts_request_in_queue(self):
+    def test_inject_turn_puts_request_in_queue_without_waiter(self):
         from system.kernel.scheduler import KernelScheduler
         from agent_core.kernel_interface import KernelRequest
 
@@ -290,12 +290,11 @@ class TestInjectTurn:
                     frontend_id="subagent",
                     priority=-1,
                 )
-                # inject_turn 不需要注册 Future
+                # inject_turn 不注册 waiter
                 scheduler.inject_turn(request)
 
-                # 验证 request 在队列中，且没有 Future
                 assert scheduler.queue_size == 1
-                assert not scheduler._router.has_pending(request.request_id)
+                assert not scheduler._out_bus.has_waiter(request.request_id)
 
             loop.run_until_complete(_run())
         finally:

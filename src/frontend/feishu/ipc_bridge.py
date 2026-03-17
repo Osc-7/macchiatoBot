@@ -1,5 +1,9 @@
 from __future__ import annotations
+
+import asyncio
 import logging
+import threading
+import time
 from typing import Any, Dict, Optional
 
 from system.automation import AutomationIPCClient, default_socket_path
@@ -13,10 +17,32 @@ Automation IPC Bridge for Feishu.
 
 封装 AutomationIPCClient，提供面向飞书前端的简单消息发送接口。
 支持斜杠指令（/clear、/usage、/session、/help）与 CLI 对齐。
+
+FeishuPushForwarder：后台轮询 [out] 队列，将 inject_turn 等推送结果发回飞书。
 """
 
 
 logger = logging.getLogger(__name__)
+
+# 全局 push 转发器，供 ws_client 注册会话并启动
+_feishu_push_forwarder: Optional["FeishuPushForwarder"] = None
+_forwarder_lock = threading.Lock()
+
+
+def get_feishu_push_forwarder() -> "FeishuPushForwarder":
+    """获取或创建 Feishu push 转发器（单例）。"""
+    global _feishu_push_forwarder
+    with _forwarder_lock:
+        if _feishu_push_forwarder is None:
+            _feishu_push_forwarder = FeishuPushForwarder()
+        return _feishu_push_forwarder
+
+
+def register_feishu_push_session(
+    session_id: str, chat_id: str, ttl_seconds: float = 300.0
+) -> None:
+    """注册需转发 push 的会话，供 FeishuPushForwarder 轮询并投递到对应 chat。"""
+    get_feishu_push_forwarder().register(session_id, chat_id, ttl_seconds)
 
 
 class AutomationDaemonUnavailable(RuntimeError):
@@ -160,3 +186,105 @@ class FeishuIPCBridge:
         )
         result = await client.run_turn(agent_input, hooks=hooks)
         return result
+
+
+class FeishuPushForwarder:
+    """后台轮询 [out] 队列，将 inject_turn 等推送结果发回飞书。
+
+    与 CLI 的 _automation_notifier_loop 对齐：统一从 kernel [out] 队列取结果，
+    按 session 投递到对应前端。飞书侧投递到 feishu_chat_id。
+    """
+
+    def __init__(
+        self,
+        *,
+        poll_interval_seconds: float = 2.0,
+        socket_path: Optional[str] = None,
+        timeout_seconds: float = 30.0,
+    ) -> None:
+        self._poll_interval = poll_interval_seconds
+        self._socket_path = socket_path or default_socket_path()
+        self._timeout = timeout_seconds
+        self._registry: Dict[str, tuple[str, float]] = {}  # session_id -> (chat_id, expiry_ts)
+        self._lock = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+
+    def register(
+        self, session_id: str, chat_id: str, ttl_seconds: float = 300.0
+    ) -> None:
+        """注册会话，在 ttl_seconds 内轮询 [out] 队列并转发到 chat_id。"""
+        if not session_id or not chat_id:
+            return
+        expiry = time.time() + ttl_seconds
+        with self._lock:
+            self._registry[session_id] = (chat_id, expiry)
+
+    def start(self) -> None:
+        """启动后台轮询线程。"""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._run_loop,
+                name="feishu-push-forwarder",
+                daemon=True,
+            )
+            self._thread.start()
+            logger.info("FeishuPushForwarder started")
+
+    def _run_loop(self) -> None:
+        """轮询循环（在独立线程中运行，内部创建新事件循环）。"""
+        while not self._stop.wait(timeout=self._poll_interval):
+            try:
+                asyncio.run(self._poll_once())
+            except Exception as exc:
+                logger.warning("FeishuPushForwarder poll_once failed: %s", exc)
+
+    async def _poll_once(self) -> None:
+        """单次轮询：对已注册会话执行 poll_push 并转发。"""
+        now = time.time()
+        with self._lock:
+            to_poll = [
+                (sid, chat_id)
+                for sid, (chat_id, expiry) in list(self._registry.items())
+                if expiry > now
+            ]
+            # 移除过期
+            self._registry = {
+                sid: (cid, exp)
+                for sid, (cid, exp) in self._registry.items()
+                if exp > now
+            }
+        if not to_poll:
+            return
+        try:
+            client = AutomationIPCClient(
+                owner_id="root",
+                source="feishu",
+                socket_path=self._socket_path,
+                timeout_seconds=self._timeout,
+            )
+            if not await client.ping():
+                return
+            feishu_client = FeishuClient(timeout_seconds=self._timeout)
+            for session_id, chat_id in to_poll:
+                await client.switch_session(session_id, create_if_missing=False)
+                results = await client.poll_push()
+                for pr in results or []:
+                    text = (pr.get("output_text") or "").strip()
+                    if not text:
+                        continue
+                    try:
+                        await feishu_client.send_text_message(
+                            chat_id=chat_id, text=text
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "FeishuPushForwarder send to chat_id=%s failed: %s",
+                            chat_id,
+                            exc,
+                        )
+        except Exception as exc:
+            logger.debug("FeishuPushForwarder _poll_once: %s", exc)

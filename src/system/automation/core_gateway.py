@@ -46,7 +46,7 @@ class AutomationCoreGateway:
     1. 直接模式（默认）：直接 await CoreSession.run_turn()，保持原有行为。
     2. Kernel 调度模式：通过 attach_scheduler() 挂载 KernelScheduler，
        将请求投入 InputQueue，由 Scheduler 异步分发，支持跨 session 真并发
-       和"乱序完成精准路由"（OutputRouter）。
+       和 OutputBus 结果等待。
 
     IPC 协议（AutomationIPCServer）和外部接口完全不变。
     """
@@ -207,16 +207,19 @@ class AutomationCoreGateway:
         挂载 KernelScheduler，启用异步队列调度模式。
 
         挂载后，run_turn() 和 inject_message() 会将请求投入 InputQueue，
-        由 Scheduler 异步分发（create_task 真并发），通过 OutputRouter 精准路由结果。
+        由 Scheduler 异步分发（create_task 真并发），通过 OutputBus 等待结果。
 
         不挂载时（默认）保持原有直接调用 CoreSession.run_turn() 的行为，零感知迁移。
         """
         self._kernel_scheduler = scheduler
 
-    def poll_push_result(self, session_id: str) -> Optional[AgentRunResult]:
-        """非阻塞：弹出 inject_turn 为该 session 产生的下一条推送结果，无则返回 None。
+    def poll_push_result(
+        self, session_id: str
+    ) -> Optional[tuple[str, AgentRunResult]]:
+        """非阻塞：弹出该 session 的下一条 [out] 队列结果，无则返回 None。
 
-        典型使用方：IPC server 的 poll_push 接口，CLI 后台轮询循环。
+        统一出口：submit 与 inject_turn 的结果均经此队列。
+        返回 (request_id, result)。典型使用方：IPC poll_push、CLI/Feishu 后台轮询。
         """
         if self._kernel_scheduler is None:
             return None
@@ -245,8 +248,8 @@ class AutomationCoreGateway:
         """
         通过 KernelScheduler 提交请求并等待结果。
 
-        使用 OutputRouter（Future）机制：submit() 返回 Future，await 等待结果。
-        不同 session 的请求并发执行，先完成先返回（乱序完成精准路由）。
+        submit() 仅提交到 [in] 队列并返回 request_id；
+        再通过 wait_result(request_id) 在 out 总线上等待结果。
 
         注意：Scheduler 只消费 metadata["content_items"]，不解析 content_refs。
         飞书等前端传 content_refs，此处需先解析为 content_items 再交给 Scheduler，
@@ -297,8 +300,8 @@ class AutomationCoreGateway:
             metadata=metadata,
             profile=profile,
         )
-        future = await self._kernel_scheduler.submit(request)
-        result: AgentRunResult = await future
+        submit_handle = await self._kernel_scheduler.submit(request)
+        result: AgentRunResult = await self._kernel_scheduler.wait_result(submit_handle)
         self.mark_activity(session_id)
         return result
 

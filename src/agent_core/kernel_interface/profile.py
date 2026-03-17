@@ -92,6 +92,10 @@ class CoreProfile:
     max_context_tokens: int = 80_000
     session_expired_seconds: int = 1_800
 
+    # 子 Agent 专用：单次运行上限（None 表示不限制）
+    max_iterations_override: Optional[int] = None
+    max_total_tokens: Optional[int] = None
+
     frontend_id: str = ""
     dialog_window_id: str = ""
 
@@ -170,17 +174,22 @@ class CoreProfile:
         *,
         frontend_id: str = "",
         dialog_window_id: str = "",
+        max_iterations_override: Optional[int] = None,
+        max_total_tokens: Optional[int] = None,
+        allow_dangerous_commands: bool = False,
     ) -> "CoreProfile":
-        """子 Agent / 工具 Agent（受限工具集，不允许危险命令，不加载长期记忆）。"""
+        """子 Agent / 工具 Agent（受限工具集；allow_dangerous_commands=True 时允许 run_command，实际执行仍受 RunCommandTool 内 subagent 白名单限制）。"""
         return cls(
             mode="sub",
             allowed_tools=allowed_tools,
-            allow_dangerous_commands=False,
+            allow_dangerous_commands=allow_dangerous_commands,
             visible_memory_scopes=["working", "chat"],
             max_context_tokens=40_000,
             session_expired_seconds=300,
             frontend_id=frontend_id,
             dialog_window_id=dialog_window_id,
+            max_iterations_override=max_iterations_override,
+            max_total_tokens=max_total_tokens,
         )
 
     @classmethod

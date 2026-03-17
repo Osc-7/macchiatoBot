@@ -40,6 +40,7 @@ class CoreLifecycleLogger:
     _closed: bool = field(default=False, repr=False)
     _file: Optional[IO[str]] = field(default=None, repr=False)
     enable_detailed_log: bool = field(default=False, repr=False)
+    max_system_prompt_log_len: int = field(default=0, repr=False)
 
     def __post_init__(self) -> None:
         base = Path(self.base_dir or "./logs/sessions")
@@ -135,18 +136,26 @@ class CoreLifecycleLogger:
         system_prompt: Optional[str] = None,
         messages: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
-        self._write(
-            {
-                "event": "llm_request",
-                "timestamp": self._timestamp(),
-                "session_id": self.session_id,
-                "turn_id": turn_id,
-                "iteration": iteration,
-                "message_count": message_count,
-                "tool_count": tool_count,
-                "system_prompt_len": system_prompt_len,
-            }
-        )
+        record: Dict[str, Any] = {
+            "event": "llm_request",
+            "timestamp": self._timestamp(),
+            "session_id": self.session_id,
+            "turn_id": turn_id,
+            "iteration": iteration,
+            "message_count": message_count,
+            "tool_count": tool_count,
+            "system_prompt_len": system_prompt_len,
+        }
+        if self.enable_detailed_log:
+            if system_prompt is not None:
+                max_len = self.max_system_prompt_log_len or -1
+                if max_len >= 0 and len(system_prompt) > max_len:
+                    record["system_prompt"] = system_prompt[:max_len] + "..."
+                else:
+                    record["system_prompt"] = system_prompt
+            if messages is not None:
+                record["messages"] = messages
+        self._write(record)
 
     def on_llm_response(
         self,

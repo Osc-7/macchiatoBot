@@ -344,39 +344,21 @@ async def _main() -> None:
         await ipc.start()
         logger.info("Automation daemon started. socket=%s", ipc.socket_path)
 
-        async def _connect_mcp_in_background() -> None:
+        # MCP 在后台任务中连接；关闭必须在同一任务中执行（finally 里 close_mcp_only），
+        # 否则 anyio 会报 "Attempted to exit cancel scope in a different task than it was entered in"。
+        async def _mcp_lifecycle_task() -> None:
             try:
                 if await core_agent.ensure_mcp_connected():
                     logger.info("MCP connected (deferred)")
-            except Exception as exc:
-                # 单行警告，不刷屏；若需排查可开启 DEBUG 或查看 logs/automation_daemon.log
-                logger.warning(
-                    "MCP deferred connect failed: %s (%s). Daemon works without MCP tools.",
-                    type(exc).__name__,
-                    exc,
-                )
-                logger.debug("MCP deferred connect traceback", exc_info=True)
+                await stop_event.wait()
+            except asyncio.CancelledError:
+                pass
+            finally:
+                await core_agent.close_mcp_only()
 
         mcp_task = asyncio.create_task(
-            _connect_mcp_in_background(), name="daemon-mcp-connect"
+            _mcp_lifecycle_task(), name="daemon-mcp-connect"
         )
-
-        def _mcp_done_cb(task: asyncio.Task[None]) -> None:
-            try:
-                exc = task.exception()
-            except asyncio.CancelledError:
-                return
-            if exc is None:
-                return
-            # 抑制 anyio/mcp 在异步生成器关闭时的已知噪音，避免 "Task exception was never retrieved"
-            msg = str(exc)
-            if "Attempted to exit cancel scope in a different task" in msg or (
-                isinstance(exc, RuntimeError) and "cancel scope" in msg
-            ):
-                logger.debug("MCP background connect teardown (ignored): %s", exc)
-            # 其他异常已在 _connect_mcp_in_background 的 except 中打过，此处不再重复
-
-        mcp_task.add_done_callback(_mcp_done_cb)
 
         try:
             while True:
@@ -385,8 +367,9 @@ async def _main() -> None:
             stop_event.set()
             raise
         finally:
-            # consumer_task.cancel()/gather 必须在 finally 里，
-            # 否则在 CancelledError 路径下会被跳过（两行代码不可达）。
+            # 先由 MCP 所在任务自行 close，再继续主流程关闭
+            mcp_task.cancel()
+            await asyncio.gather(mcp_task, return_exceptions=True)
             consumer_task.cancel()
             await asyncio.gather(consumer_task, return_exceptions=True)
             await ipc.stop()

@@ -189,33 +189,42 @@ class RunCommandTool(BaseTool):
         except (OSError, ValueError) as e:
             return None, f"无效工作目录: {e}"
 
-    def _check_select_mode_whitelist(self, command: str) -> tuple[bool, str]:
+    def _check_restricted_whitelist(self, command: str) -> tuple[bool, str]:
         """
-        检查 select mode 下命令是否在白名单内。
+        检查受限模式（subagent / tool_mode=sub）下命令是否在白名单内。
+        禁止管道、重定向、危险命令。
+        """
+        whitelist = getattr(self._cmd_config, "subagent_command_whitelist", []) or []
+        return self._check_whitelist_and_shell_safe(
+            command,
+            whitelist,
+            mode_label="受限模式",
+        )
 
-        Returns:
-            (allowed, message) - 允许时 message 为空
-        """
-        whitelist = getattr(self._cmd_config, "select_mode_command_whitelist", []) or []
+    def _check_whitelist_and_shell_safe(
+        self,
+        command: str,
+        whitelist: list,
+        *,
+        mode_label: str = "受限模式",
+    ) -> tuple[bool, str]:
+        """白名单 + 禁止 shell 运算符。whitelist 为命令名列表（如 ['ls','cat']）。"""
         whitelist_lower = {c.strip().lower() for c in whitelist if c}
-
-        # 禁止管道、重定向、子 shell 等，防止绕过
         dangerous_chars = ("|", "&", ";", "`", "$(", ">", ">>", "<", "&&", "||")
         for c in dangerous_chars:
             if c in command:
                 return (
                     False,
-                    f"select mode 下禁止使用 shell 运算符（如 {c}），仅允许单条非破坏性命令",
+                    f"{mode_label} 下禁止使用 shell 运算符（如 {c}），仅允许单条非破坏性命令",
                 )
-
         parts = command.split()
         if not parts:
             return False, "命令为空"
         base_cmd = Path(parts[0]).name.lower()
         if base_cmd not in whitelist_lower:
             return False, (
-                f"select mode 下命令 '{base_cmd}' 不在白名单内。"
-                f"允许的命令示例: {', '.join(sorted(whitelist_lower)[:8])}..."
+                f"{mode_label} 下命令 '{base_cmd}' 不在白名单内。"
+                f"允许的命令示例: {', '.join(sorted(whitelist_lower)[:10])}"
             )
         return True, ""
 
@@ -254,20 +263,29 @@ class RunCommandTool(BaseTool):
                 message="缺少必需参数: command",
             )
 
-        # select mode 下：需显式开启 + 仅允许白名单内的非破坏性命令
-        if tool_mode == "select":
-            if not getattr(self._cmd_config, "allow_run_in_select_mode", False):
+        # 受限模式（tool_mode=sub 如水源，或 source=subagent）：共用 allow_run_for_subagent + subagent_command_whitelist
+        is_restricted = (
+            tool_mode == "sub" or exec_ctx.get("source") == "subagent"
+        )
+        if is_restricted:
+            if not getattr(self._cmd_config, "allow_run_for_subagent", False):
                 return ToolResult(
                     success=False,
                     error="PERMISSION_DENIED",
-                    message="select mode 下 run_command 未授权。请在 command_tools.allow_run_in_select_mode 中显式开启",
+                    message="受限模式（sub）下 run_command 未启用。请在配置中设置 command_tools.allow_run_for_subagent 为 true",
                 )
-            whitelist_result = self._check_select_mode_whitelist(command)
+            whitelist_result = self._check_restricted_whitelist(command)
             if not whitelist_result[0]:
                 return ToolResult(
                     success=False,
                     error="COMMAND_NOT_WHITELISTED",
                     message=whitelist_result[1],
+                )
+            if self._is_dangerous_command(command):
+                return ToolResult(
+                    success=False,
+                    error="COMMAND_DENIED",
+                    message="受限模式禁止执行危险命令（如 rm、chmod -R、sudo 等），仅允许只读白名单命令",
                 )
 
         if not self._cmd_config.enabled or not self._cmd_config.allow_run:

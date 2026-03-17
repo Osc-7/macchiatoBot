@@ -42,12 +42,17 @@ logger = logging.getLogger(__name__)
 SUBAGENT_COMMUNICATION_TOOLS = ["send_message_to_agent", "reply_to_message"]
 
 
-def _merge_allowed_tools_for_subagent(allowed_tools: Optional[List[str]]) -> Optional[List[str]]:
+def _merge_allowed_tools_for_subagent(
+    allowed_tools: Optional[List[str]],
+    *,
+    add_run_command: bool = False,
+) -> Optional[List[str]]:
     """
     合并 allowed_tools，确保子 Agent 始终能向父 Agent 汇报。
 
     若父 Agent 指定了 allowed_tools 但遗漏 send_message_to_agent / reply_to_message，
     子 Agent 将无法发送结果。此函数自动补全，避免配置错误。
+    add_run_command=True 且配置允许时，会加入 run_command（子 Agent 内仍受白名单限制）。
     """
     if allowed_tools is None:
         return None
@@ -55,7 +60,29 @@ def _merge_allowed_tools_for_subagent(allowed_tools: Optional[List[str]]) -> Opt
     for t in SUBAGENT_COMMUNICATION_TOOLS:
         if t not in result:
             result.append(t)
+    if add_run_command and "run_command" not in result:
+        result.append("run_command")
     return result
+
+
+def _build_subagent_limit_fail_msg(
+    *,
+    reason: str,
+    subagent_id: str,
+    log_dir: str,
+    limit_type: str,
+) -> str:
+    """构建子任务被系统限制终止时的完整提示，含取消原因、日志位置与主 Agent 建议。"""
+    log_pattern = f"session-subagent:{subagent_id}-*.jsonl"
+    return (
+        f"[子任务 {subagent_id} 被系统终止]\n\n"
+        f"**取消原因**: {reason}\n\n"
+        f"**日志位置**: {log_dir}\n"
+        f"**日志文件名匹配**: {log_pattern}\n\n"
+        f"**建议主 Agent**: 使用 run_command 执行 `tail -n 100 {log_dir}/session-subagent:{subagent_id}-*.jsonl` "
+        f"或 `ls -t {log_dir}/session-subagent:{subagent_id}-*.jsonl | head -1 | xargs tail -n 100` "
+        f"读取日志尾部，检查子任务进展后决定是否调整 config 中的 {limit_type} 限额并重启子任务。"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -84,15 +111,38 @@ async def _run_subagent_task(
     3. 失败后调用 registry.on_fail() → inject_turn 通知父 session
     4. 无论成功失败，最后 evict 清理资源
     """
+    from agent_core.config import get_config
     from agent_core.kernel_interface import KernelRequest, CoreProfile
 
-    # 构造 subagent 的 CoreProfile（mode="sub"，按 allowed_tools 限制）
-    # 自动合并 send_message_to_agent + reply_to_message，确保子 Agent 能向父汇报
-    effective_allowed = _merge_allowed_tools_for_subagent(allowed_tools)
+    config = get_config()
+    agent_cfg = getattr(config, "agent", None)
+    cmd_cfg = getattr(config, "command_tools", None)
+    allow_run_for_subagent = bool(
+        cmd_cfg and getattr(cmd_cfg, "allow_run_for_subagent", False)
+    )
+    subagent_max_seconds = getattr(
+        agent_cfg, "subagent_max_seconds", 600
+    )
+    subagent_max_tokens = getattr(
+        agent_cfg, "subagent_max_tokens", 500_000
+    )
+    subagent_max_iterations_default = getattr(
+        agent_cfg, "subagent_max_iterations", 15
+    )
+    max_iter_override = max_iterations if max_iterations else subagent_max_iterations_default
+
+    # 构造 subagent 的 CoreProfile（mode="sub"，按 allowed_tools 限制 + 时间/token 上限）
+    # 若配置允许，为子 Agent 开放 run_command（执行时仍受 RunCommandTool 内 subagent 白名单限制）
+    effective_allowed = _merge_allowed_tools_for_subagent(
+        allowed_tools, add_run_command=allow_run_for_subagent
+    )
     profile = CoreProfile.default_sub(
         allowed_tools=effective_allowed,
         frontend_id="subagent",
         dialog_window_id=subagent_id,
+        max_iterations_override=max_iter_override,
+        max_total_tokens=subagent_max_tokens,
+        allow_dangerous_commands=allow_run_for_subagent,
     )
     # 24h TTL 保护（任务完成后主动 evict，不依赖 TTL 扫描）
     profile.session_expired_seconds = 86400
@@ -134,8 +184,31 @@ async def _run_subagent_task(
             subagent_id,
             sub_session_id,
         )
-        future = await scheduler.submit(request)
-        run_result = await future
+        submit_handle = await scheduler.submit(request)
+        try:
+            run_result = await scheduler.wait_result(
+                submit_handle, timeout_seconds=float(subagent_max_seconds)
+            )
+        except asyncio.TimeoutError:
+            scheduler.cancel_session_tasks(sub_session_id)
+            log_dir = getattr(
+                getattr(config, "logging", None), "session_log_dir", "./logs/sessions"
+            )
+            timeout_msg = _build_subagent_limit_fail_msg(
+                reason=f"子任务执行超时（已超过 {subagent_max_seconds} 秒），已强制终止",
+                subagent_id=subagent_id,
+                log_dir=log_dir,
+                limit_type="subagent_max_seconds",
+            )
+            logger.warning(
+                "subagent task timed out subagent_id=%s parent_session_id=%s limit_seconds=%s",
+                subagent_id,
+                parent_session_id,
+                subagent_max_seconds,
+                extra={"subagent_id": subagent_id, "parent_session_id": parent_session_id},
+            )
+            registry.on_fail(subagent_id, timeout_msg)
+            return
         result_text = run_result.output_text or ""
         logger.info(
             "subagent task finished successfully subagent_id=%s parent_session_id=%s result_len=%s",
@@ -222,8 +295,8 @@ class CreateSubagentTool(BaseTool):
                         "子 Agent 可用的工具名称列表。留空（null）表示 sub 模式默认工具集。\n\n"
                         "⚠️ 权限配置说明：\n"
                         "- 系统会**自动加入** send_message_to_agent、reply_to_message，确保子 Agent 能向父汇报\n"
-                        "- run_command 在 sub 模式下**始终禁用**（安全策略）\n"
-                        "- 常用组合示例：[\"read_file\", \"search_tools\"] 用于代码/文档分析；[\"web_search\", \"extract_web_content\"] 用于调研"
+                        "- run_command 可由配置 command_tools.allow_run_for_subagent 开启，开启后仅可执行白名单内只读命令（禁止管道、重定向与危险命令）\n"
+                        "- 常用组合示例：[\"read_file\", \"search_tools\"] 用于代码/文档分析；[\"read_file\", \"run_command\"] 需配置开启子 Agent 命令行后使用"
                     ),
                     required=False,
                 ),

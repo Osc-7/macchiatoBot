@@ -222,18 +222,18 @@ class TestWriteFileTool:
         provider.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_write_file_select_mode_denied(self, tmp_path):
-        """select mode 下禁止 write_file"""
+    async def test_write_file_sub_mode_denied(self, tmp_path):
+        """sub 模式下禁止 write_file"""
         config = _make_config(allow_write=True, base_dir=str(tmp_path))
         tool = WriteFileTool(config=config)
         result = await tool.execute(
             path="x.txt",
             content="x",
-            __execution_context__={"tool_mode": "select", "source": "shuiyuan"},
+            __execution_context__={"tool_mode": "sub", "source": "shuiyuan"},
         )
         assert not result.success
         assert result.error == "PERMISSION_DENIED"
-        assert "select mode" in result.message
+        assert "sub 模式" in result.message
         assert not (tmp_path / "x.txt").exists()
 
 
@@ -255,8 +255,8 @@ class TestModifyFileTool:
         assert "content" in param_names
 
     @pytest.mark.asyncio
-    async def test_modify_file_select_mode_denied(self, tmp_path):
-        """select mode 下禁止 modify_file"""
+    async def test_modify_file_sub_mode_denied(self, tmp_path):
+        """sub 模式下禁止 modify_file"""
         (tmp_path / "f.txt").write_text("old", encoding="utf-8")
         config = _make_config(allow_modify=True, base_dir=str(tmp_path))
         tool = ModifyFileTool(config=config)
@@ -265,11 +265,11 @@ class TestModifyFileTool:
             mode="search_replace",
             old_text="old",
             new_text="new",
-            __execution_context__={"tool_mode": "select", "source": "shuiyuan"},
+            __execution_context__={"tool_mode": "sub", "source": "shuiyuan"},
         )
         assert not result.success
         assert result.error == "PERMISSION_DENIED"
-        assert "select mode" in result.message
+        assert "sub 模式" in result.message
         assert (tmp_path / "f.txt").read_text() == "old"
 
     @pytest.mark.asyncio

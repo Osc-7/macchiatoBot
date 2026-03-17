@@ -9,7 +9,7 @@ modify_file 支持三种模式：search_replace（局部替换）、append（追
 from pathlib import Path
 from typing import Awaitable, Callable, Optional, Tuple
 
-from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from agent_core.config import Config, FileToolsConfig, get_config
 
 

@@ -21,7 +21,7 @@ import httpx
 
 from agent_core.config import SjtuJwConfig
 
-from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 
 
 SJTU_UNDERGRAD_COURSE_URL = "https://i.sjtu.edu.cn/kbcx/xskbcx_cxXsKb.html"

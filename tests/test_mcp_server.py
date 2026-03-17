@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from agent_core.tools import ParseTimeTool
+from system.tools.parse_time import ParseTimeTool
 from frontend.mcp_server import ScheduleToolsMCPServer
 
 

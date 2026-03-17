@@ -7,7 +7,7 @@ import pytest
 from typing import Optional
 
 from agent_core.config import CommandToolsConfig, Config, LLMConfig
-from agent_core.tools.command_tools import RunCommandTool
+from system.tools.command_tools import RunCommandTool
 
 
 def _make_config(

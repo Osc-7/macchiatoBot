@@ -34,14 +34,14 @@ from agent_core.tools import (
     SearchToolsTool,
     ToolResult,
     VersionedToolRegistry,
-    WebExtractorTool,
-    WebSearchTool,
 )
-from agent_core.tools.chat_history_tools import (
+from system.tools.chat_history_tools import (
     ChatSearchTool,
     ChatContextTool,
     ChatScrollTool,
 )
+from system.tools.web_extractor_tool import WebExtractorTool
+from system.tools.web_search_tool import WebSearchTool
 from agent_core.memory import (
     WorkingMemory,
     LongTermMemory,

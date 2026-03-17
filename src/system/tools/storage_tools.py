@@ -7,7 +7,7 @@
 from datetime import datetime, date, timedelta
 from typing import Optional, List
 
-from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from agent_core.storage.json_repository import EventRepository, TaskRepository
 from agent_core.models import (
     Event,

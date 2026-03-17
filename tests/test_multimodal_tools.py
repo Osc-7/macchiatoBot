@@ -4,7 +4,7 @@
 
 import pytest
 
-from agent_core.tools.media_tools import AttachMediaTool, AttachImageToReplyTool
+from system.tools.media_tools import AttachMediaTool, AttachImageToReplyTool
 
 
 class TestAttachMediaTool:

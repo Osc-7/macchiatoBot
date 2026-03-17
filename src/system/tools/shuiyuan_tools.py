@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from agent_core.config import Config, ShuiyuanConfig
 
-from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 
 
 def _get_shuiyuan_client(config: Optional[Config]) -> Optional[Any]:

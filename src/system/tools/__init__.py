@@ -2,12 +2,11 @@
 System-level tool registry assembly.
 
 本模块负责在 **system 层** 按类别组装工具，并提供统一的
-`build_tool_registry(profile: CoreProfile) -> VersionedToolRegistry` 工厂函数。
+`build_tool_registry(profile: CoreProfile) -> VersionedToolRegistry` 与 `get_default_tools(config)`。
 
 分类大致为：
 - schedule: 日程 / 任务 / 时间解析 / 规划器
 - file: 文件读写与修改
-- web: （预留，当前由 MCP 工具负责）
 - memory: 长期记忆、内容记忆、chat_history 检索
 - canvas: Canvas 课表与作业同步 / 查询
 - shuiyuan: 水源社区相关工具
@@ -34,62 +33,73 @@ from agent_core.memory import ContentMemory, LongTermMemory
 from agent_core.tools import (
     BaseTool,
     CallToolTool,
+    SearchToolsTool,
+    VersionedToolRegistry,
+)
+from agent_core.memory.chat_history_db import ChatHistoryDB
+
+from .parse_time import ParseTimeTool
+from .planner_tools import GetFreeSlotsTool, PlanTasksTool
+from .storage_tools import (
+    AddEventTool,
+    AddTaskTool,
+    GetEventsTool,
+    GetTasksTool,
+    UpdateEventTool,
+    UpdateTaskTool,
+    DeleteScheduleDataTool,
+)
+from .file_tools import ReadFileTool, WriteFileTool, ModifyFileTool
+from .command_tools import RunCommandTool
+from .memory_tools import (
+    MemorySearchLongTermTool,
+    MemorySearchContentTool,
+    MemoryStoreTool,
+    MemoryIngestTool,
+)
+from .chat_history_tools import (
+    ChatContextTool,
+    ChatScrollTool,
+    ChatSearchTool,
+)
+from .media_tools import AttachMediaTool, AttachImageToReplyTool
+from .canvas_tools import (
+    SyncCanvasTool,
+    FetchCanvasOverviewTool,
+    FetchCanvasCourseContentTool,
+)
+from .automation_tools import (
+    SyncSourcesTool,
+    GetSyncStatusTool,
+    GetDigestTool,
+    ListNotificationsTool,
+    AckNotificationTool,
+    ConfigureAutomationPolicyTool,
+    GetAutomationActivityTool,
+    CreateScheduledJobTool,
+    NotifyOwnerTool,
+)
+from .sjtu_jw_tools import FetchSjtuUndergradScheduleTool
+from .shuiyuan_tools import (
+    ShuiyuanSearchTool,
+    ShuiyuanGetTopicTool,
+    ShuiyuanRetortTool,
+    ShuiyuanPostReplyTool,
+)
+from .subagent_tools import (
     CancelSubagentTool,
     CreateParallelSubagentsTool,
     CreateSubagentTool,
     GetSubagentStatusTool,
     ReplyToMessageTool,
-    SearchToolsTool,
     SendMessageToAgentTool,
-    VersionedToolRegistry,
-    AddEventTool,
-    AddTaskTool,
-    AttachImageToReplyTool,
-    AttachMediaTool,
-    ConfigureAutomationPolicyTool,
-    CreateScheduledJobTool,
-    DeleteScheduleDataTool,
-    GetAutomationActivityTool,
-    GetDigestTool,
-    GetEventsTool,
-    GetFreeSlotsTool,
-    GetSyncStatusTool,
-    GetTasksTool,
-    ListNotificationsTool,
-    MemoryIngestTool,
-    MemorySearchContentTool,
-    MemorySearchLongTermTool,
-    MemoryStoreTool,
-    ModifyFileTool,
-    NotifyOwnerTool,
-    ParseTimeTool,
-    PlanTasksTool,
-    ReadFileTool,
-    RunCommandTool,
-    SyncCanvasTool,
-    SyncSourcesTool,
-    UpdateEventTool,
-    UpdateTaskTool,
-    WriteFileTool,
-    FetchCanvasCourseContentTool,
-    FetchCanvasOverviewTool,
-    FetchSjtuUndergradScheduleTool,
-    ShuiyuanGetTopicTool,
-    ShuiyuanPostReplyTool,
-    ShuiyuanRetortTool,
-    ShuiyuanSearchTool,
-    AckNotificationTool,
 )
-from agent_core.memory.chat_history_db import ChatHistoryDB
-from agent_core.tools.chat_history_tools import (
-    ChatContextTool,
-    ChatScrollTool,
-    ChatSearchTool,
-)
+from .factory import get_default_tools
 
 __all__ = [
     "VersionedToolRegistry",
     "build_tool_registry",
+    "get_default_tools",
 ]
 
 
@@ -106,7 +116,6 @@ def _build_schedule_tools(config: Config) -> List[BaseTool]:
         GetFreeSlotsTool(),
         PlanTasksTool(planning_config=getattr(config, "planning", None)),
     ]
-    # 交大教学信息服务网课表同步工具（基于 Cookie，只读）
     try:
         sjtu_cfg = getattr(config, "sjtu_jw", None)
         if sjtu_cfg is not None:
@@ -119,7 +128,6 @@ def _build_schedule_tools(config: Config) -> List[BaseTool]:
         else:
             tools.append(FetchSjtuUndergradScheduleTool())
     except Exception:
-        # 配置不完整时退化为无参数版本，避免阻塞整个注册表构建
         tools.append(FetchSjtuUndergradScheduleTool())
     return tools
 
@@ -221,7 +229,6 @@ def _build_multimodal_tools(config: Config) -> List[BaseTool]:
 
 
 def _build_canvas_tools(config: Config) -> List[BaseTool]:
-    # Canvas 工具始终注册（便于 search_tools 发现），具体可用性由工具内部校验
     tools: List[BaseTool] = [
         SyncCanvasTool(config=config),
         FetchCanvasOverviewTool(config=config),
@@ -242,14 +249,13 @@ def _build_shuiyuan_tools(config: Config) -> List[BaseTool]:
 
 
 def _build_skill_tools(config: Config) -> List[BaseTool]:
-    """LoadSkillTool：当配置了 skills.enabled 或 skills.cli_dir 时注册。"""
     tools: List[BaseTool] = []
     skills_cfg = getattr(config, "skills", None)
     if skills_cfg is not None and (
         getattr(skills_cfg, "enabled", None) or getattr(skills_cfg, "cli_dir", None)
     ):
         try:
-            from agent_core.tools.load_skill_tool import LoadSkillTool
+            from .load_skill_tool import LoadSkillTool
 
             tools.append(LoadSkillTool(config=config))
         except Exception:
@@ -264,7 +270,6 @@ def _build_automation_tools(
     memory_owner_id: Optional[str] = None,
     memory_source: Optional[str] = None,
 ) -> List[BaseTool]:
-    # 为 CreateScheduledJobTool 注入当前 Core 的权限默认值
     default_memory_owner: Optional[str] = None
     default_core_mode: Optional[str] = None
     if profile is not None:
@@ -302,30 +307,16 @@ def _build_subagent_tools(
     subagent_registry: Optional["SubagentRegistry"] = None,
     core_pool: Optional["CorePool"] = None,
 ) -> List[BaseTool]:
-    """
-    装配 multi-agent 通信工具。
-
-    mode="sub" 时只注册通信工具（send_message_to_agent + reply_to_message），
-    防止子 Agent 无限孵化。
-    mode="full" / 其他时注册完整 5 个工具（需要 registry + core_pool + scheduler）。
-    """
     tools: List[BaseTool] = []
     if subagent_registry is None:
         return tools
 
-    # scheduler 通过 registry 持有（registry.set_scheduler 后绑定），
-    # 工具初始化时直接引用 registry._scheduler（懒取值）。
-    # 为保持解耦，scheduler 在工具 execute() 时通过 registry 获取。
-    # 但 SendMessageToAgentTool / ReplyToMessageTool 需要直接持有 scheduler 引用，
-    # 在 registry 后绑定后从 registry._scheduler 取。
     mode = getattr(profile, "mode", "full") if profile else "full"
 
     if mode == "sub":
-        # Sub agent 只能通信，不能孵化
         tools.append(_LazySchedulerSendMessageTool(subagent_registry))
         tools.append(_LazySchedulerReplyToMessageTool(subagent_registry))
     else:
-        # Full / background agent：完整 5 个工具
         if core_pool is not None:
             tools.append(
                 CreateSubagentTool(
@@ -350,14 +341,6 @@ def _build_subagent_tools(
 
 
 class _SchedulerProxy:
-    """
-    懒加载 scheduler 代理。
-
-    SubagentRegistry.set_scheduler() 在 daemon 初始化末尾调用（后绑定），
-    工具在此之前已被装配。使用代理在 execute() 时才真正访问 scheduler，
-    保证时序正确。
-    """
-
     def __init__(self, registry: "SubagentRegistry") -> None:
         self._registry = registry
 
@@ -381,11 +364,8 @@ class _SchedulerProxy:
 
 
 class _LazySchedulerSendMessageTool(SendMessageToAgentTool):
-    """send_message_to_agent：通过 registry 懒加载 scheduler。"""
-
     def __init__(self, registry: "SubagentRegistry") -> None:
         self._registry = registry
-        # 不调用父类 __init__（scheduler 懒加载）
 
     @property
     def _scheduler(self):  # type: ignore[override]
@@ -395,7 +375,6 @@ class _LazySchedulerSendMessageTool(SendMessageToAgentTool):
         return s
 
     def _check_sender_cancelled(self, sender_session_id: str):
-        """拒绝已取消的 subagent 发送消息（纵深防御）。"""
         if not sender_session_id.startswith("sub:"):
             return None
         subagent_id = sender_session_id[4:]
@@ -411,8 +390,6 @@ class _LazySchedulerSendMessageTool(SendMessageToAgentTool):
 
 
 class _LazySchedulerReplyToMessageTool(ReplyToMessageTool):
-    """reply_to_message：通过 registry 懒加载 scheduler。"""
-
     def __init__(self, registry: "SubagentRegistry") -> None:
         self._registry = registry
 
@@ -433,28 +410,14 @@ def build_tool_registry(
     subagent_registry: Optional["SubagentRegistry"] = None,
     core_pool: Optional["CorePool"] = None,
 ) -> VersionedToolRegistry:
-    """
-    构建带版本号的工具注册表。
-
-    Args:
-        profile: CoreProfile（控制默认注册的工具子集）。
-        config: 可选显式 Config；缺省时使用全局 get_config()。
-
-    Returns:
-        VersionedToolRegistry 实例。
-    """
     cfg = config or get_config()
     registry = VersionedToolRegistry()
 
-    # 分类别装配工具
     tools: List[BaseTool] = []
     tools.extend(_build_schedule_tools(cfg))
     tools.extend(_build_file_tools(cfg))
     tools.extend(_build_command_tools(cfg))
 
-    # 记忆与对话历史工具：
-    # - CoreProfile.memory_enabled=False 时不注入，避免为每个一次性 Core 创建独立 data/memory/{source}/{user}/ 目录
-    # - memory_enabled=True 时启用（包括部分 background Core 显式打开记忆的场景）
     memory_enabled = getattr(profile, "memory_enabled", True)
     if memory_enabled:
         tools.extend(
@@ -493,7 +456,6 @@ def build_tool_registry(
         )
     )
 
-    # 按 CoreProfile 过滤默认可见工具集合
     if profile is not None:
         for tool in tools:
             if profile.is_tool_allowed(tool.name):
@@ -502,7 +464,6 @@ def build_tool_registry(
         for tool in tools:
             registry.register(tool)
 
-    # kernel 模式核心工具：search_tools、call_tool（Kernel 调度时需在此注册）
     agent_cfg = getattr(cfg, "agent", None)
     pinned = list(
         getattr(agent_cfg, "pinned_tools", None) or ["search_tools", "call_tool"]

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 from agent_core.config import CommandToolsConfig, Config, get_config
-from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 
 # 超时后给进程退出留的宽限时间（秒）；超时后仍未退出则 SIGKILL
 _KILL_GRACE_SECONDS = 5

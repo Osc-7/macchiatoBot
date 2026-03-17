@@ -28,7 +28,7 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 
 if TYPE_CHECKING:
     from system.kernel.subagent_registry import SubagentRegistry

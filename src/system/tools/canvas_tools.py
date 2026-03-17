@@ -22,7 +22,7 @@ from agent_core.models import (
 )
 from agent_core.storage.json_repository import EventRepository, TaskRepository
 
-from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 
 
 def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:

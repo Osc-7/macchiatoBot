@@ -36,6 +36,7 @@ class SessionManager:
 
     Usage::
 
+        from system.tools import get_default_tools
         manager = SessionManager(config=config, tools_factory=lambda: get_default_tools(config))
         result = await manager.run_task(task)
         await manager.close_all()

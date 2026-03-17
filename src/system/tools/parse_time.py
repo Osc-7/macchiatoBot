@@ -11,7 +11,7 @@ from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
 
-from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 
 
 @dataclass

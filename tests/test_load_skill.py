@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from agent_core.config import Config, LLMConfig, SkillsConfig
-from agent_core.tools import LoadSkillTool
+from system.tools.load_skill_tool import LoadSkillTool
 from agent_core.prompts.loader import (
     _format_skills_index,
     _parse_skill_frontmatter,

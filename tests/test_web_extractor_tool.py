@@ -4,7 +4,8 @@
 
 import pytest
 
-from agent_core.tools import WebExtractorTool, VersionedToolRegistry
+from agent_core.tools import VersionedToolRegistry
+from system.tools.web_extractor_tool import WebExtractorTool
 
 
 class TestWebExtractorTool:

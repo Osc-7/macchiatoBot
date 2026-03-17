@@ -6,8 +6,8 @@
 
 from typing import List
 
-from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
-from .versioned_registry import VersionedToolRegistry
+from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from agent_core.tools.versioned_registry import VersionedToolRegistry
 
 
 class WebExtractorTool(BaseTool):

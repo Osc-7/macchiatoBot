@@ -17,7 +17,8 @@ from agent_core.config import (
     MultimodalConfig,
     CanvasIntegrationConfig,
 )
-from agent_core.tools import BaseTool, get_default_tools
+from agent_core.tools import BaseTool
+from system.tools import get_default_tools
 from agent_core.interfaces import AgentRunResult
 from frontend.cli.interactive import (
     print_help,

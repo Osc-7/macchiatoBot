@@ -8,7 +8,7 @@ from datetime import datetime, date, timedelta
 from typing import Optional, List
 import uuid
 
-from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from agent_core.config import PlanningConfig
 from agent_core.storage.json_repository import EventRepository, TaskRepository
 from agent_core.models import (

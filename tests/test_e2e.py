@@ -15,15 +15,14 @@ from pathlib import Path
 import pytest
 
 from agent_core.config import PlanningConfig, PlanningWorkingHoursConfig
-from agent_core.tools import (
+from agent_core.tools import ToolRegistry
+from system.tools.storage_tools import (
     AddEventTool,
     AddTaskTool,
     GetEventsTool,
     GetTasksTool,
-    GetFreeSlotsTool,
-    PlanTasksTool,
-    ToolRegistry,
 )
+from system.tools.planner_tools import GetFreeSlotsTool, PlanTasksTool
 from agent_core.storage.json_repository import EventRepository, TaskRepository
 from agent_core.models import (
     TaskStatus,

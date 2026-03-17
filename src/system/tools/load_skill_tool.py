@@ -13,7 +13,7 @@ from agent_core.prompts.loader import (
     load_skill_content,
 )
 
-from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 
 
 class LoadSkillTool(BaseTool):

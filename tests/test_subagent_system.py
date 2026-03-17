@@ -334,7 +334,7 @@ class TestInjectTurn:
 class TestCancelSubagentTool:
     @pytest.mark.asyncio
     async def test_cancel_existing_running(self):
-        from agent_core.tools.subagent_tools import CancelSubagentTool
+        from system.tools.subagent_tools import CancelSubagentTool
         from system.kernel.subagent_registry import SubagentInfo, SubagentRegistry
 
         registry = SubagentRegistry()
@@ -353,7 +353,7 @@ class TestCancelSubagentTool:
 
     @pytest.mark.asyncio
     async def test_cancel_nonexistent(self):
-        from agent_core.tools.subagent_tools import CancelSubagentTool
+        from system.tools.subagent_tools import CancelSubagentTool
         from system.kernel.subagent_registry import SubagentRegistry
 
         registry = SubagentRegistry()
@@ -365,7 +365,7 @@ class TestCancelSubagentTool:
 
     @pytest.mark.asyncio
     async def test_cancel_missing_param(self):
-        from agent_core.tools.subagent_tools import CancelSubagentTool
+        from system.tools.subagent_tools import CancelSubagentTool
         from system.kernel.subagent_registry import SubagentRegistry
 
         registry = SubagentRegistry()
@@ -379,7 +379,7 @@ class TestCancelSubagentTool:
 class TestSendMessageToAgentTool:
     @pytest.mark.asyncio
     async def test_send_message_success(self):
-        from agent_core.tools.subagent_tools import SendMessageToAgentTool
+        from system.tools.subagent_tools import SendMessageToAgentTool
 
         mock_scheduler = MagicMock()
         mock_scheduler.inject_turn = MagicMock()
@@ -398,7 +398,7 @@ class TestSendMessageToAgentTool:
 
     @pytest.mark.asyncio
     async def test_send_message_missing_session(self):
-        from agent_core.tools.subagent_tools import SendMessageToAgentTool
+        from system.tools.subagent_tools import SendMessageToAgentTool
 
         tool = SendMessageToAgentTool(scheduler=MagicMock())
         result = await tool.execute(content="Hello")
@@ -407,7 +407,7 @@ class TestSendMessageToAgentTool:
 
     @pytest.mark.asyncio
     async def test_send_message_with_require_reply(self):
-        from agent_core.tools.subagent_tools import SendMessageToAgentTool
+        from system.tools.subagent_tools import SendMessageToAgentTool
         from agent_core.kernel_interface.action import AgentMessage
 
         captured_requests = []
@@ -467,7 +467,7 @@ class TestSendMessageToAgentTool:
 class TestReplyToMessageTool:
     @pytest.mark.asyncio
     async def test_reply_success(self):
-        from agent_core.tools.subagent_tools import ReplyToMessageTool
+        from system.tools.subagent_tools import ReplyToMessageTool
         from agent_core.kernel_interface.action import AgentMessage
 
         captured = []
@@ -492,7 +492,7 @@ class TestReplyToMessageTool:
 
     @pytest.mark.asyncio
     async def test_reply_missing_correlation_id(self):
-        from agent_core.tools.subagent_tools import ReplyToMessageTool
+        from system.tools.subagent_tools import ReplyToMessageTool
 
         tool = ReplyToMessageTool(scheduler=MagicMock())
         result = await tool.execute(
@@ -661,7 +661,7 @@ class TestToolRegistration:
 class TestGetSubagentStatusTool:
     @pytest.mark.asyncio
     async def test_get_status_running(self):
-        from agent_core.tools.subagent_tools import GetSubagentStatusTool
+        from system.tools.subagent_tools import GetSubagentStatusTool
         from system.kernel.subagent_registry import SubagentRegistry, SubagentInfo
 
         registry = SubagentRegistry()
@@ -680,7 +680,7 @@ class TestGetSubagentStatusTool:
 
     @pytest.mark.asyncio
     async def test_get_status_completed(self):
-        from agent_core.tools.subagent_tools import GetSubagentStatusTool
+        from system.tools.subagent_tools import GetSubagentStatusTool
         from system.kernel.subagent_registry import SubagentRegistry, SubagentInfo
 
         registry = SubagentRegistry()
@@ -710,7 +710,7 @@ class TestGetSubagentStatusTool:
 
     @pytest.mark.asyncio
     async def test_get_status_nonexistent(self):
-        from agent_core.tools.subagent_tools import GetSubagentStatusTool
+        from system.tools.subagent_tools import GetSubagentStatusTool
         from system.kernel.subagent_registry import SubagentRegistry
 
         tool = GetSubagentStatusTool(registry=SubagentRegistry())
@@ -721,7 +721,7 @@ class TestGetSubagentStatusTool:
 
 class TestMergeAllowedTools:
     def test_merge_adds_communication_tools(self):
-        from agent_core.tools.subagent_tools import _merge_allowed_tools_for_subagent
+        from system.tools.subagent_tools import _merge_allowed_tools_for_subagent
 
         merged = _merge_allowed_tools_for_subagent(["read_file", "search_tools"])
         assert "send_message_to_agent" in merged
@@ -730,12 +730,12 @@ class TestMergeAllowedTools:
         assert "search_tools" in merged
 
     def test_merge_none_returns_none(self):
-        from agent_core.tools.subagent_tools import _merge_allowed_tools_for_subagent
+        from system.tools.subagent_tools import _merge_allowed_tools_for_subagent
 
         assert _merge_allowed_tools_for_subagent(None) is None
 
     def test_merge_no_duplicate_if_already_present(self):
-        from agent_core.tools.subagent_tools import _merge_allowed_tools_for_subagent
+        from system.tools.subagent_tools import _merge_allowed_tools_for_subagent
 
         merged = _merge_allowed_tools_for_subagent(["send_message_to_agent"])
         assert merged.count("send_message_to_agent") == 1
@@ -750,7 +750,7 @@ class TestMergeAllowedTools:
 class TestCreateSubagentTool:
     @pytest.mark.asyncio
     async def test_create_subagent_missing_task(self):
-        from agent_core.tools.subagent_tools import CreateSubagentTool
+        from system.tools.subagent_tools import CreateSubagentTool
         from system.kernel.subagent_registry import SubagentRegistry
 
         registry = SubagentRegistry()
@@ -768,7 +768,7 @@ class TestCreateSubagentTool:
 
     @pytest.mark.asyncio
     async def test_create_subagent_registers_info(self):
-        from agent_core.tools.subagent_tools import CreateSubagentTool
+        from system.tools.subagent_tools import CreateSubagentTool
         from system.kernel.subagent_registry import SubagentRegistry
 
         registry = SubagentRegistry()
@@ -803,7 +803,7 @@ class TestCreateSubagentTool:
 class TestCreateParallelSubagentsTool:
     @pytest.mark.asyncio
     async def test_parallel_creates_multiple(self):
-        from agent_core.tools.subagent_tools import CreateParallelSubagentsTool
+        from system.tools.subagent_tools import CreateParallelSubagentsTool
         from system.kernel.subagent_registry import SubagentRegistry
 
         registry = SubagentRegistry()
@@ -833,7 +833,7 @@ class TestCreateParallelSubagentsTool:
 
     @pytest.mark.asyncio
     async def test_parallel_missing_tasks(self):
-        from agent_core.tools.subagent_tools import CreateParallelSubagentsTool
+        from system.tools.subagent_tools import CreateParallelSubagentsTool
         from system.kernel.subagent_registry import SubagentRegistry
 
         registry = SubagentRegistry()

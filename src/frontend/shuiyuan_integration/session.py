@@ -24,8 +24,8 @@ from frontend.shuiyuan_integration.reply import AUTO_REPLY_MARK
 from agent_core import AgentCore
 from agent_core.content import ContentReference
 from agent_core.interfaces import AgentRunInput
-from agent_core.tools import (
-    AttachImageToReplyTool,
+from system.tools.media_tools import AttachImageToReplyTool
+from system.tools.shuiyuan_tools import (
     ShuiyuanBrowseTopicTool,
     ShuiyuanGetCategoriesTool,
     ShuiyuanGetCategoryTopicsTool,

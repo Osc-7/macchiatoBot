@@ -11,9 +11,11 @@ from typing import List, Optional
 
 from agent_core.config import Config
 from agent_core.tools.base import BaseTool
-from agent_core.tools.parse_time import ParseTimeTool
-from agent_core.tools.planner_tools import GetFreeSlotsTool, PlanTasksTool
-from agent_core.tools.storage_tools import (
+from agent_core.memory import ContentMemory, LongTermMemory
+
+from .parse_time import ParseTimeTool
+from .planner_tools import GetFreeSlotsTool, PlanTasksTool
+from .storage_tools import (
     AddEventTool,
     AddTaskTool,
     GetEventsTool,
@@ -22,22 +24,22 @@ from agent_core.tools.storage_tools import (
     UpdateTaskTool,
     DeleteScheduleDataTool,
 )
-from agent_core.tools.file_tools import ReadFileTool, WriteFileTool, ModifyFileTool
-from agent_core.tools.command_tools import RunCommandTool
-from agent_core.tools.load_skill_tool import LoadSkillTool
-from agent_core.tools.memory_tools import (
+from .file_tools import ReadFileTool, WriteFileTool, ModifyFileTool
+from .command_tools import RunCommandTool
+from .load_skill_tool import LoadSkillTool
+from .memory_tools import (
     MemorySearchLongTermTool,
     MemorySearchContentTool,
     MemoryStoreTool,
     MemoryIngestTool,
 )
-from agent_core.tools.media_tools import AttachMediaTool, AttachImageToReplyTool
-from agent_core.tools.canvas_tools import (
+from .media_tools import AttachMediaTool, AttachImageToReplyTool
+from .canvas_tools import (
     SyncCanvasTool,
     FetchCanvasOverviewTool,
     FetchCanvasCourseContentTool,
 )
-from agent_core.tools.automation_tools import (
+from .automation_tools import (
     SyncSourcesTool,
     GetSyncStatusTool,
     GetDigestTool,
@@ -48,8 +50,8 @@ from agent_core.tools.automation_tools import (
     CreateScheduledJobTool,
     NotifyOwnerTool,
 )
-from agent_core.tools.sjtu_jw_tools import FetchSjtuUndergradScheduleTool
-from agent_core.tools.shuiyuan_tools import (
+from .sjtu_jw_tools import FetchSjtuUndergradScheduleTool
+from .shuiyuan_tools import (
     ShuiyuanSearchTool,
     ShuiyuanGetTopicTool,
     ShuiyuanRetortTool,
@@ -60,7 +62,6 @@ from agent_core.tools.shuiyuan_tools import (
     ShuiyuanGetCategoryTopicsTool,
     ShuiyuanBrowseTopicTool,
 )
-from agent_core.memory import ContentMemory, LongTermMemory
 
 
 def get_default_tools(

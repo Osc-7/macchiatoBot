@@ -8,7 +8,7 @@ from system.automation.agent_task import AgentTask
 from system.automation.logging_utils import AutomationTaskLogger
 from system.automation.repositories import AutomationPolicyRepository
 from system.automation.runtime import reset_runtime
-from agent_core.tools.automation_tools import (
+from system.tools.automation_tools import (
     AckNotificationTool,
     ConfigureAutomationPolicyTool,
     CreateScheduledJobTool,

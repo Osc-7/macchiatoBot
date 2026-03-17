@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from agent_core.memory import ContentMemory, LongTermMemory
 
-from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 
 
 class MemorySearchLongTermTool(BaseTool):

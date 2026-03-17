@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 import pytest
 
 from agent_core.config import SjtuJwConfig
-from agent_core.tools.sjtu_jw_tools import (
+from system.tools.sjtu_jw_tools import (
     FetchSjtuUndergradScheduleTool,
     SjtuJwClientError,
     guess_academic_year_and_term,

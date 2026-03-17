@@ -15,7 +15,7 @@ from system.automation.runtime import get_runtime
 from system.automation.types import AutomationPolicy, JobDefinition
 from agent_core.config import get_config
 
-from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 
 
 class SyncSourcesTool(BaseTool):

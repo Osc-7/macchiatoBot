@@ -12,7 +12,7 @@ from agent_core.config import (
     PlanningWorkingHoursConfig,
     PlanningWeightsConfig,
 )
-from agent_core.tools.planner_tools import GetFreeSlotsTool, PlanTasksTool
+from system.tools.planner_tools import GetFreeSlotsTool, PlanTasksTool
 from agent_core.storage.json_repository import EventRepository, TaskRepository
 from agent_core.models import Event, Task, EventStatus, TaskStatus, TaskPriority
 

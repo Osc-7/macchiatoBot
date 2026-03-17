@@ -780,30 +780,19 @@ async def run_interactive_loop(agent: Any) -> str:
                         )
 
                 is_processing = True
-                if hasattr(agent, "run_turn"):
-                    hooks = AgentHooks(
-                        on_assistant_delta=on_stream_delta,
-                        on_reasoning_delta=on_reasoning_delta,
-                        on_trace_event=on_trace_event,
-                    )
-                    processing_task = asyncio.create_task(
-                        agent.run_turn(AgentRunInput(text=user_input), hooks=hooks)
-                    )
-                    _raw_result = await processing_task
-                    resp_text = getattr(_raw_result, "output_text", None)
-                    response = (
-                        resp_text if isinstance(resp_text, str) else str(_raw_result)
-                    )
-                else:
-                    processing_task = asyncio.create_task(
-                        agent.process_input(
-                            user_input,
-                            on_stream_delta=on_stream_delta,
-                            on_reasoning_delta=on_reasoning_delta,
-                            on_trace_event=on_trace_event,
-                        )
-                    )
-                    response = await processing_task
+                hooks = AgentHooks(
+                    on_assistant_delta=on_stream_delta,
+                    on_reasoning_delta=on_reasoning_delta,
+                    on_trace_event=on_trace_event,
+                )
+                processing_task = asyncio.create_task(
+                    agent.run_turn(AgentRunInput(text=user_input), hooks=hooks)
+                )
+                _raw_result = await processing_task
+                resp_text = getattr(_raw_result, "output_text", None)
+                response = (
+                    resp_text if isinstance(resp_text, str) else str(_raw_result)
+                )
                 _stop_spinner()
                 _flush_reasoning_buffer()
                 if spinner_task is not None:

@@ -91,17 +91,6 @@ def _build_thread_section(posts: List[Dict[str, Any]]) -> str:
     return "## 该楼最近帖子\n\n" + "\n".join(lines) + "\n\n"
 
 
-def _build_chat_history_section(username: str, chat_rows: List[Dict[str, Any]]) -> str:
-    """
-    旧版水源记忆系统使用 ShuiyuanDB 维护 per-user 聊天历史，并将最近对话
-    以「你与该用户的聊天历史（节选）」形式直接注入 prompt。
-
-    现在已统一改为依赖主 Agent 的工作记忆 + 长期记忆（ChatHistoryDB + MEMORY），
-    这里不再默认拼接该段，保留函数只是为了兼容后续可能的特化需求。
-    """
-    return ""
-
-
 def _build_trigger_footer(
     *,
     username: str,
@@ -147,7 +136,6 @@ def build_shuiyuan_prompt_from_context(
             "reply_to_post_id": 8383407,           # 可选
             "topic_op": {...},                     # 可选，话题主楼（如有则优先使用）
             "thread_posts": [ {...}, ... ],        # get_topic_recent_posts 或 connector 传入
-            # "chat_rows": [ {...}, ... ],         # 旧版 ShuiyuanDB 聊天记录（已不再用于 prompt）
         }
     """
     username = str(context.get("username") or "").strip()
@@ -158,9 +146,6 @@ def build_shuiyuan_prompt_from_context(
     posts = context.get("thread_posts") or []
     if not isinstance(posts, list):
         posts = []
-    chat_rows = context.get("chat_rows") or []
-    if not isinstance(chat_rows, list):
-        chat_rows = []
 
     parts: List[str] = []
     if username:
@@ -178,8 +163,6 @@ def build_shuiyuan_prompt_from_context(
     thread_section = _build_thread_section(posts)
     if thread_section:
         parts.append(thread_section)
-
-    # 旧版「你与该用户的聊天历史」段已弃用，交由主 Agent 记忆系统统一注入。
 
     footer = _build_trigger_footer(
         username=username,

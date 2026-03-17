@@ -68,7 +68,7 @@ class CorePool:
 
     Usage::
 
-        pool = CorePool(config=config, tools_factory=lambda: get_tools(config))
+        pool = CorePool(config=config)
         agent = await pool.acquire("sess-001")
         # ... 使用 agent ...
         pool.touch("sess-001")       # 刷新活跃时间
@@ -78,7 +78,6 @@ class CorePool:
     def __init__(
         self,
         config: Optional["Config"] = None,
-        tools_factory: Optional[Callable[[], List["BaseTool"]]] = None,
         max_sessions: int = 100,
         kernel: Optional[Any] = None,
         summarizer: Optional[Any] = None,
@@ -88,9 +87,6 @@ class CorePool:
         from agent_core.config import get_config
 
         self._config = config or get_config()
-        self._tools_factory = (
-            tools_factory  # 已弃用，优先使用 system.tools.build_tool_registry
-        )
         self._max_sessions = max_sessions
         self._kernel = kernel  # AgentKernel 实例，用于 kill()
         self._summarizer = summarizer  # SessionSummarizer 实例，用于摘要持久化
@@ -510,8 +506,6 @@ class CorePool:
         # 导致 search_tools 更新的工作集被 InternalLoader 忽略。
         # 解决方案：过滤掉这两个工具，AgentCore.__init__ 会用正确的 working_set 重新注册它们。
         tools = [t for t in tools if t.name not in {"search_tools", "call_tool"}]
-        if not tools and self._tools_factory:
-            tools = self._tools_factory()
         # 是否为该 Core 启用本地记忆库：默认跟随配置，
         # 但允许 CoreProfile（如 cron/heartbeat）按 Core 粒度关闭，避免创建一次性 owner 目录。
         memory_enabled = getattr(profile, "memory_enabled", True)

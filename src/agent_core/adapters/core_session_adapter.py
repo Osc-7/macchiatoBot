@@ -81,16 +81,9 @@ class CoreSessionAdapter:
         wrapped_hooks = self._wrap_hooks_with_events(hooks)
 
         try:
-            if self._is_kernel_compatible():
-                # 新架构路径：直接使用 AgentKernel 驱动 run_loop()
-                run_result = await self._run_via_kernel(
-                    agent_input, content_items, wrapped_hooks
-                )
-            else:
-                # 兼容路径：回退到 process_input()（用于 mock/非 AgentCore 场景）
-                run_result = await self._run_via_process_input(
-                    agent_input, content_items, wrapped_hooks
-                )
+            run_result = await self._run_via_kernel(
+                agent_input, content_items, wrapped_hooks
+            )
 
             await self._emit_event(
                 hooks,
@@ -116,17 +109,6 @@ class CoreSessionAdapter:
             )
             raise
 
-    def _is_kernel_compatible(self) -> bool:
-        """判断底层 agent 是否支持新的 Kernel 接口（真实 AgentCore，而非 mock）。"""
-        # 检查 _current_turn_id 是否为真实整数（MagicMock 属性不会是 int）
-        turn_id = getattr(self._agent, "_current_turn_id", None)
-        return (
-            isinstance(turn_id, int)
-            and callable(getattr(self._agent, "run_loop", None))
-            and hasattr(self._agent, "_llm_client")
-            and hasattr(self._agent, "_tool_registry")
-        )
-
     async def _run_via_kernel(
         self,
         agent_input: AgentRunInput,
@@ -149,42 +131,6 @@ class CoreSessionAdapter:
         finally:
             await self._agent._finalize_turn(run_result, summary_task, summary_recent_start)
         return run_result
-
-    async def _run_via_process_input(
-        self,
-        agent_input: AgentRunInput,
-        content_items: List[Dict[str, Any]],
-        hooks: AgentHooks,
-    ) -> AgentRunResult:
-        """兼容路径：通过 process_input() 运行（支持 mock/非 AgentCore）。"""
-
-        async def on_stream_delta(delta: str) -> None:
-            if hooks.on_assistant_delta:
-                maybe = hooks.on_assistant_delta(delta)
-                if inspect.isawaitable(maybe):
-                    await maybe
-
-        async def on_reasoning_delta(delta: str) -> None:
-            if hooks.on_reasoning_delta:
-                maybe = hooks.on_reasoning_delta(delta)
-                if inspect.isawaitable(maybe):
-                    await maybe
-
-        async def on_trace_event(event: Dict[str, Any]) -> None:
-            if hooks.on_trace_event:
-                maybe = hooks.on_trace_event(event)
-                if inspect.isawaitable(maybe):
-                    await maybe
-
-        output = await self._agent.process_input(
-            agent_input.text,
-            content_items=content_items,
-            on_stream_delta=on_stream_delta,
-            on_reasoning_delta=on_reasoning_delta,
-            on_trace_event=on_trace_event,
-        )
-        attachments = getattr(self._agent, "get_outgoing_attachments", lambda: [])()
-        return AgentRunResult(output_text=output, attachments=attachments)
 
     def _wrap_hooks_with_events(self, hooks: AgentHooks) -> AgentHooks:
         """

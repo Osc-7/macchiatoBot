@@ -13,62 +13,89 @@ from system.automation import (
     AutomationIPCServer,
     SessionRegistry,
 )
+from system.kernel import CorePool
 from agent_core.interfaces import AgentHooks, AgentRunInput, AgentRunResult
+
+
+def _make_ipc_mock_scheduler(work_result: AgentRunResult, work_usage: dict):
+    """创建支持 hooks 调用的 mock scheduler，用于 IPC 测试。"""
+    last_request = []
+
+    async def _submit(request):
+        last_request.append(request)
+        sid = getattr(request, "session_id", "cli:default")
+
+        class Handle:
+            request_id = getattr(request, "request_id", "mock-req-id")
+            session_id = sid
+
+            def __await__(self):
+                return _wait_result(self).__await__()
+
+        return Handle()
+
+    async def _wait_result(handle):
+        req = last_request[-1] if last_request else None
+        metadata = getattr(req, "metadata", {}) or {}
+        hooks = metadata.get("_hooks")
+        if hooks:
+            if hooks.on_trace_event:
+                await hooks.on_trace_event(
+                    {"type": "llm_request", "iteration": 1, "tool_count": 3}
+                )
+            if hooks.on_reasoning_delta:
+                await hooks.on_reasoning_delta("thinking...")
+            if hooks.on_assistant_delta:
+                await hooks.on_assistant_delta("hello ")
+                await hooks.on_assistant_delta("world")
+        return work_result
+
+    work_agent = MagicMock()
+    work_agent.get_token_usage = MagicMock(return_value=work_usage)
+    work_agent.get_turn_count = MagicMock(return_value=1)
+    work_agent.clear_context = MagicMock()
+    work_entry = MagicMock()
+    work_entry.agent = work_agent
+
+    mock_pool = MagicMock(spec=CorePool)
+    mock_pool.list_sessions = MagicMock(return_value=["cli:default", "cli:work"])
+    # has_session 返回 False，使 switch_session 时 created=True（session 由 gateway 创建）
+    mock_pool.has_session = MagicMock(return_value=False)
+    mock_pool.evict = AsyncMock()
+    mock_pool.get_entry = MagicMock(
+        side_effect=lambda sid: work_entry if sid == "cli:work" else None
+    )
+
+    mock_scheduler = MagicMock()
+    mock_scheduler.submit = AsyncMock(side_effect=_submit)
+    mock_scheduler.wait_result = AsyncMock(side_effect=_wait_result)
+    mock_scheduler.core_pool = mock_pool
+    mock_scheduler.subscribe_out = MagicMock(return_value="mock-sub-id")
+    mock_scheduler.unsubscribe_out = MagicMock()
+
+    return mock_scheduler, work_agent
 
 
 @pytest.mark.asyncio
 async def test_ipc_server_client_run_turn_and_session_commands(tmp_path: Path):
     default_core = AsyncMock()
-    default_core.run_turn = AsyncMock(
-        return_value=AgentRunResult(output_text="default")
-    )
     default_core.get_session_state = MagicMock(return_value=MagicMock(turn_count=0))
-    default_core.get_token_usage = MagicMock(
-        return_value={
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "call_count": 0,
-            "cost_yuan": 0.0,
-        }
-    )
-    default_core.clear_context = MagicMock()
     default_core.close = AsyncMock()
 
-    work_core = AsyncMock()
+    work_result = AgentRunResult(output_text="work-ok")
+    work_usage = {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "call_count": 1,
+        "cost_yuan": 0.0,
+    }
+    scheduler, work_agent = _make_ipc_mock_scheduler(work_result, work_usage)
 
-    async def _run_turn(agent_input, hooks=None):
-        if hooks and hooks.on_trace_event:
-            await hooks.on_trace_event(
-                {"type": "llm_request", "iteration": 1, "tool_count": 3}
-            )
-        if hooks and hooks.on_reasoning_delta:
-            await hooks.on_reasoning_delta("thinking...")
-        if hooks and hooks.on_assistant_delta:
-            await hooks.on_assistant_delta("hello ")
-            await hooks.on_assistant_delta("world")
-        return AgentRunResult(output_text="work-ok")
-
-    work_core.run_turn = AsyncMock(side_effect=_run_turn)
-    work_core.get_session_state = MagicMock(return_value=MagicMock(turn_count=1))
-    work_core.get_token_usage = MagicMock(
-        return_value={
-            "prompt_tokens": 10,
-            "completion_tokens": 5,
-            "total_tokens": 15,
-            "call_count": 1,
-            "cost_yuan": 0.0,
-        }
-    )
-    work_core.clear_context = MagicMock()
-    work_core.activate_session = AsyncMock(return_value=None)
-    work_core.close = AsyncMock()
-
-    factory = AsyncMock(return_value=work_core)
     gateway = AutomationCoreGateway(
         default_core,
+        kernel_scheduler=scheduler,
         session_id="cli:default",
-        session_factory=factory,
         session_registry=SessionRegistry(str(tmp_path / "sessions.db")),
     )
 
@@ -119,7 +146,7 @@ async def test_ipc_server_client_run_turn_and_session_commands(tmp_path: Path):
         assert usage["total_tokens"] == 15
 
         await client.clear_context()
-        work_core.clear_context.assert_called_once()
+        work_agent.clear_context.assert_called_once()
     finally:
         await client.close()
         await server.stop()
@@ -130,12 +157,10 @@ async def test_ipc_server_client_run_turn_and_session_commands(tmp_path: Path):
 async def test_ipc_session_delete_rejected_when_session_is_active_for_any_client(
     tmp_path: Path,
 ):
+    from tests.test_automation_core_gateway import _make_mock_scheduler
+
     default_core = AsyncMock()
-    default_core.run_turn = AsyncMock(
-        return_value=AgentRunResult(output_text="default")
-    )
     default_core.get_session_state = MagicMock(return_value=MagicMock(turn_count=0))
-    default_core.get_token_usage = MagicMock(return_value={})
     default_core.close = AsyncMock()
 
     work_core = AsyncMock()
@@ -145,8 +170,10 @@ async def test_ipc_session_delete_rejected_when_session_is_active_for_any_client
     work_core.close = AsyncMock()
     factory = AsyncMock(return_value=work_core)
 
+    scheduler = _make_mock_scheduler()
     gateway = AutomationCoreGateway(
         default_core,
+        kernel_scheduler=scheduler,
         session_id="cli:default",
         session_factory=factory,
         session_registry=SessionRegistry(str(tmp_path / "sessions.db")),

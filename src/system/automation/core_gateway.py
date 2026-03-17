@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Awaitable, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional
 
 from .session_registry import SessionRegistry
 from agent_core.interfaces import (
@@ -15,16 +16,15 @@ from agent_core.interfaces import (
     AgentRunInput,
     AgentRunResult,
     CoreSession,
-    ExpireSessionCommand,
     InjectMessageCommand,
-    RunTurnCommand,
-    merge_run_metadata,
 )
 
 if TYPE_CHECKING:
     from system.kernel import KernelScheduler
 
 logger = logging.getLogger(__name__)
+
+_PUSH_BUFFER_MAXLEN = 50
 
 
 CoreSessionFactory = Callable[[str], CoreSession | Awaitable[CoreSession]]
@@ -40,13 +40,8 @@ class AutomationCoreGateway:
     """
     进程内 Automation 网关。
 
-    将 CLI / 其他 channel 的输入先转成 Automation Command，再下发到 CoreSession。
-
-    支持两种运行模式：
-    1. 直接模式（默认）：直接 await CoreSession.run_turn()，保持原有行为。
-    2. Kernel 调度模式：通过 attach_scheduler() 挂载 KernelScheduler，
-       将请求投入 InputQueue，由 Scheduler 异步分发，支持跨 session 真并发
-       和 OutputBus 结果等待。
+    将 CLI / 其他 channel 的输入转成 KernelRequest，通过 KernelScheduler 下发。
+    请求投入 InputQueue，由 Scheduler 异步分发，支持跨 session 真并发和 OutputBus 结果等待。
 
     IPC 协议（AutomationIPCServer）和外部接口完全不变。
     """
@@ -55,15 +50,15 @@ class AutomationCoreGateway:
         self,
         core_session: CoreSession,
         *,
+        kernel_scheduler: "KernelScheduler",
         session_id: str = "cli:default",
         policy: Optional[SessionCutPolicy] = None,
         session_factory: Optional[CoreSessionFactory] = None,
         owner_id: str = "root",
         source: str = "cli",
         session_registry: Optional[SessionRegistry] = None,
-        kernel_scheduler: Optional["KernelScheduler"] = None,
     ):
-        self._kernel_scheduler: Optional["KernelScheduler"] = kernel_scheduler
+        self._kernel_scheduler: "KernelScheduler" = kernel_scheduler
         self._sessions: Dict[str, CoreSession] = {session_id: core_session}
         self._owned_sessions: set[str] = set()
         self._active_session_id = session_id
@@ -73,22 +68,41 @@ class AutomationCoreGateway:
         now = datetime.now()
         self._last_activity: Dict[str, datetime] = {session_id: now}
         self._session_factory = session_factory
-        self._session_lock = asyncio.Lock()
         self._session_registry = session_registry or SessionRegistry()
         # 在 upsert_session（会重置 is_expired=0）之前先记录过期状态，供 activate_primary_session 使用
         self._initial_session_was_expired: bool = self._session_registry.is_expired(
             self._owner_id, self._source, session_id
         )
         self._session_registry.upsert_session(self._owner_id, self._source, session_id)
+        # 本地输出缓冲：通过 OutputBus subscriber 接收非 submit 的结果（inject_turn 等）
+        self._pending_submits: set[str] = set()
+        self._push_buffers: Dict[str, deque] = {}
+        self._subscriptions: Dict[str, str] = {}  # session_id -> subscription_id
 
     @property
     def config(self):
-        # 兼容 interactive.py 现有读取方式
-        return getattr(self._active_session(), "config", None)
+        # 兼容 interactive.py 现有读取方式；active 在 pool 时从 entry 取 config
+        entry = self._kernel_scheduler.core_pool.get_entry(self._active_session_id)
+        if entry is not None:
+            return getattr(entry.agent, "config", None)
+        session = self._sessions.get(self._active_session_id)
+        if session is not None:
+            return getattr(session, "config", None)
+        fallback = next(iter(self._sessions.values()), None)
+        return getattr(fallback, "config", None) if fallback else None
 
     @property
     def raw_core_session(self) -> CoreSession:
-        return self._active_session()
+        session = self._sessions.get(self._active_session_id)
+        if session is not None:
+            return session
+        entry = self._kernel_scheduler.core_pool.get_entry(self._active_session_id)
+        if entry is not None:
+            return entry.agent  # AgentCore 满足 config 等基础接口
+        fallback = next(iter(self._sessions.values()), None)
+        if fallback is not None:
+            return fallback
+        raise RuntimeError(f"active session not found: {self._active_session_id}")
 
     @property
     def active_session_id(self) -> str:
@@ -109,7 +123,9 @@ class AutomationCoreGateway:
         用于取代调用方直接调用 core_session.activate_session(session_id)，
         确保过期会话以空上下文启动，而非全量重放历史。
         """
-        session = self._active_session()
+        session = self._sessions.get(self._active_session_id)
+        if session is None:
+            return
         activate = getattr(session, "activate_session", None)
         if not callable(activate):
             return
@@ -126,11 +142,10 @@ class AutomationCoreGateway:
 
     def list_sessions(self) -> list[str]:
         seen = set(self._sessions.keys())
-        if self._kernel_scheduler is not None:
-            try:
-                seen.update(self._kernel_scheduler.core_pool.list_sessions())
-            except Exception:
-                pass
+        try:
+            seen.update(self._kernel_scheduler.core_pool.list_sessions())
+        except Exception:
+            pass
         for sid in self._session_registry.list_sessions(self._owner_id, self._source):
             seen.add(sid)
         return sorted(seen)
@@ -153,25 +168,20 @@ class AutomationCoreGateway:
                 self._owner_id, self._source, session_id
             )
         )
-        if self._kernel_scheduler is not None:
-            try:
-                existed_any = (
-                    existed_any
-                    or self._kernel_scheduler.core_pool.has_session(session_id)
-                )
-            except Exception:
-                pass
+        try:
+            existed_any = (
+                existed_any
+                or self._kernel_scheduler.core_pool.has_session(session_id)
+            )
+        except Exception:
+            pass
         if session_id not in self._sessions:
             if not create_if_missing and not existed_any:
                 raise KeyError(f"session not found: {session_id}")
-            # scheduler 模式下，CorePool 会在首个请求时懒加载，不强制创建本地 CoreSession。
-            if self._kernel_scheduler is None:
-                await self._create_session(session_id)
-            else:
-                self._session_registry.upsert_session(
-                    self._owner_id, self._source, session_id
-                )
-                self._last_activity[session_id] = datetime.now()
+            self._session_registry.upsert_session(
+                self._owner_id, self._source, session_id
+            )
+            self._last_activity[session_id] = datetime.now()
         return not existed_any
 
     async def switch_session(
@@ -186,58 +196,81 @@ class AutomationCoreGateway:
                 self._owner_id, self._source, session_id
             )
         )
+        try:
+            existed_any = (
+                existed_any
+                or self._kernel_scheduler.core_pool.has_session(session_id)
+            )
+        except Exception:
+            pass
         created = False
         if session_id not in self._sessions:
-            if not create_if_missing:
-                if not existed_any:
-                    raise KeyError(f"session not found: {session_id}")
-            await self._create_session(session_id)
-            created = not existed_any
+            if not create_if_missing and not existed_any:
+                raise KeyError(f"session not found: {session_id}")
+            if not existed_any:
+                self._session_registry.upsert_session(
+                    self._owner_id, self._source, session_id
+                )
+                created = True
+            self._last_activity[session_id] = datetime.now()
         self._active_session_id = session_id
         self.mark_activity(session_id)
         return created
 
     @property
     def has_scheduler(self) -> bool:
-        """是否已挂载 KernelScheduler（scheduler 模式下由 KernelScheduler._ttl_loop() 统一管理 session 生命周期）。"""
-        return self._kernel_scheduler is not None
+        """始终为 True；session 生命周期由 KernelScheduler._ttl_loop() 统一管理。"""
+        return True
 
-    def attach_scheduler(self, scheduler: "KernelScheduler") -> None:
-        """
-        挂载 KernelScheduler，启用异步队列调度模式。
+    def _ensure_subscribed(self, session_id: str) -> None:
+        """确保已订阅指定 session 的 OutputBus 广播。"""
+        if session_id in self._subscriptions:
+            return
+        sub_id = self._kernel_scheduler.subscribe_out(
+            session_id,
+            lambda req_id, result, _sid=session_id: self._on_session_output(
+                _sid, req_id, result
+            ),
+        )
+        self._subscriptions[session_id] = sub_id
 
-        挂载后，run_turn() 和 inject_message() 会将请求投入 InputQueue，
-        由 Scheduler 异步分发（create_task 真并发），通过 OutputBus 等待结果。
-
-        不挂载时（默认）保持原有直接调用 CoreSession.run_turn() 的行为，零感知迁移。
-        """
-        self._kernel_scheduler = scheduler
+    def _on_session_output(
+        self, session_id: str, request_id: str, result: AgentRunResult
+    ) -> None:
+        """OutputBus listener 回调：跳过 submit 路径结果，缓冲其余结果供 poll_push_result 消费。"""
+        if request_id in self._pending_submits:
+            return
+        if session_id not in self._push_buffers:
+            self._push_buffers[session_id] = deque(maxlen=_PUSH_BUFFER_MAXLEN)
+        self._push_buffers[session_id].append((request_id, result))
+        logger.debug(
+            "gateway: buffered output session_id=%s request_id=%s buf_size=%d",
+            session_id,
+            request_id[:8] if request_id else "",
+            len(self._push_buffers[session_id]),
+        )
 
     def poll_push_result(
         self, session_id: str
     ) -> Optional[tuple[str, AgentRunResult]]:
-        """非阻塞：弹出该 session 的下一条 [out] 队列结果，无则返回 None。
+        """非阻塞：弹出该 session 的下一条推送结果，无则返回 None。
 
-        统一出口：submit 与 inject_turn 的结果均经此队列。
+        结果来源于 OutputBus subscriber 回调缓冲的 inject_turn 等非 submit 结果。
         返回 (request_id, result)。典型使用方：IPC poll_push、CLI/Feishu 后台轮询。
         """
-        if self._kernel_scheduler is None:
+        buf = self._push_buffers.get(session_id)
+        if not buf:
             return None
-        return self._kernel_scheduler.poll_push(session_id)
+        return buf.popleft()
 
     async def run_turn(
         self,
         agent_input: AgentRunInput,
         hooks: AgentHooks | None = None,
     ) -> AgentRunResult:
-        if self._kernel_scheduler is not None:
-            return await self._run_turn_via_scheduler(
-                self._active_session_id, agent_input, hooks
-            )
-        command = RunTurnCommand(session_id=self._active_session_id, input=agent_input)
-        result = await self._dispatch_run_turn(command, hooks=hooks)
-        self.mark_activity(command.session_id)
-        return result
+        return await self._run_turn_via_scheduler(
+            self._active_session_id, agent_input, hooks
+        )
 
     async def _run_turn_via_scheduler(
         self,
@@ -300,8 +333,15 @@ class AutomationCoreGateway:
             metadata=metadata,
             profile=profile,
         )
-        submit_handle = await self._kernel_scheduler.submit(request)
-        result: AgentRunResult = await self._kernel_scheduler.wait_result(submit_handle)
+        # 确保订阅该 session 的输出（用于接收后续 inject_turn 结果）
+        self._ensure_subscribed(session_id)
+        # 标记为 pending submit，listener 回调会跳过此 request_id 的结果
+        self._pending_submits.add(request.request_id)
+        try:
+            submit_handle = await self._kernel_scheduler.submit(request)
+            result: AgentRunResult = await self._kernel_scheduler.wait_result(submit_handle)
+        finally:
+            self._pending_submits.discard(request.request_id)
         self.mark_activity(session_id)
         return result
 
@@ -310,18 +350,9 @@ class AutomationCoreGateway:
         command: InjectMessageCommand,
         hooks: AgentHooks | None = None,
     ) -> AgentRunResult:
-        if self._kernel_scheduler is not None:
-            return await self._run_turn_via_scheduler(
-                command.session_id,
-                command.input,
-                hooks=hooks,
-            )
-        result = await self._dispatch_run_turn(
-            RunTurnCommand(
-                session_id=command.session_id,
-                input=command.input,
-                metadata=command.metadata,
-            ),
+        result = await self._run_turn_via_scheduler(
+            command.session_id,
+            command.input,
             hooks=hooks,
         )
         self.mark_activity(command.session_id)
@@ -364,27 +395,15 @@ class AutomationCoreGateway:
         self, reason: str = "session_expire", *, session_id: Optional[str] = None
     ) -> None:
         sid = session_id or self._active_session_id
-        if self._kernel_scheduler is not None:
-            try:
-                await self._kernel_scheduler.core_pool.evict(sid)
-            except Exception as exc:
-                logger.warning(
-                    "evict session failed (session_id=%s, reason=%s): %s",
-                    sid,
-                    reason,
-                    exc,
-                )
-            self._session_registry.mark_expired(self._owner_id, self._source, sid)
-            self._last_activity[sid] = datetime.now()
-            return
-        # 未加载到内存的冷会话不做 finalize（避免重放整段历史再重复摘要）；
-        # 仅标记为 expired，等待下次显式激活后重新计时。
-        if sid not in self._sessions:
-            self._session_registry.mark_expired(self._owner_id, self._source, sid)
-            self._last_activity[sid] = datetime.now()
-            return
-        command = ExpireSessionCommand(session_id=sid, reason=reason)
-        await self._dispatch_expire(command)
+        try:
+            await self._kernel_scheduler.core_pool.evict(sid)
+        except Exception as exc:
+            logger.warning(
+                "evict session failed (session_id=%s, reason=%s): %s",
+                sid,
+                reason,
+                exc,
+            )
         self._session_registry.mark_expired(self._owner_id, self._source, sid)
         self._last_activity[sid] = datetime.now()
 
@@ -396,37 +415,35 @@ class AutomationCoreGateway:
         return True
 
     async def finalize_session(self):
-        return await self._active_session().finalize_session()
+        entry = self._kernel_scheduler.core_pool.get_entry(self._active_session_id)
+        if entry is not None:
+            fn = getattr(entry.agent, "finalize_session", None)
+            if callable(fn):
+                maybe = fn()
+                return await maybe if inspect.isawaitable(maybe) else maybe
+        return None
 
     def reset_session(self) -> None:
-        sid = self._active_session_id
-        self._active_session().reset_session()
-        self.mark_activity(sid)
+        entry = self._kernel_scheduler.core_pool.get_entry(self._active_session_id)
+        if entry is not None:
+            fn = getattr(entry.agent, "reset_session", None)
+            if callable(fn):
+                fn()
+        self.mark_activity(self._active_session_id)
 
     async def clear_context_for_session(self, session_id: str) -> None:
-        if self._kernel_scheduler is not None:
-            entry = self._kernel_scheduler.core_pool.get_entry(session_id)
-            if entry is not None:
-                clear_fn = getattr(entry.agent, "clear_context", None)
-                if callable(clear_fn):
-                    clear_fn()
-                return
-        session = await self._get_or_create_session(session_id)
-        clear_fn = getattr(session, "clear_context", None)
-        if callable(clear_fn):
-            clear_fn()
+        entry = self._kernel_scheduler.core_pool.get_entry(session_id)
+        if entry is not None:
+            clear_fn = getattr(entry.agent, "clear_context", None)
+            if callable(clear_fn):
+                clear_fn()
 
     def clear_context(self) -> None:
-        if self._kernel_scheduler is not None:
-            entry = self._kernel_scheduler.core_pool.get_entry(self._active_session_id)
-            if entry is not None:
-                clear_fn = getattr(entry.agent, "clear_context", None)
-                if callable(clear_fn):
-                    clear_fn()
-                return
-        clear_fn = getattr(self._active_session(), "clear_context", None)
-        if callable(clear_fn):
-            clear_fn()
+        entry = self._kernel_scheduler.core_pool.get_entry(self._active_session_id)
+        if entry is not None:
+            clear_fn = getattr(entry.agent, "clear_context", None)
+            if callable(clear_fn):
+                clear_fn()
 
     _DEFAULT_USAGE = {
         "prompt_tokens": 0,
@@ -438,43 +455,27 @@ class AutomationCoreGateway:
 
     def get_token_usage(self, session_id: Optional[str] = None) -> dict:
         sid = session_id or self._active_session_id
-        if self._kernel_scheduler is not None:
-            entry = self._kernel_scheduler.core_pool.get_entry(sid)
-            if entry is not None:
-                fn = getattr(entry.agent, "get_token_usage", None)
-                if callable(fn):
-                    result = fn()
-                    if isinstance(result, dict):
-                        return {**self._DEFAULT_USAGE, **result}
-            return dict(self._DEFAULT_USAGE)
-        session = self._sessions.get(sid)
-        if session is None:
-            return dict(self._DEFAULT_USAGE)
-        fn = getattr(session, "get_token_usage", None)
-        if callable(fn):
-            result = fn()
-            if isinstance(result, dict):
-                return {**self._DEFAULT_USAGE, **result}
+        entry = self._kernel_scheduler.core_pool.get_entry(sid)
+        if entry is not None:
+            fn = getattr(entry.agent, "get_token_usage", None)
+            if callable(fn):
+                result = fn()
+                if isinstance(result, dict):
+                    return {**self._DEFAULT_USAGE, **result}
         return dict(self._DEFAULT_USAGE)
 
     def get_turn_count(self, session_id: Optional[str] = None) -> int:
         sid = session_id or self._active_session_id
-        if self._kernel_scheduler is not None:
-            entry = self._kernel_scheduler.core_pool.get_entry(sid)
-            if entry is None:
+        entry = self._kernel_scheduler.core_pool.get_entry(sid)
+        if entry is None:
+            return 0
+        fn = getattr(entry.agent, "get_turn_count", None)
+        if callable(fn):
+            try:
+                return int(fn())
+            except Exception:
                 return 0
-            fn = getattr(entry.agent, "get_turn_count", None)
-            if callable(fn):
-                try:
-                    return int(fn())
-                except Exception:
-                    return 0
-            return 0
-        session = self._sessions.get(sid)
-        if session is None:
-            return 0
-        state = session.get_session_state()
-        return state.turn_count
+        return 0
 
     async def delete_session(self, session_id: str) -> bool:
         """删除指定会话。
@@ -568,7 +569,12 @@ class AutomationCoreGateway:
                 await _close_session_if_needed(session, temp=True)
             return False
 
-        # 如果是常驻在 Gateway 中的会话，需要从管理结构中移除并关闭。
+        # 若 session 在 CorePool 中，需 evict 移除
+        try:
+            await self._kernel_scheduler.core_pool.evict(sid)
+        except Exception:
+            pass
+        # 若是 Gateway 本地持有的会话，从管理结构中移除并关闭
         if sid in self._sessions:
             owned = sid in self._owned_sessions
             session = self._sessions.pop(sid, None)
@@ -577,14 +583,20 @@ class AutomationCoreGateway:
                 self._owned_sessions.discard(sid)
             await _close_session_if_needed(session, temp=False)
         elif created_temp:
-            # 临时创建的会话只用于清理历史，最后显式关闭但不注册到 Gateway。
             await _close_session_if_needed(session, temp=True)
 
-        # 删除注册表中的元数据记录
         self._session_registry.delete_session(self._owner_id, self._source, sid)
         return True
 
     async def close(self) -> None:
+        # 取消所有 OutputBus 订阅
+        for session_id, sub_id in list(self._subscriptions.items()):
+            try:
+                self._kernel_scheduler.unsubscribe_out(session_id, sub_id)
+            except Exception:
+                pass
+        self._subscriptions.clear()
+        self._push_buffers.clear()
         # 只关闭 gateway 自身创建的 session（_owned_sessions）；
         # 构造函数传入的初始 session 由调用方持有，gateway 不拥有它的生命周期。
         for session_id in list(self._owned_sessions):
@@ -602,99 +614,3 @@ class AutomationCoreGateway:
                 self._last_activity.pop(session_id, None)
                 self._owned_sessions.discard(session_id)
         self._session_registry.close()
-
-    async def _dispatch_run_turn(
-        self,
-        command: RunTurnCommand,
-        hooks: AgentHooks | None = None,
-    ) -> AgentRunResult:
-        session = await self._get_or_create_session(command.session_id)
-        merged_metadata = merge_run_metadata(
-            session_id=command.session_id,
-            input_metadata=command.input.metadata,
-            command_metadata=command.metadata,
-        )
-        agent_input = AgentRunInput(text=command.input.text, metadata=merged_metadata)
-        return await session.run_turn(agent_input, hooks=hooks)
-
-    async def _dispatch_expire(self, command: ExpireSessionCommand) -> None:
-        session = await self._get_or_create_session(command.session_id)
-        try:
-            await session.finalize_session()
-        except Exception as exc:
-            logger.warning(
-                "finalize_session failed during session expire (session_id=%s, reason=%s, exc_type=%s): %s",
-                command.session_id,
-                command.reason,
-                type(exc).__name__,
-                exc,
-            )
-        finally:
-            session.reset_session()
-            # reset_session 可能生成临时随机 session_id；为保证路由键稳定，
-            # 过期后立即回绑到原 session_id。
-            activate = getattr(session, "activate_session", None)
-            if callable(activate):
-                try:
-                    maybe = activate(command.session_id, replay_messages_limit=0)
-                except TypeError:
-                    # activate_session 不支持 replay_messages_limit 参数时回退
-                    maybe = activate(command.session_id)
-                if inspect.isawaitable(maybe):
-                    try:
-                        await maybe
-                    except Exception as exc:
-                        logger.warning(
-                            "activate_session failed (session_id=%s): %s",
-                            command.session_id,
-                            exc,
-                        )
-
-    def _active_session(self) -> CoreSession:
-        session = self._sessions.get(self._active_session_id)
-        if session is None:
-            raise RuntimeError(f"active session not found: {self._active_session_id}")
-        return session
-
-    async def _get_or_create_session(self, session_id: str) -> CoreSession:
-        existing = self._sessions.get(session_id)
-        if existing is not None:
-            return existing
-        return await self._create_session(session_id)
-
-    async def _create_session(self, session_id: str) -> CoreSession:
-        if self._session_factory is None:
-            raise KeyError(f"session not found: {session_id}")
-        async with self._session_lock:
-            existing = self._sessions.get(session_id)
-            if existing is not None:
-                return existing
-            created = self._session_factory(session_id)
-            session = await created if inspect.isawaitable(created) else created
-            activate = getattr(session, "activate_session", None)
-            if callable(activate):
-                try:
-                    # 会话激活默认不重放历史正文，避免把全量 messages 回灌到上下文。
-                    maybe = activate(session_id, replay_messages_limit=0)
-                except TypeError:
-                    # activate_session 不支持 replay_messages_limit 参数时回退
-                    maybe = activate(session_id)
-                if inspect.isawaitable(maybe):
-                    try:
-                        await maybe
-                    except Exception as exc:
-                        logger.warning(
-                            "activate_session failed (session_id=%s): %s",
-                            session_id,
-                            exc,
-                        )
-            self._sessions[session_id] = session
-            self._owned_sessions.add(session_id)
-            registry_ts = self._session_registry.get_updated_at(
-                self._owner_id, self._source, session_id
-            )
-            self._last_activity[session_id] = registry_ts or datetime.now()
-            self._session_registry.upsert_session(
-                self._owner_id, self._source, session_id
-            )
-            return session

@@ -6,7 +6,7 @@
 2. SubagentRegistry 状态流转（on_complete / on_fail / cancel）
 3. first-done 语义：subagent 完成后 inject_turn 唤醒父 session
 4. P2P 消息：send_message_to_agent + reply_to_message
-5. inject_turn + OutputRouter.has_pending 静默处理
+5. inject_turn + OutputBus.has_waiter
 6. 工具注册：full/sub 模式差异
 """
 

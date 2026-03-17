@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import List
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -208,9 +208,20 @@ class TestSessionManager:
     """SessionManager 行为测试，Agent 完全 mock，不调用真实 LLM。"""
 
     def _make_mock_agent(self, response: str = "ok"):
+        """创建 kernel 兼容的 mock agent，供 CoreSessionAdapter.run_turn 使用。"""
+        from agent_core.kernel_interface import ReturnAction
+
         agent = AsyncMock()
-        agent.process_input = AsyncMock(return_value=response)
+        agent.prepare_turn = AsyncMock(return_value=(1, None, 0))
+        agent._finalize_turn = AsyncMock()
+        agent._tool_registry = MagicMock()
+        agent._session_id = "mock"
         agent.close = AsyncMock()
+
+        async def _run_loop(turn_id=0, hooks=None):
+            yield ReturnAction(message=response, status="completed")
+
+        agent.run_loop = _run_loop
         return agent
 
     @pytest.mark.asyncio

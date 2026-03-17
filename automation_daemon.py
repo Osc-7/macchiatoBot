@@ -266,7 +266,6 @@ async def _main() -> None:
     sub_registry = SubagentRegistry()
     core_pool = CorePool(
         config=cfg,
-        tools_factory=lambda: get_default_tools(config=cfg),
         kernel=kernel,
         summarizer=summarizer,
         session_logger=None,
@@ -318,6 +317,7 @@ async def _main() -> None:
 
         gateway = AutomationCoreGateway(
             core_adapter,
+            kernel_scheduler=scheduler_runtime,
             session_id=default_session_id,
             policy=SessionCutPolicy(
                 idle_timeout_minutes=int(cfg.memory.idle_timeout_minutes or 30),
@@ -328,7 +328,6 @@ async def _main() -> None:
             source=source,
             session_registry=SessionRegistry(),
         )
-        gateway.attach_scheduler(scheduler_runtime)
         await gateway.activate_primary_session()
 
         ipc = AutomationIPCServer(

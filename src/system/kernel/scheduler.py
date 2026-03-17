@@ -1,15 +1,14 @@
 """
 KernelScheduler — 单线程异步调度器。
 
-包含两个核心子组件：
-1. OutputBus      — 结果总线，统一负责结果广播与 request_id 级别的等待
-2. KernelScheduler — 类比 OS 进程调度器，InputQueue + dispatch_loop + create_task 实现跨 session 真并发
+类比 OS 进程调度器，InputQueue + dispatch_loop + create_task 实现跨 session 真并发
 
 设计原则：
 - asyncio.PriorityQueue 按 (priority, enqueued_at) 排序，高优先级先处理，同优先级 FIFO
 - _dispatch_loop 使用 create_task，不 await 任务本身，让多个 session 的 IO 真正并发（协作式）
 - submit() 语义收敛为「仅提交到 [in] 队列」，返回 request_id
-- 所有结果统一经 OutputBus 广播；需要同步等待的一方按 request_id await
+- 所有结果统一经 OutputBus.publish() 广播；需要同步等待的一方按 request_id await
+- 输出单出口：Scheduler 不持有 push_queues，消费方通过 subscribe_out() 自行缓冲
 """
 
 from __future__ import annotations
@@ -20,107 +19,18 @@ import time
 from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Union
-import uuid
 
 from agent_core.interfaces import AgentHooks, AgentRunResult
 from agent_core.kernel_interface import KernelRequest
 
+from .output_bus import OutputBus
 if TYPE_CHECKING:
     from .kernel import AgentKernel
     from .core_pool import CorePool
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# OutputBus — 输出消息总线
-# ---------------------------------------------------------------------------
-
-
-class OutputBus:
-    """
-    输出消息总线。
-
-    提供两类能力：
-    1) request_id 级别等待：submit 后可 await 对应结果
-    2) session 级别广播：结果可广播给订阅者（供推送前端使用）
-    """
-
-    def __init__(self) -> None:
-        self._pending: Dict[str, asyncio.Future[AgentRunResult]] = {}
-        self._listeners: Dict[str, Dict[str, Callable[[str, AgentRunResult], Any]]] = defaultdict(dict)
-
-    def register_waiter(self, request_id: str) -> None:
-        """注册一个 request_id 的等待位。"""
-        loop = asyncio.get_running_loop()
-        self._pending[request_id] = loop.create_future()
-
-    async def wait_result(
-        self, request_id: str, timeout_seconds: Optional[float] = None
-    ) -> AgentRunResult:
-        """等待 request_id 对应结果。"""
-        fut = self._pending.get(request_id)
-        if fut is None:
-            raise RuntimeError(f"request_id not registered: {request_id}")
-        if timeout_seconds is None:
-            result = await fut
-        else:
-            result = await asyncio.wait_for(fut, timeout=float(timeout_seconds))
-        return result
-
-    def subscribe(
-        self, session_id: str, callback: Callable[[str, AgentRunResult], Any]
-    ) -> str:
-        """订阅某个 session 的输出广播，返回 subscription_id。"""
-        sub_id = str(uuid.uuid4())[:12]
-        self._listeners[session_id][sub_id] = callback
-        return sub_id
-
-    def unsubscribe(self, session_id: str, subscription_id: str) -> None:
-        """取消订阅。"""
-        listeners = self._listeners.get(session_id)
-        if not listeners:
-            return
-        listeners.pop(subscription_id, None)
-        if not listeners:
-            self._listeners.pop(session_id, None)
-
-    async def publish(self, session_id: str, request_id: str, result: AgentRunResult) -> None:
-        """发布一个结果到总线：先解锁等待者，再广播给订阅者。"""
-        fut = self._pending.pop(request_id, None)
-        if fut is not None and not fut.done():
-            fut.set_result(result)
-        listeners = list(self._listeners.get(session_id, {}).values())
-        for cb in listeners:
-            try:
-                maybe = cb(request_id, result)
-                if asyncio.iscoroutine(maybe):
-                    asyncio.create_task(maybe)
-            except Exception:
-                continue
-
-    async def publish_error(self, request_id: str, exc: BaseException) -> None:
-        """向 request_id 对应等待者发布错误。"""
-        fut = self._pending.pop(request_id, None)
-        if fut is None:
-            return
-        if not fut.done():
-            fut.set_exception(exc)
-
-    def cancel_all(self) -> None:
-        """关闭时取消所有挂起等待。"""
-        for request_id, fut in list(self._pending.items()):
-            if not fut.done():
-                fut.cancel()
-        self._pending.clear()
-
-    def has_waiter(self, request_id: str) -> bool:
-        """判断指定 request_id 是否有对应的等待者。"""
-        return request_id in self._pending
-
-    @property
-    def pending_count(self) -> int:
-        return len(self._pending)
+_IN_QUEUE_WARN_THRESHOLD = 500
 
 
 class SubmitHandle:
@@ -146,6 +56,11 @@ class KernelScheduler:
     - submit(): 将 KernelRequest 投入优先级队列，返回 request_id
     - _dispatch_loop(): 消费队列，每个请求 create_task 独立运行（跨 session 真并发）
     - 乱序完成：快任务先完成先产出到 OutputBus，慢任务继续后台执行
+
+    输出模型：
+    - 所有结果统一经 OutputBus.publish() 一个出口
+    - submit 调用方通过 Future 精准获取结果
+    - 其余消费方通过 subscribe_out() 注册 listener，自行决定缓冲/推送策略
 
     Usage::
 
@@ -179,10 +94,8 @@ class KernelScheduler:
         # per-session 串行化锁：防止同一 session 的并发请求竞争 context/turn_id/DB 写入
         self._session_locks: Dict[str, asyncio.Lock] = {}
         self._session_locks_meta: asyncio.Lock = asyncio.Lock()
-        # per-session 推送队列：存放 inject_turn 产生的 AgentRunResult，供前端轮询（兼容旧接口）
-        self._push_queues: Dict[str, asyncio.Queue] = {}
-        # session_id -> 当前正在运行的 _run_and_route Task（用于 cancel_session_tasks）
-        self._session_active_task: Dict[str, asyncio.Task] = {}
+        # session_id -> 当前正在运行的 _run_and_route Tasks（用于 cancel_session_tasks）
+        self._session_active_tasks: Dict[str, set[asyncio.Task]] = defaultdict(set)
         # 已取消的 session_id，用于拦截仍在队列中尚未 dispatch 的请求
         self._cancelled_sessions: set[str] = set()
 
@@ -273,8 +186,6 @@ class KernelScheduler:
         submit 只表达「提交」，不阻塞等待。
         若调用方要同步等待，可调用 wait_result(request_id)。
         """
-        if isinstance(request.metadata, dict):
-            request.metadata["_submit"] = True
         self._out_bus.register_waiter(request.request_id)
         await self._queue.put(request)
         logger.debug(
@@ -309,14 +220,20 @@ class KernelScheduler:
         与 submit() 的区别：
         - 不注册 request 等待位（调用方无需 await）
         - 直接 put_nowait 入队（优先级默认 -1，高于普通请求）
-        - 完成后只广播到 OutputBus，并入 push 队列供 poll_push（兼容）
+        - 完成后通过 OutputBus.publish() 广播给所有订阅者
 
         典型用途：
         - SubagentRegistry.on_complete/on_fail 唤醒父 session（first-done 语义）
         - SendMessageToAgentTool / ReplyToMessageTool 的 P2P 消息投递
         """
-        if isinstance(request.metadata, dict):
-            request.metadata["_submit"] = False
+        qsize = self._queue.qsize()
+        if qsize >= _IN_QUEUE_WARN_THRESHOLD:
+            logger.warning(
+                "KernelScheduler: input queue size %d exceeds threshold %d, "
+                "inject_turn may cause backpressure",
+                qsize,
+                _IN_QUEUE_WARN_THRESHOLD,
+            )
         self._queue.put_nowait(request)
         text_len = len(request.text or "")
         source = (request.metadata or {}).get("source", request.frontend_id or "")
@@ -330,27 +247,32 @@ class KernelScheduler:
         )
 
     def cancel_session_tasks(self, session_id: str) -> bool:
-        """取消指定 session 的活跃执行任务并标记为已取消。
+        """取消指定 session 的所有活跃执行任务并标记为已取消。
 
         同时处理两种情况：
-        - 请求已在执行 (_session_active_task) -> 直接 cancel Task
+        - 请求已在执行 (_session_active_tasks) -> 直接 cancel 所有 Tasks
         - 请求仍在队列中等待 dispatch -> 加入 _cancelled_sessions，
           _run_and_route 开头会检查并跳过
         """
         self._cancelled_sessions.add(session_id)
-        task = self._session_active_task.get(session_id)
-        if task and not task.done():
-            task.cancel()
+        tasks = self._session_active_tasks.get(session_id, set())
+        cancelled_any = False
+        for task in list(tasks):
+            if not task.done():
+                task.cancel()
+                cancelled_any = True
+        if cancelled_any:
             logger.info(
-                "KernelScheduler: cancelled active task for session_id=%s",
+                "KernelScheduler: cancelled %d active task(s) for session_id=%s",
+                len(tasks),
                 session_id,
             )
-            return True
-        logger.info(
-            "KernelScheduler: marked session_id=%s as cancelled (no active task)",
-            session_id,
-        )
-        return False
+        else:
+            logger.info(
+                "KernelScheduler: marked session_id=%s as cancelled (no active task)",
+                session_id,
+            )
+        return cancelled_any
 
     async def _dispatch_loop(self) -> None:
         """
@@ -372,14 +294,17 @@ class KernelScheduler:
                 name=f"kernel-req-{request.request_id[:8]}",
             )
             self._active_tasks.add(task)
-            self._session_active_task[request.session_id] = task
+            self._session_active_tasks[request.session_id].add(task)
 
-            def _cleanup_session(t: asyncio.Task, sid: str = request.session_id) -> None:
+            def _cleanup(t: asyncio.Task, sid: str = request.session_id) -> None:
                 self._active_tasks.discard(t)
-                if self._session_active_task.get(sid) is t:
-                    self._session_active_task.pop(sid, None)
+                task_set = self._session_active_tasks.get(sid)
+                if task_set is not None:
+                    task_set.discard(t)
+                    if not task_set:
+                        self._session_active_tasks.pop(sid, None)
 
-            task.add_done_callback(_cleanup_session)
+            task.add_done_callback(_cleanup)
             # task_done() 使 queue.join() 能正确追踪完成状态
             task.add_done_callback(lambda _: self._queue.task_done())
 
@@ -435,11 +360,10 @@ class KernelScheduler:
         3. 从 CorePool 获取对应 session 的 AgentCore
         4. 调用 agent.prepare_turn() 执行前置处理（含 memory recall）
         5. 调用 AgentKernel.run() 驱动 AgentCore
-        6. 通过 OutputBus 广播结果
+        6. 通过 OutputBus.publish() 广播结果（唯一出口）
         """
         session_id = request.session_id
         if session_id in self._cancelled_sessions:
-            self._cancelled_sessions.discard(session_id)
             logger.info(
                 "KernelScheduler: skipping cancelled session request session_id=%s request_id=%s",
                 session_id,
@@ -510,7 +434,6 @@ class KernelScheduler:
                     )
 
                 # 前置处理：同步外部更新、memory recall、写入用户消息
-                # （统一路径，修复了之前 scheduler 缺失 memory recall 的问题）
                 turn_id, summary_task, summary_recent_start = await agent.prepare_turn(
                     request.text, content_items
                 )
@@ -550,20 +473,16 @@ class KernelScheduler:
                 # 刷新 TTL（每次请求完成后更新活跃时间）
                 self._core_pool.touch(session_id)
 
-                # 统一发布到 out 总线：submit 等待者与订阅者都会收到
+                # 统一发布到 OutputBus（唯一出口）：
+                # - submit 等待者通过 Future 获取结果
+                # - 所有 subscriber 通过 listener 回调获取结果
                 await self._out_bus.publish(session_id, request.request_id, run_result)
-                # inject_turn 仍写入 push 队列，供 poll_push 兼容读取
-                if not isinstance(request.metadata, dict) or not request.metadata.get("_submit"):
-                    self._push_to_queue(session_id, request.request_id, run_result)
 
             except asyncio.CancelledError:
-                # CancelledError 继承自 BaseException（Python 3.8+），不被 except Exception 捕获。
-                # 必须显式处理，否则等待该 request_id 的调用方会永久悬挂。
                 await self._out_bus.publish_error(
                     request.request_id,
                     asyncio.CancelledError("kernel task cancelled"),
                 )
-                # inject_turn 被取消时不推送到 out 队列（任务未完成）
                 raise
             except Exception as exc:
                 logger.exception(
@@ -571,12 +490,17 @@ class KernelScheduler:
                     request.request_id[:8],
                     exc,
                 )
-                err_result = AgentRunResult(
-                    output_text=f"[后台任务处理出错] {exc}",
-                    metadata={"_push_error": str(exc)},
-                )
-                self._push_to_queue(session_id, request.request_id, err_result)
-                await self._out_bus.publish_error(request.request_id, exc)
+                # 区分两种错误投递路径：
+                # - 有 waiter（submit 路径）→ publish_error 以异常形式交给 await 方
+                # - 无 waiter（inject_turn 路径）→ publish 包装后的 AgentRunResult 给订阅者
+                if self._out_bus.has_waiter(request.request_id):
+                    await self._out_bus.publish_error(request.request_id, exc)
+                else:
+                    err_result = AgentRunResult(
+                        output_text=f"[后台任务处理出错] {exc}",
+                        metadata={"_push_error": str(exc)},
+                    )
+                    await self._out_bus.publish(session_id, request.request_id, err_result)
             finally:
                 pending = self._inflight_sessions.get(session_id, 0) - 1
                 if pending > 0:
@@ -584,58 +508,9 @@ class KernelScheduler:
                 else:
                     self._inflight_sessions.pop(session_id, None)
 
-    def _push_to_queue(
-        self, session_id: str, request_id: str, result: AgentRunResult
-    ) -> None:
-        """将结果推入 per-session [out] 队列（统一出口，submit 与 inject_turn 均经此路径）。"""
-        if session_id not in self._push_queues:
-            self._push_queues[session_id] = asyncio.Queue(maxsize=50)
-        out_len = len(result.output_text or "")
-        envelope = (request_id, result)
-        try:
-            self._push_queues[session_id].put_nowait(envelope)
-            logger.debug(
-                "KernelScheduler: out_queue put session_id=%s request_id=%s output_len=%s queue_size=%s",
-                session_id,
-                request_id[:8] if request_id else "",
-                out_len,
-                self._push_queues[session_id].qsize(),
-                extra={"session_id": session_id},
-            )
-        except asyncio.QueueFull:
-            logger.warning(
-                "KernelScheduler: out_queue full session_id=%s output_len=%s dropping result",
-                session_id,
-                out_len,
-                extra={"session_id": session_id},
-            )
-
-    def poll_push(
-        self, session_id: str
-    ) -> Optional[tuple[str, AgentRunResult]]:
-        """非阻塞：弹出该 session 的下一条 [out] 队列结果，无则返回 None。
-
-        统一出口：submit 与 inject_turn 的结果均经此队列。
-        返回 (request_id, result)，供前端按 session 顺序消费。
-        可循环调用至返回 None 以批量取出。
-        """
-        queue = self._push_queues.get(session_id)
-        if queue is None or queue.empty():
-            return None
-        try:
-            envelope = queue.get_nowait()
-            request_id, result = envelope
-            logger.debug(
-                "KernelScheduler: poll_push delivered session_id=%s request_id=%s output_len=%s remaining=%s",
-                session_id,
-                (request_id or "")[:8],
-                len(result.output_text or ""),
-                queue.qsize(),
-                extra={"session_id": session_id},
-            )
-            return (request_id, result)
-        except asyncio.QueueEmpty:
-            return None
+    def clear_cancelled(self, session_id: str) -> None:
+        """清除指定 session 的取消标记（当该 session 再次变为活跃时调用）。"""
+        self._cancelled_sessions.discard(session_id)
 
     @property
     def queue_size(self) -> int:

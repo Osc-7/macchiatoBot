@@ -8,36 +8,36 @@ import pytest
 
 from agent_core.adapters import CoreSessionAdapter
 from agent_core.interfaces import AgentHooks, AgentRunInput
+from agent_core.kernel_interface import ReturnAction
 
 
 @pytest.mark.asyncio
 async def test_run_turn_forwards_callbacks_and_events():
+    """使用 kernel 兼容的 mock agent 验证回调与事件转发。"""
     agent = MagicMock()
+    agent._current_turn_id = 0
+    agent._llm_client = MagicMock()
+    agent._tool_registry = MagicMock()
+    agent._session_id = "sess-1"
 
-    async def _process_input(
-        text,
-        content_items=None,
-        on_stream_delta=None,
-        on_reasoning_delta=None,
-        on_trace_event=None,
-    ):
-        assert text == "hello"
-        if on_stream_delta:
-            await on_stream_delta("A")
-        if on_reasoning_delta:
-            await on_reasoning_delta("R")
-        if on_trace_event:
-            await on_trace_event({"type": "tool_call", "name": "x"})
-            await on_trace_event({"type": "tool_result", "name": "x", "success": True})
-        return "done"
+    async def _run_loop(turn_id=0, hooks=None):
+        if hooks and hooks.on_assistant_delta:
+            await hooks.on_assistant_delta("A")
+        if hooks and hooks.on_reasoning_delta:
+            await hooks.on_reasoning_delta("R")
+        if hooks and hooks.on_trace_event:
+            await hooks.on_trace_event({"type": "tool_call", "name": "x"})
+            await hooks.on_trace_event({"type": "tool_result", "name": "x", "success": True})
+        yield ReturnAction(message="done", status="completed")
 
-    agent.process_input = AsyncMock(side_effect=_process_input)
+    agent.run_loop = _run_loop
+    agent.prepare_turn = AsyncMock(return_value=(1, None, 0))
+    agent._finalize_turn = AsyncMock()
     agent.finalize_session = AsyncMock()
     agent.reset_session = MagicMock()
     agent.close = AsyncMock()
     agent.get_turn_count = MagicMock(return_value=3)
     agent.get_token_usage = MagicMock(return_value={"total_tokens": 10})
-    agent._session_id = "sess-1"
 
     adapter = CoreSessionAdapter(agent)
 
@@ -72,7 +72,6 @@ async def test_run_turn_forwards_callbacks_and_events():
 @pytest.mark.asyncio
 async def test_session_lifecycle_passthrough():
     agent = MagicMock()
-    agent.process_input = AsyncMock(return_value="ok")
     agent.finalize_session = AsyncMock(return_value="summary")
     agent.reset_session = MagicMock()
     agent.close = AsyncMock()
@@ -98,7 +97,6 @@ async def test_session_lifecycle_passthrough():
 @pytest.mark.asyncio
 async def test_activate_session_passthrough():
     agent = MagicMock()
-    agent.process_input = AsyncMock(return_value="ok")
     agent.finalize_session = AsyncMock(return_value=None)
     agent.reset_session = MagicMock()
     agent.close = AsyncMock()

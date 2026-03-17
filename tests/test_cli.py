@@ -141,17 +141,6 @@ class TestRunSingleCommand:
     """测试单条命令执行"""
 
     @pytest.mark.asyncio
-    async def test_run_single_command_via_process_input(self):
-        """测试通过 process_input 执行单条命令（无 run_turn 属性时）"""
-        agent = MagicMock(spec=[])
-        agent.process_input = AsyncMock(return_value="这是测试响应")
-        command = "明天的日程"
-        response = await cli_module.run_single_command(agent, command)
-
-        assert response == "这是测试响应"
-        agent.process_input.assert_called_once_with(command)
-
-    @pytest.mark.asyncio
     async def test_run_single_command_with_run_turn(self):
         """测试通过 run_turn 执行单条命令"""
         agent = MagicMock()

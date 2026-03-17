@@ -49,11 +49,9 @@ def _parse_args(argv: List[str]) -> List[str]:
 
 
 async def run_single_command(agent: Any, command: str) -> str:
-    """执行单条命令并返回响应文本。"""
-    if hasattr(agent, "run_turn"):
-        result = await agent.run_turn(AgentRunInput(text=command), hooks=AgentHooks())
-        return result.output_text
-    return await agent.process_input(command)
+    """执行单条命令并返回响应文本。要求 agent 实现 run_turn。"""
+    result = await agent.run_turn(AgentRunInput(text=command), hooks=AgentHooks())
+    return result.output_text
 
 
 async def _dispatch(agent: Any, args: List[str]) -> None:

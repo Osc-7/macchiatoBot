@@ -279,6 +279,8 @@ async def _main() -> None:
     kernel_terminal = KernelTerminal(
         scheduler=scheduler_runtime,
         core_pool=core_pool,
+        automation_scheduler=scheduler,
+        agent_task_queue=queue,
     )
     stop_event = asyncio.Event()
     consumer_task = asyncio.create_task(

@@ -15,6 +15,39 @@ from agent_core.tools import VersionedToolRegistry
 from system.kernel import AgentKernel, CoreEntry, CorePool, KernelScheduler
 
 
+@pytest.mark.asyncio
+async def test_evict_shutdown_calls_flush_checkpoint() -> None:
+    """shutdown=True 时应在 close 前刷新 checkpoint，避免恢复时 elapsed 误判。"""
+    agent = MagicMock()
+    agent.flush_checkpoint_for_shutdown = MagicMock()
+    pool = CorePool()
+    profile = CoreProfile.default_full(frontend_id="cli", dialog_window_id="root")
+    pool._pool["cli:default"] = CoreEntry(agent=agent, profile=profile)
+    pool._kernel = MagicMock()
+    pool._kernel.kill = AsyncMock(return_value=None)
+    pool._summarizer = None
+
+    await pool.evict("cli:default", shutdown=True)
+
+    agent.flush_checkpoint_for_shutdown.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_evict_normal_does_not_call_flush_checkpoint() -> None:
+    agent = MagicMock()
+    agent.flush_checkpoint_for_shutdown = MagicMock()
+    pool = CorePool()
+    profile = CoreProfile.default_full(frontend_id="cli", dialog_window_id="root")
+    pool._pool["cli:default"] = CoreEntry(agent=agent, profile=profile)
+    pool._kernel = MagicMock()
+    pool._kernel.kill = AsyncMock(return_value=None)
+    pool._summarizer = None
+
+    await pool.evict("cli:default", shutdown=False)
+
+    agent.flush_checkpoint_for_shutdown.assert_not_called()
+
+
 def test_kernel_parse_arguments_success_and_failure() -> None:
     """流式解析失败时不应静默得到空 dict，应返回明确错误信息。"""
     # 正常 dict

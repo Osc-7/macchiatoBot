@@ -175,6 +175,19 @@ class TestAgentTaskQueue:
         queue.pop_pending()
         assert queue.pending_count() == 1
 
+    def test_running_count(self, queue):
+        assert queue.running_count() == 0
+        queue.push(make_cron_task("sync.course", "任务1"))
+        assert queue.running_count() == 0
+        queue.pop_pending()
+        assert queue.running_count() == 1
+        queue.update_status(
+            queue.list_recent(status=TaskStatus.RUNNING)[0].task_id,
+            TaskStatus.SUCCESS,
+            result="ok",
+        )
+        assert queue.running_count() == 0
+
     def test_list_recent_filter_by_status(self, queue):
         t1 = make_cron_task("sync.course", "任务1")
         t2 = make_cron_task("sync.email", "任务2")

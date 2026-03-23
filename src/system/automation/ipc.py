@@ -381,6 +381,17 @@ class AutomationIPCServer:
             if method == "terminal_queue":
                 return t.queue()
 
+            if method == "terminal_automation_jobs":
+                return t.automation_tracked_jobs()
+
+            if method == "terminal_agent_tasks":
+                lim = params.get("limit", 25)
+                try:
+                    limit_i = int(lim)
+                except (TypeError, ValueError):
+                    limit_i = 25
+                return t.agent_task_queue_status(limit=limit_i)
+
             if method == "terminal_inspect":
                 session_id = str(params.get("session_id") or "").strip()
                 if not session_id:
@@ -660,6 +671,16 @@ class AutomationIPCClient:
     async def terminal_queue(self) -> Dict[str, Any]:
         """队列状态：queue_size, inflight_sessions, cancelled_sessions, active_task_count。"""
         data = await self._request("terminal_queue", {})
+        return data if isinstance(data, dict) else {}
+
+    async def terminal_automation_jobs(self) -> Dict[str, Any]:
+        """AutomationScheduler 追踪的每个 job 的协程状态与定义摘要。"""
+        data = await self._request("terminal_automation_jobs", {})
+        return data if isinstance(data, dict) else {}
+
+    async def terminal_agent_tasks(self, *, limit: int = 25) -> Dict[str, Any]:
+        """AgentTask 持久化队列：pending/running 计数与最近任务列表。"""
+        data = await self._request("terminal_agent_tasks", {"limit": int(limit)})
         return data if isinstance(data, dict) else {}
 
     async def terminal_inspect(self, session_id: str) -> Dict[str, Any]:

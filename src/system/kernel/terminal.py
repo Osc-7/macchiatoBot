@@ -24,6 +24,8 @@ KernelTerminal — Kernel 系统管理控制台。
     status = await client.terminal_top()
     await client.terminal_kill("shuiyuan:SomeUser")
     result = await client.terminal_attach("cli:root", "系统通知：即将重启")
+    cron = await client.terminal_automation_jobs()  # 正在被追踪的定时 Job 协程
+    tasks = await client.terminal_agent_tasks()     # AgentTask 队列快照
 
   前提：daemon 已启动且 AutomationIPCServer 注入了 terminal（当前 automation_daemon 已注入）。
 """
@@ -36,6 +38,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
+    from system.automation.scheduler import AutomationScheduler
+    from system.automation.task_queue import AgentTaskQueue
+
     from .core_pool import CorePool, CoreEntry
     from .scheduler import KernelScheduler
 
@@ -105,10 +110,14 @@ class KernelTerminal:
         core_pool: "CorePool",
         *,
         boot_time: Optional[float] = None,
+        automation_scheduler: Optional["AutomationScheduler"] = None,
+        agent_task_queue: Optional["AgentTaskQueue"] = None,
     ) -> None:
         self._scheduler = scheduler
         self._pool = core_pool
         self._boot_time = boot_time if boot_time is not None else time.monotonic()
+        self._automation_scheduler = automation_scheduler
+        self._agent_task_queue = agent_task_queue
 
     # ── 查询类：只读，不改变系统状态 ────────────────────────────
 
@@ -291,6 +300,47 @@ class KernelTerminal:
             "inflight_sessions": inflight,
             "cancelled_sessions": cancelled,
             "active_task_count": self._scheduler.active_task_count,
+        }
+
+    def automation_tracked_jobs(self) -> Dict[str, Any]:
+        """
+        查看 AutomationScheduler 在进程内为每个 JobDefinition 维护的调度协程（类比 cron -l + 进程表）。
+
+        仅在 automation_daemon 等注入 ``automation_scheduler`` 时可用；否则返回 available=False。
+        """
+        if self._automation_scheduler is None:
+            return {
+                "available": False,
+                "message": "未注入 AutomationScheduler（完整能力需在 automation_daemon 下使用）",
+            }
+        snap = self._automation_scheduler.tracked_jobs_snapshot()
+        return {"available": True, **snap}
+
+    def agent_task_queue_status(self, *, limit: int = 25) -> Dict[str, Any]:
+        """
+        查看 SQLite 持久化队列中的定时/后台 AgentTask：pending/running 数量与最近条目。
+
+        仅在注入 ``agent_task_queue`` 时可用。
+        """
+        if self._agent_task_queue is None:
+            return {
+                "available": False,
+                "message": "未注入 AgentTaskQueue",
+            }
+        q = self._agent_task_queue
+        recent = q.list_recent(limit=max(1, min(limit, 100)))
+        items: List[Dict[str, Any]] = []
+        for t in recent:
+            row = t.model_dump(mode="json")
+            instr = str(row.get("instruction") or "")
+            if len(instr) > 240:
+                row["instruction"] = instr[:240] + "…"
+            items.append(row)
+        return {
+            "available": True,
+            "pending_count": q.pending_count(),
+            "running_count": q.running_count(),
+            "recent_tasks": items,
         }
 
     # ── 系统调用：改变系统状态 ────────────────────────────────

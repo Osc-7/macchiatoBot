@@ -40,7 +40,7 @@ async def run_kernel_shell(client: AutomationIPCClient) -> None:
     """
     print()
     print("  Kernel 系统控制台 (KernelTerminal)")
-    print("  命令: ps | top | queue | inspect <sid> | kill <sid> | cancel <sid> | spawn <sid> | attach <sid> <text>")
+    print("  命令: ps | top | queue | cron | tasks | inspect <sid> | kill <sid> | cancel <sid> | spawn <sid> | attach <sid> <text>")
     print("  help 帮助  quit/exit 退出")
     print()
 
@@ -67,7 +67,9 @@ async def run_kernel_shell(client: AutomationIPCClient) -> None:
             if cmd == "help":
                 print("  ps                    列出所有活跃 Core")
                 print("  top                   系统概览")
-                print("  queue                 队列状态")
+                print("  queue                 Kernel 请求队列状态")
+                print("  cron                  正在被追踪的定时 Job（AutomationScheduler 协程）")
+                print("  tasks [N]             AgentTask 队列（pending/running + 最近 N 条）")
                 print("  inspect <session_id>  查看某个 Core 详情")
                 print("  kill <session_id>    终结 Core")
                 print("  cancel <session_id>  取消该 session 正在运行的任务")
@@ -109,6 +111,57 @@ async def run_kernel_shell(client: AutomationIPCClient) -> None:
                 print(f"  active_task_count:  {q.get('active_task_count', 0)}")
                 print(f"  inflight_sessions:  {q.get('inflight_sessions', {})}")
                 print(f"  cancelled_sessions: {q.get('cancelled_sessions', [])}")
+                continue
+
+            if cmd in ("cron", "automation"):
+                snap = await client.terminal_automation_jobs()
+                if not snap.get("available"):
+                    print(f"  ({snap.get('message', '不可用')})")
+                    continue
+                print(f"  scheduler_running: {snap.get('scheduler_running')}")
+                print(f"  reload_interval_s: {snap.get('reload_interval_seconds')}")
+                w = snap.get("watcher")
+                if isinstance(w, dict):
+                    print(f"  watcher: {w}")
+                print(f"  tracked_job_count: {snap.get('tracked_job_count', 0)}")
+                for j in snap.get("jobs") or []:
+                    if not isinstance(j, dict):
+                        continue
+                    jid = j.get("job_id", "")
+                    dfn = j.get("definition") or {}
+                    jt = dfn.get("job_type", "")
+                    alive = not j.get("task_done") and not j.get("task_cancelled")
+                    stat = "alive" if alive else ("cancelled" if j.get("task_cancelled") else "done")
+                    print(f"    [{stat}] {jid}  type={jt}  task={j.get('asyncio_task_name')}")
+                    if dfn:
+                        print(f"          interval={dfn.get('interval_seconds')}s one_shot={dfn.get('one_shot')} tz={dfn.get('timezone')}")
+                    if j.get("task_error"):
+                        print(f"          error: {j.get('task_error')}")
+                continue
+
+            if cmd in ("tasks", "agent_tasks"):
+                lim = 25
+                if args:
+                    try:
+                        lim = max(1, min(100, int(args[0])))
+                    except ValueError:
+                        print("  用法: tasks [limit]")
+                        continue
+                tq = await client.terminal_agent_tasks(limit=lim)
+                if not tq.get("available"):
+                    print(f"  ({tq.get('message', '不可用')})")
+                    continue
+                print(f"  pending: {tq.get('pending_count', 0)}  running: {tq.get('running_count', 0)}")
+                for item in tq.get("recent_tasks") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    print(
+                        f"    [{item.get('status')}] {item.get('task_id')} "
+                        f"src={item.get('source')} session={item.get('session_id')}"
+                    )
+                    ins = str(item.get("instruction") or "")
+                    if ins:
+                        print(f"          {ins[:200]}{'…' if len(ins) > 200 else ''}")
                 continue
 
             if cmd == "inspect":

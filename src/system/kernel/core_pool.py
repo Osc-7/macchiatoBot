@@ -224,6 +224,20 @@ class CorePool:
                     exc,
                 )
 
+        # Kernel 关闭路径：在释放资源前刷新 checkpoint，使 last_active_at 接近关闭时刻，
+        # 避免恢复时用「上一轮 turn 的 wall 时间」与 shutdown_at 相减导致误判超时。
+        if shutdown:
+            flush = getattr(agent, "flush_checkpoint_for_shutdown", None)
+            if callable(flush):
+                try:
+                    flush()
+                except Exception as exc:
+                    logger.warning(
+                        "CorePool: flush_checkpoint_for_shutdown failed (session=%s): %s",
+                        session_id,
+                        exc,
+                    )
+
         # ── Step 2: summarize — 写入长期记忆 ───────────────────────────────
         # background 模式（包含历史上的 cron/heartbeat）不持久化摘要到长期记忆，
         # 避免为每个后台任务创建独立 data/memory/ 前缀目录；旧版仍兼容 session_id 以
@@ -361,8 +375,10 @@ class CorePool:
         # 读取 kernel 关闭时间戳；无则无法判断 elapsed，跳过所有恢复
         shutdown_path = Path(get_kernel_shutdown_at_path(mem_cfg))
         if not shutdown_path.exists():
-            logger.debug(
-                "CorePool.restore_from_checkpoints: no shutdown timestamp, skipping"
+            logger.info(
+                "CorePool.restore_from_checkpoints: missing %s — skipping restore "
+                "(unclean exit or first boot; need graceful KernelScheduler.stop to write it)",
+                shutdown_path.name,
             )
             return 0
         try:

@@ -328,97 +328,12 @@ class TestConversationContext:
 
         assert len(ctx) == 0
 
-    def test_max_messages_limit(self):
-        """测试消息数量限制"""
-        ctx = ConversationContext(max_messages=5)
-
-        # 添加超过限制的消息
-        for i in range(10):
+    def test_no_message_count_cap(self):
+        """不按条数裁剪；上下文由 token 与 Kernel 压缩控制。"""
+        ctx = ConversationContext()
+        n = 120
+        for i in range(n):
             ctx.add_user_message(f"消息 {i}")
-
-        # 应该被裁剪到 5 条
-        assert len(ctx) == 5
-
-        # 保留的应该是最后 5 条
-        messages = ctx.get_messages()
-        assert "消息 5" in messages[0]["content"]
-        assert "消息 9" in messages[4]["content"]
-
-    def test_trim_preserves_tool_blocks(self):
-        """裁剪时保持 tool 调用块完整，避免产生孤立的 tool 消息（API 要求 tool 紧接 assistant+tool_calls）"""
-        ctx = ConversationContext(max_messages=8)
-
-        # 构造多轮对话含 tool 调用
-        ctx.add_user_message("创建会议")
-        ctx.add_assistant_message(
-            content=None,
-            tool_calls=[
-                {
-                    "id": "c1",
-                    "type": "function",
-                    "function": {"name": "add_event", "arguments": "{}"},
-                },
-                {
-                    "id": "c2",
-                    "type": "function",
-                    "function": {"name": "add_event", "arguments": "{}"},
-                },
-            ],
-        )
-        ctx.add_tool_result("c1", "ok")
-        ctx.add_tool_result("c2", "ok")
-        ctx.add_assistant_message("已创建")
-        ctx.add_user_message("再创建一个")
-        ctx.add_assistant_message(
-            content=None,
-            tool_calls=[
-                {
-                    "id": "c3",
-                    "type": "function",
-                    "function": {"name": "add_event", "arguments": "{}"},
-                }
-            ],
-        )
-        ctx.add_tool_result("c3", "ok")
-        ctx.add_assistant_message("完成")
-
-        messages = ctx.get_messages()
-        # 不能以 tool 开头；每个 tool 前必须是 assistant+tool_calls 或同一块的 tool
-        assert messages[0].get("role") != "tool", "裁剪后首条不能是 tool"
-        for i, m in enumerate(messages):
-            if m.get("role") == "tool":
-                j = i - 1
-                while j >= 0 and messages[j].get("role") == "tool":
-                    j -= 1
-                assert (
-                    j >= 0
-                    and messages[j].get("role") == "assistant"
-                    and "tool_calls" in messages[j]
-                )
-
-    def test_trim_skips_incomplete_tool_blocks(self):
-        """裁剪时跳过不完整的 assistant+tool_calls 块，避免产出非法 API 请求（tool_calls 后无 tool 结果）"""
-        ctx = ConversationContext(max_messages=4)
-        ctx.add_user_message("1")
-        ctx.add_assistant_message("a1")
-        ctx.add_user_message("2")
-        ctx.add_assistant_message(
-            content=None,
-            tool_calls=[
-                {
-                    "id": "c1",
-                    "type": "function",
-                    "function": {"name": "f", "arguments": "{}"},
-                }
-            ],
-        )
-        # 最后一块 [assistant+tool_calls] 不完整；添加 user3 触发 trim，应跳过该块
-        ctx.add_user_message("3")
-        messages = ctx.get_messages()
-        # 任何 assistant+tool_calls 后必须有 tool 消息
-        for i, m in enumerate(messages):
-            if m.get("role") == "assistant" and m.get("tool_calls"):
-                has_following_tool = (
-                    i + 1 < len(messages) and messages[i + 1].get("role") == "tool"
-                )
-                assert has_following_tool, "assistant+tool_calls 后必须有 tool 消息"
+        assert len(ctx) == n
+        assert "消息 0" in ctx.get_messages()[0]["content"]
+        assert "消息 119" in ctx.get_messages()[-1]["content"]

@@ -175,3 +175,11 @@ class AgentTaskQueue:
                 "SELECT COUNT(*) FROM agent_tasks WHERE status = 'pending'"
             ).fetchone()
         return row[0] if row else 0
+
+    def running_count(self) -> int:
+        """返回当前 running（已被消费者取出、尚未标记完成）的任务数量。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM agent_tasks WHERE status = 'running'"
+            ).fetchone()
+        return row[0] if row else 0

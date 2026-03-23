@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from .event_bus import AsyncEventBus
@@ -44,6 +44,55 @@ class AutomationScheduler:
         # 仅在队列模式下实际有意义，但在 event_bus 模式下开启也无害。
         self._reload_interval: float = 60.0
         self._watch_task: Optional[asyncio.Task] = None
+
+    def tracked_jobs_snapshot(self) -> Dict[str, Any]:
+        """供 KernelTerminal / 运维查看：当前进程内为每个 job 维护的调度协程状态。
+
+        返回 JSON 友好结构：scheduler 是否在跑、watcher 状态、每个 job 的定义摘要与 asyncio.Task 是否存活。
+        """
+        jobs: List[Dict[str, Any]] = []
+        for job_id, task in sorted(self._tasks.items(), key=lambda x: x[0]):
+            row: Dict[str, Any] = {
+                "job_id": job_id,
+                "asyncio_task_name": task.get_name(),
+                "task_done": task.done(),
+                "task_cancelled": task.cancelled(),
+            }
+            snap = self._job_snapshots.get(job_id)
+            if snap is not None:
+                row["definition"] = {
+                    "job_type": snap.job_type,
+                    "enabled": snap.enabled,
+                    "one_shot": snap.one_shot,
+                    "interval_seconds": snap.interval_seconds,
+                    "timezone": snap.timezone or "Asia/Shanghai",
+                    "run_at": snap.run_at.isoformat() if snap.run_at else None,
+                }
+            if task.done() and not task.cancelled():
+                try:
+                    exc = task.exception()
+                    if exc is not None:
+                        row["task_error"] = repr(exc)
+                except (asyncio.InvalidStateError, Exception):
+                    pass
+            jobs.append(row)
+
+        watcher: Optional[Dict[str, Any]] = None
+        wt = self._watch_task
+        if wt is not None:
+            watcher = {
+                "name": wt.get_name(),
+                "done": wt.done(),
+                "cancelled": wt.cancelled(),
+            }
+
+        return {
+            "scheduler_running": self._running,
+            "reload_interval_seconds": self._reload_interval,
+            "tracked_job_count": len(jobs),
+            "jobs": jobs,
+            "watcher": watcher,
+        }
 
     async def start(self) -> None:
         if self._running:

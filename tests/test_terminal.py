@@ -197,6 +197,57 @@ def test_terminal_queue() -> None:
     assert "active_task_count" in q
 
 
+def test_terminal_automation_tracked_jobs_unavailable() -> None:
+    pool = _make_mock_pool()
+    sched = _make_mock_scheduler()
+    terminal = KernelTerminal(scheduler=sched, core_pool=pool)
+    out = terminal.automation_tracked_jobs()
+    assert out.get("available") is False
+
+
+def test_terminal_automation_tracked_jobs_with_scheduler() -> None:
+    pool = _make_mock_pool()
+    sched = _make_mock_scheduler()
+    auto = MagicMock()
+    auto.tracked_jobs_snapshot = MagicMock(
+        return_value={
+            "scheduler_running": True,
+            "tracked_job_count": 1,
+            "jobs": [{"job_id": "j1", "task_done": False}],
+        }
+    )
+    terminal = KernelTerminal(
+        scheduler=sched, core_pool=pool, automation_scheduler=auto
+    )
+    out = terminal.automation_tracked_jobs()
+    assert out.get("available") is True
+    assert out.get("tracked_job_count") == 1
+    auto.tracked_jobs_snapshot.assert_called_once()
+
+
+def test_terminal_agent_task_queue_unavailable() -> None:
+    pool = _make_mock_pool()
+    sched = _make_mock_scheduler()
+    terminal = KernelTerminal(scheduler=sched, core_pool=pool)
+    out = terminal.agent_task_queue_status()
+    assert out.get("available") is False
+
+
+def test_terminal_agent_task_queue_with_queue() -> None:
+    pool = _make_mock_pool()
+    sched = _make_mock_scheduler()
+    q = MagicMock()
+    q.pending_count = MagicMock(return_value=2)
+    q.running_count = MagicMock(return_value=1)
+    q.list_recent = MagicMock(return_value=[])
+    terminal = KernelTerminal(scheduler=sched, core_pool=pool, agent_task_queue=q)
+    out = terminal.agent_task_queue_status(limit=10)
+    assert out.get("available") is True
+    assert out["pending_count"] == 2
+    assert out["running_count"] == 1
+    q.list_recent.assert_called_once_with(limit=10)
+
+
 @pytest.mark.asyncio
 async def test_terminal_kill() -> None:
     pool = _make_mock_pool(pool_entries={"cli:default": (_make_mock_agent(), _make_mock_profile())})

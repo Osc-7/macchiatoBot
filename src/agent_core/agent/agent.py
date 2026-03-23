@@ -855,6 +855,46 @@ class AgentCore:
                     "AgentCore: checkpoint write failed: %s", exc
                 )
 
+    def flush_checkpoint_for_shutdown(self) -> None:
+        """Daemon / Kernel 正常关闭前刷新检查点，将 ``last_active_at`` 更新为当前时刻。
+
+        每轮 turn 结束时才会写入 checkpoint；若会话长时间空闲但仍未超过运行时 TTL，
+        磁盘上的 ``last_active_at`` 会停留在「上一轮结束时刻」。下次启动时
+        ``restore_from_checkpoints`` 用 ``shutdown_at - last_active_at`` 计算 elapsed，
+        会把「空闲时长」误判为停机时间，导致尚未过期的会话无法恢复。
+
+        在 ``evict(..., shutdown=True)`` 路径调用本方法，使暂停语义成立：停机前后不把
+        空闲等待算进恢复时的 TTL 折算。
+        """
+        if self._checkpoint_manager is None:
+            return
+        try:
+            profile = getattr(self, "_core_profile", None)
+            ttl = float(
+                getattr(profile, "session_expired_seconds", None)
+                or getattr(self._config.agent, "session_expired_seconds", 1800)
+            )
+            self._checkpoint_manager.write(
+                CoreCheckpoint(
+                    session_id=self._session_id,
+                    owner_id=self._user_id,
+                    source=self._source,
+                    running_summary=self._working_memory.running_summary,
+                    recent_messages=list(self._context.get_messages()),
+                    last_active_at=time.time(),
+                    remaining_ttl_seconds=ttl,
+                    turn_count=self._current_turn_id,
+                    last_history_id=self._last_history_id,
+                    token_usage=dict(self._token_usage),
+                )
+            )
+        except Exception as exc:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "AgentCore: shutdown checkpoint flush failed: %s", exc
+            )
+
     def _build_system_prompt(self) -> str:
         """
         构建系统提示。

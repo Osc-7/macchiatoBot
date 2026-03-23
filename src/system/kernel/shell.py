@@ -129,12 +129,13 @@ async def run_kernel_shell(client: AutomationIPCClient) -> None:
                 for j in snap.get("jobs") or []:
                     if not isinstance(j, dict):
                         continue
-                    jid = j.get("job_id", "")
+                    jid = j.get("job_name", "")
                     dfn = j.get("definition") or {}
                     jt = dfn.get("job_type", "")
+                    display_name = dfn.get("name") or jid
                     alive = not j.get("task_done") and not j.get("task_cancelled")
                     stat = "alive" if alive else ("cancelled" if j.get("task_cancelled") else "done")
-                    print(f"    [{stat}] {jid}  type={jt}  task={j.get('asyncio_task_name')}")
+                    print(f"    [{stat}] {display_name}  type={jt}  task={j.get('asyncio_task_name')}")
                     if dfn:
                         print(f"          interval={dfn.get('interval_seconds')}s one_shot={dfn.get('one_shot')} tz={dfn.get('timezone')}")
                     if j.get("task_error"):

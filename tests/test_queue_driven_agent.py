@@ -256,7 +256,8 @@ class TestSessionManager:
             created_agents.append(ag)
             return ag
 
-        with patch.object(manager, "_create_agent", side_effect=fake_create_agent):
+        with patch.object(manager, "_create_agent", side_effect=fake_create_agent), \
+             patch.object(manager, "_create_session_logger", return_value=None):
             await manager.run_task(
                 "cron:sync.course:2025-01-01", "同步课表", ContextPolicy.EPHEMERAL
             )
@@ -283,7 +284,8 @@ class TestSessionManager:
             created_agents.append(ag)
             return ag
 
-        with patch.object(manager, "_create_agent", side_effect=fake_create_agent):
+        with patch.object(manager, "_create_agent", side_effect=fake_create_agent), \
+             patch.object(manager, "_create_session_logger", return_value=None):
             r1 = await manager.run_task("cli:root", "你好", ContextPolicy.PERSISTENT)
             r2 = await manager.run_task("cli:root", "再见", ContextPolicy.PERSISTENT)
 
@@ -306,7 +308,8 @@ class TestSessionManager:
             created_agents.append(ag)
             return ag
 
-        with patch.object(manager, "_create_agent", side_effect=fake_create_agent):
+        with patch.object(manager, "_create_agent", side_effect=fake_create_agent), \
+             patch.object(manager, "_create_session_logger", return_value=None):
             await manager.run_task("cli:root", "来自 CLI", ContextPolicy.PERSISTENT)
             await manager.run_task(
                 "social:wechat:u123", "来自微信", ContextPolicy.PERSISTENT
@@ -326,7 +329,8 @@ class TestSessionManager:
             agents.append(ag)
             return ag
 
-        with patch.object(manager, "_create_agent", side_effect=fake_create_agent):
+        with patch.object(manager, "_create_agent", side_effect=fake_create_agent), \
+             patch.object(manager, "_create_session_logger", return_value=None):
             await manager.run_task("cli:root", "ping", ContextPolicy.PERSISTENT)
             await manager.run_task("social:wechat:u1", "ping", ContextPolicy.PERSISTENT)
             await manager.close_all()
@@ -384,12 +388,19 @@ class TestSchedulerQueueDispatch:
             task_queue=queue,
         )
 
-        job = JobDefinition(job_type="sync.course", interval_seconds=3600)
+        job = JobDefinition(
+            job_name="dispatch-sync-course-test",
+            job_type="human",
+            interval_seconds=3600,
+            payload_template={
+                "instruction": "调用 sync_canvas(days_ahead=30, write_tasks=true, write_deadline_events=true)。",
+            },
+        )
         await scheduler.run_job_once(job)
 
         tasks = queue.list_recent(limit=10)
         assert len(tasks) == 1
-        assert tasks[0].source == "cron:sync.course"
+        assert tasks[0].source == "cron:dispatch-sync-course-test"
         assert tasks[0].context_policy == ContextPolicy.EPHEMERAL
         assert "sync_canvas" in tasks[0].instruction
 
@@ -412,21 +423,25 @@ class TestSchedulerQueueDispatch:
             task_queue=queue,
         )
 
-        job_types = ["sync.course", "sync.email", "summary.daily", "summary.weekly"]
-        for jt in job_types:
+        job_names = ["dispatch-sync-course", "dispatch-sync-email", "dispatch-summary-daily", "dispatch-summary-weekly"]
+        for jn in job_names:
             await scheduler.run_job_once(
-                JobDefinition(job_type=jt, interval_seconds=3600)
+                JobDefinition(
+                    job_name=jn,
+                    job_type="human",
+                    interval_seconds=3600,
+                    payload_template={"instruction": f"Run {jn}"},
+                )
             )
 
         tasks = queue.list_recent(limit=20)
-        assert len(tasks) == len(job_types)
+        assert len(tasks) == len(job_names)
         sources = {t.source for t in tasks}
-        assert sources == {f"cron:{jt}" for jt in job_types}
+        assert sources == {f"cron:{jn}" for jn in job_names}
 
     @pytest.mark.asyncio
-    async def test_fallback_to_event_bus_when_no_queue(self, tmp_path):
-        """当未配置 task_queue 时，依然通过 event_bus 触发（旧路径兼容）。"""
-        from system.automation.event_bus import AsyncEventBus
+    async def test_no_dispatch_when_no_queue(self, tmp_path):
+        """未配置 task_queue 时，_dispatch_job 直接返回，不报错。"""
         from system.automation.repositories import (
             JobDefinitionRepository,
             JobRunRepository,
@@ -434,27 +449,22 @@ class TestSchedulerQueueDispatch:
         from system.automation.scheduler import AutomationScheduler
         from system.automation.types import JobDefinition
 
-        bus = AsyncEventBus()
-        received_topics: List[str] = []
-
-        async def handler(event: dict):
-            received_topics.append(event["topic"])
-
-        bus.subscribe("sync.requested", handler)
-
         job_def_repo = JobDefinitionRepository(base_dir=str(tmp_path / "automation"))
         job_run_repo = JobRunRepository(base_dir=str(tmp_path / "automation"))
 
         scheduler = AutomationScheduler(
-            event_bus=bus,
             job_def_repo=job_def_repo,
             job_run_repo=job_run_repo,
         )
 
-        job = JobDefinition(job_type="sync.course", interval_seconds=3600)
-        await scheduler.run_job_once(job)
-
-        assert "sync.requested" in received_topics
+        job = JobDefinition(
+            job_name="no-queue-test",
+            job_type="human",
+            interval_seconds=3600,
+            payload_template={"instruction": "test"},
+        )
+        run = await scheduler.run_job_once(job)
+        assert run.status.value == "success"
 
     @pytest.mark.asyncio
     async def test_run_job_once_disables_one_shot_job(self, tmp_path):
@@ -478,7 +488,8 @@ class TestSchedulerQueueDispatch:
         )
 
         job = JobDefinition(
-            job_type="sync.email",
+            job_name="one-shot-email-test",
+            job_type="human",
             one_shot=True,
             run_at=datetime.now() + timedelta(seconds=1),
             interval_seconds=1,
@@ -486,7 +497,7 @@ class TestSchedulerQueueDispatch:
         job_def_repo.create(job)
         await scheduler.run_job_once(job)
 
-        stored = job_def_repo.get(job.job_id)
+        stored = job_def_repo.get(job.job_name)
         assert stored is not None
         assert stored.enabled is False
         assert stored.one_shot is True

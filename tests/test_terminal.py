@@ -213,7 +213,7 @@ def test_terminal_automation_tracked_jobs_with_scheduler() -> None:
         return_value={
             "scheduler_running": True,
             "tracked_job_count": 1,
-            "jobs": [{"job_id": "j1", "task_done": False}],
+            "jobs": [{"job_name": "j1", "task_done": False}],
         }
     )
     terminal = KernelTerminal(

@@ -44,12 +44,8 @@ class JobRunRepository(JSONRepository[JobRun]):
     def __init__(self, base_dir: Optional[str] = None):
         super().__init__(_automation_base_dir(base_dir) / "job_runs.json", JobRun)
 
-    def list_recent(
-        self, limit: int = 20, job_type: Optional[str] = None
-    ) -> List[JobRun]:
+    def list_recent(self, limit: int = 20) -> List[JobRun]:
         items = self.get_all()
-        if job_type:
-            items = [item for item in items if item.job_type == job_type]
         items.sort(key=lambda i: i.triggered_at, reverse=True)
         return items[: max(1, limit)]
 

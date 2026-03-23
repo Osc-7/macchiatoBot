@@ -238,18 +238,17 @@ class CorePool:
                     )
 
         # ── Step 2: summarize — 写入长期记忆 ───────────────────────────────
-        # background 模式（包含历史上的 cron/heartbeat）不持久化摘要到长期记忆，
-        # 避免为每个后台任务创建独立 data/memory/ 前缀目录；旧版仍兼容 session_id 以
-        # \"cron:\" 开头的会话不写入长期记忆。
+        # background 模式不跑会话摘要：多为高频定时任务，避免长期记忆被刷屏。
+        # full/sub（含带 memory_owner 的 cron 任务）使用与主会话一致的 LongTermMemory 时
+        # 应正常摘要；此前误用 session_id.startswith("cron:") 一刀切，导致如 moltbook
+        # full 任务 evict 时从不写入 long_term。
         # shutdown=True 时跳过：session 只是暂停，checkpoint 会保留完整上下文供恢复，
         # 此时写摘要属于把暂停误认为 session 结束。
         if not shutdown and core_stats is not None and self._summarizer is not None:
             try:
                 long_term_memory = None
                 profile_mode = getattr(getattr(entry, "profile", None), "mode", None)
-                if profile_mode != "background" and not (session_id or "").startswith(
-                    "cron:"
-                ):
+                if profile_mode != "background":
                     long_term_memory = getattr(agent, "_long_term_memory", None)
                 messages = None
                 ctx = getattr(agent, "_context", None)

@@ -169,6 +169,7 @@ async def test_get_automation_activity_tool_reads_compact_records(
 async def test_create_scheduled_job_supports_one_shot_alarm(tmp_path):
     tool = CreateScheduledJobTool(base_dir=str(tmp_path / "automation"))
     result = await tool.execute(
+        job_name="water-reminder-once",
         instruction="到点后提醒我喝水",
         run_at="2026-03-09T21:30:00+08:00",
         user_id="u1",
@@ -179,12 +180,28 @@ async def test_create_scheduled_job_supports_one_shot_alarm(tmp_path):
     assert job["one_shot"] is True
     assert job["run_at"] is not None
     assert job["enabled"] is True
+    assert job["job_type"] == "agent"
+
+
+@pytest.mark.asyncio
+async def test_create_scheduled_job_uses_job_name(tmp_path):
+    tool = CreateScheduledJobTool(base_dir=str(tmp_path / "automation"))
+    result = await tool.execute(
+        instruction="每 10 分钟 ping",
+        interval_minutes=10,
+        job_name="ping-every-10m",
+    )
+    assert result.success is True
+    job = result.data["job"]
+    assert job["job_type"] == "agent"
+    assert job["job_name"] == "ping-every-10m"
 
 
 @pytest.mark.asyncio
 async def test_create_scheduled_job_rejects_mixed_one_shot_and_interval(tmp_path):
     tool = CreateScheduledJobTool(base_dir=str(tmp_path / "automation"))
     result = await tool.execute(
+        job_name="bad-mixed-schedule",
         instruction="闹钟+循环冲突示例",
         run_at="2026-03-09T21:30:00+08:00",
         interval_minutes=5,

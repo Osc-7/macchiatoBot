@@ -665,7 +665,7 @@ class AutomationJobConfig(BaseModel):
 
     name: str = Field(
         ...,
-        description="任务的稳定标识名，用于作为 job_definitions 中的主键之一（与 job_type、user_id 组合）。建议一旦确定就不要随意修改。",
+        description="任务的稳定标识名，与 memory_owner 一起用于 config 同步时的匹配键；对应落盘后的 payload_template.name。",
     )
     description: str = Field(
         ...,
@@ -695,10 +695,6 @@ class AutomationJobConfig(BaseModel):
     one_shot: bool = Field(
         default=False,
         description="是否按一次性任务执行。若提供 run_at 则会自动视为 true。",
-    )
-    job_type: str = Field(
-        default="agent.custom",
-        description="任务类型标识，用于区分不同类的定时任务。",
     )
     user_id: str = Field(
         default="default",

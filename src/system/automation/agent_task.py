@@ -27,7 +27,7 @@ class AgentTask(BaseModel):
     source: str
     """
     指令来源标识，格式约定：
-      - 定时任务:  cron:{job_type}
+      - 定时任务:  cron:{job_name}
       - CLI 用户:  cli:{user_id}
       - 社交平台:  social:{platform}:{user_id}
       - API/webhook: api:{name}
@@ -36,7 +36,7 @@ class AgentTask(BaseModel):
     session_id: str
     """
     上下文隔离 key，格式约定：
-      - 定时任务:  cron:{job_type}:{date}   (每次唯一，ephemeral)
+      - 定时任务:  cron:{job_name}:{date}   (每次唯一，ephemeral)
       - CLI 用户:  cli:{user_id}            (固定复用，persistent)
       - 社交平台:  social:{platform}:{uid}  (固定复用，persistent)
     """
@@ -56,21 +56,16 @@ class AgentTask(BaseModel):
 
 
 def make_cron_task(
-    job_type: str,
+    job_name: str,
     instruction: str,
     *,
     user_id: str = "default",
     memory_owner: str | None = None,
     core_mode: str | None = None,
 ) -> AgentTask:
-    """构造一个定时任务 AgentTask（ephemeral，session_id 含日期保证唯一性）。
-
-    memory_owner:
-        若提供（例如 "cli:root"），则用于决定该任务运行时加载哪一套记忆与上下文；
-        否则表示不加载任何长期/内容/对话历史记忆，仅使用工作记忆。
-    """
+    """构造定时任务 AgentTask（ephemeral，session_id 含日期保证唯一性）。"""
     today = date.today().isoformat()
-    source = f"cron:{job_type}"
+    source = f"cron:{job_name}"
     metadata: dict = {}
     if memory_owner:
         metadata["memory_owner"] = memory_owner
@@ -83,7 +78,6 @@ def make_cron_task(
         session_id=f"{source}:{today}",
         instruction=instruction,
         context_policy=ContextPolicy.EPHEMERAL,
-        # 将 memory_owner / core_mode 直接放入 metadata，后续由 automation_daemon / KernelScheduler 解析。
         metadata=metadata,
     )
 

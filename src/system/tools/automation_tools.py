@@ -76,12 +76,6 @@ class GetSyncStatusTool(BaseTool):
             description="查看同步游标与最近作业运行状态。",
             parameters=[
                 ToolParameter(
-                    name="job_type",
-                    type="string",
-                    description="可选，筛选 job_type",
-                    required=False,
-                ),
-                ToolParameter(
                     name="limit",
                     type="integer",
                     description="返回数量，默认 10",
@@ -92,10 +86,9 @@ class GetSyncStatusTool(BaseTool):
         )
 
     async def execute(self, **kwargs: Any) -> ToolResult:
-        job_type = kwargs.get("job_type")
         limit = int(kwargs.get("limit") or 10)
         runtime = await get_runtime()
-        runs = runtime.run_repo.list_recent(limit=limit, job_type=job_type)
+        runs = runtime.run_repo.list_recent(limit=limit)
         cursors = runtime.cursor_repo.get_all()
 
         return ToolResult(
@@ -462,7 +455,7 @@ class CreateScheduledJobTool(BaseTool):
         return ToolDefinition(
             name=self.name,
             description=(
-                "创建一个新的定时自动化任务。\n\n"
+                "创建一个新的定时自动化任务（job_type 固定为 agent，表示由当前 Agent 创建）。\n\n"
                 "典型用法：当用户用自然语言描述“每隔多久做什么事情”或“每天几点/几点做什么事情”时，"
                 "使用本工具将其注册为后台定时任务，由 automation_daemon 在后台以 ephemeral 会话周期性执行。\n\n"
                 "支持四种主要语义：\n"
@@ -521,10 +514,10 @@ class CreateScheduledJobTool(BaseTool):
                     required=False,
                 ),
                 ToolParameter(
-                    name="job_type",
+                    name="job_name",
                     type="string",
-                    description="任务类型标识，默认 agent.custom。可用于区分不同类的自定义任务。",
-                    required=False,
+                    description="必填：任务唯一名（存库主键），应简短稳定。",
+                    required=True,
                 ),
                 ToolParameter(
                     name="user_id",
@@ -555,12 +548,22 @@ class CreateScheduledJobTool(BaseTool):
         )
 
     async def execute(self, **kwargs: Any) -> ToolResult:
+        kwargs.pop("__execution_context__", None)
+
         instruction = str(kwargs.get("instruction") or "").strip()
         if not instruction:
             return ToolResult(
                 success=False,
                 error="MISSING_INSTRUCTION",
                 message="缺少定时任务指令（instruction）。",
+            )
+
+        job_name = str(kwargs.get("job_name") or "").strip()
+        if not job_name:
+            return ToolResult(
+                success=False,
+                error="MISSING_JOB_NAME",
+                message="缺少任务唯一名 job_name（存库主键，必填）。",
             )
 
         interval_seconds_raw = kwargs.get("interval_seconds")
@@ -662,7 +665,6 @@ class CreateScheduledJobTool(BaseTool):
             # one-shot 模式下保持 interval_seconds 的最小合法值（不会参与下一轮调度）
             interval_seconds = 1
 
-        job_type = str(kwargs.get("job_type") or "agent.custom")
         user_id = str(kwargs.get("user_id") or "default")
         enabled = bool(kwargs.get("enabled", True))
         # 未显式传入时，使用调用此工具的 Core 的权限作为默认
@@ -681,7 +683,8 @@ class CreateScheduledJobTool(BaseTool):
             timezone = "Asia/Shanghai"
 
         job = JobDefinition(
-            job_type=job_type,
+            job_name=job_name,
+            job_type="agent",
             enabled=enabled,
             one_shot=one_shot,
             run_at=run_at,

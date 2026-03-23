@@ -27,7 +27,6 @@ def test_sync_supports_one_shot_run_at(tmp_path: Path) -> None:
             name="alarm_once",
             description="一次性提醒",
             run_at="2026-03-09T21:30:00+08:00",
-            job_type="agent.custom",
             user_id="default",
             enabled=True,
         ),
@@ -41,6 +40,8 @@ def test_sync_supports_one_shot_run_at(tmp_path: Path) -> None:
     assert job.one_shot is True
     assert job.run_at is not None
     assert job.enabled is True
+    assert job.job_type == "human"
+    assert job.job_type == "human"
 
 
 @pytest.mark.asyncio
@@ -58,7 +59,8 @@ async def test_sync_creates_and_disables_config_jobs(
 
     # 先准备一个非 config 来源的任务，后续不应被 sync 影响
     manual_job = JobDefinition(
-        job_type="agent.custom",
+        job_name="manual-test-1",
+        job_type="human",
         enabled=True,
         payload_template={"name": "manual", "user_id": "default"},
     )
@@ -71,7 +73,6 @@ async def test_sync_creates_and_disables_config_jobs(
             name="job_a",
             description="do A",
             daily_time="08:00",
-            job_type="agent.custom",
             user_id="default",
             enabled=True,
         ),
@@ -79,7 +80,6 @@ async def test_sync_creates_and_disables_config_jobs(
             name="job_b",
             description="do B",
             daily_time="09:00",
-            job_type="agent.custom",
             user_id="default",
             enabled=True,
         ),
@@ -95,8 +95,8 @@ async def test_sync_creates_and_disables_config_jobs(
     assert all_jobs["job_a"].enabled is True
     assert all_jobs["job_b"].enabled is True
 
-    # 记录 job_a 的 job_id，后续应保持稳定（更新而不是新建）
-    job_a_id = all_jobs["job_a"].job_id
+    # 记录 job_a 的 job_name，后续应保持稳定（更新而不是新建）
+    job_a_id = all_jobs["job_a"].job_name
 
     # 第二次：从 config 中删掉 job_b，仅保留 job_a
     cfg2 = _make_base_config(tmp_path)
@@ -105,7 +105,6 @@ async def test_sync_creates_and_disables_config_jobs(
             name="job_a",
             description="do A updated",
             daily_time="10:00",
-            job_type="agent.custom",
             user_id="default",
             enabled=True,
         ),
@@ -119,9 +118,9 @@ async def test_sync_creates_and_disables_config_jobs(
     assert "manual" in all_jobs2
     assert all_jobs2["manual"].enabled is True
 
-    # job_a 仍然存在且启用，且 job_id 未变化
+    # job_a 仍然存在且启用，且 job_name 未变化
     assert "job_a" in all_jobs2
-    assert all_jobs2["job_a"].job_id == job_a_id
+    assert all_jobs2["job_a"].job_name == job_a_id
     assert all_jobs2["job_a"].enabled is True
     # 描述/时间已更新
     assert all_jobs2["job_a"].payload_template.get("daily_time") == "10:00"

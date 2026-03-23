@@ -23,25 +23,16 @@ class AutomationScheduler:
         job_run_repo: Optional[JobRunRepository] = None,
         task_queue: Optional["AgentTaskQueue"] = None,
     ):
-        """
-        Args:
-            event_bus:   进程内事件总线，兼容旧路径（task_queue 未设时使用）。
-            job_def_repo: 作业定义仓库。
-            job_run_repo: 作业运行记录仓库。
-            task_queue:  AgentTask 队列。设置后，_dispatch_job 将向队列推送任务
-                         而非通过 event_bus 直接触发业务逻辑。
-        """
         self._event_bus = event_bus
         self._job_def_repo = job_def_repo or JobDefinitionRepository()
         self._job_run_repo = job_run_repo or JobRunRepository()
         self._task_queue = task_queue
-        # job_id -> 调度协程任务
+        # job_name -> 调度协程任务
         self._tasks: dict[str, asyncio.Task] = {}
-        # job_id -> 最近一次用于调度的 JobDefinition 快照（用于检测配置变更）
+        # job_name -> 最近一次用于调度的 JobDefinition 快照（用于检测配置变更）
         self._job_snapshots: dict[str, JobDefinition] = {}
         self._running = False
         # 周期性检查 job_definitions 是否有新增/禁用的任务，默认 60s 刷新一次。
-        # 仅在队列模式下实际有意义，但在 event_bus 模式下开启也无害。
         self._reload_interval: float = 60.0
         self._watch_task: Optional[asyncio.Task] = None
 
@@ -51,17 +42,19 @@ class AutomationScheduler:
         返回 JSON 友好结构：scheduler 是否在跑、watcher 状态、每个 job 的定义摘要与 asyncio.Task 是否存活。
         """
         jobs: List[Dict[str, Any]] = []
-        for job_id, task in sorted(self._tasks.items(), key=lambda x: x[0]):
+        for job_name, task in sorted(self._tasks.items(), key=lambda x: x[0]):
             row: Dict[str, Any] = {
-                "job_id": job_id,
+                "job_name": job_name,
                 "asyncio_task_name": task.get_name(),
                 "task_done": task.done(),
                 "task_cancelled": task.cancelled(),
             }
-            snap = self._job_snapshots.get(job_id)
+            snap = self._job_snapshots.get(job_name)
             if snap is not None:
+                pt = snap.payload_template or {}
                 row["definition"] = {
                     "job_type": snap.job_type,
+                    "name": pt.get("name", ""),
                     "enabled": snap.enabled,
                     "one_shot": snap.one_shot,
                     "interval_seconds": snap.interval_seconds,
@@ -100,15 +93,15 @@ class AutomationScheduler:
         self._running = True
 
         for job in self._job_def_repo.get_enabled():
-            self._tasks[job.job_id] = asyncio.create_task(
+            self._tasks[job.job_name] = asyncio.create_task(
                 self._run_loop(job),
-                name=f"scheduler:{job.job_id}",
+                name=f"scheduler:{job.job_name}",
             )
             # 记录一份快照，后续用于检测配置是否发生变化
             try:
-                self._job_snapshots[job.job_id] = job.model_copy(deep=True)
+                self._job_snapshots[job.job_name] = job.model_copy(deep=True)
             except Exception:  # pragma: no cover - 理论上不会触发
-                self._job_snapshots[job.job_id] = job
+                self._job_snapshots[job.job_name] = job
 
         # 队列驱动模式下，支持在运行期通过修改 job_definitions.json 添加/禁用任务，
         # 由后台 watcher 周期性刷新内存中的任务列表，避免必须重启后台守护进程（如 automation_daemon）。
@@ -135,7 +128,7 @@ class AutomationScheduler:
 
     async def run_job_once(self, job: JobDefinition) -> JobRun:
         run = JobRun(
-            job_id=job.job_id,
+            job_name=job.job_name,
             job_type=job.job_type,
             triggered_at=datetime.now(),
             started_at=datetime.now(),
@@ -298,6 +291,8 @@ class AutomationScheduler:
             return True
         if (old.payload_template or {}) != (new.payload_template or {}):
             return True
+        if old.job_type != new.job_type:
+            return True
         return False
 
     async def _watch_job_definitions(self) -> None:
@@ -318,99 +313,70 @@ class AutomationScheduler:
                     pass
 
                 enabled_jobs = self._job_def_repo.get_enabled()
-                enabled_ids = {job.job_id for job in enabled_jobs}
+                enabled_ids = {job.job_name for job in enabled_jobs}
 
                 # 新增或配置发生变化的 enabled 任务：启动/重启对应调度协程
                 for job in enabled_jobs:
-                    existing_task = self._tasks.get(job.job_id)
-                    snapshot = self._job_snapshots.get(job.job_id)
+                    existing_task = self._tasks.get(job.job_name)
+                    snapshot = self._job_snapshots.get(job.job_name)
 
                     # 1) 全新任务：还没有调度协程
                     if existing_task is None:
-                        self._tasks[job.job_id] = asyncio.create_task(
+                        self._tasks[job.job_name] = asyncio.create_task(
                             self._run_loop(job),
-                            name=f"scheduler:{job.job_id}",
+                            name=f"scheduler:{job.job_name}",
                         )
                         try:
-                            self._job_snapshots[job.job_id] = job.model_copy(deep=True)
+                            self._job_snapshots[job.job_name] = job.model_copy(deep=True)
                         except Exception:  # pragma: no cover
-                            self._job_snapshots[job.job_id] = job
+                            self._job_snapshots[job.job_name] = job
                         continue
 
                     # 2) 已有任务，但配置发生了变化（例如 daily_time 从 13:45 改为 14:00）
                     if snapshot is not None and self._job_changed(snapshot, job):
                         existing_task.cancel()
-                        self._tasks[job.job_id] = asyncio.create_task(
+                        self._tasks[job.job_name] = asyncio.create_task(
                             self._run_loop(job),
-                            name=f"scheduler:{job.job_id}",
+                            name=f"scheduler:{job.job_name}",
                         )
                         try:
-                            self._job_snapshots[job.job_id] = job.model_copy(deep=True)
+                            self._job_snapshots[job.job_name] = job.model_copy(deep=True)
                         except Exception:  # pragma: no cover
-                            self._job_snapshots[job.job_id] = job
+                            self._job_snapshots[job.job_name] = job
 
                 # 已被删除或禁用的任务：取消并移除调度协程
-                for job_id in list(self._tasks.keys()):
-                    if job_id not in enabled_ids:
-                        task = self._tasks.pop(job_id)
+                for job_name in list(self._tasks.keys()):
+                    if job_name not in enabled_ids:
+                        task = self._tasks.pop(job_name)
                         task.cancel()
-                        self._job_snapshots.pop(job_id, None)
+                        self._job_snapshots.pop(job_name, None)
             except Exception:
                 # 防御性：不让 watcher 异常影响主循环。
                 continue
 
     async def _dispatch_job(self, job: JobDefinition) -> None:
-        # 队列模式：推送 AgentTask，由后台队列消费者（如 automation_daemon 内部）消费执行
-        if self._task_queue is not None:
-            await self._dispatch_via_queue(job)
+        if self._task_queue is None:
             return
-
-        # 兼容旧路径：通过 event_bus 直接触发业务逻辑
-        if self._event_bus is None:
-            return
-        payload = dict(job.payload_template or {})
-        if job.job_type.startswith("sync."):
-            payload.setdefault("source_type", job.job_type.split(".", 1)[1])
-            await self._event_bus.publish("sync.requested", payload)
-            return
-        if job.job_type == "summary.daily":
-            payload.setdefault("digest_type", "daily")
-            await self._event_bus.publish("summary.requested", payload)
-            return
-        if job.job_type == "summary.weekly":
-            payload.setdefault("digest_type", "weekly")
-            await self._event_bus.publish("summary.requested", payload)
-            return
+        await self._dispatch_via_queue(job)
 
     async def _dispatch_via_queue(self, job: JobDefinition) -> None:
         """构造 AgentTask 并推送到队列，session_id 含日期保证当天唯一。"""
         from .agent_task import make_cron_task
 
         payload = job.payload_template or {}
-        # instruction 优先由配置/上层工具提供；
-        # 若缺失则对少数历史内置类型提供兼容文案（便于旧代码与测试），
-        # 其余情况退回通用提示。
         instruction = payload.get("instruction")
-        if not instruction and job.job_type == "sync.course":
-            instruction = (
-                "这是自动化定时任务。请只执行以下操作："
-                "调用 sync_canvas(days_ahead=30, write_tasks=true, write_deadline_events=true)。"
-                "然后仅输出“操作 + 结果”，不要提出追问或建议。"
-            )
         if not instruction:
             instruction = (
-                f"这是自动化定时任务（类型: {job.job_type}）。"
-                "请根据任务类型执行适当的操作，并仅输出“操作 + 结果”。"
+                f"这是自动化定时任务（{job.job_name}）。"
+                "请根据任务配置执行适当的操作，并仅输出“操作 + 结果”。"
             )
-        if not instruction:
-            return
 
         user_id = str(payload.get("user_id") or "default")
         memory_owner = str(payload.get("memory_owner") or "").strip()
         core_mode = str(payload.get("core_mode") or "").strip() or None
 
         task = make_cron_task(
-            job_type=job.job_type,
+            job.job_name,
             instruction=instruction,
             user_id=user_id,
             memory_owner=memory_owner or None,

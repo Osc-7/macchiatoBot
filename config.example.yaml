@@ -107,6 +107,7 @@ shuiyuan:
 automation:
   jobs:
     # 示例：每天 15:00 同步记忆
+    # 同步生成的 JobDefinition.job_type 固定为 human（与 Agent 工具创建的 agent 相对）
     - name: "daily_memory_sync"
       description: "这是自动化定时任务。请查看反思文件和记忆文件，将尚未同步过的核心、长期的理解存到记忆中，然后仅输出“操作 + 结果”。"
       daily_time: "15:00"

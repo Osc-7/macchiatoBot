@@ -31,7 +31,7 @@ async def test_run_turn_forwards_callbacks_and_events():
         yield ReturnAction(message="done", status="completed")
 
     agent.run_loop = _run_loop
-    agent.prepare_turn = AsyncMock(return_value=(1, None, 0))
+    agent.prepare_turn = AsyncMock(return_value=1)
     agent._finalize_turn = AsyncMock()
     agent.finalize_session = AsyncMock()
     agent.reset_session = MagicMock()

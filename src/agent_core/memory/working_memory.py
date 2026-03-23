@@ -1,28 +1,16 @@
 """
-工作记忆 - 会话内滑动窗口 + LLM 总结
+工作记忆 - 会话内滑动窗口（ConversationContext.messages + token 估算）
 
-在 ConversationContext 的基础上增加 token 监控与窗口总结能力：
-- 使用 LLM 调用的真实 prompt_tokens 判断阈值（由 Agent 传入），无则回退估算
-- 接近阈值时触发 LLM 总结，与主对话并行执行，完成后合并
-- 保留最近 N 轮原始消息
+折叠摘要以 ``[会话进行中摘要]`` user 消息存在于窗口内；``running_summary`` 仅作
+checkpoint / 会话结束总结等元数据，不再单独注入主 system。
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any, Dict, List, Optional
 
 from agent_core.context.conversation import ConversationContext
-
-_SUMMARIZE_SYSTEM_PROMPT = """\
-你是一个对话摘要引擎。给定一段多轮对话历史，请输出一段简介准确的摘要，保留：
-- 用户的核心意图和需求
-- 已做出的关键决策和结论
-- 待解决的问题
-- 涉及的具体时间、数据、文件名
-
-不需要打招呼或解释，直接输出摘要。使用中文。"""
 
 _SESSION_SUMMARIZE_SYSTEM_PROMPT = """\
 你是一个会话总结引擎。给定一整个会话的对话历史（包含用户消息、助手消息、工具调用及结果），
@@ -63,31 +51,21 @@ def estimate_messages_tokens(messages: List[Dict[str, Any]]) -> int:
 
 class WorkingMemory:
     """
-    工作记忆管理器。
+    滑动窗口与 token 估算。
 
-    包装 ConversationContext，在其上叠加 token 监控和窗口总结。
+    会话正文在 ``context.messages``；``running_summary`` 与 Kernel 压缩同步，供持久化等使用。
     """
 
     def __init__(
         self,
         context: ConversationContext,
         max_tokens: int = 8000,
-        threshold: float = 0.8,
-        keep_recent: int = 4,
-        hard_threshold_ratio: Optional[float] = None,
     ):
         self._context = context
         self._max_tokens = max_tokens
-        self._threshold = threshold
-        self._keep_recent = keep_recent
-        self._soft_limit = int(max_tokens * threshold)
-        self._hard_limit = (
-            int(max_tokens * hard_threshold_ratio)
-            if hard_threshold_ratio is not None
-            else None
-        )
         self._running_summary: Optional[str] = None
-        self._needs_summarize = False
+        # 已完成上下文自总结（折叠）的次数；供压缩提示与续写 bundle 元信息使用
+        self._compression_round: int = 0
 
     @property
     def context(self) -> ConversationContext:
@@ -95,32 +73,25 @@ class WorkingMemory:
 
     @property
     def running_summary(self) -> Optional[str]:
-        """当前滑动窗口的累积摘要。"""
+        """与最近折叠摘要同步的文本（元数据）；主对话以 messages 为准。"""
         return self._running_summary
 
+    @running_summary.setter
+    def running_summary(self, value: Optional[str]) -> None:
+        self._running_summary = value
+
     @property
-    def needs_summarize(self) -> bool:
-        """是否需要触发窗口总结。"""
-        return self._needs_summarize
+    def compression_round(self) -> int:
+        """已完成的自总结（上下文折叠）次数。"""
+        return self._compression_round
 
-    def check_threshold(self, actual_tokens: Optional[int] = None) -> bool:
-        """
-        检查是否达到软或硬 token 阈值，更新 _needs_summarize。
+    @compression_round.setter
+    def compression_round(self, value: int) -> None:
+        self._compression_round = max(0, int(value))
 
-        软阈值：current_tokens >= soft_limit（需配合 start_summarize 的消息数条件）。
-        硬阈值：current_tokens >= hard_limit 时不论消息条数都会在 start_summarize 中强制总结。
-
-        Args:
-            actual_tokens: 上一轮 LLM 的 prompt_tokens（日志中有记录），若提供则优先使用
-        """
-        if actual_tokens is not None and actual_tokens > 0:
-            current_tokens = actual_tokens
-        else:
-            current_tokens = estimate_messages_tokens(self._context.get_messages())
-        soft_ok = current_tokens >= self._soft_limit
-        hard_ok = self._hard_limit is not None and current_tokens >= self._hard_limit
-        self._needs_summarize = soft_ok or hard_ok
-        return self._needs_summarize
+    @property
+    def max_tokens(self) -> int:
+        return self._max_tokens
 
     def get_current_tokens(self, actual_tokens: Optional[int] = None) -> int:
         """获取当前 token 数，优先使用 actual_tokens。"""
@@ -128,91 +99,9 @@ class WorkingMemory:
             return actual_tokens
         return estimate_messages_tokens(self._context.get_messages())
 
-    def start_summarize(
-        self, llm_client, actual_tokens: Optional[int] = None
-    ) -> Optional[tuple[asyncio.Task[str], int]]:
-        """
-        若超过阈值，启动异步总结任务，与主 LLM 对话并行执行。
-        recent_start 按块对齐，避免在 assistant+tool_calls 与 tool 之间截断，产生孤立 tool 消息。
-
-        软阈值：需同时满足 tokens >= soft_limit 且消息数 > keep_recent*2。
-        硬阈值：当 actual_tokens >= hard_limit 时，不要求消息数，强制总结（至少保留 1 条 recent）。
-
-        Returns:
-            (task, recent_start_index) 或 None。调用方需 await task 后在 apply_summary
-        """
-        messages = self._context.get_messages()
-        keep_count = self._keep_recent * 2
-        hard_triggered = (
-            self._hard_limit is not None
-            and actual_tokens is not None
-            and actual_tokens >= self._hard_limit
-        )
-
-        if len(messages) <= keep_count:
-            if not hard_triggered:
-                return None
-            if len(messages) <= 1:
-                return None
-            recent_start = 1
-        else:
-            recent_start = len(messages) - keep_count
-        # 若保留段第一条是 tool，说明截在了工具块中间，前移 recent_start 到该块的 assistant
-        if (
-            recent_start > 0
-            and recent_start < len(messages)
-            and messages[recent_start].get("role") == "tool"
-        ):
-            i = recent_start - 1
-            while i >= 0 and messages[i].get("role") == "tool":
-                i -= 1
-            if (
-                i >= 0
-                and messages[i].get("role") == "assistant"
-                and messages[i].get("tool_calls")
-            ):
-                recent_start = i
-        old_messages = messages[:recent_start]
-        if not old_messages:
-            return None
-
-        summary_input = self._format_messages_for_summary(old_messages)
-        if self._running_summary:
-            summary_input = (
-                f"之前的摘要：\n{self._running_summary}\n\n新增对话：\n{summary_input}"
-            )
-
-        async def _do_summarize() -> str:
-            response = await llm_client.chat(
-                messages=[{"role": "user", "content": summary_input}],
-                system_message=_SUMMARIZE_SYSTEM_PROMPT,
-            )
-            return response.content or ""
-
-        task = asyncio.create_task(_do_summarize())
-        return (task, recent_start)
-
-    def apply_summary(self, summary_text: str, recent_start: int) -> None:
-        """
-        合并总结结果：将 summary 替换旧消息，保留 recent_start 及之后的上下文。
-        应在主 LLM 流程结束后、await 总结 task 完成后调用。
-        会丢弃保留段开头的孤立 tool 消息（其前的 assistant+tool_calls 已被摘要），
-        避免 API 报错：messages with role "tool" must follow a message with "tool_calls"。
-        """
-        self._running_summary = summary_text
-        summary_message = {
-            "role": "system",
-            "content": f"[会话进行中摘要]\n{self._running_summary}",
-        }
-        messages = self._context.get_messages()
-        recent = messages[recent_start:]
-        # 丢弃保留段开头的孤立 tool：前面的 assistant+tool_calls 已进摘要，这些 tool 会触发 API 400
-        while recent and recent[0].get("role") == "tool":
-            recent = recent[1:]
-        self._context.messages.clear()
-        self._context.messages.append(summary_message)
-        self._context.messages.extend(recent)
-        self._needs_summarize = False
+    def should_compress(self, actual_tokens: Optional[int] = None) -> bool:
+        """判断当前上下文是否需要 Kernel 侧压缩。"""
+        return self.get_current_tokens(actual_tokens) >= self._max_tokens
 
     async def summarize_session(self, llm_client) -> Dict[str, Any]:
         """

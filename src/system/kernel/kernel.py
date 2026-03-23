@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from agent_core.interfaces import AgentHooks, AgentRunResult
 from agent_core.kernel_interface import (
@@ -226,23 +226,22 @@ class AgentKernel:
 
         return CoreStatsAction(session_id=getattr(agent, "_session_id", ""))
 
+    _SUMMARY_USER_PREFIX = "[会话进行中摘要]"
+
     async def _compress_context(
         self,
         agent: "AgentCore",
         keep_recent_turns: Optional[int] = None,
     ) -> tuple[str, int]:
         """
-        压缩 agent 的对话上下文。
+        压缩对话上下文。
 
-        策略：
-        1. 取出全部 messages，保留最近 keep_recent_turns 轮（含 tool_result）
-        2. 将旧部分通过 summary_llm_client 生成一段摘要文本
-        3. 将旧消息从 context 中截断（只保留 system-adjacent 部分 + 新消息）
-        4. 返回 (摘要文本, 保留的完整消息数)
+        1. 按 user 轮切分，保留最近 keep_recent_turns 轮；其余为待折叠段。
+        2. 将待折叠段（含 assistant / tool / tool_result）原样交给 summary LLM，最后一条 user 为「请总结」。
+        3. 若得到摘要：清空已折叠段，在 messages 里只留一条摘要 user，再拼上保留段；并写入 running_summary（checkpoint / 会话结束总结等元数据，不再单独注入主 system）。
+        4. 若摘要失败：仅截断为保留段，不插入摘要消息。
 
-        keep_recent_turns 优先从 CoreProfile 或 agent 配置读取；
-        未配置时退化为默认值 6。
-        若 LLM 摘要失败，退化为不摘要的纯截断（保证 Kernel 不因摘要失败而卡住）。
+        返回 (摘要文本, 压缩后 messages 条数)。
         """
         if keep_recent_turns is None:
             profile = getattr(agent, "_core_profile", None)
@@ -271,53 +270,83 @@ class AgentKernel:
         old_messages = messages[:split_idx]
         new_messages = messages[split_idx:]
 
+        wm = getattr(agent, "_working_memory", None)
+        fold_before = int(getattr(wm, "compression_round", 0) or 0) if wm else 0
         summary_text = await self._summarize_messages(agent, old_messages)
 
-        # 截断 context：只保留新消息
-        ctx.messages = list(new_messages)
+        if summary_text.strip():
+            summary_msg = {
+                "role": "user",
+                "content": (
+                    f"{self._SUMMARY_USER_PREFIX}\n{summary_text.strip()}"
+                ),
+            }
+            ctx.messages = [summary_msg] + list(new_messages)
+            if wm is not None:
+                wm.running_summary = summary_text.strip()
+                wm.compression_round = fold_before + 1
+        else:
+            ctx.messages = list(new_messages)
 
+        kept = len(ctx.messages)
         logger.info(
             "AgentKernel: compressed %d old messages → summary (%d chars), kept %d messages",
             len(old_messages),
             len(summary_text),
-            len(new_messages),
+            kept,
         )
-        return summary_text, len(new_messages)
+        return summary_text, kept
+
+    _COMPRESS_SYSTEM_APPEND = """\
+# 上下文压缩
+
+当前不是在正常回复用户，而是在上下文触顶后，对 **messages 中的对话** 做折叠摘要。
+对话含 user / assistant / tool 调用与 tool 结果；最后一条 user 是总结指令。
+请输出一段可延续的摘要正文：用户目标、关键事实、工具结果中的数据、待办与未决问题；语言与对话一致。"""
+
+    _SUMMARIZE_USER_APPEND = "请总结以上对话。"
+
+    @staticmethod
+    def _system_message_for_compression(agent: "AgentCore") -> str:
+        """与主对话同一套 build_agent_system_prompt，再追加压缩任务段。"""
+        builder = getattr(agent, "_build_system_prompt", None)
+        base = ""
+        if callable(builder):
+            try:
+                base = (builder() or "").strip()
+            except Exception as exc:
+                logger.warning(
+                    "AgentKernel: _build_system_prompt failed for compression: %s", exc
+                )
+        append = AgentKernel._COMPRESS_SYSTEM_APPEND.strip()
+        if base:
+            return f"{base}\n\n{append}"
+        return append
 
     @staticmethod
     async def _summarize_messages(
         agent: "AgentCore",
         messages: list,
     ) -> str:
-        """用 summary_llm_client 为旧消息生成摘要，失败时返回空字符串。"""
+        """待折叠段浅拷贝进 API messages（避免客户端就地改 dict 影响尚未替换的上下文），末尾追加「请总结」。"""
         llm = getattr(agent, "_summary_llm_client", None)
         if llm is None or not messages:
             return ""
 
-        dialogue_lines = []
-        for m in messages:
-            role = m.get("role", "")
-            content = m.get("content", "")
-            if (
-                isinstance(content, str)
-                and content.strip()
-                and role in ("user", "assistant")
-            ):
-                dialogue_lines.append(f"[{role}]: {content[:400]}")
-
-        if not dialogue_lines:
-            return ""
-
-        prompt = (
-            "请用 3-5 句话概括以下对话的核心内容、关键决定和重要信息，供后续对话参考。\n\n"
-            + "\n".join(dialogue_lines[-20:])
+        # 浅拷贝即可：总结完成后原段会从 context 丢弃；此处仅防 LLM 客户端改写 message dict
+        chat_messages: List[Dict[str, Any]] = [dict(m) for m in messages]
+        chat_messages.append(
+            {"role": "user", "content": AgentKernel._SUMMARIZE_USER_APPEND}
         )
+
+        system_message = AgentKernel._system_message_for_compression(agent)
+
         try:
             resp = await llm.chat(
-                system_message="你是一个对话摘要助手，输出简洁的中文摘要。",
-                messages=[{"role": "user", "content": prompt}],
+                system_message=system_message,
+                messages=chat_messages,
             )
-            return resp.content.strip() if resp and resp.content else ""
+            return (resp.content or "").strip() if resp else ""
         except Exception as exc:
             logger.warning("AgentKernel._summarize_messages: LLM call failed: %s", exc)
             return ""

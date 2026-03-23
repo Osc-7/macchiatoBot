@@ -225,7 +225,7 @@ class TestSessionManager:
         from agent_core.kernel_interface import ReturnAction
 
         agent = AsyncMock()
-        agent.prepare_turn = AsyncMock(return_value=(1, None, 0))
+        agent.prepare_turn = AsyncMock(return_value=1)
         agent._finalize_turn = AsyncMock()
         agent._tool_registry = MagicMock()
         agent._session_id = "mock"

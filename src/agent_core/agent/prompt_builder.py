@@ -19,7 +19,11 @@ def _visible_scopes(agent: Any) -> set:
 
 
 def build_agent_system_prompt(agent: Any) -> str:
-    """Build the current system prompt from agent runtime state."""
+    """Build the current system prompt from agent runtime state.
+
+    工作记忆不再单独注入 system：会话状态即 ``ConversationContext.messages`` 滑动窗口
+    （含 Kernel 折叠产生的 ``[会话进行中摘要]`` user 条）；长期记忆等仍见「# 记忆上下文」。
+    """
     time_ctx = get_time_context(agent._timezone)
     time_str = time_ctx.to_prompt_string()
     scopes = _visible_scopes(agent)
@@ -69,10 +73,6 @@ def build_agent_system_prompt(agent: Any) -> str:
                 parts.append(f"\n{recall_text}")
         if parts:
             prompt += "\n\n# 记忆上下文\n\n" + "\n".join(parts)
-
-        # working: 工作记忆摘要
-        if "working" in scopes and agent._working_memory.running_summary:
-            prompt += f"\n\n# 工作记忆摘要\n\n{agent._working_memory.running_summary}"
 
     # automation 摘要：仅在可见 long_term 时注入（作为辅助上下文）
     digest_sections: List[str] = []

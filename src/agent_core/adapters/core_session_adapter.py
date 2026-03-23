@@ -140,9 +140,7 @@ class CoreSessionAdapter:
         input_text = agent_input.text
 
         # 前置处理：同步外部更新、memory recall、写入用户消息（统一路径）
-        turn_id, summary_task, summary_recent_start = await self._agent.prepare_turn(
-            input_text, content_items
-        )
+        turn_id = await self._agent.prepare_turn(input_text, content_items)
 
         # SessionManager 路径：记录 turn_start（Scheduler 路径在 scheduler 内调用）
         sl = getattr(self._agent, "_session_logger", None)
@@ -160,7 +158,7 @@ class CoreSessionAdapter:
         try:
             run_result = await kernel.run(self._agent, turn_id=turn_id, hooks=hooks)
         finally:
-            await self._agent._finalize_turn(run_result, summary_task, summary_recent_start)
+            await self._agent._finalize_turn(run_result)
         return run_result
 
     def _wrap_hooks_with_events(self, hooks: AgentHooks) -> AgentHooks:

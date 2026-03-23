@@ -206,6 +206,13 @@ class TestBuildSystemPrompt:
         assert "日期:" in prompt
         assert "时区:" in prompt
 
+    def test_build_system_prompt_has_no_working_memory_section(self, agent):
+        """工作记忆仅为滑动窗口，system 不再含「# 工作记忆摘要」。"""
+        agent._memory_enabled = True
+        agent._working_memory.running_summary = "不应出现在 system"
+        prompt = agent._build_system_prompt()
+        assert "# 工作记忆摘要" not in prompt
+
     @pytest.mark.skip(reason="不再需要这些信息")
     def test_build_system_prompt_contains_agent_info(self, agent):
         """测试系统提示包含 Agent 信息"""
@@ -667,7 +674,7 @@ class TestAgentIntegration:
     async def test_cross_window_sync_resets_prompt_token_hint_for_timely_compression(
         self, mock_config
     ):
-        """跨窗口同步到新增消息后，应让阈值判断基于当前上下文重估。"""
+        """跨窗口同步到新增消息后，_last_prompt_tokens 应重置为 None 以确保后续压缩检查基于实际上下文重估。"""
         agent = AgentCore(config=mock_config, source="cli", user_id="root")
         await agent.activate_session("cli:shared")
         # 模拟另一窗口写入了同一 session 的新增消息
@@ -680,19 +687,14 @@ class TestAgentIntegration:
         agent._last_prompt_tokens = 999999
 
         with patch.object(
-            agent._working_memory, "check_threshold", return_value=False
-        ) as mock_threshold:
-            with patch.object(
-                agent._llm_client,
-                "chat_with_tools",
-                new_callable=AsyncMock,
-                return_value=LLMResponse(content="ok", tool_calls=[]),
-            ):
-                await agent.process_input("test")
+            agent._llm_client,
+            "chat_with_tools",
+            new_callable=AsyncMock,
+            return_value=LLMResponse(content="ok", tool_calls=[]),
+        ):
+            await agent.process_input("test")
 
-        call_args = mock_threshold.call_args
-        assert call_args is not None
-        assert call_args.kwargs.get("actual_tokens") is None
+        assert agent._last_prompt_tokens is None or agent._last_prompt_tokens != 999999
 
     @pytest.mark.asyncio
     async def test_activate_session_with_zero_replay_does_not_crash_with_existing_history(

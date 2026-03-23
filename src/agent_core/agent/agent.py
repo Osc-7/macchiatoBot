@@ -198,9 +198,6 @@ class AgentCore:
         self._working_memory = WorkingMemory(
             context=self._context,
             max_tokens=mem_cfg.max_working_tokens,
-            threshold=mem_cfg.working_summary_threshold,
-            keep_recent=mem_cfg.working_keep_recent,
-            hard_threshold_ratio=mem_cfg.working_summary_hard_ratio,
         )
         self._recall_policy = RecallPolicy(
             force_recall=mem_cfg.force_recall,
@@ -404,20 +401,20 @@ class AgentCore:
         self,
         text: str,
         content_items: Optional[List[Dict[str, Any]]] = None,
-    ) -> Tuple[int, Optional[asyncio.Task], Optional[int]]:
+    ) -> int:
         """
-        为新一轮处理做准备，返回 (turn_id, summary_task, summary_recent_start)。
+        为新一轮处理做准备，返回 turn_id。
 
         统一了三条执行路径（process_input / KernelScheduler / CoreSessionAdapter）
         中重复的前置处理逻辑，确保行为一致——特别是 memory recall 在所有路径均生效。
 
-        调用方在 AgentKernel.run() 完成后需调用 _finalize_turn(run_result, summary_task, summary_recent_start)。
+        上下文压缩由 run_loop 内部检测并通过 ContextOverflowAction 信号交给 Kernel 处理，
+        不再在 prepare_turn 阶段启动并行总结任务。
         """
         await self._sync_external_session_updates()
         self._current_turn_id += 1
         turn_id = self._current_turn_id
 
-        # 记忆检索 enrich（之前 KernelScheduler 路径缺失此步骤）
         if self._memory_enabled and self._recall_policy.should_recall(text):
             recall_result = await asyncio.to_thread(
                 self._recall_policy.recall,
@@ -442,19 +439,7 @@ class AgentCore:
             )
             self._last_history_id = max(self._last_history_id, int(msg_id))
 
-        # 工作记忆并行总结（不阻塞主流程）
-        summary_task: Optional[asyncio.Task] = None
-        summary_recent_start: Optional[int] = None
-        if self._memory_enabled and self._working_memory.check_threshold(
-            actual_tokens=self._last_prompt_tokens
-        ):
-            result = self._working_memory.start_summarize(
-                self._summary_llm_client, actual_tokens=self._last_prompt_tokens
-            )
-            if result:
-                summary_task, summary_recent_start = result
-
-        return turn_id, summary_task, summary_recent_start
+        return turn_id
 
     async def process_input(
         self,
@@ -483,9 +468,7 @@ class AgentCore:
         from agent_core.interfaces import AgentHooks
         from system.kernel import AgentKernel
 
-        turn_id, summary_task, summary_recent_start = await self.prepare_turn(
-            user_input, content_items
-        )
+        turn_id = await self.prepare_turn(user_input, content_items)
 
         hooks = AgentHooks(
             on_assistant_delta=on_stream_delta,
@@ -497,9 +480,7 @@ class AgentCore:
         try:
             run_result = await kernel.run(self, turn_id=turn_id, hooks=hooks)
         finally:
-            # 无论 kernel.run() 是否抛出异常，都执行后处理（写 checkpoint、处理 summary_task）。
-            # 若 run 异常，summary_task 将在 _finalize_turn 内部被捕获并取消。
-            await self._finalize_turn(run_result, summary_task, summary_recent_start)
+            await self._finalize_turn(run_result)
 
         return run_result.output_text
 
@@ -529,7 +510,6 @@ class AgentCore:
             ToolResultEvent,
             InternalLoader,
             ContextOverflowAction,
-            ContextCompressedEvent,
         )
 
         loader = InternalLoader()
@@ -540,6 +520,24 @@ class AgentCore:
             previous_messages = self._context.get_messages()
 
             try:
+                # ── 上下文压缩检查（信号机制：Core 检测 → Kernel 执行）──────
+                current_tokens = self._working_memory.get_current_tokens(
+                    actual_tokens=self._last_prompt_tokens
+                )
+                compress_threshold = self._working_memory.max_tokens
+                profile = getattr(self, "_core_profile", None)
+                if profile is not None and getattr(profile, "max_context_tokens", None):
+                    compress_threshold = min(
+                        compress_threshold, profile.max_context_tokens
+                    )
+                if current_tokens >= compress_threshold:
+                    _ = yield ContextOverflowAction(
+                        current_tokens=current_tokens,
+                        threshold_tokens=compress_threshold,
+                        session_id=self._session_id,
+                    )
+                    # 摘要由 Kernel 写入 context.messages；此处不再写 running_summary
+
                 # ── 组装 LLM Payload（Prompt + Context + Tools）──────────
                 payload = loader.assemble(self)
 
@@ -737,29 +735,6 @@ class AgentCore:
                         )
                         self._last_history_id = max(self._last_history_id, int(msg_id))
 
-                    # 上下文溢出检查（仅在完整 thought→tools→observations 循环结束后触发，
-                    # 不在 tool_result 期间中断，保证工具调用链的完整性）
-                    profile = getattr(self, "_core_profile", None)
-                    threshold = profile.max_context_tokens if profile else None
-                    if (
-                        threshold is not None
-                        and self._last_prompt_tokens is not None
-                        and self._last_prompt_tokens >= threshold
-                    ):
-                        compress_event = yield ContextOverflowAction(
-                            current_tokens=self._last_prompt_tokens,
-                            threshold_tokens=threshold,
-                            session_id=self._session_id,
-                        )
-                        # Kernel 完成压缩后发回 ContextCompressedEvent，Core 继续
-                        if isinstance(compress_event, ContextCompressedEvent):
-                            if compress_event.compressed_summary:
-                                # 将 Kernel 生成的摘要写入工作记忆的 running_summary，
-                                # 下一次 _build_system_prompt 时会自动注入到系统提示
-                                self._working_memory._running_summary = (
-                                    compress_event.compressed_summary
-                                )
-
                     yield ReturnAction(
                         message=response.content,
                         status="completed",
@@ -804,11 +779,9 @@ class AgentCore:
     async def _finalize_turn(
         self,
         run_result: "Optional[AgentRunResult]",
-        summary_task: Optional[asyncio.Task] = None,
-        summary_recent_start: Optional[int] = None,
     ) -> None:
         """
-        本轮后处理：合并工作记忆总结 + 写入检查点。
+        本轮后处理：写入检查点。
 
         由 process_input() 和 KernelScheduler._run_and_route() 在
         AgentKernel.run() 完成后调用。
@@ -816,17 +789,6 @@ class AgentCore:
         检查点存 last_active_at（本 turn 结束时间）；是否过期由 kernel 下次启动时
         用「kernel 关闭时间戳 - last_active_at」计算 elapsed 判断。
         """
-        if summary_task is not None and summary_recent_start is not None:
-            try:
-                summary_text = await summary_task
-                self._working_memory.apply_summary(summary_text, summary_recent_start)
-            except (asyncio.CancelledError, Exception) as _sum_exc:
-                import logging as _log
-                _log.getLogger(__name__).warning(
-                    "AgentCore: summary_task failed, skipping working memory compression: %s",
-                    _sum_exc,
-                )
-
         # 每轮结束后写入检查点（last_active_at = now）；过期判断在 kernel 启动时用关闭时间戳计算
         if self._checkpoint_manager is not None:
             try:
@@ -847,6 +809,7 @@ class AgentCore:
                         turn_count=self._current_turn_id,
                         last_history_id=self._last_history_id,
                         token_usage=dict(self._token_usage),
+                        compression_round=self._working_memory.compression_round,
                     )
                 )
             except Exception as exc:
@@ -886,6 +849,7 @@ class AgentCore:
                     turn_count=self._current_turn_id,
                     last_history_id=self._last_history_id,
                     token_usage=dict(self._token_usage),
+                    compression_round=self._working_memory.compression_round,
                 )
             )
         except Exception as exc:
@@ -1104,9 +1068,6 @@ class AgentCore:
         self._working_memory = WorkingMemory(
             context=self._context,
             max_tokens=self._config.memory.max_working_tokens,
-            threshold=self._config.memory.working_summary_threshold,
-            keep_recent=self._config.memory.working_keep_recent,
-            hard_threshold_ratio=self._config.memory.working_summary_hard_ratio,
         )
 
         if not self._memory_enabled:
@@ -1140,7 +1101,7 @@ class AgentCore:
 
         恢复内容：
         - ConversationContext.messages（压缩后的上下文窗口）
-        - WorkingMemory._running_summary（压缩摘要）
+        - WorkingMemory（running_summary / compression_round 等元数据，主对话以 messages 为准）
         - session_id、turn_count、last_history_id、token_usage
 
         由 CorePool._load() 在读取到有效检查点时调用，
@@ -1161,11 +1122,11 @@ class AgentCore:
         self._working_memory = WorkingMemory(
             context=self._context,
             max_tokens=self._config.memory.max_working_tokens,
-            threshold=self._config.memory.working_summary_threshold,
-            keep_recent=self._config.memory.working_keep_recent,
-            hard_threshold_ratio=self._config.memory.working_summary_hard_ratio,
         )
-        self._working_memory._running_summary = checkpoint.running_summary
+        self._working_memory.running_summary = checkpoint.running_summary
+        self._working_memory.compression_round = getattr(
+            checkpoint, "compression_round", 0
+        )
 
     async def _sync_external_session_updates(self) -> None:
         """同步其他终端在同一 session 里新增的 user/assistant 消息。"""
@@ -1207,9 +1168,6 @@ class AgentCore:
         self._working_memory = WorkingMemory(
             context=self._context,
             max_tokens=self._config.memory.max_working_tokens,
-            threshold=self._config.memory.working_summary_threshold,
-            keep_recent=self._config.memory.working_keep_recent,
-            hard_threshold_ratio=self._config.memory.working_summary_hard_ratio,
         )
 
     async def close_mcp_only(self) -> None:

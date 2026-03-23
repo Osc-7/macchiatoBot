@@ -280,9 +280,6 @@ async def test_agent_prepare_turn_populates_recall_result(tmp_path) -> None:
     config.memory = MagicMock()
     config.memory.enabled = False
     config.memory.max_working_tokens = 4000
-    config.memory.working_summary_threshold = 0.8
-    config.memory.working_keep_recent = 5
-    config.memory.working_summary_hard_ratio = 0.9
     config.memory.force_recall = False
     config.memory.recall_top_n = 3
     config.memory.recall_score_threshold = 0.5
@@ -309,11 +306,9 @@ async def test_agent_prepare_turn_populates_recall_result(tmp_path) -> None:
     if agent._chat_history_db is not None:
         agent._chat_history_db.write_message = MagicMock(return_value=1)  # type: ignore[method-assign]
 
-    turn_id, summary_task, summary_recent_start = await agent.prepare_turn("测试消息")
+    turn_id = await agent.prepare_turn("测试消息")
 
     assert turn_id == 1
-    assert summary_task is None
-    assert summary_recent_start is None
     assert recall_called, "prepare_turn 在 memory_enabled=True 时应调用 recall_policy.should_recall"
     assert len(agent._context.get_messages()) == 1
 
@@ -354,3 +349,73 @@ async def test_compress_context_keeps_complete_recent_turn() -> None:
         "assistant",
     ]
     assert ctx.messages[0]["content"] == "u2"
+
+
+@pytest.mark.asyncio
+async def test_compress_context_inserts_single_summary_message_before_kept_turns() -> None:
+    """有摘要时：messages 仅保留一条摘要 user + keep_recent 段。"""
+    registry = VersionedToolRegistry()
+    kernel = AgentKernel(tool_registry=registry)
+
+    ctx = ConversationContext()
+    ctx.messages = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+    wm = SimpleNamespace(running_summary=None, compression_round=0)
+    llm = AsyncMock()
+    llm.chat = AsyncMock(return_value=SimpleNamespace(content="  压缩结果  "))
+    agent = SimpleNamespace(
+        _context=ctx,
+        _summary_llm_client=llm,
+        _working_memory=wm,
+        _build_system_prompt=MagicMock(return_value="主系统提示"),
+    )
+
+    summary, kept = await kernel._compress_context(agent, keep_recent_turns=1)
+
+    assert summary.strip() == "压缩结果"
+    assert kept == 3
+    assert len(ctx.messages) == 3
+    assert ctx.messages[0]["role"] == "user"
+    assert "[会话进行中摘要]" in ctx.messages[0]["content"]
+    assert "压缩结果" in ctx.messages[0]["content"]
+    assert ctx.messages[1]["content"] == "u2"
+    assert ctx.messages[2]["role"] == "assistant"
+    assert wm.running_summary == "压缩结果"
+    assert wm.compression_round == 1
+
+
+@pytest.mark.asyncio
+async def test_summarize_messages_passes_transcript_and_appends_summarize() -> None:
+    """待折叠段浅拷贝进 chat，末尾追加请总结；system 为主 Agent + 压缩追加段。"""
+    registry = VersionedToolRegistry()
+    kernel = AgentKernel(tool_registry=registry)
+
+    llm = AsyncMock()
+    llm.chat = AsyncMock(return_value=SimpleNamespace(content="合并后的记忆"))
+    agent = SimpleNamespace(
+        _summary_llm_client=llm,
+        _build_system_prompt=MagicMock(return_value="主系统提示"),
+    )
+    old_messages = [
+        {"role": "user", "content": "新问题"},
+        {"role": "assistant", "content": "新回答"},
+    ]
+
+    out = await kernel._summarize_messages(agent, old_messages)
+
+    assert out == "合并后的记忆"
+    llm.chat.assert_called_once()
+    call_kw = llm.chat.call_args
+    msgs = call_kw[1]["messages"]
+    assert msgs[0]["content"] == "新问题"
+    assert msgs[1]["content"] == "新回答"
+    assert msgs[0] is not old_messages[0]
+    assert msgs[-1]["role"] == "user"
+    assert "请总结" in msgs[-1]["content"]
+    sys_msg = call_kw[1]["system_message"]
+    assert "主系统提示" in sys_msg
+    assert "上下文压缩" in sys_msg

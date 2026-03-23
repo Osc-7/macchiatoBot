@@ -41,6 +41,7 @@ class CoreCheckpoint:
     turn_count: int
     last_history_id: int            # 用于 _sync_external_session_updates
     token_usage: Dict[str, int]
+    compression_round: int = 0  # 自总结（上下文折叠）已完成次数
     saved_at: float = field(default_factory=time.time)
     # 生命周期标记：True = 已被 evict，下次 kernel 启动时清理
     expired: bool = False
@@ -95,6 +96,7 @@ class CoreCheckpointManager:
                 turn_count=int(data.get("turn_count", 0)),
                 last_history_id=int(data.get("last_history_id", 0)),
                 token_usage=dict(data.get("token_usage", {})),
+                compression_round=int(data.get("compression_round", 0)),
                 saved_at=float(data.get("saved_at", 0.0)),
                 expired=bool(data.get("expired", False)),
             )

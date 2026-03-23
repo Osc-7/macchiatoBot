@@ -359,7 +359,7 @@ class KernelScheduler:
         2. 获取 per-session 锁（同 session 请求串行执行，防止 context 竞争）
         3. 从 CorePool 获取对应 session 的 AgentCore
         4. 调用 agent.prepare_turn() 执行前置处理（含 memory recall）
-        5. 调用 AgentKernel.run() 驱动 AgentCore
+        5. 调用 AgentKernel.run() 驱动 AgentCore（上下文压缩由 run_loop 信号触发）
         6. 通过 OutputBus.publish() 广播结果（唯一出口）
         """
         session_id = request.session_id
@@ -388,8 +388,6 @@ class KernelScheduler:
             raise
         async with session_lock:
             agent = None
-            summary_task = None
-            summary_recent_start = None
             turn_id = 0
             run_result = None
             try:
@@ -439,9 +437,7 @@ class KernelScheduler:
                     )
 
                 # 前置处理：同步外部更新、memory recall、写入用户消息
-                turn_id, summary_task, summary_recent_start = await agent.prepare_turn(
-                    request.text, content_items
-                )
+                turn_id = await agent.prepare_turn(request.text, content_items)
 
                 # Core 级生命周期日志：记录本轮输入（在 prepare_turn 之后可获得 turn_id）
                 if core_logger is not None:
@@ -464,7 +460,7 @@ class KernelScheduler:
                 )
 
                 # 后处理
-                await agent._finalize_turn(run_result, summary_task, summary_recent_start)
+                await agent._finalize_turn(run_result)
 
                 # Core 级生命周期日志：记录本轮输出（正常路径）
                 if core_logger is not None:
@@ -490,7 +486,7 @@ class KernelScheduler:
                 # 取消时也写 checkpoint，保证 daemon 重启后可恢复
                 if agent is not None:
                     try:
-                        await agent._finalize_turn(None, summary_task, summary_recent_start)
+                        await agent._finalize_turn(None)
                     except Exception:
                         pass
                 # 异常/取消路径：记录 turn_end，保证每轮都有结束记录
@@ -515,7 +511,7 @@ class KernelScheduler:
                 # 异常时也写 checkpoint，保证 daemon 重启后可从未完成状态恢复
                 if agent is not None:
                     try:
-                        await agent._finalize_turn(None, summary_task, summary_recent_start)
+                        await agent._finalize_turn(None)
                     except Exception:
                         pass
                 # 异常路径：记录 turn_end，保证每轮都有结束记录

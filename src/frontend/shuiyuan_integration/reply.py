@@ -10,16 +10,27 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import random
+import time
 from pathlib import Path
 from typing import Any, List, Optional
+
+import requests
 
 from .client import ShuiyuanClient, ShuiyuanClientPool
 from .db import ShuiyuanDB, get_shuiyuan_db_path_for_user
 
 # 固定标记，用于识别由本集成发出的自动回复，避免递归触发。
 AUTO_REPLY_MARK = "macchiato_SHUIYUAN_AUTO_REPLY"
+
+logger = logging.getLogger(__name__)
+
+# 发帖重试：DNS/断连、超时、502/503 及 429 等瞬时错误（指数退避）
+_POST_REPLY_MAX_ATTEMPTS = 4
+_POST_REPLY_BASE_DELAY_SEC = 1.5
+_TRANSIENT_HTTP = frozenset({429, 500, 502, 503})
 
 
 def _generate_random_string(length: int = 20) -> str:
@@ -67,23 +78,59 @@ def post_reply(
 
     raw_with_marker = _attach_hidden_marker(raw)
 
-    result, status_code, err_detail = client.create_post(
-        raw=raw_with_marker,
-        topic_id=topic_id,
-        reply_to_post_number=reply_to_post_number,
-    )
-    if not result:
-        if status_code == 429:
-            return False, "限流：水源 API 达到频率限制(429)，请稍后再试"
+    result: Optional[dict[str, Any]] = None
+    for attempt in range(_POST_REPLY_MAX_ATTEMPTS):
+        try:
+            result, status_code, err_detail = client.create_post(
+                raw=raw_with_marker,
+                topic_id=topic_id,
+                reply_to_post_number=reply_to_post_number,
+            )
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt >= _POST_REPLY_MAX_ATTEMPTS - 1:
+                return False, f"发帖失败：网络错误 {e}"
+            delay = _POST_REPLY_BASE_DELAY_SEC * (2**attempt)
+            logger.warning(
+                "发帖网络异常 (%d/%d)，%.1fs 后重试: %s",
+                attempt + 1,
+                _POST_REPLY_MAX_ATTEMPTS,
+                delay,
+                e,
+            )
+            time.sleep(delay)
+            continue
+
+        if result:
+            break
+
         if status_code == 403:
             return False, (
                 "发帖失败：User-Api-Key 需含 write 权限。"
                 "请运行 python -m shuiyuan_integration.user_api_key 并传入 scopes=['read','write'] 重新生成 Key。"
             )
+
+        if status_code in _TRANSIENT_HTTP and attempt < _POST_REPLY_MAX_ATTEMPTS - 1:
+            delay = _POST_REPLY_BASE_DELAY_SEC * (2**attempt)
+            if status_code == 429:
+                delay = max(delay, 5.0)
+            logger.warning(
+                "发帖 HTTP %d (%d/%d)，%.1fs 后重试",
+                status_code,
+                attempt + 1,
+                _POST_REPLY_MAX_ATTEMPTS,
+                delay,
+            )
+            time.sleep(delay)
+            continue
+
+        if status_code == 429:
+            return False, "限流：水源 API 达到频率限制(429)，请稍后再试"
         msg = f"发帖失败：HTTP {status_code}"
         if err_detail:
             msg += f" — {err_detail}"
         return False, msg
+
+    assert result is not None  # 成功路径已由 break 保证
 
     db.record_reply(username)
     post_id = result.get("id")

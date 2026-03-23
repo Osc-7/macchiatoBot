@@ -13,6 +13,7 @@ import asyncio
 import logging
 import signal
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,15 @@ logging.basicConfig(
 logger = logging.getLogger("automation_daemon")
 
 POLL_INTERVAL_SECONDS = 5
+# 单条自动化任务超过此时长打 WARNING，便于发现「卡住整条队列」的长任务
+_CONSUME_SLOW_SECONDS = 300.0
+
+
+def _instruction_preview(text: str, *, max_len: int = 120) -> str:
+    t = (text or "").replace("\n", " ").strip()
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 1] + "…"
 
 
 async def _consume_loop(
@@ -83,9 +93,23 @@ async def _consume_loop(
             except asyncio.TimeoutError:
                 pass
             continue
+        started = time.perf_counter()
+        pending_behind = queue.pending_count()
+        running_in_db = queue.running_count()
         task_logger = AutomationTaskLogger(task)
         task_logger.log_task_start()
+        logger.info(
+            "consume: popped task_id=%s source=%s session_id=%s pending_behind=%d "
+            "running_in_db=%d instruction_preview=%r",
+            task.task_id,
+            task.source,
+            task.session_id,
+            pending_behind,
+            running_in_db,
+            _instruction_preview(task.instruction),
+        )
         activity_record: dict[str, Any] | None = None
+        outcome = "interrupted"
         try:
 
             async def on_trace_event(event: dict) -> None:
@@ -159,16 +183,24 @@ async def _consume_loop(
                 },
                 profile=profile,
             )
-            future = await scheduler.submit(request)
-            run_result = await future
+            handle = await scheduler.submit(request)
+            logger.info(
+                "consume: awaiting kernel task_id=%s request_id=%s session_id=%s",
+                task.task_id,
+                handle.request_id,
+                task.session_id,
+            )
+            run_result = await handle
             result = run_result.output_text
             op_ok, op_problems = task_logger.evaluate_required_operations()
             if op_ok:
+                outcome = "success"
                 queue.update_status(task.task_id, TaskStatus.SUCCESS, result=result)
                 activity_record = task_logger.log_task_end(
                     status=TaskStatus.SUCCESS, result=result, error=None
                 )
             else:
+                outcome = "failed_validation"
                 error_msg = "; ".join(op_problems)
                 queue.update_status(
                     task.task_id, TaskStatus.FAILED, result=result, error=error_msg
@@ -177,12 +209,25 @@ async def _consume_loop(
                     status=TaskStatus.FAILED, result=result, error=error_msg
                 )
         except Exception as exc:
+            outcome = "exception"
             logger.exception("Task %s failed: %s", task.task_id, exc)
             activity_record = task_logger.log_task_end(
                 status=TaskStatus.FAILED, result=None, error=str(exc)
             )
             queue.update_status(task.task_id, TaskStatus.FAILED, error=str(exc))
         finally:
+            elapsed = time.perf_counter() - started
+            log_fn = logger.warning if elapsed >= _CONSUME_SLOW_SECONDS else logger.info
+            log_fn(
+                "consume: finished task_id=%s source=%s session_id=%s outcome=%s "
+                "elapsed_s=%.2f pending_behind=%d",
+                task.task_id,
+                task.source,
+                task.session_id,
+                outcome,
+                elapsed,
+                queue.pending_count(),
+            )
             if activity_record is not None:
                 try:
                     await _maybe_notify_feishu_activity(activity_record)

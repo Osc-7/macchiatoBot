@@ -433,6 +433,20 @@ class AutomationIPCServer:
                     "attachments": getattr(result, "attachments", []),
                 }
 
+            if method == "terminal_create_user":
+                user_id = str(params.get("user_id") or "").strip()
+                if not user_id:
+                    raise ValueError("user_id 不能为空")
+                frontend = str(params.get("frontend") or "cli").strip() or "cli"
+                warm_spawn = bool(params.get("warm_spawn", False))
+                return await t.create_logic_user(
+                    user_id, frontend=frontend, warm_spawn=warm_spawn
+                )
+
+            if method == "terminal_list_users":
+                frontend = str(params.get("frontend") or "cli").strip() or "cli"
+                return t.list_logic_users(frontend=frontend)
+
             raise ValueError(f"unknown terminal method: {method}")
 
         raise ValueError(f"unknown method: {method}")
@@ -720,3 +734,26 @@ class AutomationIPCClient:
             metadata=data.get("metadata") or {},
             attachments=data.get("attachments") or [],
         )
+
+    async def terminal_create_user(
+        self,
+        user_id: str,
+        *,
+        frontend: str = "cli",
+        warm_spawn: bool = False,
+    ) -> Dict[str, Any]:
+        """在记忆库下创建逻辑用户目录布局；可选预热 Core 会话。"""
+        data = await self._request(
+            "terminal_create_user",
+            {
+                "user_id": user_id,
+                "frontend": frontend,
+                "warm_spawn": bool(warm_spawn),
+            },
+        )
+        return data if isinstance(data, dict) else {}
+
+    async def terminal_list_users(self, *, frontend: str = "cli") -> Dict[str, Any]:
+        """列出某 frontend 下已有记忆目录的用户 id。"""
+        data = await self._request("terminal_list_users", {"frontend": frontend})
+        return data if isinstance(data, dict) else {}

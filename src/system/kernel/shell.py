@@ -40,7 +40,7 @@ async def run_kernel_shell(client: AutomationIPCClient) -> None:
     """
     print()
     print("  Kernel 系统控制台 (KernelTerminal)")
-    print("  命令: ps | top | queue | cron | tasks | inspect <sid> | kill <sid> | cancel <sid> | spawn <sid> | attach <sid> <text>")
+    print("  命令: ps | top | queue | cron | tasks | user … | inspect <sid> | kill <sid> | cancel <sid> | spawn <sid> | attach <sid> <text>")
     print("  help 帮助  quit/exit 退出")
     print()
 
@@ -75,6 +75,8 @@ async def run_kernel_shell(client: AutomationIPCClient) -> None:
                 print("  cancel <session_id>  取消该 session 正在运行的任务")
                 print("  spawn <session_id>   创建新 Core")
                 print("  attach <session_id> <text>  以系统身份向该 session 发消息")
+                print("  user create <user_id> [--frontend cli] [--warm]  创建逻辑用户记忆目录（可选预热 Core）")
+                print("  user list [--frontend cli]               列出该前端下已有记忆目录的用户")
                 print("  help | quit | exit")
                 continue
 
@@ -235,6 +237,70 @@ async def run_kernel_shell(client: AutomationIPCClient) -> None:
                     print()
                 except Exception as e:
                     print(f"  错误: {e}")
+                continue
+
+            if cmd == "user":
+                if not args:
+                    print("  用法: user create <user_id> [--frontend cli] [--warm]")
+                    print("        user list [--frontend cli]")
+                    continue
+                sub = args[0].lower()
+                rest = args[1:]
+                if sub == "create":
+                    if not rest:
+                        print("  用法: user create <user_id> [--frontend cli] [--warm]")
+                        continue
+                    uid = rest[0]
+                    fe, warm = "cli", False
+                    i = 1
+                    while i < len(rest):
+                        if rest[i] == "--frontend" and i + 1 < len(rest):
+                            fe = rest[i + 1]
+                            i += 2
+                        elif rest[i] == "--warm":
+                            warm = True
+                            i += 1
+                        else:
+                            i += 1
+                    try:
+                        out = await client.terminal_create_user(
+                            uid, frontend=fe, warm_spawn=warm
+                        )
+                        print(f"  memory_owner: {out.get('memory_owner')}")
+                        print(f"  default_session_id: {out.get('default_session_id')}")
+                        print(f"  owner_dir: {out.get('owner_dir')}")
+                        cp = out.get("created_paths") or []
+                        if cp:
+                            print(f"  新建目录: {cp}")
+                        else:
+                            print("  目录已存在（未新建）")
+                        if out.get("warm_spawn"):
+                            print(f"  预热 Core: {'是' if out.get('spawned') else '否'}")
+                        users = out.get("all_users_on_frontend")
+                        if isinstance(users, list):
+                            print(f"  该前端全部用户: {', '.join(users) if users else '(无)'}")
+                    except Exception as e:
+                        print(f"  错误: {e}")
+                    continue
+                if sub == "list":
+                    fe = "cli"
+                    i = 0
+                    while i < len(rest):
+                        if rest[i] == "--frontend" and i + 1 < len(rest):
+                            fe = rest[i + 1]
+                            i += 2
+                        else:
+                            i += 1
+                    try:
+                        snap = await client.terminal_list_users(frontend=fe)
+                        u = snap.get("users") or []
+                        print(f"  frontend={snap.get('frontend', fe)}  users={len(u)}")
+                        for name in u:
+                            print(f"    {name}")
+                    except Exception as e:
+                        print(f"  错误: {e}")
+                    continue
+                print("  未知 user 子命令；使用 user create / user list")
                 continue
 
             print(f"  未知命令: {cmd}  输入 help 查看帮助")

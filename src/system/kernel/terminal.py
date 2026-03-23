@@ -26,6 +26,8 @@ KernelTerminal — Kernel 系统管理控制台。
     result = await client.terminal_attach("cli:root", "系统通知：即将重启")
     cron = await client.terminal_automation_jobs()  # 正在被追踪的定时 Job 协程
     tasks = await client.terminal_agent_tasks()     # AgentTask 队列快照
+    users = await client.terminal_list_users(frontend="cli")
+    await client.terminal_create_user("alice", frontend="cli", warm_spawn=False)
 
   前提：daemon 已启动且 AutomationIPCServer 注入了 terminal（当前 automation_daemon 已注入）。
 """
@@ -388,6 +390,51 @@ class KernelTerminal:
         但不销毁 Core 本身。
         """
         return self._scheduler.cancel_session_tasks(session_id)
+
+    async def create_logic_user(
+        self,
+        user_id: str,
+        *,
+        frontend: str = "cli",
+        warm_spawn: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        为指定前端创建逻辑用户：在 data/memory/{frontend}/{user}/ 下建立标准目录（幂等）。
+
+        可选 warm_spawn：额外 ``CorePool.acquire`` 预热一条 ``{frontend}:{user}`` 会话（消耗资源）。
+        """
+        from agent_core.agent.memory_paths import (
+            ensure_memory_owner_layout,
+            list_user_ids_under_frontend,
+        )
+
+        mem_cfg = self._pool._config.memory
+        layout = ensure_memory_owner_layout(mem_cfg, user_id, source=frontend)
+        result: Dict[str, Any] = {
+            **layout,
+            "warm_spawn": bool(warm_spawn),
+            "spawned": False,
+        }
+        if warm_spawn:
+            sid = str(layout["default_session_id"])
+            fe = str(layout["frontend"])
+            uid = str(layout["user_id"])
+            await self.spawn(sid, source=fe, user_id=uid)
+            result["spawned"] = True
+        # 便于运维确认磁盘上已有哪些用户
+        result["all_users_on_frontend"] = list_user_ids_under_frontend(
+            mem_cfg, frontend=str(layout["frontend"])
+        )
+        return result
+
+    def list_logic_users(self, *, frontend: str = "cli") -> Dict[str, Any]:
+        """列出某 frontend 下磁盘上已存在的逻辑用户目录名。"""
+        from agent_core.agent.memory_paths import list_user_ids_under_frontend
+
+        mem_cfg = self._pool._config.memory
+        fe = (frontend or "cli").strip() or "cli"
+        users = list_user_ids_under_frontend(mem_cfg, frontend=fe)
+        return {"frontend": fe, "users": users}
 
     # ── 交互类：attach 到某个 session 直接对话 ─────────────────
 

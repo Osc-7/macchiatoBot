@@ -56,8 +56,8 @@ class TestAgentTaskModel:
 
     def test_serialization_round_trip(self):
         task = AgentTask(
-            source="cli:default",
-            session_id="cli:default",
+            source="cli:root",
+            session_id="cli:root",
             instruction="查看今天的日程",
             context_policy=ContextPolicy.PERSISTENT,
         )
@@ -284,8 +284,8 @@ class TestSessionManager:
             return ag
 
         with patch.object(manager, "_create_agent", side_effect=fake_create_agent):
-            r1 = await manager.run_task("cli:default", "你好", ContextPolicy.PERSISTENT)
-            r2 = await manager.run_task("cli:default", "再见", ContextPolicy.PERSISTENT)
+            r1 = await manager.run_task("cli:root", "你好", ContextPolicy.PERSISTENT)
+            r2 = await manager.run_task("cli:root", "再见", ContextPolicy.PERSISTENT)
 
         # 同一个 session_id 只创建一个 Agent
         assert len(created_agents) == 1
@@ -307,7 +307,7 @@ class TestSessionManager:
             return ag
 
         with patch.object(manager, "_create_agent", side_effect=fake_create_agent):
-            await manager.run_task("cli:default", "来自 CLI", ContextPolicy.PERSISTENT)
+            await manager.run_task("cli:root", "来自 CLI", ContextPolicy.PERSISTENT)
             await manager.run_task(
                 "social:wechat:u123", "来自微信", ContextPolicy.PERSISTENT
             )
@@ -327,7 +327,7 @@ class TestSessionManager:
             return ag
 
         with patch.object(manager, "_create_agent", side_effect=fake_create_agent):
-            await manager.run_task("cli:default", "ping", ContextPolicy.PERSISTENT)
+            await manager.run_task("cli:root", "ping", ContextPolicy.PERSISTENT)
             await manager.run_task("social:wechat:u1", "ping", ContextPolicy.PERSISTENT)
             await manager.close_all()
 
@@ -347,13 +347,13 @@ class TestSessionManager:
 
         with patch.object(manager, "_create_session", return_value=core_session):
             result = await manager.run_task(
-                session_id="cli:default",
+                session_id="cli:root",
                 instruction="你好",
                 context_policy=ContextPolicy.PERSISTENT,
             )
 
         assert result == "ok"
-        core_session.activate_session.assert_awaited_once_with("cli:default")
+        core_session.activate_session.assert_awaited_once_with("cli:root")
         core_session.run_turn.assert_awaited_once()
         call_args = core_session.run_turn.await_args
         assert call_args.args[0].text == "你好"

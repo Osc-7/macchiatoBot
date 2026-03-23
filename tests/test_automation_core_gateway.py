@@ -31,7 +31,7 @@ def _make_mock_scheduler(
     pool_entries = pool_entries or {}
 
     async def _submit(request):
-        sid = getattr(request, "session_id", "cli:default")
+        sid = getattr(request, "session_id", "cli:root")
 
         class Handle:
             request_id = getattr(request, "request_id", "mock-req-id")
@@ -43,7 +43,7 @@ def _make_mock_scheduler(
         return Handle()
 
     async def _wait_result(handle):
-        sid = getattr(handle, "session_id", "cli:default")
+        sid = getattr(handle, "session_id", "cli:root")
         return results_by_session.get(sid, default_result)
 
     mock_pool = MagicMock(spec=CorePool)
@@ -69,7 +69,7 @@ def _make_gateway(
     core=None,
     *,
     kernel_scheduler=None,
-    session_id: str = "cli:default",
+    session_id: str = "cli:root",
     session_registry=None,
     session_factory=None,
     **kwargs,
@@ -126,8 +126,8 @@ async def test_gateway_expire_flow_calls_evict(tmp_path):
     changed = await gateway.expire_session_if_needed(reason="idle_timeout")
 
     assert changed is True
-    scheduler.core_pool.evict.assert_awaited_once_with("cli:default")
-    assert registry.is_expired("root", "cli", "cli:default") is True
+    scheduler.core_pool.evict.assert_awaited_once_with("cli:root")
+    assert registry.is_expired("root", "cli", "cli:root") is True
 
 
 @pytest.mark.asyncio
@@ -139,7 +139,7 @@ async def test_gateway_expire_session_calls_evict(tmp_path):
     gateway = _make_gateway(tmp_path, core, kernel_scheduler=scheduler)
     await gateway.expire_session(reason="manual")
 
-    scheduler.core_pool.evict.assert_awaited_once_with("cli:default")
+    scheduler.core_pool.evict.assert_awaited_once_with("cli:root")
 
 
 @pytest.mark.asyncio
@@ -181,7 +181,7 @@ async def test_gateway_inject_message_submits_to_scheduler(tmp_path):
 async def test_gateway_switch_session_upserts_and_routes(tmp_path):
     scheduler = _make_mock_scheduler(
         results_by_session={
-            "cli:default": AgentRunResult(output_text="default"),
+            "cli:root": AgentRunResult(output_text="default"),
             "cli:work": AgentRunResult(output_text="new"),
         }
     )
@@ -194,7 +194,7 @@ async def test_gateway_switch_session_upserts_and_routes(tmp_path):
 
     assert created is True
     assert result.output_text == "new"
-    assert "cli:default" in gateway.list_sessions()
+    assert "cli:root" in gateway.list_sessions()
     assert "cli:work" in gateway.list_sessions()
 
 
@@ -202,7 +202,7 @@ async def test_gateway_switch_session_upserts_and_routes(tmp_path):
 async def test_gateway_inject_message_uses_target_session(tmp_path):
     scheduler = _make_mock_scheduler(
         results_by_session={
-            "cli:default": AgentRunResult(output_text="default"),
+            "cli:root": AgentRunResult(output_text="default"),
             "wx:u1": AgentRunResult(output_text="other"),
         }
     )
@@ -216,7 +216,7 @@ async def test_gateway_inject_message_uses_target_session(tmp_path):
     )
     result = await gateway.run_turn(AgentRunInput(text="local"), hooks=AgentHooks())
 
-    assert gateway.active_session_id == "cli:default"
+    assert gateway.active_session_id == "cli:root"
     assert inject_result.output_text == "other"
     assert result.output_text == "default"
     assert scheduler.submit.await_count == 2
@@ -274,7 +274,7 @@ async def test_gateway_sessions_visible_across_instances(tmp_path):
     sessions = gw_b.list_sessions()
     await gw_b.close()
 
-    assert "cli:default" in sessions
+    assert "cli:root" in sessions
     assert "cli:work" in sessions
 
 
@@ -300,7 +300,7 @@ async def test_gateway_should_expire_uses_registry_timestamp_for_unloaded_sessio
         tmp_path,
         core,
         kernel_scheduler=scheduler,
-        session_id="cli:default",
+        session_id="cli:root",
         policy=SessionCutPolicy(idle_timeout_minutes=30, daily_cutoff_hour=4),
         session_registry=registry,
         owner_id="root",
@@ -329,7 +329,7 @@ async def test_gateway_expired_session_not_repeated_until_activity(tmp_path):
     assert changed_1 is True
     assert changed_2 is False
 
-    gateway.mark_activity("cli:default")
+    gateway.mark_activity("cli:root")
     changed_3 = await gateway.expire_session_if_needed(reason="idle")
     assert changed_3 is True
     await gateway.close()
@@ -364,7 +364,7 @@ async def test_gateway_switch_session_to_existing_routes_to_scheduler(tmp_path):
     """切换至已存在会话时，run_turn 经 scheduler 路由到对应 session。"""
     scheduler = _make_mock_scheduler(
         results_by_session={
-            "cli:default": AgentRunResult(output_text="default"),
+            "cli:root": AgentRunResult(output_text="default"),
             "cli:expired": AgentRunResult(output_text="new"),
         }
     )

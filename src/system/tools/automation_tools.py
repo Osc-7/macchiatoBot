@@ -541,7 +541,7 @@ class CreateScheduledJobTool(BaseTool):
                 ToolParameter(
                     name="memory_owner",
                     type="string",
-                    description='可选：记忆 owner 标识，例如 "feishu:ou_xxx" 或 "cli:default"。不提供时与当前会话的权限对齐（有记忆则复用，无则不开）。',
+                    description='可选：记忆 owner 标识，例如 "feishu:ou_xxx" 或 "cli:root"。不提供时与当前会话的权限对齐（有记忆则复用，无则不开）。',
                     required=False,
                 ),
                 ToolParameter(

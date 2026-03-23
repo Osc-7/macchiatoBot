@@ -80,7 +80,7 @@ Example:
 /session
 /session new cli:work
 /session list
-/session switch cli:default
+/session switch cli:root
 ```
 
 Notes:

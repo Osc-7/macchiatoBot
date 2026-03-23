@@ -23,7 +23,7 @@ def _make_ipc_mock_scheduler(work_result: AgentRunResult, work_usage: dict):
 
     async def _submit(request):
         last_request.append(request)
-        sid = getattr(request, "session_id", "cli:default")
+        sid = getattr(request, "session_id", "cli:root")
 
         class Handle:
             request_id = getattr(request, "request_id", "mock-req-id")
@@ -58,7 +58,7 @@ def _make_ipc_mock_scheduler(work_result: AgentRunResult, work_usage: dict):
     work_entry.agent = work_agent
 
     mock_pool = MagicMock(spec=CorePool)
-    mock_pool.list_sessions = MagicMock(return_value=["cli:default", "cli:work"])
+    mock_pool.list_sessions = MagicMock(return_value=["cli:root", "cli:work"])
     # has_session 返回 False，使 switch_session 时 created=True（session 由 gateway 创建）
     mock_pool.has_session = MagicMock(return_value=False)
     mock_pool.evict = AsyncMock()
@@ -95,7 +95,7 @@ async def test_ipc_server_client_run_turn_and_session_commands(tmp_path: Path):
     gateway = AutomationCoreGateway(
         default_core,
         kernel_scheduler=scheduler,
-        session_id="cli:default",
+        session_id="cli:root",
         session_registry=SessionRegistry(str(tmp_path / "sessions.db")),
     )
 
@@ -110,7 +110,7 @@ async def test_ipc_server_client_run_turn_and_session_commands(tmp_path: Path):
         await client.connect()
 
         sessions = await client.list_sessions()
-        assert "cli:default" in sessions
+        assert "cli:root" in sessions
 
         created = await client.switch_session("cli:work", create_if_missing=True)
         assert created is True
@@ -174,7 +174,7 @@ async def test_ipc_session_delete_rejected_when_session_is_active_for_any_client
     gateway = AutomationCoreGateway(
         default_core,
         kernel_scheduler=scheduler,
-        session_id="cli:default",
+        session_id="cli:root",
         session_factory=factory,
         session_registry=SessionRegistry(str(tmp_path / "sessions.db")),
     )

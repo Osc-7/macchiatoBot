@@ -164,7 +164,7 @@ class AutomationIPCServer:
     ) -> None:
         client_id = str(params.get("client_id") or "default")
         if client_id not in self._client_active_session:
-            self._client_active_session[client_id] = f"{self._source}:default"
+            self._client_active_session[client_id] = f"{self._source}:{self._owner_id}"
         active_session = self._client_active_session[client_id]
         text = str(params.get("text") or "")
         metadata = params.get("metadata")
@@ -253,7 +253,7 @@ class AutomationIPCServer:
     async def _dispatch(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         client_id = str(params.get("client_id") or "default")
         if client_id not in self._client_active_session:
-            self._client_active_session[client_id] = f"{self._source}:default"
+            self._client_active_session[client_id] = f"{self._source}:{self._owner_id}"
         active_session = self._client_active_session[client_id]
 
         if method == "ping":
@@ -297,7 +297,7 @@ class AutomationIPCServer:
             ok = await self._gateway.delete_session(session_id)
             # 如果客户端当前活跃会话被删除，则回退到默认会话标识；实际 CoreSession 需按需显式切换。
             if ok and self._client_active_session.get(client_id) == session_id:
-                self._client_active_session[client_id] = f"{self._source}:default"
+                self._client_active_session[client_id] = f"{self._source}:{self._owner_id}"
             return {
                 "deleted": ok,
                 "active_session_id": self._client_active_session.get(client_id),
@@ -451,7 +451,7 @@ class AutomationIPCClient:
     ) -> None:
         self.owner_id = owner_id.strip() or "root"
         self.source = source.strip() or "cli"
-        self.active_session_id = f"{self.source}:default"
+        self.active_session_id = f"{self.source}:{self.owner_id}"
         self._socket_path = socket_path or default_socket_path()
         self._timeout_seconds = float(timeout_seconds)
         self._token_usage_cache: Dict[str, Any] = {

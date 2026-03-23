@@ -80,7 +80,7 @@ CLI 会话命令（通过 IPC 或本地模式）：
 /session
 /session new cli:work
 /session list
-/session switch cli:default
+/session switch cli:root
 ```
 
 说明：

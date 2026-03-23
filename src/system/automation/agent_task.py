@@ -28,7 +28,7 @@ class AgentTask(BaseModel):
     """
     指令来源标识，格式约定：
       - 定时任务:  cron:{job_type}
-      - CLI 用户:  cli:default
+      - CLI 用户:  cli:{user_id}
       - 社交平台:  social:{platform}:{user_id}
       - API/webhook: api:{name}
     """
@@ -37,7 +37,7 @@ class AgentTask(BaseModel):
     """
     上下文隔离 key，格式约定：
       - 定时任务:  cron:{job_type}:{date}   (每次唯一，ephemeral)
-      - CLI 用户:  cli:default              (固定复用，persistent)
+      - CLI 用户:  cli:{user_id}            (固定复用，persistent)
       - 社交平台:  social:{platform}:{uid}  (固定复用，persistent)
     """
     instruction: str
@@ -66,7 +66,7 @@ def make_cron_task(
     """构造一个定时任务 AgentTask（ephemeral，session_id 含日期保证唯一性）。
 
     memory_owner:
-        若提供（例如 "cli:default"），则用于决定该任务运行时加载哪一套记忆与上下文；
+        若提供（例如 "cli:root"），则用于决定该任务运行时加载哪一套记忆与上下文；
         否则表示不加载任何长期/内容/对话历史记忆，仅使用工作记忆。
     """
     today = date.today().isoformat()
@@ -92,7 +92,7 @@ def make_user_task(
     instruction: str,
     *,
     channel: str = "cli",
-    user_id: str = "default",
+    user_id: str = "root",
 ) -> AgentTask:
     """构造一个用户会话 AgentTask（persistent，session_id 按渠道固定）。"""
     return AgentTask(

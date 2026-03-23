@@ -22,12 +22,12 @@ async def test_evict_shutdown_calls_flush_checkpoint() -> None:
     agent.flush_checkpoint_for_shutdown = MagicMock()
     pool = CorePool()
     profile = CoreProfile.default_full(frontend_id="cli", dialog_window_id="root")
-    pool._pool["cli:default"] = CoreEntry(agent=agent, profile=profile)
+    pool._pool["cli:root"] = CoreEntry(agent=agent, profile=profile)
     pool._kernel = MagicMock()
     pool._kernel.kill = AsyncMock(return_value=None)
     pool._summarizer = None
 
-    await pool.evict("cli:default", shutdown=True)
+    await pool.evict("cli:root", shutdown=True)
 
     agent.flush_checkpoint_for_shutdown.assert_called_once()
 
@@ -38,12 +38,12 @@ async def test_evict_normal_does_not_call_flush_checkpoint() -> None:
     agent.flush_checkpoint_for_shutdown = MagicMock()
     pool = CorePool()
     profile = CoreProfile.default_full(frontend_id="cli", dialog_window_id="root")
-    pool._pool["cli:default"] = CoreEntry(agent=agent, profile=profile)
+    pool._pool["cli:root"] = CoreEntry(agent=agent, profile=profile)
     pool._kernel = MagicMock()
     pool._kernel.kill = AsyncMock(return_value=None)
     pool._summarizer = None
 
-    await pool.evict("cli:default", shutdown=False)
+    await pool.evict("cli:root", shutdown=False)
 
     agent.flush_checkpoint_for_shutdown.assert_not_called()
 
@@ -81,12 +81,12 @@ async def test_priority_queue_inject_before_user_request() -> None:
     # 先入队用户请求（priority=0），再入队 inject（priority=-1）
     user_req = KernelRequest.create(
         text="用户消息",
-        session_id="cli:default",
+        session_id="cli:root",
         priority=0,
     )
     inject_req = KernelRequest.create(
         text="[子任务 abc 完成]\n\n结果",
-        session_id="cli:default",
+        session_id="cli:root",
         frontend_id="subagent",
         priority=-1,
     )

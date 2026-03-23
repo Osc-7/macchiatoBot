@@ -702,12 +702,12 @@ class AutomationJobConfig(BaseModel):
     )
     user_id: str = Field(
         default="default",
-        description="逻辑用户 ID，用于区分不同用户的后台任务（通常与记忆库 owner 的 user 段一致，如 cli:default 中的 default）。",
+        description="逻辑用户 ID，用于区分不同用户的后台任务（通常与记忆库 owner 的 user 段一致，如 cli:root 中的 root）。",
     )
     memory_owner: Optional[str] = Field(
         default=None,
         description=(
-            '可选：记忆库 owner 标识，例如 "cli:default"、"feishu:some_user"。'
+            '可选：记忆库 owner 标识，例如 "cli:root"、"feishu:some_user"。'
             "配置后，自动化任务将在该 owner 的上下文和记忆下运行；未配置时，不加载任何长期/内容/对话历史记忆。"
         ),
     )

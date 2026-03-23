@@ -302,8 +302,8 @@ class TestRunInteractiveLoop:
         agent.config = SimpleNamespace(memory=SimpleNamespace(idle_timeout_minutes=30))
         agent.mark_activity = MagicMock()
         agent.expire_session_if_needed = AsyncMock(return_value=False)
-        agent.active_session_id = "cli:default"
-        _sessions = ["cli:default"]
+        agent.active_session_id = "cli:root"
+        _sessions = ["cli:root"]
 
         def _list_sessions():
             return list(_sessions)
@@ -327,7 +327,7 @@ class TestRunInteractiveLoop:
                 "session",
                 "session new cli:work",
                 "session list",
-                "session switch cli:default",
+                "session switch cli:root",
                 "quit",
             ],
         ):
@@ -336,7 +336,7 @@ class TestRunInteractiveLoop:
         assert reason == "quit"
         agent.process_input.assert_not_called()
         assert "cli:work" in _sessions
-        assert agent.active_session_id == "cli:default"
+        assert agent.active_session_id == "cli:root"
 
     @pytest.mark.asyncio
     async def test_session_switch_missing_session_shows_hint(self, capsys):
@@ -355,8 +355,8 @@ class TestRunInteractiveLoop:
         agent.config = SimpleNamespace(memory=SimpleNamespace(idle_timeout_minutes=30))
         agent.mark_activity = MagicMock()
         agent.expire_session_if_needed = AsyncMock(return_value=False)
-        agent.active_session_id = "cli:default"
-        agent.list_sessions = MagicMock(return_value=["cli:default"])
+        agent.active_session_id = "cli:root"
+        agent.list_sessions = MagicMock(return_value=["cli:root"])
         agent.switch_session = AsyncMock()
 
         with patch(
@@ -386,10 +386,10 @@ class TestRunInteractiveLoop:
         agent.config = SimpleNamespace(memory=SimpleNamespace(idle_timeout_minutes=30))
         agent.mark_activity = MagicMock()
         agent.expire_session_if_needed = AsyncMock(return_value=False)
-        agent.active_session_id = "cli:default"
+        agent.active_session_id = "cli:root"
         agent.owner_id = "root"
         agent.source = "cli"
-        agent.list_sessions = MagicMock(return_value=["cli:default"])
+        agent.list_sessions = MagicMock(return_value=["cli:root"])
         agent.switch_session = AsyncMock()
 
         with patch("builtins.input", side_effect=["session whoami", "quit"]):
@@ -399,7 +399,7 @@ class TestRunInteractiveLoop:
         captured = capsys.readouterr()
         assert "user=root" in captured.out
         assert "source=cli" in captured.out
-        assert "session=cli:default" in captured.out
+        assert "session=cli:root" in captured.out
 
 
 class TestMainAsync:

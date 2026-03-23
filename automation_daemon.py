@@ -119,7 +119,7 @@ async def _consume_loop(
 
             # 从任务 metadata 中读取显式 core_mode / memory_owner：
             # - core_mode: full / sub / background（兼容旧值 cron/heartbeat → background）
-            # - memory_owner: 决定记忆 owner（如 feishu:uid / cli:default）
+            # - memory_owner: 决定记忆 owner（如 feishu:uid / cli:root）
             raw_mode = ""
             raw_owner = ""
             if isinstance(task.metadata, dict):
@@ -288,7 +288,7 @@ async def _main() -> None:
     # 工具在 daemon 进程内加载；修改工具实现/定义（如 file_tools.read_file）后需重启本 daemon 才能生效
     # 传入 owner_id 和 source 确保记忆工具指向正确的用户目录
     tools = get_default_tools(config=cfg, user_id=owner_id, source=source)
-    default_session_id = f"{source}:default"
+    default_session_id = f"{source}:{owner_id}"
 
     queue = AgentTaskQueue()
     recovered = queue.recover_stale_running()

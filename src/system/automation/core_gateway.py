@@ -50,7 +50,7 @@ class AutomationCoreGateway:
         core_session: CoreSession,
         *,
         kernel_scheduler: "KernelScheduler",
-        session_id: str = "cli:default",
+        session_id: str = "cli:root",
         policy: Optional[SessionCutPolicy] = None,
         session_factory: Optional[CoreSessionFactory] = None,
         owner_id: str = "root",

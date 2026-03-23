@@ -97,7 +97,7 @@ def _make_mock_scheduler(*, queue_size: int = 0, active_task_count: int = 0) -> 
     sched = MagicMock()
     sched.queue_size = queue_size
     sched.active_task_count = active_task_count
-    sched._inflight_sessions = {"cli:default": 1}
+    sched._inflight_sessions = {"cli:root": 1}
     sched._cancelled_sessions = set()
     sched.cancel_session_tasks = MagicMock(return_value=True)
     sched.submit = AsyncMock(return_value=MagicMock(request_id="req-1"))
@@ -122,13 +122,13 @@ def test_terminal_ps_empty() -> None:
 def test_terminal_ps_one() -> None:
     agent = _make_mock_agent(source="cli", user_id="root", turn_count=3, token_usage={"total_tokens": 200})
     profile = _make_mock_profile(mode="full", session_expired_seconds=1800)
-    pool = _make_mock_pool(pool_entries={"cli:default": (agent, profile)})
+    pool = _make_mock_pool(pool_entries={"cli:root": (agent, profile)})
     sched = _make_mock_scheduler()
     terminal = KernelTerminal(scheduler=sched, core_pool=pool)
     cores = terminal.ps()
     assert len(cores) == 1
     c = cores[0]
-    assert c.session_id == "cli:default"
+    assert c.session_id == "cli:root"
     assert c.source == "cli"
     assert c.user_id == "root"
     assert c.mode == "full"
@@ -250,11 +250,11 @@ def test_terminal_agent_task_queue_with_queue() -> None:
 
 @pytest.mark.asyncio
 async def test_terminal_kill() -> None:
-    pool = _make_mock_pool(pool_entries={"cli:default": (_make_mock_agent(), _make_mock_profile())})
+    pool = _make_mock_pool(pool_entries={"cli:root": (_make_mock_agent(), _make_mock_profile())})
     sched = _make_mock_scheduler()
     terminal = KernelTerminal(scheduler=sched, core_pool=pool)
-    await terminal.kill("cli:default")
-    pool.evict.assert_awaited_once_with("cli:default", shutdown=False)
+    await terminal.kill("cli:root")
+    pool.evict.assert_awaited_once_with("cli:root", shutdown=False)
 
 
 @pytest.mark.asyncio
@@ -263,9 +263,9 @@ async def test_terminal_cancel() -> None:
     sched = _make_mock_scheduler()
     sched.cancel_session_tasks = MagicMock(return_value=True)
     terminal = KernelTerminal(scheduler=sched, core_pool=pool)
-    out = await terminal.cancel("cli:default")
+    out = await terminal.cancel("cli:root")
     assert out is True
-    sched.cancel_session_tasks.assert_called_once_with("cli:default")
+    sched.cancel_session_tasks.assert_called_once_with("cli:root")
 
 
 @pytest.mark.asyncio
@@ -310,7 +310,7 @@ async def test_terminal_attach() -> None:
         )
     )
     terminal = KernelTerminal(scheduler=sched, core_pool=pool)
-    result = await terminal.attach("cli:default", "hello")
+    result = await terminal.attach("cli:root", "hello")
     assert result.output_text == "reply"
     assert getattr(result, "metadata", {}) == {"k": "v"}
     assert getattr(result, "attachments", []) == [{"type": "image"}]

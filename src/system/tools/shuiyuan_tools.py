@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from agent_core.config import Config, ShuiyuanConfig
+from agent_core.config import Config
 
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 

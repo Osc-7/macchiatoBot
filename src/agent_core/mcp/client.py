@@ -160,7 +160,6 @@ class MCPClientManager:
                     break
 
                 except Exception as exc:
-                    last_exc = exc
                     if attempt_stack is not None:
                         await attempt_stack.aclose()
                         attempt_stack = None

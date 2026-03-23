@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from system.automation.scheduler import AutomationScheduler
     from system.automation.task_queue import AgentTaskQueue
 
-    from .core_pool import CorePool, CoreEntry
+    from .core_pool import CorePool
     from .scheduler import KernelScheduler
 
 logger = __import__("logging").getLogger(__name__)
@@ -404,7 +404,6 @@ class KernelTerminal:
         构造 KernelRequest 提交到 Scheduler，等待结果返回。
         这是唯一涉及 LLM 的方法。
         """
-        from agent_core.interfaces import AgentRunResult
         from agent_core.kernel_interface import KernelRequest
 
         metadata: Dict[str, Any] = {"source": "system", "user_id": "root"}

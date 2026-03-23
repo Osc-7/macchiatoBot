@@ -22,12 +22,11 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     from agent_core.config import Config
     from agent_core.agent.agent import AgentCore
-    from agent_core.tools import BaseTool
     from agent_core.kernel_interface import CoreProfile
     from .core_logger import CoreLifecycleLogger
     from .subagent_registry import SubagentRegistry

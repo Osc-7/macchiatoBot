@@ -364,7 +364,7 @@ class AgentKernel:
                 if not isinstance(parsed, dict):
                     return {}, "工具参数必须是 JSON 对象"
                 return parsed, None
-            except (json.JSONDecodeError, ValueError) as e:
+            except (json.JSONDecodeError, ValueError):
                 preview = arguments[:500] + ("...(截断)" if len(arguments) > 500 else "")
                 return {}, f"工具参数 JSON 解析失败（可能为流式输出截断）: {preview}"
         return {}, "工具参数类型无效"

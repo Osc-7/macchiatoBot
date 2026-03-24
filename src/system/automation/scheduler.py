@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
+
+_logger = logging.getLogger(__name__)
 
 from .event_bus import AsyncEventBus
 from .repositories import JobDefinitionRepository, JobRunRepository
@@ -52,6 +55,7 @@ class AutomationScheduler:
             snap = self._job_snapshots.get(job_name)
             if snap is not None:
                 pt = snap.payload_template or {}
+                instruction = pt.get("instruction") or ""
                 row["definition"] = {
                     "job_type": snap.job_type,
                     "name": pt.get("name", ""),
@@ -60,6 +64,13 @@ class AutomationScheduler:
                     "interval_seconds": snap.interval_seconds,
                     "timezone": snap.timezone or "Asia/Shanghai",
                     "run_at": snap.run_at.isoformat() if snap.run_at else None,
+                    "daily_time": pt.get("daily_time"),
+                    "times": pt.get("times"),
+                    "start_time": pt.get("start_time"),
+                    "user_id": pt.get("user_id"),
+                    "memory_owner": pt.get("memory_owner"),
+                    "core_mode": pt.get("core_mode"),
+                    "instruction_preview": instruction[:80] + ("…" if len(instruction) > 80 else ""),
                 }
             if task.done() and not task.cancelled():
                 try:
@@ -159,17 +170,26 @@ class AutomationScheduler:
         注意：首次执行前会先等待到下一次计划触发时间，
         避免在 scheduler / 后台守护进程启动瞬间就立刻跑一遍。
         """
+        _logger.info("scheduler: run_loop started for %s", job.job_name)
         while self._running:
-            delay = self._compute_sleep_seconds(job)
+            try:
+                delay = self._compute_sleep_seconds(job)
+            except Exception:
+                _logger.exception("scheduler: _compute_sleep_seconds failed for %s, fallback 60s", job.job_name)
+                delay = 60.0
             try:
                 await asyncio.sleep(delay)
             except asyncio.CancelledError:
                 break
             if not self._running:
                 break
-            await self.run_job_once(job)
+            try:
+                await self.run_job_once(job)
+            except Exception:
+                _logger.exception("scheduler: run_job_once raised for %s, loop continues", job.job_name)
             if job.one_shot:
                 break
+        _logger.info("scheduler: run_loop ended for %s", job.job_name)
 
     def _compute_sleep_seconds(self, job: JobDefinition) -> float:
         """根据 JobDefinition 计算下一次调度前应 sleep 的秒数。
@@ -320,21 +340,26 @@ class AutomationScheduler:
                     existing_task = self._tasks.get(job.job_name)
                     snapshot = self._job_snapshots.get(job.job_name)
 
-                    # 1) 全新任务：还没有调度协程
+                    need_start = False
+                    reason = ""
                     if existing_task is None:
-                        self._tasks[job.job_name] = asyncio.create_task(
-                            self._run_loop(job),
-                            name=f"scheduler:{job.job_name}",
+                        need_start = True
+                        reason = "new"
+                    elif existing_task.done():
+                        exc = existing_task.exception() if not existing_task.cancelled() else None
+                        _logger.warning(
+                            "scheduler: run_loop for %s died (exc=%s), restarting",
+                            job.job_name,
+                            exc,
                         )
-                        try:
-                            self._job_snapshots[job.job_name] = job.model_copy(deep=True)
-                        except Exception:  # pragma: no cover
-                            self._job_snapshots[job.job_name] = job
-                        continue
-
-                    # 2) 已有任务，但配置发生了变化（例如 daily_time 从 13:45 改为 14:00）
-                    if snapshot is not None and self._job_changed(snapshot, job):
+                        need_start = True
+                        reason = "crashed"
+                    elif snapshot is not None and self._job_changed(snapshot, job):
                         existing_task.cancel()
+                        need_start = True
+                        reason = "config_changed"
+
+                    if need_start:
                         self._tasks[job.job_name] = asyncio.create_task(
                             self._run_loop(job),
                             name=f"scheduler:{job.job_name}",
@@ -343,6 +368,12 @@ class AutomationScheduler:
                             self._job_snapshots[job.job_name] = job.model_copy(deep=True)
                         except Exception:  # pragma: no cover
                             self._job_snapshots[job.job_name] = job
+                        if reason != "new":
+                            _logger.info(
+                                "scheduler: restarted run_loop for %s (reason=%s)",
+                                job.job_name,
+                                reason,
+                            )
 
                 # 已被删除或禁用的任务：取消并移除调度协程
                 for job_name in list(self._tasks.keys()):

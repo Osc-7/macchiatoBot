@@ -201,22 +201,27 @@ class FeishuPushForwarder:
         poll_interval_seconds: float = 2.0,
         socket_path: Optional[str] = None,
         timeout_seconds: float = 30.0,
+        session_ttl_seconds: float = 300.0,
     ) -> None:
         self._poll_interval = poll_interval_seconds
         self._socket_path = socket_path or default_socket_path()
         self._timeout = timeout_seconds
+        # 会话注册有效期：subagent 等 inject_turn 可能远超 5 分钟才全部完成，
+        # 成功转发推送后会在 _poll_once 内滑动续期，避免后续结果无法送达飞书。
+        self._session_ttl_seconds = float(session_ttl_seconds)
         self._registry: Dict[str, tuple[str, float]] = {}  # session_id -> (chat_id, expiry_ts)
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
 
     def register(
-        self, session_id: str, chat_id: str, ttl_seconds: float = 300.0
+        self, session_id: str, chat_id: str, ttl_seconds: Optional[float] = None
     ) -> None:
         """注册会话，在 ttl_seconds 内轮询 [out] 队列并转发到 chat_id。"""
         if not session_id or not chat_id:
             return
-        expiry = time.time() + ttl_seconds
+        ttl = float(ttl_seconds) if ttl_seconds is not None else self._session_ttl_seconds
+        expiry = time.time() + ttl
         with self._lock:
             self._registry[session_id] = (chat_id, expiry)
 
@@ -272,6 +277,7 @@ class FeishuPushForwarder:
             for session_id, chat_id in to_poll:
                 await client.switch_session(session_id, create_if_missing=False)
                 results = await client.poll_push()
+                sent_any = False
                 for pr in results or []:
                     text = (pr.get("output_text") or "").strip()
                     if not text:
@@ -280,11 +286,15 @@ class FeishuPushForwarder:
                         await feishu_client.send_text_message(
                             chat_id=chat_id, text=text
                         )
+                        sent_any = True
                     except Exception as exc:
                         logger.warning(
                             "FeishuPushForwarder send to chat_id=%s failed: %s",
                             chat_id,
                             exc,
                         )
+                # 有推送成功则续期，避免长任务在首条用户消息后固定 300s 过期、后续 inject 丢失
+                if sent_any:
+                    self.register(session_id, chat_id)
         except Exception as exc:
             logger.debug("FeishuPushForwarder _poll_once: %s", exc)

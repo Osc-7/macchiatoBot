@@ -82,17 +82,29 @@ async def _consume_loop(
     scheduler: KernelScheduler,
     stop_event: asyncio.Event,
 ) -> None:
+    logger.info("consume: consumer loop started, poll_interval=%ss", POLL_INTERVAL_SECONDS)
+    _idle_polls = 0
+    _ALIVE_LOG_INTERVAL = 120  # 每 120 次空轮询(~10min)打一次存活日志
     while not stop_event.is_set():
-        task = queue.pop_pending()
+        try:
+            task = queue.pop_pending()
+        except Exception:
+            logger.exception("consume: pop_pending() raised, will retry in %ss", POLL_INTERVAL_SECONDS)
+            task = None
         if task is None:
+            _idle_polls += 1
+            if _idle_polls % _ALIVE_LOG_INTERVAL == 0:
+                logger.info(
+                    "consume: alive (idle polls=%d, pending=%d)",
+                    _idle_polls,
+                    queue.pending_count(),
+                )
             try:
-                # 不用 asyncio.shield：shield 每次超时会泄漏一个孤儿 Task（wait_for 只取消
-                # 外层 shield，内层 stop_event.wait() Task 继续运行，长期运行累积数万个）。
-                # Event.wait() 协程支持安全取消，直接 wait_for 即可。
                 await asyncio.wait_for(stop_event.wait(), timeout=POLL_INTERVAL_SECONDS)
             except asyncio.TimeoutError:
                 pass
             continue
+        _idle_polls = 0
         started = time.perf_counter()
         pending_behind = queue.pending_count()
         running_in_db = queue.running_count()

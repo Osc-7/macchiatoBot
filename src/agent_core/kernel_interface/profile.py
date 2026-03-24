@@ -89,7 +89,7 @@ class CoreProfile:
     # 适合 background 模式（定时任务 / 心跳）等一次性或只读任务。
     memory_enabled: bool = True
 
-    max_context_tokens: int = 80_000
+    max_context_tokens: Optional[int] = 80_000
     session_expired_seconds: int = 1_800
 
     # 子 Agent 专用：单次运行上限（None 表示不限制）
@@ -176,15 +176,21 @@ class CoreProfile:
         dialog_window_id: str = "",
         max_iterations_override: Optional[int] = None,
         max_total_tokens: Optional[int] = None,
+        max_context_tokens: Optional[int] = None,
         allow_dangerous_commands: bool = False,
     ) -> "CoreProfile":
-        """子 Agent / 工具 Agent（受限工具集；allow_dangerous_commands=True 时允许 run_command，实际执行仍受 RunCommandTool 内 subagent 白名单限制）。"""
+        """子 Agent / 工具 Agent（受限工具集；allow_dangerous_commands=True 时允许 run_command，实际执行仍受 RunCommandTool 内 subagent 白名单限制）。
+
+        max_context_tokens:
+            profile 层上下文压缩阈值；None 表示不设该上限（仅由 WorkingMemory 的 max_tokens 约束）。
+            历史上曾硬编码为 40_000，与 agent.subagent_max_tokens（累计用量）无关。
+        """
         return cls(
             mode="sub",
             allowed_tools=allowed_tools,
             allow_dangerous_commands=allow_dangerous_commands,
             visible_memory_scopes=["working", "chat"],
-            max_context_tokens=40_000,
+            max_context_tokens=max_context_tokens,
             session_expired_seconds=300,
             frontend_id=frontend_id,
             dialog_window_id=dialog_window_id,

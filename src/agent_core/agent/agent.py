@@ -526,10 +526,11 @@ class AgentCore:
                 )
                 compress_threshold = self._working_memory.max_tokens
                 profile = getattr(self, "_core_profile", None)
-                if profile is not None and getattr(profile, "max_context_tokens", None):
-                    compress_threshold = min(
-                        compress_threshold, profile.max_context_tokens
-                    )
+                mct = (
+                    getattr(profile, "max_context_tokens", None) if profile else None
+                )
+                if mct is not None:
+                    compress_threshold = min(compress_threshold, mct)
                 if current_tokens >= compress_threshold:
                     _ = yield ContextOverflowAction(
                         current_tokens=current_tokens,

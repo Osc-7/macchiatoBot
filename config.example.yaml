@@ -187,6 +187,8 @@ agent:
   # 子 Agent 限制（防止卡住、无限循环）
   subagent_max_seconds: 600      # 单次运行最大时长（秒），超时强制终止
   subagent_max_tokens: 500000    # 累计 token 上限，超限强制结束；null 表示不限制
+  # subagent 上下文压缩阈值（profile 层）；null 表示不设该上限，仅受 working memory 约束（与旧版硬编码 40000 不同）
+  # subagent_max_context_tokens: null
   subagent_max_iterations: 15    # 默认最大迭代次数（工具未传 max_iterations 时使用）
   enable_debug: true
   # 工具暴露模式：

@@ -126,6 +126,9 @@ async def _run_subagent_task(
     subagent_max_tokens = getattr(
         agent_cfg, "subagent_max_tokens", 500_000
     )
+    subagent_max_context_tokens = getattr(
+        agent_cfg, "subagent_max_context_tokens", None
+    )
     subagent_max_iterations_default = getattr(
         agent_cfg, "subagent_max_iterations", 15
     )
@@ -142,6 +145,7 @@ async def _run_subagent_task(
         dialog_window_id=subagent_id,
         max_iterations_override=max_iter_override,
         max_total_tokens=subagent_max_tokens,
+        max_context_tokens=subagent_max_context_tokens,
         allow_dangerous_commands=allow_run_for_subagent,
     )
     # 24h TTL 保护（任务完成后主动 evict，不依赖 TTL 扫描）

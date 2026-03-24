@@ -164,10 +164,14 @@ async def _consume_loop(
                     dialog_window_id=dialog_id,
                 )
             elif mode == "sub":
+                cfg = get_config()
+                agent_cfg = getattr(cfg, "agent", None)
+                sub_ctx = getattr(agent_cfg, "subagent_max_context_tokens", None)
                 profile = CoreProfile.default_sub(
                     allowed_tools=None,
                     frontend_id=frontend_id,
                     dialog_window_id=dialog_id,
+                    max_context_tokens=sub_ctx,
                 )
             else:
                 # 默认后台任务权限（定时任务 / 心跳）

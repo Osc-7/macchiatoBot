@@ -577,6 +577,10 @@ class AgentConfig(BaseModel):
         ge=1,
         description="子 Agent 默认最大迭代次数（工具未传 max_iterations 时使用）",
     )
+    subagent_max_context_tokens: Optional[int] = Field(
+        default=None,
+        description="子 Agent 上下文压缩阈值（profile.max_context_tokens）；None 表示不设 profile 层上限，仅受 working memory 约束",
+    )
     enable_debug: bool = Field(default=False, description="是否启用调试模式")
     tool_mode: str = Field(
         default="kernel",

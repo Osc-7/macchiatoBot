@@ -663,8 +663,15 @@ class AutomationIPCClient:
         attachments = data.get("attachments")
         if not isinstance(attachments, list):
             attachments = []
+        output_text = str(data.get("output_text") or "")
+        # 对端提前断开或网络中断时可能收不到 final 事件，避免飞书等前端完全无反馈
+        if final_result is None and not output_text.strip():
+            output_text = (
+                "连接已中断，未收到完整回复，请稍后重试。"
+            )
+            meta_dict = {**meta_dict, "_ipc_error": "stream_incomplete"}
         return AgentRunResult(
-            output_text=str(data.get("output_text") or ""),
+            output_text=output_text,
             metadata=meta_dict,
             attachments=attachments,
         )

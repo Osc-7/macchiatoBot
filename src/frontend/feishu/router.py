@@ -27,8 +27,11 @@ from .event_models import FeishuChallengeRequest, FeishuEventEnvelope
 from .ipc_bridge import (
     AutomationDaemonUnavailable,
     FeishuIPCBridge,
+    MSG_FEISHU_DAEMON_UNAVAILABLE,
+    format_feishu_processing_error,
     get_feishu_push_forwarder,
     register_feishu_push_session,
+    send_feishu_error_notice,
     try_handle_slash_command_via_ipc,
 )
 from .session_mapping import map_event_to_session
@@ -195,6 +198,11 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
         )
     except AutomationDaemonUnavailable as exc:
         logger.warning("automation daemon unavailable for feishu message: %s", exc)
+        await send_feishu_error_notice(
+            chat_id=msg.chat_id,
+            text=MSG_FEISHU_DAEMON_UNAVAILABLE,
+            timeout_seconds=cfg.timeout_seconds,
+        )
         # 告知飞书侧“服务暂时不可用”，避免重复重试
         return JSONResponse(
             {"code": 1, "msg": "automation daemon unavailable"},
@@ -203,6 +211,11 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "failed to process feishu message via automation daemon: %s", exc
+        )
+        await send_feishu_error_notice(
+            chat_id=msg.chat_id,
+            text=format_feishu_processing_error(exc),
+            timeout_seconds=cfg.timeout_seconds,
         )
         return JSONResponse(
             {"code": 1, "msg": "internal error"},

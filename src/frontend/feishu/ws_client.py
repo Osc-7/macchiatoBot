@@ -36,8 +36,11 @@ from .event_models import (
 from .ipc_bridge import (
     AutomationDaemonUnavailable,
     FeishuIPCBridge,
+    MSG_FEISHU_DAEMON_UNAVAILABLE,
+    format_feishu_processing_error,
     get_feishu_push_forwarder,
     register_feishu_push_session,
+    send_feishu_error_notice,
     try_handle_slash_command_via_ipc,
 )
 from .router import _is_duplicate_event  # 复用去重缓存
@@ -174,10 +177,20 @@ async def _handle_im_message_event_async(data: Any) -> None:
         )
     except AutomationDaemonUnavailable as exc:
         logger.warning("automation daemon unavailable for feishu ws message: %s", exc)
+        await send_feishu_error_notice(
+            chat_id=feishu_message.chat_id,
+            text=MSG_FEISHU_DAEMON_UNAVAILABLE,
+            timeout_seconds=feishu_cfg.timeout_seconds,
+        )
         return
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "failed to process feishu ws message via automation daemon: %s", exc
+        )
+        await send_feishu_error_notice(
+            chat_id=feishu_message.chat_id,
+            text=format_feishu_processing_error(exc),
+            timeout_seconds=feishu_cfg.timeout_seconds,
         )
         return
 

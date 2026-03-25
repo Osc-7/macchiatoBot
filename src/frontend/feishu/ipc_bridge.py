@@ -49,6 +49,38 @@ class AutomationDaemonUnavailable(RuntimeError):
     """当 automation daemon 未运行或 IPC 连接失败时抛出。"""
 
 
+MSG_FEISHU_DAEMON_UNAVAILABLE = (
+    "无法连接本地 automation 服务（macchiato agent），请确认已启动 automation_daemon。"
+)
+
+
+def format_feishu_processing_error(exc: BaseException) -> str:
+    """将异常格式化为飞书用户可见的一行说明（避免过长）。"""
+    msg = str(exc).strip() or type(exc).__name__
+    if len(msg) > 500:
+        msg = msg[:499] + "…"
+    return f"处理消息时出错：{msg}"
+
+
+async def send_feishu_error_notice(
+    *,
+    chat_id: str,
+    text: str,
+    timeout_seconds: float = 30.0,
+) -> None:
+    """向飞书会话发送一条用户可见的错误或状态提示。"""
+    cid = (chat_id or "").strip()
+    if not cid or not (text or "").strip():
+        return
+    try:
+        client = FeishuClient(timeout_seconds=timeout_seconds)
+        await client.send_text_message(chat_id=cid, text=text)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "send_feishu_error_notice failed (chat_id=%s): %s", cid, exc
+        )
+
+
 async def try_handle_slash_command_via_ipc(
     *,
     session_id: str,

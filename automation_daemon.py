@@ -42,7 +42,6 @@ from system.kernel import (
     KernelScheduler,
     KernelTerminal,
     SessionSummarizer,
-    SubagentRegistry,
 )
 from agent_core.llm.client import LLMClient
 from system.tools import build_tool_registry
@@ -324,19 +323,13 @@ async def _main() -> None:
     # 如需单独的总结模型，可在此处通过 model_override 指定，例如 "qwen2.5-7b-instruct" 等。
     summary_llm_client = LLMClient(config=cfg)
     summarizer = SessionSummarizer(llm_client=summary_llm_client)
-    # SubagentRegistry 先创建，在 scheduler 就绪后通过 set_scheduler 后绑定（避免循环依赖）
-    sub_registry = SubagentRegistry()
     core_pool = CorePool(
         config=cfg,
         kernel=kernel,
         summarizer=summarizer,
         session_logger=None,
-        subagent_registry=sub_registry,
     )
     scheduler_runtime = KernelScheduler(kernel=kernel, core_pool=core_pool)
-    # 后绑定 scheduler：工具装配在 CorePool._load() 时已引用 registry，
-    # 此时 scheduler 已初始化，可以安全绑定。
-    sub_registry.set_scheduler(scheduler_runtime)
     kernel_terminal = KernelTerminal(
         scheduler=scheduler_runtime,
         core_pool=core_pool,

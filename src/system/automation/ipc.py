@@ -461,7 +461,7 @@ class AutomationIPCClient:
         owner_id: str = "root",
         source: str = "cli",
         socket_path: Optional[str] = None,
-        timeout_seconds: float = 120.0,
+        timeout_seconds: float = 300.0,
     ) -> None:
         self.owner_id = owner_id.strip() or "root"
         self.source = source.strip() or "cli"

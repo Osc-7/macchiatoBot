@@ -35,7 +35,6 @@ from .terminal import (
     SystemStatus,
 )
 from .output_bus import OutputBus
-from .subagent_registry import SubagentInfo, SubagentRegistry
 from .summarizer import SessionSummarizer
 
 __all__ = [
@@ -64,6 +63,4 @@ __all__ = [
     "SessionDetail",
     "SystemStatus",
     "SessionSummarizer",
-    "SubagentInfo",
-    "SubagentRegistry",
 ]

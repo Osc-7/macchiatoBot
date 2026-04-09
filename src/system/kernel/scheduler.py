@@ -81,6 +81,9 @@ class KernelScheduler:
     ) -> None:
         self._kernel = kernel
         self._core_pool = core_pool
+        set_scheduler = getattr(self._core_pool, "set_scheduler", None)
+        if callable(set_scheduler):
+            set_scheduler(self)
         self._hooks_factory = hooks_factory
         self._ttl_scan_interval = ttl_scan_interval
         self._queue: asyncio.PriorityQueue[KernelRequest] = asyncio.PriorityQueue()
@@ -223,7 +226,7 @@ class KernelScheduler:
         - 完成后通过 OutputBus.publish() 广播给所有订阅者
 
         典型用途：
-        - SubagentRegistry.on_complete/on_fail 唤醒父 session（first-done 语义）
+        - CorePool.on_sub_complete/on_sub_fail 唤醒父 session（first-done 语义）
         - SendMessageToAgentTool / ReplyToMessageTool 的 P2P 消息投递
         """
         qsize = self._queue.qsize()
@@ -422,7 +425,7 @@ class KernelScheduler:
                 )
 
                 # Core 级生命周期日志接入（在 prepare_turn 之前注入，确保用户消息被记录）
-                entry = self._core_pool.get_entry(session_id)
+                entry = self._core_pool.get_live_entry(session_id)
                 core_logger = getattr(entry, "logger", None) if entry is not None else None
                 if core_logger is not None and agent._session_logger is None:
                     agent._session_logger = core_logger  # type: ignore[assignment]
@@ -490,7 +493,7 @@ class KernelScheduler:
                     except Exception:
                         pass
                 # 异常/取消路径：记录 turn_end，保证每轮都有结束记录
-                entry = self._core_pool.get_entry(session_id)
+                entry = self._core_pool.get_live_entry(session_id)
                 core_logger = getattr(entry, "logger", None) if entry is not None else None
                 if core_logger is not None:
                     try:
@@ -515,7 +518,7 @@ class KernelScheduler:
                     except Exception:
                         pass
                 # 异常路径：记录 turn_end，保证每轮都有结束记录
-                entry = self._core_pool.get_entry(session_id)
+                entry = self._core_pool.get_live_entry(session_id)
                 core_logger = getattr(entry, "logger", None) if entry is not None else None
                 if core_logger is not None:
                     try:

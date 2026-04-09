@@ -63,6 +63,10 @@ class CoreInfo:
     turn_count: int
     total_tokens: int
     memory_enabled: bool
+    parent_session_id: Optional[str] = None
+    lifecycle: str = "running"
+    in_zombie: bool = False
+    task_description: Optional[str] = None
 
 
 @dataclass
@@ -74,6 +78,7 @@ class SystemStatus:
     queue_depth: int
     inflight_tasks: int
     uptime_seconds: float
+    zombie_cores: int = 0
 
 
 @dataclass
@@ -94,6 +99,13 @@ class SessionDetail:
     memory_enabled: bool
     has_checkpoint: bool
     log_file: Optional[str]
+    parent_session_id: Optional[str] = None
+    lifecycle: str = "running"
+    in_zombie: bool = False
+    task_description: Optional[str] = None
+    completed_at: Optional[float] = None
+    sub_error: Optional[str] = None
+    sub_result_preview: Optional[str] = None
 
 
 class KernelTerminal:
@@ -125,55 +137,13 @@ class KernelTerminal:
 
     def ps(self) -> List[CoreInfo]:
         """
-        列出所有活跃 Core（类比 ps aux）。
+        列出完整进程表（类比 ps aux）。
 
-        数据源：CorePool._pool 中所有 CoreEntry。
+        数据源：CorePool 中所有活跃 Core + zombie 子进程。
         """
-        now = time.monotonic()
         result: List[CoreInfo] = []
-        for session_id, entry in self._pool._pool.items():
-            agent = entry.agent
-            profile = entry.profile
-            source = getattr(agent, "_source", "cli")
-            user_id = getattr(agent, "_user_id", "root")
-            mode = getattr(profile, "mode", "full")
-            ttl_sec = getattr(profile, "session_expired_seconds", 1800)
-            uptime = now - entry.session_start_ts
-            idle = now - entry.last_active_ts
-            ttl_remaining = max(0.0, ttl_sec - idle)
-
-            turn_count = 0
-            total_tokens = 0
-            fn_turn = getattr(agent, "get_turn_count", None)
-            if callable(fn_turn):
-                try:
-                    turn_count = int(fn_turn())
-                except Exception:
-                    pass
-            fn_usage = getattr(agent, "get_token_usage", None)
-            if callable(fn_usage):
-                try:
-                    u = fn_usage()
-                    if isinstance(u, dict):
-                        total_tokens = int(u.get("total_tokens", 0))
-                except Exception:
-                    pass
-
-            memory_enabled = getattr(profile, "memory_enabled", True)
-            result.append(
-                CoreInfo(
-                    session_id=session_id,
-                    source=source,
-                    user_id=user_id,
-                    mode=mode,
-                    uptime_seconds=uptime,
-                    idle_seconds=idle,
-                    ttl_remaining_seconds=ttl_remaining,
-                    turn_count=turn_count,
-                    total_tokens=total_tokens,
-                    memory_enabled=memory_enabled,
-                )
-            )
+        for session_id, entry in self._pool.list_entries(include_zombies=True):
+            result.append(self._build_core_info(session_id, entry))
         return result
 
     def top(self) -> SystemStatus:
@@ -193,6 +163,7 @@ class KernelTerminal:
             queue_depth=queue_depth,
             inflight_tasks=inflight,
             uptime_seconds=uptime,
+            zombie_cores=self._pool.zombie_count(),
         )
 
     def inspect(self, session_id: str) -> SessionDetail:
@@ -207,29 +178,17 @@ class KernelTerminal:
 
         agent = entry.agent
         profile = entry.profile
-        now = time.monotonic()
-        source = getattr(agent, "_source", "cli")
-        user_id = getattr(agent, "_user_id", "root")
+        source, user_id = self._resolve_entry_identity(session_id, entry)
         mode = getattr(profile, "mode", "full")
-        ttl_sec = getattr(profile, "session_expired_seconds", 1800)
-        uptime = now - entry.session_start_ts
-        idle = now - entry.last_active_ts
-        ttl_remaining = max(0.0, ttl_sec - idle)
-
-        turn_count = 0
-        fn_turn = getattr(agent, "get_turn_count", None)
-        if callable(fn_turn):
-            try:
-                turn_count = int(fn_turn())
-            except Exception:
-                pass
+        ttl_sec, uptime, idle, ttl_remaining = self._resolve_timing(entry)
+        turn_count = self._get_turn_count(agent)
 
         token_usage: Dict[str, int] = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
         }
-        fn_usage = getattr(agent, "get_token_usage", None)
+        fn_usage = getattr(agent, "get_token_usage", None) if agent is not None else None
         if callable(fn_usage):
             try:
                 u = fn_usage()
@@ -241,7 +200,7 @@ class KernelTerminal:
                 pass
 
         context_message_count = 0
-        ctx = getattr(agent, "_context", None)
+        ctx = getattr(agent, "_context", None) if agent is not None else None
         if ctx is not None:
             get_msgs = getattr(ctx, "get_messages", None)
             if callable(get_msgs):
@@ -258,7 +217,7 @@ class KernelTerminal:
         }
 
         has_checkpoint = False
-        ckpt_mgr = getattr(agent, "_checkpoint_manager", None)
+        ckpt_mgr = getattr(agent, "_checkpoint_manager", None) if agent is not None else None
         if ckpt_mgr is not None:
             path = getattr(ckpt_mgr, "_path", None)
             if path is not None and Path(path).exists():
@@ -271,6 +230,7 @@ class KernelTerminal:
             if fp is not None:
                 log_file = str(fp)
 
+        in_zombie = self._pool.is_zombie(session_id)
         return SessionDetail(
             session_id=session_id,
             source=source,
@@ -286,6 +246,13 @@ class KernelTerminal:
             memory_enabled=profile_summary["memory_enabled"],
             has_checkpoint=has_checkpoint,
             log_file=log_file,
+            parent_session_id=entry.parent_session_id,
+            lifecycle=self._entry_lifecycle(entry, in_zombie=in_zombie),
+            in_zombie=in_zombie,
+            task_description=entry.task_description,
+            completed_at=entry.sub_completed_at,
+            sub_error=entry.sub_error,
+            sub_result_preview=((entry.sub_result or "")[:500] + ("..." if len(entry.sub_result or "") > 500 else "")) if entry.sub_result is not None else None,
         )
 
     def queue(self) -> Dict[str, Any]:
@@ -303,6 +270,72 @@ class KernelTerminal:
             "cancelled_sessions": cancelled,
             "active_task_count": self._scheduler.active_task_count,
         }
+
+    def _build_core_info(self, session_id: str, entry: Any) -> CoreInfo:
+        agent = entry.agent
+        source, user_id = self._resolve_entry_identity(session_id, entry)
+        mode = getattr(entry.profile, "mode", "full")
+        _, uptime, idle, ttl_remaining = self._resolve_timing(entry)
+        total_tokens = 0
+        fn_usage = getattr(agent, "get_token_usage", None) if agent is not None else None
+        if callable(fn_usage):
+            try:
+                usage = fn_usage()
+                if isinstance(usage, dict):
+                    total_tokens = int(usage.get("total_tokens", 0))
+            except Exception:
+                pass
+        in_zombie = self._pool.is_zombie(session_id)
+        return CoreInfo(
+            session_id=session_id,
+            source=source,
+            user_id=user_id,
+            mode=mode,
+            uptime_seconds=uptime,
+            idle_seconds=idle,
+            ttl_remaining_seconds=ttl_remaining,
+            turn_count=self._get_turn_count(agent),
+            total_tokens=total_tokens,
+            memory_enabled=getattr(entry.profile, "memory_enabled", True),
+            parent_session_id=entry.parent_session_id,
+            lifecycle=self._entry_lifecycle(entry, in_zombie=in_zombie),
+            in_zombie=in_zombie,
+            task_description=entry.task_description,
+        )
+
+    def _resolve_entry_identity(self, session_id: str, entry: Any) -> tuple[str, str]:
+        agent = entry.agent
+        if agent is not None:
+            return getattr(agent, "_source", "cli"), getattr(agent, "_user_id", "root")
+        profile = entry.profile
+        source = getattr(profile, "frontend_id", None) or session_id.split(":", 1)[0]
+        user_id = getattr(profile, "dialog_window_id", None) or session_id.split(":", 1)[-1]
+        return str(source), str(user_id)
+
+    def _resolve_timing(self, entry: Any) -> tuple[float, float, float, float]:
+        now = time.monotonic()
+        ttl_sec = float(getattr(entry.profile, "session_expired_seconds", 1800))
+        uptime = max(0.0, now - entry.session_start_ts)
+        idle = max(0.0, now - entry.last_active_ts)
+        ttl_remaining = max(0.0, ttl_sec - idle)
+        return ttl_sec, uptime, idle, ttl_remaining
+
+    def _get_turn_count(self, agent: Any) -> int:
+        if agent is None:
+            return 0
+        fn_turn = getattr(agent, "get_turn_count", None)
+        if callable(fn_turn):
+            try:
+                return int(fn_turn())
+            except Exception:
+                return 0
+        return 0
+
+    @staticmethod
+    def _entry_lifecycle(entry: Any, *, in_zombie: bool) -> str:
+        if entry.sub_status:
+            return "zombie" if in_zombie else entry.sub_status
+        return "zombie" if in_zombie else "running"
 
     def automation_tracked_jobs(self) -> Dict[str, Any]:
         """

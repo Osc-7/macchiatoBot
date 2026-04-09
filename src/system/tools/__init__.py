@@ -23,7 +23,6 @@ import os
 from typing import TYPE_CHECKING, List, Optional
 
 if TYPE_CHECKING:
-    from system.kernel.subagent_registry import SubagentRegistry
     from system.kernel.core_pool import CorePool
 
 from agent_core.config import Config, get_config
@@ -304,82 +303,77 @@ def _build_automation_tools(
 def _build_subagent_tools(
     profile: Optional[CoreProfile] = None,
     *,
-    subagent_registry: Optional["SubagentRegistry"] = None,
     core_pool: Optional["CorePool"] = None,
 ) -> List[BaseTool]:
     tools: List[BaseTool] = []
-    if subagent_registry is None:
+    if core_pool is None:
         return tools
 
     mode = getattr(profile, "mode", "full") if profile else "full"
 
     if mode == "sub":
-        tools.append(_LazySchedulerSendMessageTool(subagent_registry))
-        tools.append(_LazySchedulerReplyToMessageTool(subagent_registry))
+        tools.append(_LazySchedulerSendMessageTool(core_pool))
+        tools.append(_LazySchedulerReplyToMessageTool(core_pool))
     else:
-        if core_pool is not None:
-            tools.append(
-                CreateSubagentTool(
-                    registry=subagent_registry,
-                    core_pool=core_pool,
-                    scheduler=_SchedulerProxy(subagent_registry),
-                )
+        tools.append(
+            CreateSubagentTool(
+                core_pool=core_pool,
+                scheduler=_SchedulerProxy(core_pool),
             )
-            tools.append(
-                CreateParallelSubagentsTool(
-                    registry=subagent_registry,
-                    core_pool=core_pool,
-                    scheduler=_SchedulerProxy(subagent_registry),
-                )
+        )
+        tools.append(
+            CreateParallelSubagentsTool(
+                core_pool=core_pool,
+                scheduler=_SchedulerProxy(core_pool),
             )
-        tools.append(_LazySchedulerSendMessageTool(subagent_registry))
-        tools.append(_LazySchedulerReplyToMessageTool(subagent_registry))
-        tools.append(GetSubagentStatusTool(registry=subagent_registry))
-        tools.append(CancelSubagentTool(registry=subagent_registry))
+        )
+        tools.append(_LazySchedulerSendMessageTool(core_pool))
+        tools.append(_LazySchedulerReplyToMessageTool(core_pool))
+        tools.append(GetSubagentStatusTool(core_pool=core_pool))
+        tools.append(CancelSubagentTool(core_pool=core_pool))
 
     return tools
 
 
 class _SchedulerProxy:
-    def __init__(self, registry: "SubagentRegistry") -> None:
-        self._registry = registry
+    def __init__(self, core_pool: "CorePool") -> None:
+        self._core_pool = core_pool
 
     def inject_turn(self, request) -> None:  # type: ignore[override]
-        s = self._registry._scheduler
+        s = self._core_pool._scheduler
         if s is None:
-            raise RuntimeError("KernelScheduler not yet bound to SubagentRegistry")
+            raise RuntimeError("KernelScheduler not yet bound to CorePool")
         s.inject_turn(request)
 
     async def submit(self, request):  # type: ignore[override]
-        s = self._registry._scheduler
+        s = self._core_pool._scheduler
         if s is None:
-            raise RuntimeError("KernelScheduler not yet bound to SubagentRegistry")
+            raise RuntimeError("KernelScheduler not yet bound to CorePool")
         return await s.submit(request)
 
     async def wait_result(self, request_id: str, timeout_seconds: float | None = None):  # type: ignore[override]
-        s = self._registry._scheduler
+        s = self._core_pool._scheduler
         if s is None:
-            raise RuntimeError("KernelScheduler not yet bound to SubagentRegistry")
+            raise RuntimeError("KernelScheduler not yet bound to CorePool")
         return await s.wait_result(request_id, timeout_seconds=timeout_seconds)
 
 
 class _LazySchedulerSendMessageTool(SendMessageToAgentTool):
-    def __init__(self, registry: "SubagentRegistry") -> None:
-        self._registry = registry
+    def __init__(self, core_pool: "CorePool") -> None:
+        self._core_pool = core_pool
 
     @property
     def _scheduler(self):  # type: ignore[override]
-        s = self._registry._scheduler
+        s = self._core_pool._scheduler
         if s is None:
-            raise RuntimeError("KernelScheduler not yet bound to SubagentRegistry")
+            raise RuntimeError("KernelScheduler not yet bound to CorePool")
         return s
 
     def _check_sender_cancelled(self, sender_session_id: str):
         if not sender_session_id.startswith("sub:"):
             return None
-        subagent_id = sender_session_id[4:]
-        info = self._registry.get(subagent_id)
-        if info is not None and info.status == "cancelled":
+        entry = self._core_pool.get_sub_info(sender_session_id)
+        if entry is not None and entry.sub_status == "cancelled":
             from agent_core.tools.base import ToolResult
             return ToolResult(
                 success=False,
@@ -390,14 +384,14 @@ class _LazySchedulerSendMessageTool(SendMessageToAgentTool):
 
 
 class _LazySchedulerReplyToMessageTool(ReplyToMessageTool):
-    def __init__(self, registry: "SubagentRegistry") -> None:
-        self._registry = registry
+    def __init__(self, core_pool: "CorePool") -> None:
+        self._core_pool = core_pool
 
     @property
     def _scheduler(self):  # type: ignore[override]
-        s = self._registry._scheduler
+        s = self._core_pool._scheduler
         if s is None:
-            raise RuntimeError("KernelScheduler not yet bound to SubagentRegistry")
+            raise RuntimeError("KernelScheduler not yet bound to CorePool")
         return s
 
 
@@ -407,7 +401,6 @@ def build_tool_registry(
     config: Optional[Config] = None,
     memory_owner_id: Optional[str] = None,
     memory_source: Optional[str] = None,
-    subagent_registry: Optional["SubagentRegistry"] = None,
     core_pool: Optional["CorePool"] = None,
 ) -> VersionedToolRegistry:
     cfg = config or get_config()
@@ -451,7 +444,6 @@ def build_tool_registry(
     tools.extend(
         _build_subagent_tools(
             profile=profile,
-            subagent_registry=subagent_registry,
             core_pool=core_pool,
         )
     )

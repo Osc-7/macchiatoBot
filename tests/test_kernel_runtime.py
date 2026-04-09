@@ -151,7 +151,7 @@ async def test_core_pool_acquire_hot_updates_profile(
 
     captured: dict = {}
 
-    def _fake_build_tool_registry(*, profile=None, config=None, memory_owner_id=None, subagent_registry=None, core_pool=None):  # type: ignore[no-untyped-def]
+    def _fake_build_tool_registry(*, profile=None, config=None, memory_owner_id=None, core_pool=None):  # type: ignore[no-untyped-def]
         captured["profile"] = profile
         captured["memory_owner_id"] = memory_owner_id
         return fake_registry

@@ -78,7 +78,10 @@ class SyncCanvasTool(BaseTool):
 - 调用 Canvas API 拉取未来 N 天数据
 - 作业生成 Task（可被 planner 排程）
 - 作业截止时间生成 deadline 事件
+- 当 include_submitted=true 时，已提交的作业仍会拉取；同步逻辑会给任务/事件打上「已提交」并标为 completed
 - 返回同步统计（创建/跳过/错误）
+
+重要：若要在本地反映「已在 Canvas 提交」，必须传 include_submitted=true（或把 config.canvas.include_submitted 设为 true）。为 false 时客户端会丢弃已提交作业，本地无法据此更新完成状态。
 """,
             parameters=[
                 ToolParameter(
@@ -90,7 +93,7 @@ class SyncCanvasTool(BaseTool):
                 ToolParameter(
                     name="include_submitted",
                     type="boolean",
-                    description="可选，是否包含已提交作业；默认使用配置值",
+                    description="可选，是否拉取已提交的作业（默认 config.canvas.include_submitted）。为 true 时才会同步已提交状态并写入「已提交」、将对应任务与 deadline 标为 completed；为 false 时未来窗口内已提交项会被忽略。",
                     required=False,
                 ),
                 ToolParameter(
@@ -401,8 +404,10 @@ class FetchCanvasOverviewTool(BaseTool):
 工具会：
 - 获取当前用户基本信息
 - 获取所有活跃课程列表
-- 获取未来 N 天内的作业与日历事件
+- 获取未来 N 天内的作业与日历事件（作业列表与 sync_canvas 同源）
 - 获取同一时间窗口内的 Planner 待办/机会项
+
+upcoming_assignments 与 include_submitted：为 false（默认）时仅含未提交作业；为 true 时含未提交与已提交，每条有 is_submitted 字段区分。这不是“只读已提交列表”，而是完整列表。
 
 不会：
 - 创建/修改 Canvas 中的任何内容
@@ -417,7 +422,7 @@ class FetchCanvasOverviewTool(BaseTool):
                 ToolParameter(
                     name="include_submitted",
                     type="boolean",
-                    description="可选，是否包含已提交作业，默认使用 Canvas 配置值",
+                    description="可选，与 sync_canvas 一致：false 时 upcoming_assignments 不含已提交；true 时含已提交且可凭 is_submitted 区分。",
                     required=False,
                 ),
             ],

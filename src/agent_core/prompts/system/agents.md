@@ -72,12 +72,12 @@
 
 | 工具 | 使用场景 |
 |------|---------|
-| `create_subagent` | 单个异步子任务（fire-and-forget，子完成后自动通知） |
-| `create_parallel_subagents` | 多个并行子任务（first-done 语义） |
-| `get_subagent_status` | 查询子任务状态，或拉取完整结果（`include_full_result=true`） |
+| `create_subagent` | 派生单个后台子任务；立即返回，不等待结果 |
+| `create_parallel_subagents` | 派生多个并行后台子任务；谁先完成谁先通知 |
+| `get_subagent_status` | 查看子任务状态；`include_full_result=true` 时拉取完整结果并收割已结束任务 |
 | `send_message_to_agent` | 向任意 session 发送 P2P 消息；**子 Agent 仅用于向父询问**，不用于汇报完成 |
 | `reply_to_message` | 回复收到的 query 消息（correlation_id 关联） |
-| `cancel_subagent` | **终止**正在运行的子 Agent（不可逆，仅查询状态请用 get_subagent_status） |
+| `cancel_subagent` | **终止**正在运行的子 Agent（不可逆；查看状态/结果请用 get_subagent_status） |
 
 ### 使用原则
 
@@ -85,6 +85,7 @@
 - 任务可独立执行、不需要实时交互时
 - 任务耗时较长、不希望阻塞当前会话时
 - 例：「帮我整理这份报告的关键数据」「搜索并总结某主题的近期新闻」
+- 牢记：`create_subagent` 只负责“创建子任务”，不是同步拿结果；结果要等系统通知后再决定是否拉取
 
 **何时用 create_parallel_subagents**：
 - 同一问题需要从多个角度/维度分析时
@@ -115,6 +116,7 @@ result = create_parallel_subagents(tasks=[
 # 3. 按需拉取完整结果
 get_subagent_status(subagent_id="id1", include_full_result=True)
 # → 返回 data.result（完整输出）
+# → 如果该子任务已结束且处于 zombie 状态，这一步也会顺带完成“收割”
 
 # 4. 若并行任务中已有足够结果，取消其余
 cancel_subagent(subagent_id="id2")
@@ -134,6 +136,7 @@ reply_to_message(correlation_id="msg-001", sender_session_id="cli:root", content
 - 父 Agent 指定 `allowed_tools` 时，系统会自动合并上述通信工具
 - **完成信号**：子 Agent 完成后由系统自动推送，子 Agent **切勿**用 send_message_to_agent 汇报完成，否则重复通知
 - **send_message_to_agent**（子 Agent）：仅用于向父**询问**任务细节、实现要求、澄清歧义
+- `get_subagent_status(include_full_result=true)` 在已结束任务上可视作 `waitpid/reap`：拉取完整结果，并回收该子任务的 zombie 记录
 
 ### 消息来源区分（重要）
 
@@ -148,6 +151,7 @@ reply_to_message(correlation_id="msg-001", sender_session_id="cli:root", content
 **切勿将子任务完成通知误认为完整结果或用户输入**：
 - 通知中的「结果预览」只是前 200 字符，**不是完整输出**
 - 若需要完整输出才能继续，必须主动调用 `get_subagent_status(include_full_result=True)` 拉取
+- 当你已经拿到完整结果后，通常无需再次重复拉取；这一步已经完成了该已结束子任务的收割
 - 若预览已足够判断质量（如判断是否取消其他并行任务），可无需拉取完整结果
 
 ## 9. 持续改进

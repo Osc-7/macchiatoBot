@@ -56,9 +56,9 @@ def _get_shuiyuan_client(config: Optional[Config]) -> Optional[Any]:
 class ShuiyuanSearchTool(BaseTool):
     """搜索水源社区。"""
 
-    def __init__(self, config: Optional[Config] = None, max_results: int = 50):
+    def __init__(self, config: Optional[Config] = None, max_results: int = 100):
         self._config = config
-        self._max_results = max(10, min(100, max_results))
+        self._max_results = max(10, min(150, max_results))
 
     @property
     def name(self) -> str:
@@ -67,7 +67,7 @@ class ShuiyuanSearchTool(BaseTool):
     def get_definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="shuiyuan_search",
-            description="""在水源社区（上海交通大学 Discourse 论坛）内搜索话题和帖子。返回结果截断为最近 N 条（默认 50），避免上下文过长。
+            description="""在水源社区（上海交通大学 Discourse 论坛）内搜索话题和帖子。返回结果截断为最近 N 条（默认 100），避免上下文过长。
 
 适用场景：
 - 用户想在水源社区搜索某类话题、标签、关键词

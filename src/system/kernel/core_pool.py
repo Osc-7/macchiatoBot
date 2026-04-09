@@ -20,16 +20,16 @@ import asyncio
 import inspect
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Literal, Optional
 
 if TYPE_CHECKING:
     from agent_core.config import Config
     from agent_core.agent.agent import AgentCore
     from agent_core.kernel_interface import CoreProfile
     from .core_logger import CoreLifecycleLogger
-    from .subagent_registry import SubagentRegistry
+    from .scheduler import KernelScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +38,19 @@ logger = logging.getLogger(__name__)
 class CoreEntry:
     """进程控制块（PCB）— 一个 AgentCore 实例的完整元数据。"""
 
-    agent: "AgentCore"
+    agent: Optional["AgentCore"]
     profile: "CoreProfile"
+    created_at: float = field(default_factory=time.time)
     last_active_ts: float = field(default_factory=time.monotonic)
     session_start_ts: float = field(default_factory=time.monotonic)
     logger: Optional["CoreLifecycleLogger"] = None
+    parent_session_id: Optional[str] = None
+    task_description: Optional[str] = None
+    bg_task: Optional[asyncio.Task[Any]] = None
+    sub_status: Optional[Literal["running", "completed", "failed", "cancelled"]] = None
+    sub_result: Optional[str] = None
+    sub_error: Optional[str] = None
+    sub_completed_at: Optional[float] = None
 
     def is_expired(self) -> bool:
         """根据 profile.session_expired_seconds 判断是否超时。"""
@@ -81,7 +89,6 @@ class CorePool:
         kernel: Optional[Any] = None,
         summarizer: Optional[Any] = None,
         session_logger: Optional[Any] = None,
-        subagent_registry: Optional["SubagentRegistry"] = None,
     ) -> None:
         from agent_core.config import get_config
 
@@ -90,12 +97,18 @@ class CorePool:
         self._kernel = kernel  # AgentKernel 实例，用于 kill()
         self._summarizer = summarizer  # SessionSummarizer 实例，用于摘要持久化
         self._session_logger = session_logger  # 旧版 SessionLogger（将逐步废弃）
-        self._subagent_registry = subagent_registry  # SubagentRegistry，用于 subagent 工具装配
+        self._scheduler: Optional["KernelScheduler"] = None
         # session_id → CoreEntry
         self._pool: Dict[str, CoreEntry] = {}
+        # 已结束待收割的子进程骸体：session_id -> stripped CoreEntry
+        self._zombies: Dict[str, CoreEntry] = {}
         # per-session 锁，防止并发创建
         self._locks: Dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
+
+    def set_scheduler(self, scheduler: "KernelScheduler") -> None:
+        """后绑定 KernelScheduler，供子进程完成时 inject_turn。"""
+        self._scheduler = scheduler
 
     async def acquire(
         self,
@@ -113,12 +126,13 @@ class CorePool:
         内部使用 per-session Lock 保证只创建一次。
         返回 AgentCore 实例（不含 CoreEntry，调用方不需要感知 PCB 细节）。
         """
-        if session_id in self._pool and profile is None:
-            return self._pool[session_id].agent
+        existing = self._pool.get(session_id)
+        if existing is not None and existing.agent is not None and profile is None:
+            return existing.agent
 
         lock = await self._get_lock(session_id)
         async with lock:
-            if session_id in self._pool:
+            if session_id in self._pool and self._pool[session_id].agent is not None:
                 entry = self._pool[session_id]
                 if profile is not None:
                     await self._hot_update_profile(
@@ -150,6 +164,17 @@ class CorePool:
                 profile=entry_profile,
                 logger=core_logger,
             )
+            if existing is not None:
+                entry.created_at = existing.created_at
+                entry.last_active_ts = existing.last_active_ts
+                entry.session_start_ts = existing.session_start_ts
+                entry.parent_session_id = existing.parent_session_id
+                entry.task_description = existing.task_description
+                entry.bg_task = existing.bg_task
+                entry.sub_status = existing.sub_status
+                entry.sub_result = existing.sub_result
+                entry.sub_error = existing.sub_error
+                entry.sub_completed_at = existing.sub_completed_at
             if ttl_offset > 0:
                 entry.last_active_ts = time.monotonic() - ttl_offset
             self._pool[session_id] = entry
@@ -167,8 +192,25 @@ class CorePool:
             entry.touch()
 
     def get_entry(self, session_id: str) -> Optional[CoreEntry]:
-        """返回指定 session 的 CoreEntry（含 profile 和时间戳）。"""
+        """返回指定 session 的 CoreEntry（优先活跃表，其次 zombie 表）。"""
+        return self._pool.get(session_id) or self._zombies.get(session_id)
+
+    def get_live_entry(self, session_id: str) -> Optional[CoreEntry]:
+        """仅返回活跃进程表中的条目。"""
         return self._pool.get(session_id)
+
+    def list_entries(self, *, include_zombies: bool = False) -> List[tuple[str, CoreEntry]]:
+        """列出进程表条目。"""
+        items = list(self._pool.items())
+        if include_zombies:
+            items.extend(self._zombies.items())
+        return items
+
+    def zombie_count(self) -> int:
+        return len(self._zombies)
+
+    def is_zombie(self, session_id: str) -> bool:
+        return session_id in self._zombies
 
     def scan_expired(self) -> List[str]:
         """
@@ -198,17 +240,20 @@ class CorePool:
         if entry is None:
             return
         agent = entry.agent
+        is_subagent = bool(entry.parent_session_id) or session_id.startswith("sub:")
 
         # ── Step 1: kill — 收集 CoreStats ──────────────────────────────────
         core_stats = None
-        if self._kernel is not None:
+        if agent is None:
+            core_stats = None
+        elif self._kernel is not None:
             try:
                 core_stats = await self._kernel.kill(agent)
             except Exception as exc:
                 logger.warning(
                     "CorePool: kernel.kill failed (session=%s): %s", session_id, exc
                 )
-        else:
+        elif agent is not None:
             # 向后兼容：无 kernel 时走旧的 finalize_session
             try:
                 finalize = getattr(agent, "finalize_session", None)
@@ -225,7 +270,7 @@ class CorePool:
 
         # Kernel 关闭路径：在释放资源前刷新 checkpoint，使 last_active_at 接近关闭时刻，
         # 避免恢复时用「上一轮 turn 的 wall 时间」与 shutdown_at 相减导致误判超时。
-        if shutdown:
+        if shutdown and agent is not None:
             flush = getattr(agent, "flush_checkpoint_for_shutdown", None)
             if callable(flush):
                 try:
@@ -244,7 +289,12 @@ class CorePool:
         # full 任务 evict 时从不写入 long_term。
         # shutdown=True 时跳过：session 只是暂停，checkpoint 会保留完整上下文供恢复，
         # 此时写摘要属于把暂停误认为 session 结束。
-        if not shutdown and core_stats is not None and self._summarizer is not None:
+        if (
+            agent is not None
+            and not shutdown
+            and core_stats is not None
+            and self._summarizer is not None
+        ):
             try:
                 long_term_memory = None
                 profile_mode = getattr(getattr(entry, "profile", None), "mode", None)
@@ -272,7 +322,7 @@ class CorePool:
         # shutdown=False（TTL 过期 / 主动关闭单个 session）时，标记 checkpoint 为已过期，
         # 由下次 restore_from_checkpoints() 扫描时见到 expired=True 统一清理。
         # shutdown=True（kernel 关闭）时不标记过期，保留 checkpoint 供下次恢复。
-        ckpt_mgr = getattr(agent, "_checkpoint_manager", None)
+        ckpt_mgr = getattr(agent, "_checkpoint_manager", None) if agent is not None else None
         if ckpt_mgr is not None and not shutdown:
             try:
                 ckpt_mgr.mark_expired()
@@ -282,7 +332,7 @@ class CorePool:
                 )
 
         try:
-            close = getattr(agent, "close", None)
+            close = getattr(agent, "close", None) if agent is not None else None
             if callable(close):
                 result = close()
                 if inspect.isawaitable(result):
@@ -325,6 +375,9 @@ class CorePool:
             except Exception:
                 pass
 
+        if not shutdown and is_subagent and entry.sub_status in {"completed", "failed", "cancelled"}:
+            self._zombies[session_id] = self._strip_entry_for_zombie(entry)
+
         logger.debug("CorePool: evicted session %s", session_id)
 
     async def evict_all(self) -> None:
@@ -344,7 +397,161 @@ class CorePool:
 
     def has_session(self, session_id: str) -> bool:
         """判断 session 是否已加载到内存中。"""
-        return session_id in self._pool
+        return session_id in self._pool or session_id in self._zombies
+
+    def register_sub(
+        self,
+        *,
+        sub_session_id: str,
+        parent_session_id: str,
+        task_description: str,
+        profile: Optional["CoreProfile"] = None,
+    ) -> CoreEntry:
+        """在进程表中注册一个子进程占位条目。"""
+        from agent_core.kernel_interface import CoreProfile as _CoreProfile
+
+        subagent_id = sub_session_id[4:] if sub_session_id.startswith("sub:") else sub_session_id
+        entry_profile = profile or _CoreProfile.default_sub(
+            allowed_tools=None,
+            frontend_id="subagent",
+            dialog_window_id=subagent_id,
+        )
+        entry = CoreEntry(
+            agent=None,
+            profile=entry_profile,
+            parent_session_id=parent_session_id,
+            task_description=task_description,
+            sub_status="running",
+        )
+        self._zombies.pop(sub_session_id, None)
+        self._pool[sub_session_id] = entry
+        desc = task_description or ""
+        task_preview = desc[:80].replace("\n", " ")
+        if len(desc) > 80:
+            task_preview += "..."
+        logger.info(
+            "CorePool: registered sub session_id=%s parent_session_id=%s task_preview=%s",
+            sub_session_id,
+            parent_session_id,
+            task_preview,
+            extra={"session_id": sub_session_id, "parent_session_id": parent_session_id},
+        )
+        return entry
+
+    def list_subs_by_parent(self, parent_session_id: str) -> List[CoreEntry]:
+        return [
+            entry
+            for _, entry in self.list_entries(include_zombies=True)
+            if entry.parent_session_id == parent_session_id
+        ]
+
+    def get_sub_info(self, sub_session_id: str) -> Optional[CoreEntry]:
+        return self.get_entry(sub_session_id)
+
+    def on_sub_complete(self, sub_session_id: str, result: str) -> None:
+        entry = self._pool.get(sub_session_id) or self._zombies.get(sub_session_id)
+        if entry is None:
+            logger.warning("CorePool.on_sub_complete: unknown session_id=%s", sub_session_id)
+            return
+        if entry.sub_status == "cancelled":
+            logger.info(
+                "CorePool.on_sub_complete: ignoring cancelled session_id=%s",
+                sub_session_id,
+            )
+            return
+        entry.sub_status = "completed"
+        entry.sub_result = result
+        entry.sub_error = None
+        entry.sub_completed_at = time.time()
+        duration_sec = entry.sub_completed_at - entry.created_at if entry.created_at else None
+        logger.info(
+            "CorePool: subagent completed session_id=%s parent_session_id=%s result_len=%s duration_sec=%s",
+            sub_session_id,
+            entry.parent_session_id,
+            len(result),
+            round(duration_sec, 2) if duration_sec is not None else None,
+            extra={"session_id": sub_session_id, "parent_session_id": entry.parent_session_id, "status": "completed"},
+        )
+        task_preview = (entry.task_description or "")[:80]
+        result_preview = (result or "")[:200]
+        ellipsis = "..." if len(result or "") > 200 else ""
+        notification = (
+            f"[子任务 {self._subagent_id(sub_session_id)} 完成]\n"
+            f"任务：{task_preview}\n"
+            f"结果预览：{result_preview}{ellipsis}\n\n"
+            f"如需完整结果，调用 get_subagent_status(subagent_id=\"{self._subagent_id(sub_session_id)}\", include_full_result=True)"
+        )
+        self._inject_to_parent(sub_session_id, entry, notification)
+
+    def on_sub_fail(self, sub_session_id: str, error: str) -> None:
+        entry = self._pool.get(sub_session_id) or self._zombies.get(sub_session_id)
+        if entry is None:
+            logger.warning("CorePool.on_sub_fail: unknown session_id=%s", sub_session_id)
+            return
+        if entry.sub_status == "cancelled":
+            logger.info(
+                "CorePool.on_sub_fail: ignoring cancelled session_id=%s",
+                sub_session_id,
+            )
+            return
+        entry.sub_status = "failed"
+        entry.sub_error = error
+        entry.sub_completed_at = time.time()
+        duration_sec = entry.sub_completed_at - entry.created_at if entry.created_at else None
+        error_preview = (error or "")[:200].replace("\n", " ")
+        logger.info(
+            "CorePool: subagent failed session_id=%s parent_session_id=%s duration_sec=%s error_preview=%s",
+            sub_session_id,
+            entry.parent_session_id,
+            round(duration_sec, 2) if duration_sec is not None else None,
+            error_preview + ("..." if len(error or "") > 200 else ""),
+            extra={"session_id": sub_session_id, "parent_session_id": entry.parent_session_id, "status": "failed"},
+        )
+        logger.debug("CorePool: subagent full error session_id=%s error=%s", sub_session_id, error)
+        self._inject_to_parent(
+            sub_session_id,
+            entry,
+            f"[子任务 {self._subagent_id(sub_session_id)} 失败]\n错误：{error}",
+        )
+
+    def cancel_sub(self, sub_session_id: str) -> bool:
+        entry = self._pool.get(sub_session_id) or self._zombies.get(sub_session_id)
+        if entry is None:
+            logger.warning("CorePool.cancel_sub: unknown session_id=%s", sub_session_id)
+            return False
+        if entry.sub_status in ("completed", "failed", "cancelled"):
+            logger.info(
+                "CorePool: cancel no-op session_id=%s already status=%s",
+                sub_session_id,
+                entry.sub_status,
+                extra={"session_id": sub_session_id, "parent_session_id": entry.parent_session_id},
+            )
+            return True
+        previous_status = entry.sub_status
+        if entry.bg_task is not None and not entry.bg_task.done():
+            entry.bg_task.cancel()
+            logger.info(
+                "CorePool: cancelled bg_task session_id=%s parent_session_id=%s previous_status=%s",
+                sub_session_id,
+                entry.parent_session_id,
+                previous_status,
+                extra={"session_id": sub_session_id, "parent_session_id": entry.parent_session_id, "status": "cancelled"},
+            )
+        else:
+            logger.info(
+                "CorePool: marked cancelled (no bg_task or already done) session_id=%s parent_session_id=%s",
+                sub_session_id,
+                entry.parent_session_id,
+                extra={"session_id": sub_session_id, "parent_session_id": entry.parent_session_id, "status": "cancelled"},
+            )
+        if self._scheduler is not None:
+            self._scheduler.cancel_session_tasks(sub_session_id)
+        entry.sub_status = "cancelled"
+        entry.sub_completed_at = time.time()
+        return True
+
+    def reap_zombie(self, session_id: str) -> None:
+        self._zombies.pop(session_id, None)
 
     async def restore_from_checkpoints(self) -> int:
         """
@@ -515,7 +722,6 @@ class CorePool:
             profile=profile,
             config=self._config,
             memory_owner_id=user_id,
-            subagent_registry=self._subagent_registry,
             core_pool=self,
         )
         tools = list(reg.list_tools()[1].values())
@@ -701,7 +907,6 @@ class CorePool:
             profile=profile,
             config=self._config,
             memory_owner_id=user_id,
-            subagent_registry=self._subagent_registry,
             core_pool=self,
         )
         entry.agent._tool_registry = reg
@@ -722,3 +927,73 @@ class CorePool:
             if session_id not in self._locks:
                 self._locks[session_id] = asyncio.Lock()
             return self._locks[session_id]
+
+    @staticmethod
+    def _subagent_id(session_id: str) -> str:
+        return session_id[4:] if session_id.startswith("sub:") else session_id
+
+    def _strip_entry_for_zombie(self, entry: CoreEntry) -> CoreEntry:
+        zombie = replace(entry, agent=None)
+        zombie.bg_task = None
+        zombie.last_active_ts = time.monotonic()
+        return zombie
+
+    def _inject_to_parent(self, session_id: str, entry: CoreEntry, content: str) -> None:
+        from agent_core.kernel_interface.action import AgentMessage, KernelRequest
+
+        if self._scheduler is None:
+            logger.warning(
+                "CorePool: scheduler not set, cannot inject_turn session_id=%s parent_session_id=%s",
+                session_id,
+                entry.parent_session_id,
+                extra={"session_id": session_id, "parent_session_id": entry.parent_session_id},
+            )
+            return
+        parent_session_id = (entry.parent_session_id or "").strip()
+        if not parent_session_id:
+            logger.error(
+                "CorePool: parent_session_id is empty for session_id=%s — inject_turn aborted",
+                session_id,
+                extra={"session_id": session_id},
+            )
+            return
+        msg_type = "task" if entry.sub_status == "completed" else "notify"
+        message_id = str(__import__("uuid").uuid4())
+        agent_msg = AgentMessage(
+            message_id=message_id,
+            sender_session=session_id,
+            receiver_session=parent_session_id,
+            message_type=msg_type,
+            subagent_id=self._subagent_id(session_id),
+        )
+        request = KernelRequest.create(
+            text=content,
+            session_id=parent_session_id,
+            frontend_id="subagent",
+            priority=-1,
+            metadata={"_agent_message": agent_msg},
+        )
+        logger.info(
+            "CorePool: inject_to_parent message_id=%s session_id=%s parent_session_id=%s message_type=%s content_len=%s",
+            message_id[:8],
+            session_id,
+            parent_session_id,
+            msg_type,
+            len(content),
+            extra={
+                "session_id": session_id,
+                "parent_session_id": parent_session_id,
+                "message_id": message_id,
+                "message_type": msg_type,
+            },
+        )
+        try:
+            self._scheduler.inject_turn(request)
+        except Exception as exc:
+            logger.warning(
+                "CorePool: inject_turn failed session_id=%s parent_session_id=%s error=%s",
+                session_id,
+                parent_session_id,
+                exc,
+                extra={"session_id": session_id, "parent_session_id": parent_session_id},
+            )

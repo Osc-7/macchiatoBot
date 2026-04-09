@@ -24,6 +24,12 @@ class MockCoreEntry:
     last_active_ts: float = 0.0
     session_start_ts: float = 0.0
     logger: object | None = None
+    parent_session_id: str | None = None
+    task_description: str | None = None
+    sub_status: str | None = None
+    sub_result: str | None = None
+    sub_error: str | None = None
+    sub_completed_at: float | None = None
 
 
 def _make_mock_agent(
@@ -72,6 +78,7 @@ def _make_mock_pool(*, pool_entries: dict | None = None) -> MagicMock:
     pool = MagicMock()
     pool._max_sessions = 100
     pool._pool = {}
+    pool._zombies = {}
     if pool_entries:
         now = time.monotonic()
         for sid, val in pool_entries.items():
@@ -87,6 +94,11 @@ def _make_mock_pool(*, pool_entries: dict | None = None) -> MagicMock:
                     logger=MagicMock(file_path="/tmp/session.jsonl"),
                 )
     pool.get_entry = lambda sid: pool._pool.get(sid)
+    pool.list_entries = lambda include_zombies=False: (
+        list(pool._pool.items()) + (list(pool._zombies.items()) if include_zombies else [])
+    )
+    pool.zombie_count = lambda: len(pool._zombies)
+    pool.is_zombie = lambda sid: sid in pool._zombies
     pool.list_sessions = lambda: list(pool._pool.keys())
     pool.acquire = AsyncMock()
     pool.evict = AsyncMock()
@@ -135,6 +147,7 @@ def test_terminal_ps_one() -> None:
     assert c.turn_count == 3
     assert c.total_tokens == 200
     assert c.memory_enabled is True
+    assert c.in_zombie is False
 
 
 def test_terminal_top() -> None:
@@ -147,6 +160,7 @@ def test_terminal_top() -> None:
     assert status.max_cores == 100
     assert status.queue_depth == 2
     assert status.inflight_tasks == 1
+    assert status.zombie_cores == 0
     assert status.uptime_seconds >= 0
 
 
@@ -184,6 +198,55 @@ def test_terminal_inspect_ok() -> None:
     # has_checkpoint depends on Path(ckpt_mgr._path).exists(); mock path may not exist
     assert isinstance(detail.has_checkpoint, bool)
     assert detail.log_file == "/logs/feishu-u123.jsonl"
+    assert detail.in_zombie is False
+
+
+def test_terminal_ps_includes_zombies() -> None:
+    agent = _make_mock_agent(source="subagent", user_id="sub-1")
+    profile = _make_mock_profile(mode="sub", session_expired_seconds=86400)
+    pool = _make_mock_pool(pool_entries={"sub:live": (agent, profile)})
+    pool._zombies["sub:dead"] = MockCoreEntry(
+        agent=None,
+        profile=profile,
+        last_active_ts=time.monotonic() - 5.0,
+        session_start_ts=time.monotonic() - 20.0,
+        parent_session_id="cli:root",
+        task_description="dead task",
+        sub_status="completed",
+        sub_result="done",
+    )
+    sched = _make_mock_scheduler()
+    terminal = KernelTerminal(scheduler=sched, core_pool=pool)
+    cores = terminal.ps()
+    assert len(cores) == 2
+    zombie = next(c for c in cores if c.session_id == "sub:dead")
+    assert zombie.in_zombie is True
+    assert zombie.parent_session_id == "cli:root"
+    assert zombie.lifecycle == "zombie"
+
+
+def test_terminal_inspect_zombie_ok() -> None:
+    profile = _make_mock_profile(mode="sub", session_expired_seconds=86400)
+    pool = _make_mock_pool()
+    pool._zombies["sub:done"] = MockCoreEntry(
+        agent=None,
+        profile=profile,
+        last_active_ts=time.monotonic() - 5.0,
+        session_start_ts=time.monotonic() - 20.0,
+        parent_session_id="cli:root",
+        task_description="done task",
+        sub_status="completed",
+        sub_result="full result text",
+        sub_completed_at=time.time(),
+    )
+    pool.get_entry = lambda sid: pool._zombies.get(sid)
+    sched = _make_mock_scheduler()
+    terminal = KernelTerminal(scheduler=sched, core_pool=pool)
+    detail = terminal.inspect("sub:done")
+    assert detail.in_zombie is True
+    assert detail.parent_session_id == "cli:root"
+    assert detail.lifecycle == "zombie"
+    assert "full result text" in (detail.sub_result_preview or "")
 
 
 def test_terminal_queue() -> None:

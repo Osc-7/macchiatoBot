@@ -106,7 +106,7 @@ class AgentMessage:
     """Agent 间 P2P 消息信封，附加在 KernelRequest.metadata["_agent_message"] 中。
 
     用途：
-    - create_subagent / create_parallel_subagents 完成后由 SubagentRegistry 注入
+    - create_subagent / create_parallel_subagents 完成后由 CorePool 注入
     - send_message_to_agent / reply_to_message 实现 P2P 双向通信
     - inject_turn() 携带此信封，使接收方 agent 能感知消息来源与类型
 

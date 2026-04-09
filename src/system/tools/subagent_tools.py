@@ -44,14 +44,14 @@ SUBAGENT_COMMUNICATION_TOOLS = ["send_message_to_agent", "reply_to_message"]
 def _merge_allowed_tools_for_subagent(
     allowed_tools: Optional[List[str]],
     *,
-    add_run_command: bool = False,
+    add_bash: bool = False,
 ) -> Optional[List[str]]:
     """
     合并 allowed_tools，确保子 Agent 始终能向父 Agent 汇报。
 
     若父 Agent 指定了 allowed_tools 但遗漏 send_message_to_agent / reply_to_message，
     子 Agent 将无法发送结果。此函数自动补全，避免配置错误。
-    add_run_command=True 且配置允许时，会加入 run_command（子 Agent 内仍受白名单限制）。
+    add_bash=True 且配置允许时，会加入 bash（子 Agent 内仍受 BashSecurity 白名单限制）。
     """
     if allowed_tools is None:
         return None
@@ -59,8 +59,8 @@ def _merge_allowed_tools_for_subagent(
     for t in SUBAGENT_COMMUNICATION_TOOLS:
         if t not in result:
             result.append(t)
-    if add_run_command and "run_command" not in result:
-        result.append("run_command")
+    if add_bash and "bash" not in result:
+        result.append("bash")
     return result
 
 
@@ -78,7 +78,7 @@ def _build_subagent_limit_fail_msg(
         f"**取消原因**: {reason}\n\n"
         f"**日志位置**: {log_dir}\n"
         f"**日志文件名匹配**: {log_pattern}\n\n"
-        f"**建议主 Agent**: 使用 run_command 执行 `tail -n 100 {log_dir}/session-subagent:{subagent_id}-*.jsonl` "
+        f"**建议主 Agent**: 使用 bash 执行 `tail -n 100 {log_dir}/session-subagent:{subagent_id}-*.jsonl` "
         f"或 `ls -t {log_dir}/session-subagent:{subagent_id}-*.jsonl | head -1 | xargs tail -n 100` "
         f"读取日志尾部，检查子任务进展后决定是否调整 config 中的 {limit_type} 限额并重启子任务。"
     )
@@ -133,9 +133,9 @@ async def _run_subagent_task(
     max_iter_override = max_iterations if max_iterations else subagent_max_iterations_default
 
     # 构造 subagent 的 CoreProfile（mode="sub"，按 allowed_tools 限制 + 时间/token 上限）
-    # 若配置允许，为子 Agent 开放 run_command（执行时仍受 RunCommandTool 内 subagent 白名单限制）
+    # 若配置允许，为子 Agent 开放 bash（执行时仍受 BashSecurity 白名单限制）
     effective_allowed = _merge_allowed_tools_for_subagent(
-        allowed_tools, add_run_command=allow_run_for_subagent
+        allowed_tools, add_bash=allow_run_for_subagent
     )
     profile = CoreProfile.default_sub(
         allowed_tools=effective_allowed,
@@ -294,8 +294,8 @@ class CreateSubagentTool(BaseTool):
                         "子 Agent 可用的工具名称列表。留空（null）表示使用 sub 模式默认权限。\n\n"
                         "⚠️ 权限配置说明：\n"
                         "- 系统会**自动加入** send_message_to_agent、reply_to_message，确保子 Agent 在需要澄清时能联系父 Agent\n"
-                        "- run_command 可由配置 command_tools.allow_run_for_subagent 开启，开启后仅可执行白名单内只读命令（禁止管道、重定向与危险命令）\n"
-                        "- 常用组合示例：[\"read_file\", \"search_tools\"] 用于代码/文档分析；[\"read_file\", \"run_command\"] 需配置开启子 Agent 命令行后使用"
+                        "- bash 可由配置 command_tools.allow_run_for_subagent 开启，开启后仅可执行白名单内只读命令（禁止管道、重定向与危险命令）\n"
+                        "- 常用组合示例：[\"read_file\", \"search_tools\"] 用于代码/文档分析；[\"read_file\", \"bash\"] 需配置开启子 Agent 命令行后使用"
                     ),
                     required=False,
                 ),

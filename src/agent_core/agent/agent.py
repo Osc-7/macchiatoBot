@@ -82,7 +82,7 @@ def _format_subagent_limit_msg(
         f"[子任务 {subagent_id} 被系统终止]\n\n"
         f"**取消原因**: {reason}\n\n"
         f"**日志位置**: {path_hint}\n\n"
-        f"**建议主 Agent**: 使用 run_command 执行 `tail -n 100 <日志路径>` 读取日志尾部，"
+        f"**建议主 Agent**: 使用 bash 执行 `tail -n 100 <日志路径>` 读取日志尾部，"
         f"检查子任务进展后决定是否调整 config 中的 {limit_type} 限额并重启子任务。"
     )
 
@@ -276,6 +276,10 @@ class AgentCore:
         self._defer_mcp_connect = defer_mcp_connect
         # 为 True 表示 MCP 已由“连接所在任务”关闭（用于 daemon 后台任务同任务 close，避免 anyio 跨任务 exit）
         self._mcp_closed_by_owner = False
+
+        # 持久化 Bash 会话（在 __aenter__ 中启动，与 search_tools/call_tool 同为 Core 自注册 meta tool）
+        self._bash: Optional["BashRuntime"] = None
+        self._bash_security: Optional["BashSecurity"] = None
 
         # 联网工具（基于 Tavily MCP）
         if self._config.mcp.enabled:
@@ -942,7 +946,7 @@ class AgentCore:
         else:
             kwargs = tool_call.arguments
 
-        # 注入执行上下文（供 run_command/file_tools 等做来源/模式鉴权）
+        # 注入执行上下文（供 bash/file_tools 等做来源/模式鉴权）
         kwargs = dict(kwargs)
         kwargs["__execution_context__"] = {
             "tool_mode": self._effective_tool_mode,
@@ -1182,6 +1186,14 @@ class AgentCore:
 
     async def close(self) -> None:
         """关闭 Agent，释放资源"""
+        if self._bash is not None:
+            try:
+                await self._bash.close(
+                    write_snapshot=self._config.command_tools.snapshot_enabled,
+                )
+            except Exception:
+                pass
+            self._bash = None
         await self._llm_client.close()
         if self._summary_llm_client is not self._llm_client:
             await self._summary_llm_client.close()
@@ -1217,6 +1229,35 @@ class AgentCore:
 
     async def __aenter__(self) -> "AgentCore":
         """异步上下文管理器入口"""
+        # 启动持久化 Bash 会话并注册 BashTool
+        cmd_cfg = self._config.command_tools
+        if cmd_cfg.enabled and cmd_cfg.allow_run:
+            from agent_core.bash_runtime import BashRuntime, BashRuntimeConfig
+            from agent_core.bash_security import BashSecurity
+            from agent_core.tools.bash_tool import BashTool
+
+            rt_config = BashRuntimeConfig(
+                shell_path=cmd_cfg.shell_path,
+                base_dir=cmd_cfg.base_dir,
+                default_timeout_seconds=cmd_cfg.default_timeout_seconds,
+                max_timeout_seconds=cmd_cfg.max_timeout_seconds,
+                default_output_limit=cmd_cfg.default_output_limit,
+                max_output_limit=cmd_cfg.max_output_limit,
+                init_commands=list(cmd_cfg.init_commands or []),
+                snapshot_enabled=cmd_cfg.snapshot_enabled,
+                snapshot_dir=cmd_cfg.snapshot_dir,
+            )
+            self._bash = BashRuntime(config=rt_config)
+            await self._bash.start()
+            self._bash_security = BashSecurity(
+                restricted_whitelist=list(cmd_cfg.subagent_command_whitelist or []),
+                allow_run_for_restricted=cmd_cfg.allow_run_for_subagent,
+            )
+            if not self._tool_registry.has("bash"):
+                self._tool_registry.register(
+                    BashTool(bash=self._bash, security=self._bash_security)
+                )
+
         if self._config.mcp.enabled and not self._mcp_connected:
             runtime_servers = self._build_runtime_mcp_servers(self._config.mcp.servers)
             # 不写回全局共享 Config 单例（self._config.mcp.servers），

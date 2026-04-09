@@ -342,11 +342,11 @@ class FileToolsConfig(BaseModel):
 
 
 class CommandToolsConfig(BaseModel):
-    """命令执行工具配置"""
+    """命令执行工具配置（持久化 Bash 会话）"""
 
     enabled: bool = Field(
         default=True,
-        description="是否启用 run_command 工具",
+        description="是否启用 bash 工具",
     )
     allow_run: bool = Field(
         default=True,
@@ -354,7 +354,7 @@ class CommandToolsConfig(BaseModel):
     )
     allow_run_for_subagent: bool = Field(
         default=False,
-        description="是否允许受限模式（subagent、tool_mode=sub 如水源）使用 run_command；开启后仅可执行 subagent_command_whitelist 内命令，禁止管道/重定向与危险命令",
+        description="是否允许受限模式（subagent、tool_mode=sub 如水源）使用 bash；开启后仅可执行 subagent_command_whitelist 内命令，禁止管道/重定向与危险命令",
     )
     subagent_command_whitelist: List[str] = Field(
         default_factory=lambda: [
@@ -380,7 +380,7 @@ class CommandToolsConfig(BaseModel):
     )
     base_dir: str = Field(
         default=".",
-        description="相对路径 cwd 的基准目录；绝对路径可指定任意有效目录（如 /etc、~/.config）",
+        description="bash 会话初始工作目录",
     )
     default_timeout_seconds: float = Field(
         default=30.0,
@@ -401,6 +401,22 @@ class CommandToolsConfig(BaseModel):
         default=200000,
         gt=0,
         description="允许的最大输出限制（字符）",
+    )
+    shell_path: str = Field(
+        default="/bin/bash",
+        description="bash 可执行文件路径",
+    )
+    init_commands: List[str] = Field(
+        default_factory=list,
+        description="bash 启动时执行的初始化命令列表",
+    )
+    snapshot_enabled: bool = Field(
+        default=False,
+        description="Core evict 时是否写入 bash 环境快照（用于恢复）",
+    )
+    snapshot_dir: str = Field(
+        default="./data/bash_snapshots",
+        description="bash 快照文件存储目录",
     )
 
 
@@ -603,7 +619,7 @@ class AgentConfig(BaseModel):
             "web_search",
             "read_file",
             "write_file",
-            "run_command",
+            "bash",
             "extract_web_content",
             "attach_media",
             "memory_search_long_term",

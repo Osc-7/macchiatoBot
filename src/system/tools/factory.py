@@ -25,7 +25,6 @@ from .storage_tools import (
     DeleteScheduleDataTool,
 )
 from .file_tools import ReadFileTool, WriteFileTool, ModifyFileTool
-from .command_tools import RunCommandTool
 from .load_skill_tool import LoadSkillTool
 from .memory_tools import (
     MemorySearchLongTermTool,
@@ -99,8 +98,7 @@ def get_default_tools(
         tools.append(WriteFileTool(config=config))
         tools.append(ModifyFileTool(config=config))
 
-    if config and config.command_tools.enabled:
-        tools.append(RunCommandTool(config=config))
+    # BashTool 由 AgentCore.__aenter__ 自注册，不再在 factory 中装配
 
     if config and (
         (config.skills.enabled or []) or getattr(config.skills, "cli_dir", None)

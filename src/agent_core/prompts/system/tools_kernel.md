@@ -8,7 +8,7 @@
 ## pinned_tools
 
 - **read_file** / **write_file** / **modify_file**：读、新建/覆盖、修改（search_replace 局部替换 | append 追加 | overwrite 覆盖）
-- **run_command**：执行终端命令，支持 `cwd`、`timeout`、`output_limit`
+- **bash**：在持久化 bash 会话中执行命令，环境变量/工作目录在会话期间保持
 - **web_search**：联网搜索公开信息，返回结构化结果（标题/链接/摘要）
 - **extract_web_content**：抓取网页内容
 - **memory_search_long_term** / **memory_search_content** / **memory_store** / **memory_ingest**：记忆检索与写入；用户偏好写 MEMORY.md 用 write_file/modify_file

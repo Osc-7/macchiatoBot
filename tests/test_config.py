@@ -134,7 +134,7 @@ class TestConfigModels:
         assert config.file_tools.allow_write is False
 
     def test_command_tools_config_defaults(self):
-        """测试命令工具配置默认值"""
+        """测试命令工具（bash 会话）配置默认值"""
         ct = CommandToolsConfig()
         assert ct.enabled is True
         assert ct.allow_run is True

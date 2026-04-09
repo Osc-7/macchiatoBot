@@ -49,7 +49,6 @@ from .storage_tools import (
     DeleteScheduleDataTool,
 )
 from .file_tools import ReadFileTool, WriteFileTool, ModifyFileTool
-from .command_tools import RunCommandTool
 from .memory_tools import (
     MemorySearchLongTermTool,
     MemorySearchContentTool,
@@ -142,11 +141,9 @@ def _build_file_tools(config: Config) -> List[BaseTool]:
 
 
 def _build_command_tools(config: Config) -> List[BaseTool]:
-    tools: List[BaseTool] = []
-    cmd_cfg = getattr(config, "command_tools", None)
-    if cmd_cfg and getattr(cmd_cfg, "enabled", False):
-        tools.append(RunCommandTool(config=config))
-    return tools
+    # BashTool 由 AgentCore.__aenter__ 自注册（绑定 Core 自身的 BashRuntime），
+    # 不再通过 build_tool_registry 外部装配。保留空函数签名以维持调用链。
+    return []
 
 
 def _build_memory_tools(

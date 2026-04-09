@@ -108,7 +108,7 @@ class CoreProfile:
         3. 如果 allowed_tools 为 None → True（无白名单限制）
         4. 否则检查 allowed_tools 白名单
         """
-        _DANGEROUS_TOOLS = {"run_command"}
+        _DANGEROUS_TOOLS = {"bash", "run_command"}
 
         if tool_name in self.deny_tools:
             return False

@@ -77,15 +77,16 @@ class TestGetDefaultTools:
         assert "write_file" in tool_names
         assert "modify_file" in tool_names
 
-    def test_get_default_tools_includes_run_command_when_enabled(self):
-        """当 command_tools.enabled 时，应包含 run_command"""
+    def test_get_default_tools_no_bash_in_registry(self):
+        """BashTool 由 AgentCore 自注册，不在 get_default_tools 返回中"""
         config = Config(
             llm=LLMConfig(api_key="x", model="x"),
             command_tools=CommandToolsConfig(enabled=True, allow_run=True),
         )
         tools = get_default_tools(config=config)
         tool_names = [t.name for t in tools]
-        assert "run_command" in tool_names
+        assert "bash" not in tool_names
+        assert "run_command" not in tool_names
 
     def test_get_default_tools_includes_attach_media_when_enabled(self):
         """当 multimodal.enabled 时，应包含 attach_media"""

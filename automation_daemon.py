@@ -154,7 +154,7 @@ async def _consume_loop(
 
             if mode == "full":
                 # full 模式下对齐 cli/feishu 主对话的权限策略：
-                # - 是否允许 run_command 由 config.command_tools.allow_run 决定
+                # - 是否允许 bash 命令由 config.command_tools.allow_run 决定
                 # - 其余参数复用 agent 配置
                 cfg = get_config()
                 profile = CoreProfile.full_from_config(

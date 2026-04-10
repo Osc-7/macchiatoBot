@@ -254,21 +254,22 @@ class AgentCore:
                 if not self._tool_registry.has(chat_tool.name):
                     self._tool_registry.register(chat_tool)
 
-        # kernel 模式下补充核心工具
-        if self._kernel_enabled:
-            if not self._tool_registry.has("search_tools"):
-                self._tool_registry.register(
-                    SearchToolsTool(
-                        registry=self._tool_registry,
-                        working_set=self._working_set,
-                    )
+        # Meta：search_tools / call_tool 对所有 Core 注册（与 kernel/sub 无关）；
+        # kernel 模式下 InternalLoader 仍通过工作集裁剪可见工具，sub 模式为全量 definitions + Profile 过滤。
+        if not self._tool_registry.has("search_tools"):
+            self._tool_registry.register(
+                SearchToolsTool(
+                    registry=self._tool_registry,
+                    working_set=self._working_set,
                 )
-            if not self._tool_registry.has("call_tool"):
-                self._tool_registry.register(
-                    CallToolTool(
-                        registry=self._tool_registry,
-                    )
+            )
+        if not self._tool_registry.has("call_tool"):
+            self._tool_registry.register(
+                CallToolTool(
+                    registry=self._tool_registry,
+                    profile_getter=lambda: getattr(self, "_core_profile", None),
                 )
+            )
 
         # MCP 客户端（在 __aenter__ 中连接，或 defer 时由 ensure_mcp_connected 连接）
         self._mcp_manager: Optional[MCPClientManager] = None

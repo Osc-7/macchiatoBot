@@ -119,15 +119,15 @@ class TestAgentCoreInit:
         assert agent._config is mock_config
         assert agent._max_iterations == 10
         assert agent._timezone == "America/New_York"
-        # 2 custom tools + 3 chat history tools（sub 模式，无 search_tools/call_tool）
-        assert len(agent.tool_registry) == 5
+        # 2 custom + 3 chat + search_tools + call_tool（meta 全 Core 注册）
+        assert len(agent.tool_registry) == 7
 
     def test_init_without_tools(self, mock_config):
         """测试不传入工具时初始化"""
         agent = AgentCore(config=mock_config)
 
-        # 3 chat history tools（sub 模式）
-        assert len(agent.tool_registry) == 3
+        # 3 chat + search_tools + call_tool
+        assert len(agent.tool_registry) == 5
         assert isinstance(agent.context, ConversationContext)
 
     def test_tool_registry_property(self, agent):
@@ -154,8 +154,8 @@ class TestToolRegistration:
         agent.register_tool(new_tool)
 
         assert agent.tool_registry.has("tool_c")
-        # 2 original + 1 new + 3 chat history tools
-        assert len(agent.tool_registry) == 6
+        # 2 original + 1 new + 3 chat + meta
+        assert len(agent.tool_registry) == 8
 
     def test_unregister_tool(self, agent):
         """测试注销工具"""
@@ -163,8 +163,8 @@ class TestToolRegistration:
 
         assert result is True
         assert not agent.tool_registry.has("tool_a")
-        # 2 original - 1 removed + 3 chat history tools
-        assert len(agent.tool_registry) == 4
+        # 2 original - 1 removed + 3 chat + meta
+        assert len(agent.tool_registry) == 6
 
     def test_unregister_nonexistent_tool(self, agent):
         """测试注销不存在的工具"""

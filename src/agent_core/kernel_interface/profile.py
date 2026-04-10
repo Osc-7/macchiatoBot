@@ -35,8 +35,8 @@ class CoreProfile:
         Kernel 执行 ToolCallAction 时会二次校验，即使 LLM 发出了请求也会拒绝。
 
     allow_dangerous_commands:
-        是否允许执行危险 shell 命令（RunCommandTool）。
-        False 时 RunCommandTool 自动加入 deny_tools（内核态强制）。
+        是否允许使用 bash 工具（工具名层）；具体命令由 BashSecurity 再校验。
+        False 时 is_tool_allowed 对 bash 为否（见 is_tool_allowed 步骤 2）。
 
     visible_memory_scopes:
         允许 InternalLoader 加载的记忆层级。
@@ -58,7 +58,7 @@ class CoreProfile:
     - allowed_tools / deny_tools:
         工具白/黑名单，Kernel 在执行 ToolCallAction 时会再次校验。
     - allow_dangerous_commands:
-        是否允许 run_command 等危险工具。
+        是否允许 bash 工具名（见字段说明）。
     - visible_memory_scopes:
         InternalLoader 允许加载的记忆层级（working / long_term / content / chat）。
         空列表表示不加载任何记忆（适合一次性无状态 Core）。
@@ -104,15 +104,15 @@ class CoreProfile:
 
         执行顺序：
         1. 如果 tool_name 在 deny_tools → False（黑名单优先）
-        2. 如果 allow_dangerous_commands=False 且 tool 是危险命令工具 → False
+        2. 如果 allow_dangerous_commands=False 且 tool 为 bash → False
         3. 如果 allowed_tools 为 None → True（无白名单限制）
         4. 否则检查 allowed_tools 白名单
         """
-        _DANGEROUS_TOOLS = {"bash", "run_command"}
+        _DANGEROUS_SHELL_TOOLS = {"bash"}
 
         if tool_name in self.deny_tools:
             return False
-        if not self.allow_dangerous_commands and tool_name in _DANGEROUS_TOOLS:
+        if not self.allow_dangerous_commands and tool_name in _DANGEROUS_SHELL_TOOLS:
             return False
         if self.allowed_tools is None:
             return True
@@ -179,7 +179,7 @@ class CoreProfile:
         max_context_tokens: Optional[int] = None,
         allow_dangerous_commands: bool = False,
     ) -> "CoreProfile":
-        """子 Agent / 工具 Agent（受限工具集；allow_dangerous_commands=True 时允许 run_command，实际执行仍受 RunCommandTool 内 subagent 白名单限制）。
+        """子 Agent / 工具 Agent（受限工具集；allow_dangerous_commands=True 时允许 bash 工具名，执行仍受 BashSecurity / 白名单约束）。
 
         max_context_tokens:
             profile 层上下文压缩阈值；None 表示不设该上限（仅由 WorkingMemory 的 max_tokens 约束）。
@@ -227,15 +227,19 @@ class CoreProfile:
         max_context_tokens: int = 200000,
         session_expired_seconds: int = 1800,
     ) -> "CoreProfile":
-        """水源社区受限 Core：仅 shuiyuan 工具，无危险命令，聊天历史由 per-user DB 管理。"""
+        """水源社区受限 Core：业务工具 + meta + bash；shell 细粒度由 BashSecurity + command_tools 负责。"""
         return cls(
             mode="sub",
             allowed_tools=[
+                "search_tools",
+                "call_tool",
                 "shuiyuan_search",
                 "shuiyuan_get_topic",
                 "shuiyuan_post_retort",
                 "attach_media",
                 "attach_image_to_reply",
+                "load_skill",
+                "bash",
                 "web_search",
                 "extract_web_content",
                 "memory_search_long_term",
@@ -248,7 +252,7 @@ class CoreProfile:
                 "read_file",
                 "modify_file",
             ],
-            allow_dangerous_commands=False,
+            allow_dangerous_commands=True,
             # 为每个水源用户名维护独立记忆：recent_topic + MEMORY.md + chat_history
             visible_memory_scopes=["long_term", "chat"],
             frontend_id="shuiyuan",

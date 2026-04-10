@@ -11,6 +11,7 @@ from agent_core.config import AgentConfig, Config, LLMConfig
 from agent_core.agent import AgentCore
 from agent_core.llm import LLMResponse, ToolCall
 from agent_core.orchestrator import ToolWorkingSetManager
+from agent_core.kernel_interface.profile import CoreProfile
 from agent_core.tools import (
     BaseTool,
     CallToolTool,
@@ -114,6 +115,25 @@ class TestKernelTools:
         assert result.success is True
         assert dummy.called is True
         assert dummy.called_kwargs == {"input": "x"}
+
+    @pytest.mark.asyncio
+    async def test_call_tool_inner_denied_when_profile_forbids(self):
+        registry = VersionedToolRegistry()
+        dummy = DummyTool(name="secret_tool")
+        registry.register(dummy)
+        profile = CoreProfile(
+            mode="sub",
+            allowed_tools=["call_tool"],
+            allow_dangerous_commands=False,
+        )
+        caller = CallToolTool(
+            registry=registry,
+            profile_getter=lambda: profile,
+        )
+        result = await caller.execute(name="secret_tool", arguments={})
+        assert result.success is False
+        assert result.error == "PERMISSION_DENIED"
+        assert dummy.called is False
 
 
 class TestAgentKernelMode:

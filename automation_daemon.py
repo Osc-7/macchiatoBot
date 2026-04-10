@@ -185,17 +185,25 @@ async def _consume_loop(
                 profile.memory_enabled = True
             else:
                 profile.memory_enabled = False
+            # 必须把任务的 memory_owner 透传到 KernelRequest.metadata，供调度器解析记忆路径；
+            # 仅依赖 CoreProfile 在部分边界情况下会与 job 配置不一致。
+            req_meta: dict[str, Any] = {
+                "source": "cron",
+                "user_id": task.user_id,
+                "_hooks": hooks,
+            }
+            if isinstance(task.metadata, dict):
+                mo = str(task.metadata.get("memory_owner") or "").strip()
+                if mo:
+                    req_meta["memory_owner"] = mo
+                cm = str(task.metadata.get("core_mode") or "").strip()
+                if cm:
+                    req_meta["core_mode"] = cm
             request = KernelRequest.create(
                 text=task.instruction,
                 session_id=task.session_id,
                 frontend_id=task.source,
-                metadata={
-                    # source/user_id 仍表示“逻辑触发方”（cron + user_id），
-                    # 实际记忆 owner 由 CoreProfile.frontend_id/dialog_window_id 决定。
-                    "source": "cron",
-                    "user_id": task.user_id,
-                    "_hooks": hooks,
-                },
+                metadata=req_meta,
                 profile=profile,
             )
             handle = await scheduler.submit(request)

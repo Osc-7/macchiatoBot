@@ -13,6 +13,26 @@ from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolR
 from agent_core.config import Config, FileToolsConfig, get_config
 
 
+def _redirect_memory_md_if_needed(path_str: str, exec_ctx: dict, config: Config) -> str:
+    """将裸 MEMORY.md 映射到 data/memory/{frontend}/{user}/long_term/MEMORY.md（支持 memory_owner）。"""
+    if Path(path_str).name != "MEMORY.md":
+        return path_str
+    try:
+        from agent_core.config import MemoryConfig
+        from agent_core.agent.memory_paths import (
+            effective_memory_namespace_from_execution_context,
+            resolve_memory_owner_paths,
+        )
+
+        src, uid = effective_memory_namespace_from_execution_context(exec_ctx)
+        mem_cfg = getattr(config, "memory", None) or MemoryConfig()
+        return resolve_memory_owner_paths(mem_cfg, uid, config=config, source=src)[
+            "memory_md_path"
+        ]
+    except Exception:
+        return path_str
+
+
 class ReadFileTool(BaseTool):
     """
     读取文件工具
@@ -123,47 +143,8 @@ class ReadFileTool(BaseTool):
                 message="缺少必需参数: path",
             )
 
-        # 若 path 为 MEMORY.md，则根据前端 source + user_id 映射到
-        # data/memory/{frontend}/{user_id}/long_term/MEMORY.md，避免默认落到项目根目录。
-        try:
-            from agent_core.config import MemoryConfig  # 局部导入避免循环
-            from agent_core.agent.memory_paths import resolve_memory_owner_paths
-
-            if Path(path_str).name == "MEMORY.md":
-                source = (exec_ctx.get("source") or "").strip() or "cli"
-                user_id = (exec_ctx.get("user_id") or "").strip() or "root"
-                mem_cfg: MemoryConfig = (
-                    getattr(self._config, "memory", None) or MemoryConfig()
-                )
-                paths = resolve_memory_owner_paths(
-                    mem_cfg, user_id, config=self._config, source=source
-                )
-                path_str = paths["memory_md_path"]
-                kwargs["path"] = path_str
-        except Exception:
-            # 解析失败时退回原始 path_str 行为
-            pass
-
-        # 若 path 为 MEMORY.md，则根据前端 source + user_id 映射到
-        # data/memory/{frontend}/{user_id}/long_term/MEMORY.md，避免默认落到项目根目录。
-        try:
-            from agent_core.config import MemoryConfig  # 局部导入避免循环
-            from agent_core.agent.memory_paths import resolve_memory_owner_paths
-
-            if Path(path_str).name == "MEMORY.md":
-                source = (exec_ctx.get("source") or "").strip() or "cli"
-                user_id = (exec_ctx.get("user_id") or "").strip() or "root"
-                mem_cfg: MemoryConfig = (
-                    getattr(self._config, "memory", None) or MemoryConfig()
-                )
-                paths = resolve_memory_owner_paths(
-                    mem_cfg, user_id, config=self._config, source=source
-                )
-                path_str = paths["memory_md_path"]
-                kwargs["path"] = path_str
-        except Exception:
-            # 解析失败时退回原始 path_str 行为
-            pass
+        path_str = _redirect_memory_md_if_needed(path_str, exec_ctx, self._config)
+        kwargs["path"] = path_str
 
         if not self._ft_config.allow_read:
             return ToolResult(
@@ -176,39 +157,20 @@ class ReadFileTool(BaseTool):
         if err:
             return ToolResult(success=False, error="INVALID_PATH", message=err)
 
-        # 水源会话的修改路径白名单：仅允许修改本用户的长期记忆 MEMORY.md
-        source = (exec_ctx.get("source") or "").strip()
-        user_id = (exec_ctx.get("user_id") or "").strip()
-        if source == "shuiyuan" and user_id:
-            from agent_core.config import MemoryConfig  # 局部导入避免循环
-            from agent_core.agent.memory_paths import resolve_memory_owner_paths
+        # 水源会话：仅允许读取本用户的长期记忆 MEMORY.md
+        from agent_core.agent.memory_paths import (
+            effective_memory_namespace_from_execution_context,
+            resolve_memory_owner_paths,
+        )
+        from agent_core.config import MemoryConfig
 
+        ns_src, ns_uid = effective_memory_namespace_from_execution_context(exec_ctx)
+        if ns_src == "shuiyuan" and ns_uid:
             mem_cfg: MemoryConfig = (
                 getattr(self._config, "memory", None) or MemoryConfig()
             )
             paths = resolve_memory_owner_paths(
-                mem_cfg, user_id, config=self._config, source="shuiyuan"
-            )
-            allowed_memory_md = Path(paths["memory_md_path"]).resolve()
-            if resolved != allowed_memory_md:
-                return ToolResult(
-                    success=False,
-                    error="FORBIDDEN_PATH",
-                    message="水源会话仅允许修改本用户的长期记忆文件 MEMORY.md。",
-                )
-
-        # frontend 级别的路径白名单控制：水源会话只允许读取自己的长期记忆 MEMORY.md
-        source = (exec_ctx.get("source") or "").strip()
-        user_id = (exec_ctx.get("user_id") or "").strip()
-        if source == "shuiyuan" and user_id:
-            from agent_core.config import MemoryConfig  # 局部导入避免循环
-            from agent_core.agent.memory_paths import resolve_memory_owner_paths
-
-            mem_cfg: MemoryConfig = (
-                getattr(self._config, "memory", None) or MemoryConfig()
-            )
-            paths = resolve_memory_owner_paths(
-                mem_cfg, user_id, config=self._config, source="shuiyuan"
+                mem_cfg, ns_uid, config=self._config, source="shuiyuan"
             )
             allowed_memory_md = Path(paths["memory_md_path"]).resolve()
             if resolved != allowed_memory_md:
@@ -423,26 +385,8 @@ class WriteFileTool(BaseTool):
                 message="缺少必需参数: content",
             )
 
-        # 若 path 为 MEMORY.md，则根据前端 source + user_id 映射到
-        # data/memory/{frontend}/{user_id}/long_term/MEMORY.md，避免默认落到项目根目录。
-        try:
-            from agent_core.config import MemoryConfig  # 局部导入避免循环
-            from agent_core.agent.memory_paths import resolve_memory_owner_paths
-
-            if Path(path_str).name == "MEMORY.md":
-                source = (exec_ctx.get("source") or "").strip() or "cli"
-                user_id = (exec_ctx.get("user_id") or "").strip() or "root"
-                mem_cfg: MemoryConfig = (
-                    getattr(self._config, "memory", None) or MemoryConfig()
-                )
-                paths = resolve_memory_owner_paths(
-                    mem_cfg, user_id, config=self._config, source=source
-                )
-                path_str = paths["memory_md_path"]
-                kwargs["path"] = path_str
-        except Exception:
-            # 解析失败时退回原始 path_str 行为
-            pass
+        path_str = _redirect_memory_md_if_needed(path_str, exec_ctx, self._config)
+        kwargs["path"] = path_str
 
         if not self._ft_config.allow_write:
             return ToolResult(
@@ -455,18 +399,17 @@ class WriteFileTool(BaseTool):
         if err:
             return ToolResult(success=False, error="INVALID_PATH", message=err)
 
-        # 水源会话的写入路径白名单：仅允许写入本用户的长期记忆 MEMORY.md
-        source = (exec_ctx.get("source") or "").strip()
-        user_id = (exec_ctx.get("user_id") or "").strip()
-        if source == "shuiyuan" and user_id:
-            from agent_core.config import MemoryConfig  # 局部导入避免循环
-            from agent_core.agent.memory_paths import resolve_memory_owner_paths
+        from agent_core.agent.memory_paths import (
+            effective_memory_namespace_from_execution_context,
+            resolve_memory_owner_paths,
+        )
+        from agent_core.config import MemoryConfig
 
-            mem_cfg: MemoryConfig = (
-                getattr(self._config, "memory", None) or MemoryConfig()
-            )
+        ns_src, ns_uid = effective_memory_namespace_from_execution_context(exec_ctx)
+        if ns_src == "shuiyuan" and ns_uid:
+            mem_cfg = getattr(self._config, "memory", None) or MemoryConfig()
             paths = resolve_memory_owner_paths(
-                mem_cfg, user_id, config=self._config, source="shuiyuan"
+                mem_cfg, ns_uid, config=self._config, source="shuiyuan"
             )
             allowed_memory_md = Path(paths["memory_md_path"]).resolve()
             if resolved != allowed_memory_md:
@@ -736,6 +679,9 @@ class ModifyFileTool(BaseTool):
                 error="PERMISSION_DENIED",
                 message="文件修改功能未启用。请在配置中设置 file_tools.allow_modify: true",
             )
+
+        path_str = _redirect_memory_md_if_needed(path_str, exec_ctx, self._config)
+        kwargs["path"] = path_str
 
         resolved, err = self._resolve_path(path_str)
         if err:

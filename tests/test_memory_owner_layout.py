@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from agent_core.agent.memory_paths import (
+    effective_memory_namespace_from_execution_context,
     ensure_memory_owner_layout,
     list_user_ids_under_frontend,
     validate_logic_namespace_segment,
@@ -31,6 +32,26 @@ def test_ensure_memory_owner_layout_creates_and_idempotent(tmp_path) -> None:
     assert (tmp_path / "m" / "cli" / "alice" / "content").is_dir()
     assert len(r1["created_paths"]) >= 1
     assert r2["created_paths"] == []
+
+
+def test_effective_memory_namespace_prefers_memory_owner() -> None:
+    fe, uid = effective_memory_namespace_from_execution_context(
+        {
+            "memory_owner": "feishu:ou_abc",
+            "source": "cron",
+            "user_id": "default",
+        }
+    )
+    assert fe == "feishu"
+    assert uid == "ou_abc"
+
+
+def test_effective_memory_namespace_fallback_source_user() -> None:
+    fe, uid = effective_memory_namespace_from_execution_context(
+        {"source": "cli", "user_id": "root"}
+    )
+    assert fe == "cli"
+    assert uid == "root"
 
 
 def test_list_user_ids_under_frontend(tmp_path) -> None:

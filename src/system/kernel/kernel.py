@@ -143,12 +143,16 @@ class AgentKernel:
                 else:
                     # 注入执行上下文：补全 AgentCore._execute_tool_call() 原本做的注入，
                     # 让 bash / file_tools 等能感知 tool_mode 和 source。
-                    parsed_args["__execution_context__"] = {
+                    _ctx = {
                         "tool_mode": getattr(agent, "_effective_tool_mode", "kernel"),
                         "source": getattr(agent, "_source", ""),
                         "user_id": getattr(agent, "_user_id", ""),
                         "session_id": getattr(agent, "_session_id", ""),
                     }
+                    _jmo = getattr(agent, "_job_memory_owner", None)
+                    if _jmo:
+                        _ctx["memory_owner"] = _jmo
+                    parsed_args["__execution_context__"] = _ctx
                     result = await agent_registry.execute(
                         action.tool_name, **parsed_args
                     )

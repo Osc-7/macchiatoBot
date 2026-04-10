@@ -85,6 +85,24 @@ def list_user_ids_under_frontend(mem_cfg: MemoryConfig, *, frontend: str = "cli"
     return names
 
 
+def effective_memory_namespace_from_execution_context(exec_ctx: dict) -> tuple[str, str]:
+    """
+    解析 data/memory/{frontend}/{user}/ 所需的 frontend 与 user_id。
+
+    优先使用自动化任务在 __execution_context__ 中注入的 memory_owner（如 feishu:ou_xxx），
+    否则使用 source + user_id。供 file_tools 将 ``MEMORY.md`` 映射到对应用户的 long_term 路径。
+    """
+    mo = (exec_ctx.get("memory_owner") or "").strip()
+    if mo and ":" in mo:
+        left, right = mo.split(":", 1)
+        left, right = left.strip(), right.strip()
+        if left and right:
+            return left, right
+    src = (exec_ctx.get("source") or "").strip() or "cli"
+    uid = (exec_ctx.get("user_id") or "").strip() or "root"
+    return src, uid
+
+
 def resolve_memory_owner_paths(
     mem_cfg: MemoryConfig,
     user_id: str,

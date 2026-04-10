@@ -405,24 +405,29 @@ class KernelScheduler:
                         hooks = raw_hooks
 
                 # 获取 AgentCore（懒加载）
-                # 记忆路径：profile 有非空 frontend_id/dialog_window_id 时优先使用
+                # 记忆路径：优先 metadata.memory_owner（feishu:uid），与 job 配置一致；
+                # 否则用 CoreProfile.frontend_id/dialog_window_id；再否则 metadata.source/user_id。
+                md = request.metadata if isinstance(request.metadata, dict) else {}
+                mo_raw = str(md.get("memory_owner") or "").strip()
                 profile = request.profile
-                mem_source = (
-                    profile.frontend_id
-                    if (profile and (profile.frontend_id or "").strip())
-                    else request.metadata.get("source", request.frontend_id)
-                )
-                mem_user_id = (
-                    profile.dialog_window_id
-                    if (profile and (profile.dialog_window_id or "").strip())
-                    else request.metadata.get("user_id", "root")
-                )
+                if mo_raw and ":" in mo_raw:
+                    mem_source, mem_user_id = mo_raw.split(":", 1)
+                    mem_source, mem_user_id = mem_source.strip(), mem_user_id.strip()
+                elif profile and (profile.frontend_id or "").strip():
+                    mem_source = profile.frontend_id.strip()
+                    mem_user_id = (profile.dialog_window_id or "").strip() or "root"
+                else:
+                    mem_source = str(md.get("source") or request.frontend_id or "cli")
+                    mem_user_id = str(md.get("user_id") or "root")
+
                 agent = await self._core_pool.acquire(
                     request.session_id,
                     source=mem_source,
                     user_id=mem_user_id,
                     profile=profile,
                 )
+                # 供工具层解析 MEMORY.md / 与任务 owner 对齐（即使 agent._source 曾为 cron:job）
+                setattr(agent, "_job_memory_owner", mo_raw or None)
 
                 # Core 级生命周期日志接入（在 prepare_turn 之前注入，确保用户消息被记录）
                 entry = self._core_pool.get_live_entry(session_id)

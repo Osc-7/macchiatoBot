@@ -174,9 +174,9 @@ file_tools:
 
 # 命令执行工具配置
 command_tools:
-  enabled: true       # 是否启用 run_command 工具
+  enabled: true       # 是否启用 bash 工具
   allow_run: true     # 是否允许执行终端命令
-  # 受限模式（subagent、tool_mode=sub 如水源）是否允许 run_command；开启后仅可执行 subagent_command_whitelist 内命令
+  # 受限模式（subagent、tool_mode=sub 如水源）是否允许 bash；开启后仅可执行 subagent_command_whitelist 内命令
   allow_run_for_subagent: false
   # 受限模式命令白名单（默认含 find 等只读命令；可在此追加）
   # subagent_command_whitelist: ["ls", "pwd", "cat", "head", "tail", "grep", "find", "echo", "which", "file", "stat", "wc", "date", "whoami", "id", "env", "printenv"]
@@ -209,7 +209,7 @@ agent:
     - "web_search"
     - "read_file"
     - "write_file"
-    - "run_command"
+    - "bash"
     - "extract_web_content"
     - "attach_media"
     - "memory_search_long_term"

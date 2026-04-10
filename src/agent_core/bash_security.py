@@ -9,7 +9,7 @@ BashSecurity -- 命令安全校验模块。
 参考：
 - Claude Code bashSecurity.ts (23 条校验)
 - Codex approval/sandbox 分层
-- 原 RunCommandTool._DANGEROUS_PATTERNS + _check_restricted_whitelist
+- 早期命令工具的白名单与危险模式检测思路
 """
 
 from __future__ import annotations

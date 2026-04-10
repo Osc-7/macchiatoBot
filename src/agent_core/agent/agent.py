@@ -1241,11 +1241,14 @@ class AgentCore:
 
             from agent_core.agent.workspace_paths import (
                 build_bash_workspace_guard_init,
+                ensure_workspace_owner_layout,
                 is_bash_workspace_admin,
                 resolve_bash_working_dir,
+                resolve_workspace_tmp_dir,
             )
 
             profile = self._core_profile
+            ensure_workspace_owner_layout(cmd_cfg, self._user_id, source=self._source)
             bash_cwd = resolve_bash_working_dir(
                 cmd_cfg, self._user_id, source=self._source, profile=profile
             )
@@ -1259,6 +1262,11 @@ class AgentCore:
             )
             jail_root = (
                 str(Path(bash_cwd).resolve()) if ws_restricted else None
+            )
+            tmp_root = (
+                resolve_workspace_tmp_dir(cmd_cfg, self._user_id, source=self._source)
+                if ws_restricted
+                else None
             )
             init_cmds = guard_init + list(cmd_cfg.init_commands or [])
             rt_config = BashRuntimeConfig(
@@ -1278,6 +1286,7 @@ class AgentCore:
                 restricted_whitelist=list(cmd_cfg.subagent_command_whitelist or []),
                 allow_run_for_restricted=cmd_cfg.allow_run_for_subagent,
                 workspace_jail_root=jail_root,
+                workspace_tmp_root=tmp_root,
             )
             if not self._tool_registry.has("bash"):
                 self._tool_registry.register(

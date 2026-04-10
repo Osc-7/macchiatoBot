@@ -26,6 +26,7 @@ from agent_core.config import (
     reset_config,
     find_config_file,
 )
+from agent_core.kernel_interface.profile import CoreProfile
 
 
 @pytest.fixture(autouse=True)
@@ -96,9 +97,18 @@ class TestConfigModels:
         assert config.enable_debug is False
         # 默认使用 kernel 模式；full 作为向后兼容别名，在 Agent 内部被视为 kernel
         assert config.tool_mode == "kernel"
+        assert config.source_overrides == {}
         assert config.working_set_size == 6
         assert "search_tools" in config.pinned_tools
         assert "call_tool" in config.pinned_tools
+
+    def test_shuiyuan_profile_is_full_mode(self):
+        """水源前端默认走 full profile，而不是受限 sub。"""
+        profile = CoreProfile.for_shuiyuan(dialog_window_id="alice")
+        assert profile.mode == "full"
+        assert profile.allowed_tools is None
+        assert profile.frontend_id == "shuiyuan"
+        assert profile.dialog_window_id == "alice"
 
     def test_full_config(self):
         """测试完整配置"""

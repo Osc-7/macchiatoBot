@@ -176,7 +176,7 @@ file_tools:
 command_tools:
   enabled: true       # 是否启用 bash 工具
   allow_run: true     # 是否允许执行终端命令
-  # 受限模式（subagent、tool_mode=sub 如水源）是否允许 bash；开启后仅可执行 subagent_command_whitelist 内命令
+  # 受限模式（subagent、tool_mode=sub）是否允许 bash；开启后仅可执行 subagent_command_whitelist 内命令
   allow_run_for_subagent: false
   # 受限模式命令白名单（默认含 find 等只读命令；可在此追加）
   # subagent_command_whitelist: ["ls", "pwd", "cat", "head", "tail", "grep", "find", "echo", "which", "file", "stat", "wc", "date", "whoami", "id", "env", "printenv"]
@@ -199,11 +199,10 @@ agent:
   enable_debug: true
   # 工具暴露模式：
   # - kernel: 核心工具 search_tools/call_tool + pinned + working set（CLI/飞书）
-  # - sub: 受限模式，仅使用传入工具，禁止写入/危险命令（水源等小内核场景）
+  # - sub: 受限模式，仅使用传入工具，禁止写入/危险命令（适合子 agent）
   tool_mode: "kernel"
-  # 按 source 覆盖 tool_mode；水源使用 sub，cli/feishu 默认 kernel
-  source_overrides:
-    shuiyuan: "sub"
+  # 按 source 覆盖 tool_mode；未配置时沿用上面的全局 tool_mode
+  source_overrides: {}
   # kernel 模式下 LRU 工作集大小（不含 pinned_tools）
   working_set_size: 6
   # 核心工具 + pinned_tools，kernel 模式下始终暴露

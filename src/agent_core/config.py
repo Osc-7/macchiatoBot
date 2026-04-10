@@ -354,7 +354,7 @@ class CommandToolsConfig(BaseModel):
     )
     allow_run_for_subagent: bool = Field(
         default=False,
-        description="是否允许受限模式（subagent、tool_mode=sub 如水源）使用 bash；开启后仅可执行 subagent_command_whitelist 内命令，禁止管道/重定向与危险命令",
+        description="是否允许受限模式（subagent、tool_mode=sub）使用 bash；开启后仅可执行 subagent_command_whitelist 内命令，禁止管道/重定向与危险命令",
     )
     subagent_command_whitelist: List[str] = Field(
         default_factory=lambda: [
@@ -618,8 +618,8 @@ class AgentConfig(BaseModel):
         description="工具暴露模式: kernel(核心工具+工作集) | sub(受限模式，仅使用传入工具，禁止写入/危险命令)",
     )
     source_overrides: Dict[str, str] = Field(
-        default_factory=lambda: {"shuiyuan": "sub"},
-        description="按 source 覆盖 tool_mode，如 shuiyuan->sub，cli/feishu 默认 kernel",
+        default_factory=dict,
+        description="按 source 覆盖 tool_mode；未覆盖时沿用全局 tool_mode",
     )
     working_set_size: int = Field(
         default=6,

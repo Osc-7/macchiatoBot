@@ -140,7 +140,6 @@ def resolve_memory_owner_paths(
         "checkpoint_path": str(checkpoint_path),
     }
 
-
 def get_kernel_shutdown_at_path(mem_cfg: MemoryConfig) -> str:
     """
     Kernel 关闭时写入的时间戳文件路径（进程级单例）。

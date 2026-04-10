@@ -15,6 +15,7 @@ BashSecurity -- 命令安全校验模块。
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -86,6 +87,13 @@ _DEFAULT_RESTRICTED_WHITELIST = frozenset([
 # 工作区隔离：阻止通过特殊 builtin 绕过覆盖后的 cd
 _WORKSPACE_JAIL_BUILTIN_CD = re.compile(r"\bbuiltin\s+cd\b", re.I)
 _WORKSPACE_JAIL_COMMAND_CD = re.compile(r"\bcommand\s+cd\b", re.I)
+_WORKSPACE_WRITE_MUTATING_ALL_PATHS = frozenset(
+    {"touch", "mkdir", "rmdir", "truncate", "rm", "unlink"}
+)
+_WORKSPACE_WRITE_MUTATING_LAST_PATH = frozenset(
+    {"mv", "cp", "install", "ln", "rsync"}
+)
+_WORKSPACE_SEGMENT_OPERATORS = frozenset({"&&", "||", ";", "|"})
 
 
 class BashSecurity:
@@ -103,12 +111,14 @@ class BashSecurity:
         restricted_whitelist: Optional[List[str]] = None,
         allow_run_for_restricted: bool = False,
         workspace_jail_root: Optional[str] = None,
+        workspace_tmp_root: Optional[str] = None,
     ) -> None:
         self._restricted_whitelist = frozenset(
             restricted_whitelist
         ) if restricted_whitelist is not None else _DEFAULT_RESTRICTED_WHITELIST
         self._allow_run_for_restricted = allow_run_for_restricted
         self._workspace_jail_root = workspace_jail_root
+        self._workspace_tmp_root = workspace_tmp_root
 
     def check(
         self,
@@ -135,6 +145,9 @@ class BashSecurity:
 
         if self._workspace_jail_root:
             jail = self._check_workspace_jail_bypass(command)
+            if jail is not None:
+                return jail
+            jail = self._check_workspace_write_scope(command)
             if jail is not None:
                 return jail
 
@@ -181,6 +194,150 @@ class BashSecurity:
                 error_code="WORKSPACE_JAIL_DENIED",
             )
         return None
+
+    def _check_workspace_write_scope(self, command: str) -> Optional[SecurityVerdict]:
+        """
+        工作区隔离已启用时，拒绝对工作区外显式写入/修改。
+
+        目标：
+        - 工作区内：允许读写
+        - 工作区外：允许只读访问，但拒绝显式写路径（touch、cp 目标、重定向等）
+
+        这是启发式规则，主要覆盖 shell / 常见文件工具的直接写路径。
+        """
+        roots = [Path(self._workspace_jail_root or "").resolve()]
+        if self._workspace_tmp_root:
+            roots.append(Path(self._workspace_tmp_root).resolve())
+        for segment in self._split_command_segments(command):
+            tokens = self._tokenize_segment(segment)
+            if not tokens:
+                continue
+            for path_str in self._extract_write_targets(tokens):
+                candidate = self._resolve_candidate_path(path_str, roots[0])
+                if candidate is None:
+                    continue
+                if not any(self._path_within_root(candidate, root) for root in roots):
+                    return SecurityVerdict(
+                        SecurityAction.DENY,
+                        reason=f"工作区隔离模式下禁止写入工作区外路径: {candidate}",
+                        error_code="WORKSPACE_WRITE_DENIED",
+                    )
+        return None
+
+    @staticmethod
+    def _split_command_segments(command: str) -> List[str]:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        segments: list[list[str]] = [[]]
+        for token in lexer:
+            if token in _WORKSPACE_SEGMENT_OPERATORS:
+                if segments[-1]:
+                    segments.append([])
+                continue
+            segments[-1].append(token)
+        return [" ".join(seg).strip() for seg in segments if seg]
+
+    @staticmethod
+    def _tokenize_segment(segment: str) -> List[str]:
+        lexer = shlex.shlex(segment, posix=True, punctuation_chars="<>")
+        lexer.whitespace_split = True
+        return list(lexer)
+
+    @staticmethod
+    def _is_option(token: str) -> bool:
+        return token.startswith("-") and token != "-"
+
+    @staticmethod
+    def _resolve_candidate_path(path_str: str, root: Path) -> Optional[Path]:
+        s = (path_str or "").strip()
+        if not s:
+            return None
+        if s.startswith("~/"):
+            return (root / s[2:]).resolve()
+        if s.startswith("/"):
+            return Path(s).resolve()
+        return None
+
+    @staticmethod
+    def _path_within_root(candidate: Path, root: Path) -> bool:
+        try:
+            candidate.resolve().relative_to(root.resolve())
+            return True
+        except ValueError:
+            return False
+
+    def _extract_write_targets(self, tokens: List[str]) -> List[str]:
+        targets: list[str] = []
+        targets.extend(self._extract_redirect_targets(tokens))
+        if not tokens:
+            return targets
+        base_cmd = Path(tokens[0]).name.lower()
+        args = tokens[1:]
+
+        if base_cmd in _WORKSPACE_WRITE_MUTATING_ALL_PATHS:
+            targets.extend(
+                token for token in args if not self._is_option(token) and token != "--"
+            )
+            return targets
+
+        if base_cmd in _WORKSPACE_WRITE_MUTATING_LAST_PATH:
+            non_option = [
+                token for token in args if not self._is_option(token) and token != "--"
+            ]
+            if non_option:
+                targets.append(non_option[-1])
+            return targets
+
+        if base_cmd == "tee":
+            targets.extend(
+                token
+                for token in args
+                if not self._is_option(token) and token not in {"-", "/dev/stdout"}
+            )
+            return targets
+
+        if base_cmd in {"chmod", "chown", "chgrp"}:
+            non_option = [
+                token for token in args if not self._is_option(token) and token != "--"
+            ]
+            if len(non_option) >= 2:
+                targets.extend(non_option[1:])
+            return targets
+
+        if base_cmd == "sed" and any(
+            token == "-i" or token.startswith("-i") for token in args
+        ):
+            non_option = [
+                token for token in args if not self._is_option(token) and token != "--"
+            ]
+            if len(non_option) >= 2:
+                targets.extend(non_option[1:])
+            return targets
+
+        if base_cmd == "dd":
+            for token in args:
+                if token.startswith("of="):
+                    targets.append(token[3:])
+            return targets
+
+        return targets
+
+    @staticmethod
+    def _extract_redirect_targets(tokens: List[str]) -> List[str]:
+        targets: list[str] = []
+        i = 0
+        while i < len(tokens):
+            token = tokens[i]
+            if token in {">", ">>", "1>", "1>>", "2>", "2>>"}:
+                if i + 1 < len(tokens):
+                    targets.append(tokens[i + 1])
+                    i += 2
+                    continue
+            m = re.match(r"^(?:\d+)?(>>?)(.+)$", token)
+            if m:
+                targets.append(m.group(2))
+            i += 1
+        return targets
 
     # ── Layer 1 实现 ──────────────────────────────────────────
 

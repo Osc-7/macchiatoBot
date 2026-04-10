@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from agent_core.agent.workspace_paths import (
@@ -11,6 +13,7 @@ from agent_core.agent.workspace_paths import (
     list_user_ids_under_workspace,
     resolve_bash_working_dir,
     resolve_workspace_owner_dir,
+    resolve_workspace_tmp_dir,
 )
 from agent_core.config import CommandToolsConfig
 from agent_core.kernel_interface.profile import CoreProfile
@@ -22,6 +25,7 @@ def test_ensure_workspace_owner_layout_creates_and_idempotent(tmp_path) -> None:
     r2 = ensure_workspace_owner_layout(cfg, "alice", source="cli")
     assert r1["workspace_owner"] == "cli:alice"
     assert (tmp_path / "w" / "cli" / "alice").is_dir()
+    assert Path(r1["tmp_dir"]).is_dir()
     assert len(r1["created_paths"]) >= 1
     assert r2["created_paths"] == []
 
@@ -38,6 +42,12 @@ def test_resolve_workspace_owner_dir(tmp_path) -> None:
     cfg = CommandToolsConfig(workspace_base_dir=str(tmp_path / "w"))
     p = resolve_workspace_owner_dir(cfg, "bob", source="feishu")
     assert p == str(tmp_path / "w" / "feishu" / "bob")
+
+
+def test_resolve_workspace_tmp_dir() -> None:
+    cfg = CommandToolsConfig()
+    p = resolve_workspace_tmp_dir(cfg, "bob", source="feishu")
+    assert p == "/tmp/macchiato/feishu/bob"
 
 
 def test_resolve_bash_working_dir_isolated(tmp_path) -> None:

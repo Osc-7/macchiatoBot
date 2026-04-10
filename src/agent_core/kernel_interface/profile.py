@@ -230,34 +230,12 @@ class CoreProfile:
         max_context_tokens: int = 200000,
         session_expired_seconds: int = 1800,
     ) -> "CoreProfile":
-        """水源社区受限 Core：业务工具 + meta + bash；shell 细粒度由 BashSecurity + command_tools 负责。"""
+        """水源社区前端 Core：按普通前端走 full 权限，仍保留独立 frontend/user 记忆命名空间。"""
         return cls(
-            mode="sub",
-            allowed_tools=[
-                "search_tools",
-                "call_tool",
-                "shuiyuan_search",
-                "shuiyuan_get_topic",
-                "shuiyuan_post_retort",
-                "attach_media",
-                "attach_image_to_reply",
-                "load_skill",
-                "bash",
-                "web_search",
-                "extract_web_content",
-                "memory_search_long_term",
-                "memory_search_content",
-                "chat_search",
-                "chat_context",
-                "chat_scroll",
-                "notify_owner",
-                "write_file",
-                "read_file",
-                "modify_file",
-            ],
+            mode="full",
+            allowed_tools=None,
             allow_dangerous_commands=True,
-            # 为每个水源用户名维护独立记忆：recent_topic + MEMORY.md + chat_history
-            visible_memory_scopes=["long_term", "chat"],
+            # 为每个水源用户名维护独立记忆与工作区命名空间
             frontend_id="shuiyuan",
             dialog_window_id=dialog_window_id,
             max_context_tokens=max_context_tokens,

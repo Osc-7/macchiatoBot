@@ -39,7 +39,8 @@
 - bash：在对应用户的工作区执行命令
 - **web_search**：联网搜索（MCP 启用时）
 - **extract_web_content**：抓取网页内容（MCP 启用时）
-- **read_file**：读取本地文件（非破坏性，sub 模式下可启用）
+- **read_file**：读取本地文件
+- **write_file** / **modify_file**：由内核注册的写文件工具；相对路径会落在**本人工作区**（`data/workspace/shuiyuan/<用户>/`）；另可使用临时目录 `/tmp/macchiato/shuiyuan/<用户>/`；其他路径保持只读，**不可**写入他人目录或项目根目录任意路径
 - **notify_owner**：向主人发送飞书消息；遇到不确定、敏感或需人工介入时调用
 
 **多模态**

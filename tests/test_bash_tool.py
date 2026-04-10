@@ -140,6 +140,71 @@ class TestBashSecurity:
         v = sec.check("cd subdir", profile=CoreProfile(mode="full"))
         assert v.allowed
 
+    def test_workspace_jail_denies_touch_outside_workspace(self):
+        sec = self._sec(workspace_jail_root="/tmp/ws")
+        v = sec.check("touch /tmp/outside.txt", profile=CoreProfile(mode="full"))
+        assert v.denied
+        assert v.error_code == "WORKSPACE_WRITE_DENIED"
+
+    def test_workspace_jail_allows_touch_inside_workspace(self):
+        sec = self._sec(workspace_jail_root="/tmp/ws")
+        v = sec.check("touch /tmp/ws/note.txt", profile=CoreProfile(mode="full"))
+        assert v.allowed
+
+    def test_workspace_jail_allows_read_outside_workspace(self):
+        sec = self._sec(workspace_jail_root="/tmp/ws")
+        v = sec.check("cat /etc/hosts", profile=CoreProfile(mode="full"))
+        assert v.allowed
+
+    def test_workspace_jail_denies_redirect_outside_workspace(self):
+        sec = self._sec(workspace_jail_root="/tmp/ws")
+        v = sec.check("echo hi > /tmp/outside.txt", profile=CoreProfile(mode="full"))
+        assert v.denied
+        assert v.error_code == "WORKSPACE_WRITE_DENIED"
+
+    def test_workspace_jail_allows_redirect_inside_workspace(self):
+        sec = self._sec(workspace_jail_root="/tmp/ws")
+        v = sec.check("echo hi > /tmp/ws/out.txt", profile=CoreProfile(mode="full"))
+        assert v.allowed
+
+    def test_workspace_jail_allows_cp_from_outside_to_workspace(self):
+        sec = self._sec(workspace_jail_root="/tmp/ws")
+        v = sec.check(
+            "cp /etc/hosts /tmp/ws/hosts.copy", profile=CoreProfile(mode="full")
+        )
+        assert v.allowed
+
+    def test_workspace_jail_denies_cp_to_outside_workspace(self):
+        sec = self._sec(workspace_jail_root="/tmp/ws")
+        v = sec.check(
+            "cp /tmp/ws/file.txt /tmp/outside.txt", profile=CoreProfile(mode="full")
+        )
+        assert v.denied
+        assert v.error_code == "WORKSPACE_WRITE_DENIED"
+
+    def test_workspace_jail_allows_write_to_tmp_root(self):
+        sec = self._sec(
+            workspace_jail_root="/tmp/ws",
+            workspace_tmp_root="/tmp/macchiato/cli/u1",
+        )
+        v = sec.check(
+            "echo hi > /tmp/macchiato/cli/u1/out.txt",
+            profile=CoreProfile(mode="full"),
+        )
+        assert v.allowed
+
+    def test_workspace_jail_denies_write_to_other_tmp_root(self):
+        sec = self._sec(
+            workspace_jail_root="/tmp/ws",
+            workspace_tmp_root="/tmp/macchiato/cli/u1",
+        )
+        v = sec.check(
+            "echo hi > /tmp/macchiato/cli/u2/out.txt",
+            profile=CoreProfile(mode="full"),
+        )
+        assert v.denied
+        assert v.error_code == "WORKSPACE_WRITE_DENIED"
+
 
 # ── BashTool 集成测试 ─────────────────────────────────────────
 

@@ -2,11 +2,18 @@
 文件读写工具测试 - 测试 read_file, write_file, modify_file
 """
 
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
-from agent_core.config import Config, LLMConfig, FileToolsConfig
+from agent_core.config import (
+    Config,
+    LLMConfig,
+    FileToolsConfig,
+    CommandToolsConfig,
+    MemoryConfig,
+)
 from system.tools.file_tools import ReadFileTool, WriteFileTool, ModifyFileTool
 from agent_core.tools.base import ToolDefinition
 
@@ -26,7 +33,47 @@ def _make_config(
             allow_modify=allow_modify,
             base_dir=base_dir,
         ),
+        command_tools=CommandToolsConfig(
+            base_dir=base_dir,
+            workspace_isolation_enabled=False,
+        ),
     )
+
+
+def _make_workspace_sandbox_config(
+    tmp_path,
+    *,
+    source: str = "cli",
+    allow_read: bool = True,
+    allow_write: bool = True,
+    allow_modify: bool = True,
+) -> Config:
+    """通用工作区沙箱：相对路径落在 data/workspace/{frontend}/{user}/。"""
+    ws_parent = tmp_path / "workspace_parent"
+    mem_base = tmp_path / "memory_parent"
+    return Config(
+        llm=LLMConfig(api_key="test", model="test"),
+        memory=MemoryConfig(memory_base_dir=str(mem_base)),
+        file_tools=FileToolsConfig(
+            enabled=True,
+            allow_read=allow_read,
+            allow_write=allow_write,
+            allow_modify=allow_modify,
+            base_dir=str(tmp_path),
+        ),
+        command_tools=CommandToolsConfig(
+            base_dir=str(tmp_path),
+            workspace_base_dir=str(ws_parent),
+            workspace_isolation_enabled=True,
+        ),
+    )
+
+
+def _ctx(source: str = "cli", user_id: str = "u1", *, sub: bool = False) -> dict:
+    ctx = {"source": source, "user_id": user_id}
+    if sub:
+        ctx["tool_mode"] = "sub"
+    return ctx
 
 
 # ============================================================================
@@ -57,6 +104,35 @@ class TestReadFileTool:
         assert result.success
         assert result.data["content"] == "hello world"
         assert "hello.txt" in result.message
+
+    @pytest.mark.asyncio
+    async def test_read_file_workspace_relative_ok(self, tmp_path):
+        """开启工作区隔离时，相对路径解析到当前 frontend/user 工作区。"""
+        config = _make_workspace_sandbox_config(tmp_path, source="feishu")
+        f = tmp_path / "workspace_parent" / "feishu" / "r1" / "note.md"
+        f.parent.mkdir(parents=True)
+        f.write_text("workspace", encoding="utf-8")
+        tool = ReadFileTool(config=config)
+        result = await tool.execute(
+            path="note.md",
+            __execution_context__=_ctx("feishu", "r1"),
+        )
+        assert result.success
+        assert result.data["content"] == "workspace"
+
+    @pytest.mark.asyncio
+    async def test_read_file_workspace_allows_absolute_path_outside(self, tmp_path):
+        """工作区外路径保持只读，read_file 仍可读取。"""
+        config = _make_workspace_sandbox_config(tmp_path, source="feishu")
+        external = tmp_path / "outside.txt"
+        external.write_text("outside", encoding="utf-8")
+        tool = ReadFileTool(config=config)
+        result = await tool.execute(
+            path=str(external),
+            __execution_context__=_ctx("feishu", "r1"),
+        )
+        assert result.success
+        assert result.data["content"] == "outside"
 
     @pytest.mark.asyncio
     async def test_read_file_not_found(self, tmp_path):
@@ -223,18 +299,64 @@ class TestWriteFileTool:
 
     @pytest.mark.asyncio
     async def test_write_file_sub_mode_denied(self, tmp_path):
-        """sub 模式下禁止 write_file"""
+        """sub 模式下统一禁止 write_file。"""
         config = _make_config(allow_write=True, base_dir=str(tmp_path))
         tool = WriteFileTool(config=config)
         result = await tool.execute(
             path="x.txt",
             content="x",
-            __execution_context__={"tool_mode": "sub", "source": "shuiyuan"},
+            __execution_context__={"tool_mode": "sub", "source": "cli"},
         )
         assert not result.success
         assert result.error == "PERMISSION_DENIED"
         assert "sub 模式" in result.message
         assert not (tmp_path / "x.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_write_file_workspace_ok(self, tmp_path):
+        """开启工作区隔离时，可写入当前 frontend/user 工作区。"""
+        config = _make_workspace_sandbox_config(tmp_path, source="feishu", allow_write=True)
+        tool = WriteFileTool(config=config)
+        result = await tool.execute(
+            path="hello.py",
+            content="print(1)",
+            __execution_context__=_ctx("feishu", "wbzd"),
+        )
+        assert result.success
+        expected = tmp_path / "workspace_parent" / "feishu" / "wbzd" / "hello.py"
+        assert expected.read_text() == "print(1)"
+
+    @pytest.mark.asyncio
+    async def test_write_file_forbidden_outside_workspace(self, tmp_path):
+        """工作区外路径对 write_file 保持只读。"""
+        config = _make_workspace_sandbox_config(tmp_path, source="feishu", allow_write=True)
+        tool = WriteFileTool(config=config)
+        outside = tmp_path / "evil.txt"
+        result = await tool.execute(
+            path=str(outside),
+            content="x",
+            __execution_context__=_ctx("feishu", "wbzd"),
+        )
+        assert not result.success
+        assert result.error == "FORBIDDEN_PATH"
+        assert not outside.exists()
+
+    @pytest.mark.asyncio
+    async def test_write_file_tmp_dir_allowed(self, tmp_path):
+        """允许写入 frontend/user 专属临时目录。"""
+        config = _make_workspace_sandbox_config(tmp_path, source="feishu", allow_write=True)
+        tool = WriteFileTool(config=config)
+        temp_file = "/tmp/macchiato/feishu/wbzd/script.py"
+        result = await tool.execute(
+            path=temp_file,
+            content="print(1)",
+            __execution_context__=_ctx("feishu", "wbzd"),
+        )
+        try:
+            assert result.success
+            assert Path(temp_file).read_text() == "print(1)"
+        finally:
+            Path(temp_file).unlink(missing_ok=True)
 
 
 # ============================================================================
@@ -256,7 +378,7 @@ class TestModifyFileTool:
 
     @pytest.mark.asyncio
     async def test_modify_file_sub_mode_denied(self, tmp_path):
-        """sub 模式下禁止 modify_file"""
+        """sub 模式下统一禁止 modify_file。"""
         (tmp_path / "f.txt").write_text("old", encoding="utf-8")
         config = _make_config(allow_modify=True, base_dir=str(tmp_path))
         tool = ModifyFileTool(config=config)
@@ -265,12 +387,69 @@ class TestModifyFileTool:
             mode="search_replace",
             old_text="old",
             new_text="new",
-            __execution_context__={"tool_mode": "sub", "source": "shuiyuan"},
+            __execution_context__={"tool_mode": "sub", "source": "cli"},
         )
         assert not result.success
         assert result.error == "PERMISSION_DENIED"
         assert "sub 模式" in result.message
         assert (tmp_path / "f.txt").read_text() == "old"
+
+    @pytest.mark.asyncio
+    async def test_modify_file_workspace_ok(self, tmp_path):
+        """开启工作区隔离时，可修改当前 frontend/user 工作区内文件。"""
+        config = _make_workspace_sandbox_config(tmp_path, source="feishu", allow_modify=True)
+        ws_file = tmp_path / "workspace_parent" / "feishu" / "u2" / "app.py"
+        ws_file.parent.mkdir(parents=True)
+        ws_file.write_text("old", encoding="utf-8")
+        tool = ModifyFileTool(config=config)
+        result = await tool.execute(
+            path="app.py",
+            mode="search_replace",
+            old_text="old",
+            new_text="new",
+            __execution_context__=_ctx("feishu", "u2"),
+        )
+        assert result.success
+        assert ws_file.read_text() == "new"
+
+    @pytest.mark.asyncio
+    async def test_modify_file_forbidden_outside_workspace(self, tmp_path):
+        """工作区外路径对 modify_file 保持只读。"""
+        config = _make_workspace_sandbox_config(tmp_path, source="feishu", allow_modify=True)
+        outside = tmp_path / "outside.py"
+        outside.write_text("old", encoding="utf-8")
+        tool = ModifyFileTool(config=config)
+        result = await tool.execute(
+            path=str(outside),
+            mode="search_replace",
+            old_text="old",
+            new_text="new",
+            __execution_context__=_ctx("feishu", "u2"),
+        )
+        assert not result.success
+        assert result.error == "FORBIDDEN_PATH"
+        assert outside.read_text() == "old"
+
+    @pytest.mark.asyncio
+    async def test_modify_file_tmp_dir_allowed(self, tmp_path):
+        """允许修改 frontend/user 专属临时目录内文件。"""
+        config = _make_workspace_sandbox_config(tmp_path, source="feishu", allow_modify=True)
+        temp_file = Path("/tmp/macchiato/feishu/u2/app.py")
+        temp_file.parent.mkdir(parents=True, exist_ok=True)
+        temp_file.write_text("old", encoding="utf-8")
+        tool = ModifyFileTool(config=config)
+        result = await tool.execute(
+            path=str(temp_file),
+            mode="search_replace",
+            old_text="old",
+            new_text="new",
+            __execution_context__=_ctx("feishu", "u2"),
+        )
+        try:
+            assert result.success
+            assert temp_file.read_text() == "new"
+        finally:
+            temp_file.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
     async def test_modify_file_search_replace_exact_success(self, tmp_path):

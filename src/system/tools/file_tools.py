@@ -1,8 +1,10 @@
 """
 文件读写工具 - 提供 read_file, write_file, modify_file
 
-路径可为任意有效路径（/etc、~/.config 等），与 command_tools 一致。
-读取受 allow_read 配置控制，写入和修改需要 allow_write/allow_modify 权限。
+读取受 allow_read 配置控制；写入和修改需要 allow_write/allow_modify 权限。
+开启工作区隔离时，相对路径默认落在当前 frontend/user 的工作区；
+写入/修改仅允许发生在该工作区或临时目录 `/tmp/macchiato/{frontend}/{user}/`
+内，其他路径保持只读。
 modify_file 支持三种模式：search_replace（局部替换）、append（追加）、overwrite（覆盖）。
 """
 
@@ -31,6 +33,97 @@ def _redirect_memory_md_if_needed(path_str: str, exec_ctx: dict, config: Config)
         ]
     except Exception:
         return path_str
+
+
+def _sub_mode_forbids_file_mutation(exec_ctx: dict) -> bool:
+    """sub 模式统一禁止写/改文件。"""
+    return (exec_ctx.get("tool_mode") or "kernel").lower() == "sub"
+
+
+def _resolve_workspace_root_for_exec_ctx(exec_ctx: dict, config: Config) -> Path:
+    """当前 frontend/user 的工作区根目录。"""
+    from agent_core.agent.memory_paths import (
+        effective_memory_namespace_from_execution_context,
+    )
+    from agent_core.agent.workspace_paths import resolve_workspace_owner_dir
+
+    src, uid = effective_memory_namespace_from_execution_context(exec_ctx)
+    return Path(
+        resolve_workspace_owner_dir(config.command_tools, uid, source=src)
+    ).expanduser().resolve()
+
+
+def _resolve_workspace_tmp_root_for_exec_ctx(exec_ctx: dict, config: Config) -> Path:
+    """当前 frontend/user 的临时目录根。"""
+    from agent_core.agent.memory_paths import (
+        effective_memory_namespace_from_execution_context,
+    )
+    from agent_core.agent.workspace_paths import resolve_workspace_tmp_dir
+
+    src, uid = effective_memory_namespace_from_execution_context(exec_ctx)
+    return Path(
+        resolve_workspace_tmp_dir(config.command_tools, uid, source=src)
+    ).expanduser().resolve()
+
+
+def _is_path_within_root(candidate: Path, root: Path) -> bool:
+    try:
+        candidate.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _resolve_path_for_file_tool(
+    path_str: str,
+    exec_ctx: dict,
+    ft_cfg: FileToolsConfig,
+    config: Config,
+) -> tuple[Optional[Path], Optional[str]]:
+    """解析读取路径。开启工作区隔离时，相对路径相对当前工作区；绝对路径可读任意位置。"""
+    if getattr(config.command_tools, "workspace_isolation_enabled", False):
+        workspace_root = _resolve_workspace_root_for_exec_ctx(exec_ctx, config)
+        try:
+            raw = Path(path_str).expanduser()
+            candidate = (
+                raw.resolve() if raw.is_absolute() else (workspace_root / raw).resolve()
+            )
+            return candidate, None
+        except (OSError, ValueError) as e:
+            return None, f"无效路径: {e}"
+    base = Path(ft_cfg.base_dir).resolve()
+    try:
+        raw = Path(path_str).expanduser()
+        resolved = raw.resolve() if raw.is_absolute() else (base / raw).resolve()
+        return resolved, None
+    except (OSError, ValueError) as e:
+        return None, f"无效路径: {e}"
+
+
+def _resolve_mutation_path_for_file_tool(
+    path_str: str,
+    exec_ctx: dict,
+    ft_cfg: FileToolsConfig,
+    config: Config,
+) -> tuple[Optional[Path], Optional[str]]:
+    """
+    解析写入/修改路径。开启工作区隔离时，仅允许当前 frontend/user 的工作区内路径。
+    """
+    resolved, err = _resolve_path_for_file_tool(path_str, exec_ctx, ft_cfg, config)
+    if err or resolved is None:
+        return resolved, err
+    if getattr(config.command_tools, "workspace_isolation_enabled", False):
+        workspace_root = _resolve_workspace_root_for_exec_ctx(exec_ctx, config)
+        tmp_root = _resolve_workspace_tmp_root_for_exec_ctx(exec_ctx, config)
+        if not (
+            _is_path_within_root(resolved, workspace_root)
+            or _is_path_within_root(resolved, tmp_root)
+        ):
+            return None, (
+                "文件写入/修改仅允许在当前工作区或临时目录内: "
+                f"{workspace_root} ; {tmp_root}"
+            )
+    return resolved, None
 
 
 class ReadFileTool(BaseTool):
@@ -110,28 +203,13 @@ class ReadFileTool(BaseTool):
                 },
             ],
             usage_notes=[
-                "path 支持任意有效路径（/etc/xxx、~/.config/xxx 等），相对路径相对于 base_dir",
+                "开启工作区隔离时，相对路径相对于当前 frontend/user 的工作区；绝对路径仍可读取任意位置",
                 "只能读取文本文件，二进制文件会返回错误",
                 "文件不存在时返回明确错误",
                 "对于大文件，建议结合 start_line 和 max_lines 分段读取，以避免一次性加载过多内容",
             ],
             tags=["文件", "读取"],
         )
-
-    def _resolve_path(self, path: str) -> tuple[Optional[Path], Optional[str]]:
-        """
-        解析路径，支持任意有效路径（绝对路径直接使用，相对路径相对于 base_dir）。
-
-        Returns:
-            (resolved_path, error_message) - 成功时 error_message 为 None
-        """
-        base = Path(self._ft_config.base_dir).resolve()
-        try:
-            raw = Path(path).expanduser()
-            resolved = raw.resolve() if raw.is_absolute() else (base / raw).resolve()
-            return resolved, None
-        except (OSError, ValueError) as e:
-            return None, f"无效路径: {e}"
 
     async def execute(self, **kwargs) -> ToolResult:
         exec_ctx = kwargs.pop("__execution_context__", None) or {}
@@ -153,32 +231,21 @@ class ReadFileTool(BaseTool):
                 message="文件读取功能未启用，请在配置中设置 file_tools.allow_read: true",
             )
 
-        resolved, err = self._resolve_path(path_str)
-        if err:
-            return ToolResult(success=False, error="INVALID_PATH", message=err)
-
-        # 水源会话：仅允许读取本用户的长期记忆 MEMORY.md
-        from agent_core.agent.memory_paths import (
-            effective_memory_namespace_from_execution_context,
-            resolve_memory_owner_paths,
+        resolved, err = _resolve_path_for_file_tool(
+            path_str, exec_ctx, self._ft_config, self._config
         )
-        from agent_core.config import MemoryConfig
-
-        ns_src, ns_uid = effective_memory_namespace_from_execution_context(exec_ctx)
-        if ns_src == "shuiyuan" and ns_uid:
-            mem_cfg: MemoryConfig = (
-                getattr(self._config, "memory", None) or MemoryConfig()
+        if err:
+            return ToolResult(
+                success=False,
+                error="INVALID_PATH",
+                message=err,
             )
-            paths = resolve_memory_owner_paths(
-                mem_cfg, ns_uid, config=self._config, source="shuiyuan"
+        if resolved is None:
+            return ToolResult(
+                success=False,
+                error="INVALID_PATH",
+                message=f"无效路径: {path_str}",
             )
-            allowed_memory_md = Path(paths["memory_md_path"]).resolve()
-            if resolved != allowed_memory_md:
-                return ToolResult(
-                    success=False,
-                    error="FORBIDDEN_PATH",
-                    message="水源会话仅允许读取本用户的长期记忆文件 MEMORY.md。",
-                )
 
         encoding = kwargs.get("encoding", "utf-8")
         start_line = kwargs.get("start_line")
@@ -345,25 +412,15 @@ class WriteFileTool(BaseTool):
             ],
             usage_notes=[
                 "写入和覆盖需要配置允许：file_tools.allow_write: true",
-                "path 支持任意有效路径（/etc、~/.config 等）",
+                "开启工作区隔离时，仅允许写入当前 frontend/user 的工作区或 `/tmp/macchiato/{frontend}/{user}/`；其他路径保持只读",
                 "会完全覆盖已存在的文件",
             ],
             tags=["文件", "写入"],
         )
 
-    def _resolve_path(self, path: str) -> tuple[Optional[Path], Optional[str]]:
-        base = Path(self._ft_config.base_dir).resolve()
-        try:
-            raw = Path(path).expanduser()
-            resolved = raw.resolve() if raw.is_absolute() else (base / raw).resolve()
-            return resolved, None
-        except (OSError, ValueError) as e:
-            return None, f"无效路径: {e}"
-
     async def execute(self, **kwargs) -> ToolResult:
-        # sub 模式下禁止写入（破坏性操作）
         exec_ctx = kwargs.pop("__execution_context__", None) or {}
-        if (exec_ctx.get("tool_mode") or "kernel").lower() == "sub":
+        if _sub_mode_forbids_file_mutation(exec_ctx):
             return ToolResult(
                 success=False,
                 error="PERMISSION_DENIED",
@@ -395,29 +452,25 @@ class WriteFileTool(BaseTool):
                 message="文件写入功能未启用。请在配置中设置 file_tools.allow_write: true",
             )
 
-        resolved, err = self._resolve_path(path_str)
-        if err:
-            return ToolResult(success=False, error="INVALID_PATH", message=err)
-
-        from agent_core.agent.memory_paths import (
-            effective_memory_namespace_from_execution_context,
-            resolve_memory_owner_paths,
+        resolved, err = _resolve_mutation_path_for_file_tool(
+            path_str, exec_ctx, self._ft_config, self._config
         )
-        from agent_core.config import MemoryConfig
-
-        ns_src, ns_uid = effective_memory_namespace_from_execution_context(exec_ctx)
-        if ns_src == "shuiyuan" and ns_uid:
-            mem_cfg = getattr(self._config, "memory", None) or MemoryConfig()
-            paths = resolve_memory_owner_paths(
-                mem_cfg, ns_uid, config=self._config, source="shuiyuan"
+        if err:
+            return ToolResult(
+                success=False,
+                error=(
+                    "FORBIDDEN_PATH"
+                    if "工作区内" in err or "工作区或临时目录内" in err
+                    else "INVALID_PATH"
+                ),
+                message=err,
             )
-            allowed_memory_md = Path(paths["memory_md_path"]).resolve()
-            if resolved != allowed_memory_md:
-                return ToolResult(
-                    success=False,
-                    error="FORBIDDEN_PATH",
-                    message="水源会话仅允许写入本用户的长期记忆文件 MEMORY.md。",
-                )
+        if resolved is None:
+            return ToolResult(
+                success=False,
+                error="INVALID_PATH",
+                message=f"无效路径: {path_str}",
+            )
 
         # 若有权限提供者，则调用确认
         if self._permission_provider:
@@ -558,7 +611,7 @@ class ModifyFileTool(BaseTool):
 
 1. **search_replace**（推荐）：局部替换，只需提供 old_text 和 new_text，Token 成本低。
    适合：修改函数、插入几行、替换配置项等。支持多级回退匹配（精确→空白容差→锚点）。
-2. **append**：在文件末尾追加内容。适合：日志、MEMORY.md、笔记追加。
+2. **append**：在文件末尾追加内容。适合：日志、笔记追加。
 3. **overwrite**：覆盖整个文件。适合：小文件重写；search_replace 多次失败时的兜底。
 
 优先使用 search_replace；大范围修改或匹配失败时，用 read_file 读取后用 write_file 覆盖。""",
@@ -623,9 +676,9 @@ class ModifyFileTool(BaseTool):
                 {
                     "description": "在文件末尾追加",
                     "params": {
-                        "path": "MEMORY.md",
+                        "path": "notes.md",
                         "mode": "append",
-                        "content": "\n- 用户偏好下午开会",
+                        "content": "\n- 今日新增想法",
                     },
                 },
                 {
@@ -639,26 +692,16 @@ class ModifyFileTool(BaseTool):
             ],
             usage_notes=[
                 "修改需要配置允许：file_tools.allow_modify: true",
-                "path 支持任意有效路径（/etc、~/.config 等）",
+                "开启工作区隔离时，仅允许修改当前 frontend/user 的工作区或 `/tmp/macchiato/{frontend}/{user}/`；其他路径保持只读",
                 "search_replace 时 old_text 需与文件内容完全一致；失败时建议 read_file + write_file",
                 "append 模式下文件不存在会先创建",
             ],
             tags=["文件", "修改"],
         )
 
-    def _resolve_path(self, path: str) -> tuple[Optional[Path], Optional[str]]:
-        base = Path(self._ft_config.base_dir).resolve()
-        try:
-            raw = Path(path).expanduser()
-            resolved = raw.resolve() if raw.is_absolute() else (base / raw).resolve()
-            return resolved, None
-        except (OSError, ValueError) as e:
-            return None, f"无效路径: {e}"
-
     async def execute(self, **kwargs) -> ToolResult:
-        # sub 模式下禁止修改（破坏性操作）
         exec_ctx = kwargs.pop("__execution_context__", None) or {}
-        if (exec_ctx.get("tool_mode") or "kernel").lower() == "sub":
+        if _sub_mode_forbids_file_mutation(exec_ctx):
             return ToolResult(
                 success=False,
                 error="PERMISSION_DENIED",
@@ -683,9 +726,25 @@ class ModifyFileTool(BaseTool):
         path_str = _redirect_memory_md_if_needed(path_str, exec_ctx, self._config)
         kwargs["path"] = path_str
 
-        resolved, err = self._resolve_path(path_str)
+        resolved, err = _resolve_mutation_path_for_file_tool(
+            path_str, exec_ctx, self._ft_config, self._config
+        )
         if err:
-            return ToolResult(success=False, error="INVALID_PATH", message=err)
+            return ToolResult(
+                success=False,
+                error=(
+                    "FORBIDDEN_PATH"
+                    if "工作区内" in err or "工作区或临时目录内" in err
+                    else "INVALID_PATH"
+                ),
+                message=err,
+            )
+        if resolved is None:
+            return ToolResult(
+                success=False,
+                error="INVALID_PATH",
+                message=f"无效路径: {path_str}",
+            )
 
         mode = kwargs.get("mode", "search_replace")
         if mode not in ("search_replace", "append", "overwrite"):
@@ -733,6 +792,7 @@ class ModifyFileTool(BaseTool):
                     error="SEARCH_REPLACE_FAILED",
                     message=err_msg,
                 )
+            assert new_content is not None
 
             if self._permission_provider:
                 summary = (

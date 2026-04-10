@@ -10,6 +10,8 @@ from agent_core.config import CommandToolsConfig
 
 from .memory_paths import validate_logic_namespace_segment
 
+_TMP_BASE_DIR = Path("/tmp/macchiato")
+
 
 def _ns_segment(value: str, default: str) -> str:
     return (value or "").strip() or default
@@ -28,6 +30,18 @@ def resolve_workspace_owner_dir(
     return str(base / fe / uid)
 
 
+def resolve_workspace_tmp_dir(
+    cmd_cfg: CommandToolsConfig,
+    user_id: str,
+    *,
+    source: str = "cli",
+) -> str:
+    """返回 /tmp/macchiato/{frontend}/{user_id}/ 目录路径字符串。"""
+    fe = validate_logic_namespace_segment(_ns_segment(source, "cli"), what="frontend")
+    uid = validate_logic_namespace_segment(_ns_segment(user_id, "root"), what="user_id")
+    return str(_TMP_BASE_DIR / fe / uid)
+
+
 def ensure_workspace_owner_layout(
     cmd_cfg: CommandToolsConfig,
     user_id: str,
@@ -35,25 +49,29 @@ def ensure_workspace_owner_layout(
     source: str = "cli",
 ) -> Dict[str, Any]:
     """
-    在 {workspace_base_dir}/{frontend}/{user}/ 下创建工作区目录（幂等）。
+    在 {workspace_base_dir}/{frontend}/{user}/ 与 /tmp/macchiato/{frontend}/{user}/
+    下创建目录（幂等）。
 
     与 ensure_memory_owner_layout 的命名空间规则一致。
     """
     fe = validate_logic_namespace_segment(_ns_segment(source, "cli"), what="frontend")
     uid = validate_logic_namespace_segment(_ns_segment(user_id, "root"), what="user_id")
     owner = Path((cmd_cfg.workspace_base_dir or "./data/workspace").strip()) / fe / uid
+    tmp_dir = _TMP_BASE_DIR / fe / uid
     created_paths: List[str] = []
-    if owner.exists():
-        if not owner.is_dir():
-            raise ValueError(f"工作区路径已存在且不是目录: {owner}")
-    else:
-        owner.mkdir(parents=True, exist_ok=True)
-        created_paths.append(str(owner))
+    for path_obj, label in ((owner, "工作区路径"), (tmp_dir, "临时目录路径")):
+        if path_obj.exists():
+            if not path_obj.is_dir():
+                raise ValueError(f"{label}已存在且不是目录: {path_obj}")
+        else:
+            path_obj.mkdir(parents=True, exist_ok=True)
+            created_paths.append(str(path_obj))
     return {
         "frontend": fe,
         "user_id": uid,
         "workspace_owner": f"{fe}:{uid}",
         "owner_dir": str(owner),
+        "tmp_dir": str(tmp_dir),
         "created_paths": created_paths,
     }
 

@@ -53,7 +53,7 @@ class MCPClientManager:
             from mcp.client.stdio import stdio_client
         except ImportError as e:
             raise RuntimeError(
-                "未安装 mcp 依赖，请先执行: pip install -r requirements.txt"
+                "未安装 mcp 依赖，请先执行: source init.sh（或 uv sync --all-groups）"
             ) from e
 
         for server in self._config.servers:

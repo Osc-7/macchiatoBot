@@ -20,6 +20,9 @@ wheels/
 .installed.cfg
 *.egg
 
+# Node (若在仓库根执行过 npm/npx 安装，避免误提交；MCP 用 npx 缓存即可)
+node_modules/
+
 # Virtual Environment
 .venv/
 venv/

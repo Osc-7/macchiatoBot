@@ -23,6 +23,7 @@ def validate_logic_namespace_segment(value: str, *, what: str = "segment") -> st
     校验多前端/多用户下的逻辑命名片段（frontend、user_id 等）。
 
     禁止路径穿越与冒号（session_id / memory_owner 用冒号拼接）。
+    允许 Unicode 字符（支持中文用户名等），现代文件系统都支持。
     """
     s = (value or "").strip()
     if not s:
@@ -31,8 +32,7 @@ def validate_logic_namespace_segment(value: str, *, what: str = "segment") -> st
         raise ValueError(f"{what} 过长（最多 128 字符）")
     if s in (".", "..") or any(c in s for c in "/\\:"):
         raise ValueError(f"{what} 不能包含路径分隔符或冒号")
-    if not _NS_SEGMENT_RE.fullmatch(s):
-        raise ValueError(f"{what} 仅允许字母、数字、._-")
+    # 允许 Unicode（中文用户名等），只禁止路径穿越字符
     return s
 
 

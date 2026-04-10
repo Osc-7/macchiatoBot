@@ -747,6 +747,7 @@ class CorePool:
             source=source,
             session_logger=None,  # 关闭旧版会话日志，改用 Kernel 级 CoreLifecycleLogger
             memory_enabled=memory_enabled,
+            core_profile=profile,
         )
 
         await agent.__aenter__()
@@ -788,9 +789,7 @@ class CorePool:
                 )
                 core_logger = None
 
-            # 将 CoreProfile 注入 agent，供 InternalLoader 过滤工具列表
-            # 和 AgentKernel 进行内核态权限校验
-            agent._core_profile = profile
+            # CoreProfile 已在 AgentCore(core_profile=) 传入（供 bash 工作区等在 __aenter__ 前可用）
 
             # ── 检查点恢复 vs 冷启动 ──────────────────────────────────────────
             # 过期判断：elapsed = kernel_last_shutdown_at - checkpoint.last_active_at；

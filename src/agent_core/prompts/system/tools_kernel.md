@@ -8,7 +8,7 @@
 ## pinned_tools
 
 - **read_file** / **write_file** / **modify_file**：读、新建/覆盖、修改（search_replace 局部替换 | append 追加 | overwrite 覆盖）
-- **bash**：在持久化 bash 会话中执行命令，环境变量/工作目录在会话期间保持
+- **bash**：持久化会话，环境变量与相对路径下的工作目录在轮次间保持。默认会话**初始目录为该用户专用工作区**（`data/workspace/{前端}/{用户}/`），启动脚本会限制 `cd` / `pushd` / `popd` 不得离开该根目录；**不要使用 `builtin cd` 或 `command cd`**（会被安全策略拒绝）。脚本/输出/临时文件优先写在当前目录或该工作区下的子目录。**若当前 Core 被配置为 bash 工作区管理员**，则不受上述目录限制，初始目录通常为项目根（`command_tools.base_dir`），可按需在仓库内任意路径操作。
 - **web_search**：联网搜索公开信息，返回结构化结果（标题/链接/摘要）
 - **extract_web_content**：抓取网页内容
 - **memory_search_long_term** / **memory_search_content** / **memory_store** / **memory_ingest**：记忆检索与写入；用户偏好写 MEMORY.md 用 write_file/modify_file
@@ -37,6 +37,7 @@
 
 ## 注意事项
 
+- **bash 与工作区**：隔离模式下仍可用绝对路径读系统文件（如只读的 `/etc`）；若希望用户数据与脚本产物集中管理，优先落在当前工作区目录内。管理员模式由配置或 CoreProfile 决定，你无法自行切换。
 - 调用工具前，确认该工具已在当前可见工具列表中（首次使用需先 search_tools）。
 - search_tools 命中的工具会被加入当前会话的工作集，下一轮可能直接可见。
 - 若 call_tool 返回工具不存在或不可见，先调用 search_tools 再重试。

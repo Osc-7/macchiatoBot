@@ -380,7 +380,22 @@ class CommandToolsConfig(BaseModel):
     )
     base_dir: str = Field(
         default=".",
-        description="bash 会话初始工作目录",
+        description="bash 会话初始工作目录；开启工作区隔离时仅作未隔离/超级管理员模式下的 cwd",
+    )
+    workspace_base_dir: str = Field(
+        default="./data/workspace",
+        description="bash 工作区根目录；与 memory 一致为 {base}/{frontend}/{user}/",
+    )
+    workspace_isolation_enabled: bool = Field(
+        default=True,
+        description="为 True 时各（非管理员）Core 的 bash 初始 cwd 落在 workspace_base_dir 下对应用户目录，并注入 cd 防护",
+    )
+    workspace_admin_memory_owners: List[str] = Field(
+        default_factory=list,
+        description=(
+            "具有 bash 全盘工作目录权限的 memory_owner 列表（形如 cli:root、feishu:ou_xxx）；"
+            "亦可对单个 Core 设置 CoreProfile.bash_workspace_admin"
+        ),
     )
     default_timeout_seconds: float = Field(
         default=30.0,

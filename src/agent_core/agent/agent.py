@@ -110,6 +110,7 @@ class AgentCore:
         defer_mcp_connect: bool = False,
         *,
         memory_enabled: Optional[bool] = None,
+        core_profile: Optional[Any] = None,
     ):
         """
         初始化 Agent。
@@ -124,6 +125,7 @@ class AgentCore:
             source: 来源命名空间（如 cli/qq/whatsapp）
             defer_mcp_connect: 为 True 时 __aenter__ 不连接 MCP，需稍后调用 ensure_mcp_connected()（用于 daemon 先完成启动再连 MCP）
             memory_enabled: 覆盖配置级 memory.enabled，用于按 Core 粒度关闭记忆（例如 cron/heartbeat）
+            core_profile: Kernel 侧 CoreProfile（需在 __aenter__ 前传入，以便 bash 工作区与权限与 Core 一致）
         """
         self._config = config or get_config()
         self._user_id = user_id.strip() or "root"
@@ -185,7 +187,7 @@ class AgentCore:
         # ChatHistoryDB 最后同步到的消息 ID（用于跨终端增量同步）
         self._last_history_id: int = 0
         # CoreProfile — Kernel 注入的权限配置；None 表示无限制（向后兼容）
-        self._core_profile: Optional[Any] = None
+        self._core_profile: Optional[Any] = core_profile
 
         # 四层记忆系统
         mem_cfg: MemoryConfig = self._config.memory
@@ -1237,14 +1239,36 @@ class AgentCore:
             from agent_core.bash_security import BashSecurity
             from agent_core.tools.bash_tool import BashTool
 
+            from agent_core.agent.workspace_paths import (
+                build_bash_workspace_guard_init,
+                is_bash_workspace_admin,
+                resolve_bash_working_dir,
+            )
+
+            profile = self._core_profile
+            bash_cwd = resolve_bash_working_dir(
+                cmd_cfg, self._user_id, source=self._source, profile=profile
+            )
+            ws_restricted = cmd_cfg.workspace_isolation_enabled and not is_bash_workspace_admin(
+                cmd_cfg, self._source, self._user_id, profile
+            )
+            guard_init = (
+                build_bash_workspace_guard_init(str(Path(bash_cwd).resolve()))
+                if ws_restricted
+                else []
+            )
+            jail_root = (
+                str(Path(bash_cwd).resolve()) if ws_restricted else None
+            )
+            init_cmds = guard_init + list(cmd_cfg.init_commands or [])
             rt_config = BashRuntimeConfig(
                 shell_path=cmd_cfg.shell_path,
-                base_dir=cmd_cfg.base_dir,
+                base_dir=bash_cwd,
                 default_timeout_seconds=cmd_cfg.default_timeout_seconds,
                 max_timeout_seconds=cmd_cfg.max_timeout_seconds,
                 default_output_limit=cmd_cfg.default_output_limit,
                 max_output_limit=cmd_cfg.max_output_limit,
-                init_commands=list(cmd_cfg.init_commands or []),
+                init_commands=init_cmds,
                 snapshot_enabled=cmd_cfg.snapshot_enabled,
                 snapshot_dir=cmd_cfg.snapshot_dir,
             )
@@ -1253,6 +1277,7 @@ class AgentCore:
             self._bash_security = BashSecurity(
                 restricted_whitelist=list(cmd_cfg.subagent_command_whitelist or []),
                 allow_run_for_restricted=cmd_cfg.allow_run_for_subagent,
+                workspace_jail_root=jail_root,
             )
             if not self._tool_registry.has("bash"):
                 self._tool_registry.register(

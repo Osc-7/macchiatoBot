@@ -143,6 +143,9 @@ class TestConfigModels:
         assert ct.max_timeout_seconds == 300.0
         assert ct.default_output_limit == 12000
         assert ct.max_output_limit == 200000
+        assert ct.workspace_base_dir == "./data/workspace"
+        assert ct.workspace_isolation_enabled is True
+        assert ct.workspace_admin_memory_owners == []
 
     def test_config_has_command_tools_default(self):
         """测试 Config 未指定 command_tools 时使用默认值"""

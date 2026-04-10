@@ -89,6 +89,9 @@ class CoreProfile:
     # 适合 background 模式（定时任务 / 心跳）等一次性或只读任务。
     memory_enabled: bool = True
 
+    # bash 工作区：为 True 时该 Core 使用 command_tools.base_dir 作为初始 cwd，不启用按用户目录隔离与 cd 防护（全盘可访问，与 config.command_tools.workspace_admin_memory_owners 二选一配置方式）。
+    bash_workspace_admin: bool = False
+
     max_context_tokens: Optional[int] = 80_000
     session_expired_seconds: int = 1_800
 

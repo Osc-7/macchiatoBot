@@ -432,7 +432,8 @@ class KernelTerminal:
         warm_spawn: bool = False,
     ) -> Dict[str, Any]:
         """
-        为指定前端创建逻辑用户：在 data/memory/{frontend}/{user}/ 下建立标准目录（幂等）。
+        为指定前端创建逻辑用户：在 data/memory/{frontend}/{user}/ 下建立标准目录（幂等），
+        并在启用 bash 工作区隔离时创建 data/workspace/{frontend}/{user}/（与 memory 同层级划分）。
 
         可选 warm_spawn：额外 ``CorePool.acquire`` 预热一条 ``{frontend}:{user}`` 会话（消耗资源）。
         """
@@ -440,14 +441,26 @@ class KernelTerminal:
             ensure_memory_owner_layout,
             list_user_ids_under_frontend,
         )
+        from agent_core.agent.workspace_paths import (
+            ensure_workspace_owner_layout,
+            list_user_ids_under_workspace,
+        )
 
         mem_cfg = self._pool._config.memory
         layout = ensure_memory_owner_layout(mem_cfg, user_id, source=frontend)
+        cmd_cfg = self._pool._config.command_tools
+        workspace_layout: Optional[Dict[str, Any]] = None
+        if getattr(cmd_cfg, "workspace_isolation_enabled", True):
+            workspace_layout = ensure_workspace_owner_layout(
+                cmd_cfg, user_id, source=frontend
+            )
         result: Dict[str, Any] = {
             **layout,
             "warm_spawn": bool(warm_spawn),
             "spawned": False,
         }
+        if workspace_layout is not None:
+            result["workspace"] = workspace_layout
         if warm_spawn:
             sid = str(layout["default_session_id"])
             fe = str(layout["frontend"])
@@ -458,6 +471,10 @@ class KernelTerminal:
         result["all_users_on_frontend"] = list_user_ids_under_frontend(
             mem_cfg, frontend=str(layout["frontend"])
         )
+        if workspace_layout is not None:
+            result["all_workspace_users_on_frontend"] = list_user_ids_under_workspace(
+                cmd_cfg, frontend=str(layout["frontend"])
+            )
         return result
 
     def list_logic_users(self, *, frontend: str = "cli") -> Dict[str, Any]:

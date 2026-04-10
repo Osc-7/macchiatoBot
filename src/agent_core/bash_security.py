@@ -83,6 +83,10 @@ _DEFAULT_RESTRICTED_WHITELIST = frozenset([
     "which", "file", "stat", "wc", "date", "whoami", "id", "env", "printenv",
 ])
 
+# 工作区隔离：阻止通过特殊 builtin 绕过覆盖后的 cd
+_WORKSPACE_JAIL_BUILTIN_CD = re.compile(r"\bbuiltin\s+cd\b", re.I)
+_WORKSPACE_JAIL_COMMAND_CD = re.compile(r"\bcommand\s+cd\b", re.I)
+
 
 class BashSecurity:
     """
@@ -98,11 +102,13 @@ class BashSecurity:
         *,
         restricted_whitelist: Optional[List[str]] = None,
         allow_run_for_restricted: bool = False,
+        workspace_jail_root: Optional[str] = None,
     ) -> None:
         self._restricted_whitelist = frozenset(
             restricted_whitelist
         ) if restricted_whitelist is not None else _DEFAULT_RESTRICTED_WHITELIST
         self._allow_run_for_restricted = allow_run_for_restricted
+        self._workspace_jail_root = workspace_jail_root
 
     def check(
         self,
@@ -126,6 +132,11 @@ class BashSecurity:
                 reason="命令为空",
                 error_code="EMPTY_COMMAND",
             )
+
+        if self._workspace_jail_root:
+            jail = self._check_workspace_jail_bypass(command)
+            if jail is not None:
+                return jail
 
         mode = (profile.mode if profile else "full").lower()
         is_restricted = mode == "sub"
@@ -154,6 +165,22 @@ class BashSecurity:
             )
 
         return _VERDICT_ALLOW
+
+    def _check_workspace_jail_bypass(self, command: str) -> Optional[SecurityVerdict]:
+        """工作区隔离已启用时，禁止显式调用 builtin/command cd 绕过函数式 cd。"""
+        if _WORKSPACE_JAIL_BUILTIN_CD.search(command):
+            return SecurityVerdict(
+                SecurityAction.DENY,
+                reason="工作区隔离模式下禁止使用 builtin cd 绕过目录防护",
+                error_code="WORKSPACE_JAIL_DENIED",
+            )
+        if _WORKSPACE_JAIL_COMMAND_CD.search(command):
+            return SecurityVerdict(
+                SecurityAction.DENY,
+                reason="工作区隔离模式下禁止使用 command cd 绕过目录防护",
+                error_code="WORKSPACE_JAIL_DENIED",
+            )
+        return None
 
     # ── Layer 1 实现 ──────────────────────────────────────────
 

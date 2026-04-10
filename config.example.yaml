@@ -180,6 +180,12 @@ command_tools:
   allow_run_for_subagent: false
   # 受限模式命令白名单（默认含 find 等只读命令；可在此追加）
   # subagent_command_whitelist: ["ls", "pwd", "cat", "head", "tail", "grep", "find", "echo", "which", "file", "stat", "wc", "date", "whoami", "id", "env", "printenv"]
+  # bash 工作区（与 memory 相同：./data/workspace/{frontend}/{user}/）；非管理员 Core 的持久 bash 初始 cwd 与 HOME 在此
+  workspace_base_dir: "./data/workspace"
+  workspace_isolation_enabled: true   # false 时所有 Core 均用 base_dir 作为初始 cwd，且不注入 cd 防护
+  # 具有「全盘」bash 工作目录的管理员（memory_owner 形如 cli:root）；亦可对单个 Core 设 CoreProfile.bash_workspace_admin
+  # workspace_admin_memory_owners: ["cli:root"]
+  # base_dir: "."                      # 管理员或未开隔离时 bash 的初始目录（通常为项目根）
 
 # Agent 配置
 agent:

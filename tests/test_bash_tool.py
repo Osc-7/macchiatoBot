@@ -124,6 +124,22 @@ class TestBashSecurity:
         v = sec.check("pip install requests", profile=CoreProfile(mode="full"))
         assert v.allowed
 
+    def test_workspace_jail_denies_builtin_cd(self):
+        sec = self._sec(workspace_jail_root="/tmp/ws")
+        v = sec.check("builtin cd /", profile=CoreProfile(mode="full"))
+        assert v.denied
+        assert v.error_code == "WORKSPACE_JAIL_DENIED"
+
+    def test_workspace_jail_denies_command_cd(self):
+        sec = self._sec(workspace_jail_root="/tmp/ws")
+        v = sec.check("command cd /etc", profile=CoreProfile(mode="full"))
+        assert v.denied
+
+    def test_workspace_jail_allows_normal_cd_when_jailed(self):
+        sec = self._sec(workspace_jail_root="/tmp/ws")
+        v = sec.check("cd subdir", profile=CoreProfile(mode="full"))
+        assert v.allowed
+
 
 # ── BashTool 集成测试 ─────────────────────────────────────────
 

@@ -15,7 +15,7 @@ import os
 import random
 import time
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 import requests
 
@@ -66,15 +66,15 @@ def post_reply(
     *,
     db: ShuiyuanDB,
     client: ShuiyuanClient,
-) -> tuple[bool, str]:
+) -> Tuple[bool, str, Optional[int]]:
     """
     检查限流后发帖，并保存到聊天记录。
 
     Returns:
-        (success, message)
+        (success, message, post_id)；失败时 post_id 为 None。
     """
     if not db.check_reply_allowed(username):
-        return False, "限流：该用户在本分钟内回复次数已达上限，请稍后再试"
+        return False, "限流：该用户在本分钟内回复次数已达上限，请稍后再试", None
 
     raw_with_marker = _attach_hidden_marker(raw)
 
@@ -88,7 +88,7 @@ def post_reply(
             )
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             if attempt >= _POST_REPLY_MAX_ATTEMPTS - 1:
-                return False, f"发帖失败：网络错误 {e}"
+                return False, f"发帖失败：网络错误 {e}", None
             delay = _POST_REPLY_BASE_DELAY_SEC * (2**attempt)
             logger.warning(
                 "发帖网络异常 (%d/%d)，%.1fs 后重试: %s",
@@ -107,7 +107,7 @@ def post_reply(
             return False, (
                 "发帖失败：User-Api-Key 需含 write 权限。"
                 "请运行 python -m shuiyuan_integration.user_api_key 并传入 scopes=['read','write'] 重新生成 Key。"
-            )
+            ), None
 
         if status_code in _TRANSIENT_HTTP and attempt < _POST_REPLY_MAX_ATTEMPTS - 1:
             delay = _POST_REPLY_BASE_DELAY_SEC * (2**attempt)
@@ -124,11 +124,11 @@ def post_reply(
             continue
 
         if status_code == 429:
-            return False, "限流：水源 API 达到频率限制(429)，请稍后再试"
+            return False, "限流：水源 API 达到频率限制(429)，请稍后再试", None
         msg = f"发帖失败：HTTP {status_code}"
         if err_detail:
             msg += f" — {err_detail}"
-        return False, msg
+        return False, msg, None
 
     assert result is not None  # 成功路径已由 break 保证
 
@@ -136,7 +136,81 @@ def post_reply(
     post_id = result.get("id")
     db.append_chat(username, topic_id, "assistant", raw_with_marker, post_id=post_id)
 
-    return True, f"已回复，post_id={post_id}"
+    return True, f"已回复，post_id={post_id}", post_id
+
+
+def update_post_reply(
+    post_id: int,
+    raw: str,
+    *,
+    client: ShuiyuanClient,
+    edit_reason: str = "合并子任务 / 后台推送回复",
+) -> Tuple[bool, str]:
+    """
+    更新已发布帖子正文（不增加「每分钟回复次数」计数）。
+
+    用于 automation IPC ``poll_push`` 拿到的 inject_turn 结果与首轮回复合并；
+    水源 connector 可对每段 inject **逐次**调用以多次编辑同帖。
+    """
+    if not post_id:
+        return False, "缺少 post_id"
+
+    raw_with_marker = _attach_hidden_marker(raw)
+
+    result: Optional[dict[str, Any]] = None
+    for attempt in range(_POST_REPLY_MAX_ATTEMPTS):
+        try:
+            result, status_code, err_detail = client.update_post(
+                post_id=post_id,
+                raw=raw_with_marker,
+                edit_reason=edit_reason,
+            )
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt >= _POST_REPLY_MAX_ATTEMPTS - 1:
+                return False, f"更新帖子失败：网络错误 {e}"
+            delay = _POST_REPLY_BASE_DELAY_SEC * (2**attempt)
+            logger.warning(
+                "更新帖子网络异常 (%d/%d)，%.1fs 后重试: %s",
+                attempt + 1,
+                _POST_REPLY_MAX_ATTEMPTS,
+                delay,
+                e,
+            )
+            time.sleep(delay)
+            continue
+
+        if result:
+            break
+
+        if status_code == 403:
+            return False, (
+                "更新帖子失败：User-Api-Key 需含 write 权限。"
+                "请运行 python -m shuiyuan_integration.user_api_key 并传入 scopes=['read','write'] 重新生成 Key。"
+            )
+
+        if status_code in _TRANSIENT_HTTP and attempt < _POST_REPLY_MAX_ATTEMPTS - 1:
+            delay = _POST_REPLY_BASE_DELAY_SEC * (2**attempt)
+            if status_code == 429:
+                delay = max(delay, 5.0)
+            logger.warning(
+                "更新帖子 HTTP %d (%d/%d)，%.1fs 后重试",
+                status_code,
+                attempt + 1,
+                _POST_REPLY_MAX_ATTEMPTS,
+                delay,
+            )
+            time.sleep(delay)
+            continue
+
+        if status_code == 429:
+            return False, "限流：水源 API 达到频率限制(429)，请稍后再试"
+        msg = f"更新帖子失败：HTTP {status_code}"
+        if err_detail:
+            msg += f" — {err_detail}"
+        return False, msg
+
+    assert result is not None
+    return True, f"已更新帖子 post_id={post_id}"
 
 
 def record_user_message(

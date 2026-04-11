@@ -1,6 +1,37 @@
 from frontend.shuiyuan_integration.client import ShuiyuanClient
 
 
+def test_update_post_put_json_body(monkeypatch):
+    calls = []
+
+    class _Ok:
+        status_code = 200
+
+        def json(self):
+            return {"id": 42, "raw": "新正文"}
+
+    def _fake_put(url, **kwargs):
+        calls.append((url, kwargs.get("json")))
+        return _Ok()
+
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client._ensure_rate_limit", lambda: None
+    )
+    monkeypatch.setattr("frontend.shuiyuan_integration.client.requests.put", _fake_put)
+
+    client = ShuiyuanClient(user_api_key="k")
+    result, status, detail = client.update_post(42, "新正文", edit_reason="fix")
+
+    assert status == 200
+    assert detail == ""
+    assert result == {"id": 42, "raw": "新正文"}
+    assert len(calls) == 1
+    assert calls[0][0].endswith("/posts/42.json")
+    assert calls[0][1] == {
+        "post": {"raw": "新正文", "edit_reason": "fix"},
+    }
+
+
 class _Resp:
     def __init__(self, status_code: int, text: str = ""):
         self.status_code = status_code

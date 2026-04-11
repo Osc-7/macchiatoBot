@@ -624,6 +624,46 @@ class ShuiyuanClient:
 
         return None, r.status_code, body
 
+    def update_post(
+        self,
+        post_id: int,
+        raw: str,
+        *,
+        edit_reason: str = "",
+    ) -> tuple[Optional[dict[str, Any]], int, str]:
+        """
+        编辑已有帖子正文。需要 User-Api-Key 含 write scope。
+
+        对应 Discourse 官方 Ruby 客户端：`put("/posts/#{id}", post: { raw: raw })`，
+        即 HTTP ``PUT {base}/posts/{id}.json``，JSON body 为 ``{"post": {"raw": "..."}}``。
+
+        Returns:
+            (post_dict, status_code, error_detail)，语义同 :meth:`create_post`。
+        """
+        payload: dict[str, Any] = {"post": {"raw": raw}}
+        if edit_reason:
+            payload["post"]["edit_reason"] = edit_reason
+
+        _ensure_rate_limit()
+        r = requests.put(
+            f"{self._base}/posts/{post_id}.json",
+            json=payload,
+            headers={**self._headers, "Content-Type": "application/json"},
+            timeout=self._timeout,
+        )
+        if r.status_code in (200, 201):
+            try:
+                return r.json(), r.status_code, ""
+            except Exception:
+                return {}, r.status_code, ""
+
+        try:
+            body = (r.text or "")[:500].replace("\n", " ").strip()
+        except Exception:
+            body = ""
+
+        return None, r.status_code, body
+
     def get_latest_topics(
         self,
         page: int = 0,

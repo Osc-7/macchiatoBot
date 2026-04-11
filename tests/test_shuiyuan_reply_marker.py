@@ -77,7 +77,7 @@ def test_post_reply_attaches_marker_and_uses_it_in_db():
     db = _DummyDB()
     client = _DummyClient()
 
-    ok, msg = post_reply(
+    ok, msg, post_id = post_reply(
         username="user",
         topic_id=1,
         raw="回复内容",
@@ -86,6 +86,7 @@ def test_post_reply_attaches_marker_and_uses_it_in_db():
     )
 
     assert ok is True
+    assert post_id == 123
     assert "post_id=" in msg
     assert len(client.payloads) == 1
     sent_raw = client.payloads[0]["raw"]
@@ -102,7 +103,7 @@ def test_post_reply_retries_transient_http():
     db = _DummyDB()
     client = _FlakyClient()
 
-    ok, msg = post_reply(
+    ok, msg, post_id = post_reply(
         username="user",
         topic_id=1,
         raw="回复内容",
@@ -111,6 +112,7 @@ def test_post_reply_retries_transient_http():
     )
 
     assert ok is True
+    assert post_id == 999
     assert "999" in msg
     assert client.calls == 3
 

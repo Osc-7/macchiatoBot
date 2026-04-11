@@ -515,7 +515,7 @@ class ShuiyuanPostReplyTool(BaseTool):
             chat_limit_per_user=cfg.memory.chat_limit_per_user,
             replies_per_minute=cfg.rate_limit.replies_per_minute,
         )
-        success, msg = post_reply(
+        success, msg, _post_id = post_reply(
             username=self._username,
             topic_id=self._topic_id,
             raw=raw,

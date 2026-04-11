@@ -406,6 +406,20 @@ class TestGetSubagentStatusTool:
         assert reap_result.data["result"] == "report content"
         assert pool.get_sub_info("sub:xyz789") is None
 
+        reap_again = await reap_tool.execute(subagent_id="xyz789")
+        assert reap_again.success is True
+        assert reap_again.data.get("already_reaped") is True
+
+    @pytest.mark.asyncio
+    async def test_reap_unknown_subagent_id_not_found(self):
+        from system.tools.subagent_tools import ReapSubagentTool
+
+        pool, _ = _make_pool()
+        tool = ReapSubagentTool(core_pool=pool)
+        r = await tool.execute(subagent_id="definitely-not-created")
+        assert r.success is False
+        assert r.error == "SUBAGENT_NOT_FOUND"
+
     @pytest.mark.asyncio
     async def test_reap_subagent_still_running(self):
         from system.tools.subagent_tools import ReapSubagentTool

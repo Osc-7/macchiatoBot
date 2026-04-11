@@ -1053,6 +1053,8 @@ class ReapSubagentTool(BaseTool):
                 "收割后无法再 get_subagent_status（SUBAGENT_NOT_FOUND）",
                 "若仍需要子工作区内的文件，请先 read_file 拷贝到父工作区再 reap",
                 "与 get_subagent_status 分工：get 只读；reap 带副作用",
+                "若 entry 已消失：仅当**本进程内曾成功 reap 过**同一 id 时才返回成功（幂等）；"
+                "否则视为拼写错误或从未创建（SUBAGENT_NOT_FOUND）。进程重启后不保留收割记录。",
             ],
             tags=["multi-agent", "subagent", "lifecycle"],
         )
@@ -1067,9 +1069,26 @@ class ReapSubagentTool(BaseTool):
         sub_session_id = f"sub:{subagent_id}"
         entry = self._core_pool.get_sub_info(sub_session_id)
         if entry is None:
+            if self._core_pool.was_subagent_reaped_in_process(sub_session_id):
+                logger.info(
+                    "reap_subagent: idempotent subagent_id=%s (reaped earlier in this process)",
+                    subagent_id,
+                    extra={"subagent_id": subagent_id},
+                )
+                return ToolResult(
+                    success=True,
+                    data={"subagent_id": subagent_id, "already_reaped": True},
+                    message=(
+                        f"subagent_id={subagent_id} 在本进程内已成功收割过，无需重复 reap。"
+                    ),
+                )
             return ToolResult(
                 success=False,
-                message=f"未找到 subagent_id={subagent_id}",
+                message=(
+                    f"未找到 subagent_id={subagent_id}：请核对是否与 create_subagent 返回的 id 一致；"
+                    f"若从未创建过该子任务也会如此。"
+                    f"（若曾在**重启前**成功 reap，本进程无记录，属正常。）"
+                ),
                 error="SUBAGENT_NOT_FOUND",
             )
 

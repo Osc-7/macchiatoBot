@@ -102,6 +102,8 @@ class CorePool:
         self._pool: Dict[str, CoreEntry] = {}
         # 已结束待收割的子进程骸体：session_id -> stripped CoreEntry
         self._zombies: Dict[str, CoreEntry] = {}
+        # sub:xxx -> time.time()：本进程内已成功 reap_zombie 后记入，用于区分「重复 reap」与「错误 id」
+        self._reaped_subagent_at: Dict[str, float] = {}
         # per-session 锁，防止并发创建
         self._locks: Dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
@@ -592,6 +594,20 @@ class CorePool:
                     extra={"session_id": session_id},
                 )
         self._zombies.pop(session_id, None)
+        if session_id.startswith("sub:"):
+            self._reaped_subagent_at[session_id] = time.time()
+
+    def was_subagent_reaped_in_process(
+        self, session_id: str, *, max_age_seconds: float = 604800.0
+    ) -> bool:
+        """本 CorePool 进程内是否曾对该 sub session 成功执行过 reap_zombie（未过期）。"""
+        ts = self._reaped_subagent_at.get(session_id)
+        if ts is None:
+            return False
+        if time.time() - ts > max_age_seconds:
+            self._reaped_subagent_at.pop(session_id, None)
+            return False
+        return True
 
     async def restore_from_checkpoints(self) -> int:
         """

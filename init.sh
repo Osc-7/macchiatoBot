@@ -25,12 +25,25 @@ if [ -z "$PYTHON_BIN" ]; then
     return 1 2>/dev/null || exit 1
 fi
 
-# 2. 检查并安装依赖
-# 在 Sandbox 中，我们通常直接 pip install 到系统或当前用户路径
-if [ -f "requirements.txt" ]; then
-    log_info "正在检查/更新依赖 (requirements.txt)..."
-    $PYTHON_BIN -m pip install --upgrade pip -q
-    $PYTHON_BIN -m pip install -r requirements.txt -q
+# 2. 同步依赖（pyproject.toml + uv.lock → uv sync → .venv）
+ensure_uv() {
+    if command -v uv >/dev/null 2>&1; then
+        return 0
+    fi
+    log_info "未检测到 uv，正在通过 pip 安装..."
+    if ! $PYTHON_BIN -m pip install -q uv; then
+        echo -e "${RED}[ERROR]${NC} 无法安装 uv，请先安装: https://docs.astral.sh/uv/getting-started/installation/"
+        return 1
+    fi
+}
+
+if [ -f "pyproject.toml" ]; then
+    ensure_uv || return 1 2>/dev/null || exit 1
+
+    log_info "正在同步依赖 (uv sync，含 dev 组)..."
+    uv sync --all-groups -q
+    export PATH="$(pwd)/.venv/bin:$PATH"
+    PYTHON_BIN="$(pwd)/.venv/bin/python"
     log_success "依赖检查完成"
 fi
 

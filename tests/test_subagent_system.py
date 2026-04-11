@@ -152,6 +152,54 @@ class TestCorePoolSubagentLifecycle:
         assert zombie.agent is None
         assert pool.is_zombie("sub:sub-005") is True
 
+    @pytest.mark.asyncio
+    async def test_subagent_zombie_visible_while_evict_awaits_teardown(self):
+        """evict 在 await kill/summarize/close 期间，zombie 应已可查，避免父会话拉取 NOT_FOUND。"""
+        from agent_core.kernel_interface import CoreProfile
+        from system.kernel import CoreEntry
+
+        pool, _ = _make_pool()
+        profile = CoreProfile.default_sub(
+            allowed_tools=None,
+            frontend_id="subagent",
+            dialog_window_id="race-001",
+        )
+        entry = CoreEntry(
+            agent=MagicMock(),
+            profile=profile,
+            parent_session_id="cli:root",
+            task_description="done",
+            sub_status="completed",
+            sub_result="full report",
+        )
+        pool._pool["sub:race-001"] = entry
+
+        resume_kill = asyncio.Event()
+
+        async def slow_kill(agent):
+            await resume_kill.wait()
+            return MagicMock()
+
+        pool._kernel = MagicMock()
+        pool._kernel.kill = slow_kill
+        pool._summarizer = MagicMock()
+        pool._summarizer.summarize_and_persist = AsyncMock()
+
+        ev_task = asyncio.create_task(pool.evict("sub:race-001"))
+        await asyncio.sleep(0)
+        # 已 pop 且 kill 在等 resume_kill；此时 zombie 应已登记
+        mid = pool.get_sub_info("sub:race-001")
+        assert mid is not None, "zombie must exist during async evict teardown"
+        assert mid.sub_status == "completed"
+        assert mid.sub_result == "full report"
+        assert pool.is_zombie("sub:race-001")
+
+        resume_kill.set()
+        await ev_task
+        final = pool.get_sub_info("sub:race-001")
+        assert final is not None
+        assert final.agent is None
+
 
 class TestInjectTurn:
     def test_has_waiter_returns_false_for_unregistered_request(self):
@@ -410,3 +458,47 @@ class TestCreateParallelSubagentsTool:
         )
         assert result.success is True
         assert result.data["count"] == 3
+
+
+class TestReapSubagentWorkspace:
+    def test_remove_subagent_workspace_trees_deletes_data_and_tmp(self, tmp_path, monkeypatch):
+        import agent_core.agent.workspace_paths as wp
+
+        monkeypatch.setattr(wp, "_TMP_BASE_DIR", tmp_path / "mtmp")
+        from agent_core.config import CommandToolsConfig
+        from agent_core.agent.workspace_paths import (
+            ensure_workspace_owner_layout,
+            remove_subagent_workspace_trees,
+        )
+
+        cmd = CommandToolsConfig(workspace_base_dir=str(tmp_path / "ws"))
+        ensure_workspace_owner_layout(cmd, "ab-cd-ef", source="subagent")
+        assert (tmp_path / "ws" / "subagent" / "ab-cd-ef").is_dir()
+        assert (tmp_path / "mtmp" / "subagent" / "ab-cd-ef").is_dir()
+        (tmp_path / "ws" / "subagent" / "ab-cd-ef" / "f.txt").write_text("x", encoding="utf-8")
+        remove_subagent_workspace_trees(cmd, "sub:ab-cd-ef")
+        assert not (tmp_path / "ws" / "subagent" / "ab-cd-ef").exists()
+        assert not (tmp_path / "mtmp" / "subagent" / "ab-cd-ef").exists()
+
+    def test_reap_zombie_removes_workspace_dirs(self, tmp_path, monkeypatch):
+        import agent_core.agent.workspace_paths as wp
+
+        monkeypatch.setattr(wp, "_TMP_BASE_DIR", tmp_path / "mtmp")
+        from agent_core.config import get_config
+        from agent_core.agent.workspace_paths import ensure_workspace_owner_layout
+        from system.kernel import CorePool
+
+        cfg = get_config().model_copy(
+            update={
+                "command_tools": get_config().command_tools.model_copy(
+                    update={"workspace_base_dir": str(tmp_path / "ws")}
+                )
+            }
+        )
+        pool = CorePool(config=cfg)
+        ensure_workspace_owner_layout(cfg.command_tools, "zid01", source="subagent")
+        pool._zombies["sub:zid01"] = object()
+        pool.reap_zombie("sub:zid01")
+        assert "sub:zid01" not in pool._zombies
+        assert not (tmp_path / "ws" / "subagent" / "zid01").exists()
+        assert not (tmp_path / "mtmp" / "subagent" / "zid01").exists()

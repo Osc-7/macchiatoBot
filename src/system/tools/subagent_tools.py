@@ -922,7 +922,8 @@ class GetSubagentStatusTool(BaseTool):
                 "查询子 Agent（subagent）的当前状态。\n\n"
                 "默认返回状态摘要和结果预览（前 500 字符），适合在收到完成通知后快速判断是否要继续处理。\n"
                 "设置 include_full_result=true 时，会返回完整输出；若该子任务已结束且处于待收割状态，"
-                "这次调用还会顺带完成“收割”操作，将其从 zombie 表中移除。\n\n"
+                "这次调用还会顺带完成“收割”操作：从 zombie 表移除，并删除该 subagent 在隔离工作区下的目录"
+                "（data/workspace/subagent/<id>/ 与 /tmp/macchiato/subagent/<id>/）。\n\n"
                 "若需要终止仍在运行的子任务，应使用 cancel_subagent。"
             ),
             parameters=[
@@ -958,7 +959,7 @@ class GetSubagentStatusTool(BaseTool):
                 "只能查询本 Agent 创建的子 Agent",
                 "status 可能为：running、completed、failed、cancelled",
                 "收到 [子任务 xxx 完成] 通知后，若需要完整输出，再调用 include_full_result=true",
-                "include_full_result=true 在已结束任务上相当于 waitpid/reap：既取完整结果，也回收 zombie 记录",
+                "include_full_result=true 在已结束任务上相当于 waitpid/reap：既取完整结果，也回收 zombie 并删除子工作区目录",
             ],
             tags=["multi-agent", "subagent", "query"],
         )

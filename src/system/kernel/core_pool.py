@@ -242,6 +242,16 @@ class CorePool:
         agent = entry.agent
         is_subagent = bool(entry.parent_session_id) or session_id.startswith("sub:")
 
+        # 子 Agent 已终态时，尽快写入 zombie 表。否则后续 kill / summarize / close 多为长时间
+        # await，此窗口内 get_entry 既不在 _pool 也未登记 _zombies，父会话会收到完成注入但
+        # get_subagent_status 恒为 SUBAGENT_NOT_FOUND（竞态）。
+        if (
+            not shutdown
+            and is_subagent
+            and entry.sub_status in {"completed", "failed", "cancelled"}
+        ):
+            self._zombies[session_id] = self._strip_entry_for_zombie(entry)
+
         # ── Step 1: kill — 收集 CoreStats ──────────────────────────────────
         core_stats = None
         if agent is None:
@@ -284,20 +294,23 @@ class CorePool:
 
         # ── Step 2: summarize — 写入长期记忆 ───────────────────────────────
         # background 模式不跑会话摘要：多为高频定时任务，避免长期记忆被刷屏。
-        # full/sub（含带 memory_owner 的 cron 任务）使用与主会话一致的 LongTermMemory 时
-        # 应正常摘要；此前误用 session_id.startswith("cron:") 一刀切，导致如 moltbook
-        # full 任务 evict 时从不写入 long_term。
+        # sub 模式（子 Agent）为一次性任务：可交付结果在 sub_result / zombie，由父 get_subagent_status
+        # 拉取即可；不必再跑 LLM 会话摘要写入 data/memory/subagent/<id>/long_term（重复、费 token、拉长 evict）。
+        # full（含带 memory_owner 的 cron 任务）使用与主会话一致的 LongTermMemory 时应正常摘要；
+        # 此前误用 session_id.startswith("cron:") 一刀切，导致如 moltbook full 任务 evict 时从不写入 long_term。
         # shutdown=True 时跳过：session 只是暂停，checkpoint 会保留完整上下文供恢复，
         # 此时写摘要属于把暂停误认为 session 结束。
+        _prof_mode = getattr(getattr(entry, "profile", None), "mode", None)
         if (
             agent is not None
             and not shutdown
             and core_stats is not None
             and self._summarizer is not None
+            and _prof_mode != "sub"
         ):
             try:
                 long_term_memory = None
-                profile_mode = getattr(getattr(entry, "profile", None), "mode", None)
+                profile_mode = _prof_mode
                 if profile_mode != "background":
                     long_term_memory = getattr(agent, "_long_term_memory", None)
                 messages = None
@@ -377,6 +390,18 @@ class CorePool:
 
         if not shutdown and is_subagent and entry.sub_status in {"completed", "failed", "cancelled"}:
             self._zombies[session_id] = self._strip_entry_for_zombie(entry)
+            logger.info(
+                "CorePool: subagent evicted session_id=%s parent_session_id=%s sub_status=%s "
+                "(zombie PCB retained until parent get_subagent_status reap)",
+                session_id,
+                entry.parent_session_id or "",
+                entry.sub_status,
+                extra={
+                    "session_id": session_id,
+                    "parent_session_id": entry.parent_session_id,
+                    "sub_status": entry.sub_status,
+                },
+            )
 
         logger.debug("CorePool: evicted session %s", session_id)
 
@@ -552,6 +577,18 @@ class CorePool:
         return True
 
     def reap_zombie(self, session_id: str) -> None:
+        if session_id.startswith("sub:"):
+            try:
+                from agent_core.agent.workspace_paths import remove_subagent_workspace_trees
+
+                remove_subagent_workspace_trees(self._config.command_tools, session_id)
+            except Exception as exc:
+                logger.warning(
+                    "CorePool.reap_zombie: subagent workspace cleanup failed session_id=%s: %s",
+                    session_id,
+                    exc,
+                    extra={"session_id": session_id},
+                )
         self._zombies.pop(session_id, None)
 
     async def restore_from_checkpoints(self) -> int:

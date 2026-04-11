@@ -300,7 +300,8 @@ async def run_kernel_shell(client: AutomationIPCClient) -> None:
                 print(f"{term.bold}{term.blue}  Command reference{term.reset}")
                 _hr(term, "·", 40)
                 print(f"{term.dim}  ps{term.reset}")
-                print("      List loaded Agent cores (live sessions in this daemon).")
+                print("      List cores in _pool plus subagent zombies (PCB stubs after evict).")
+                print("      Column lifecycle=zombie: AgentCore torn down; row stays until parent reap.")
                 print(f"{term.dim}  top{term.reset}")
                 print("      Summary: core count, scheduler queue depth, inflight tasks, uptime.")
                 print(f"{term.dim}  queue{term.reset}")
@@ -342,8 +343,17 @@ async def run_kernel_shell(client: AutomationIPCClient) -> None:
                     _print_table(
                         term,
                         rows,
-                        ["session_id", "source", "user_id", "mode", "idle_seconds", "total_tokens", "turn_count"],
-                        {"session_id": 32, "source": 10, "user_id": 12, "mode": 10},
+                        [
+                            "session_id",
+                            "source",
+                            "user_id",
+                            "mode",
+                            "lifecycle",
+                            "idle_seconds",
+                            "total_tokens",
+                            "turn_count",
+                        ],
+                        {"session_id": 32, "source": 10, "user_id": 12, "mode": 10, "lifecycle": 10},
                     )
                 print()
                 continue

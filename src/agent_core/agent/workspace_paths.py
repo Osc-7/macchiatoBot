@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import shlex
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent_core.config import CommandToolsConfig
 
 from .memory_paths import validate_logic_namespace_segment
+
+logger = logging.getLogger(__name__)
 
 _TMP_BASE_DIR = Path("/tmp/macchiato")
 
@@ -190,3 +194,65 @@ popd() {{
 }}
 """.strip()
     return [script]
+
+
+def remove_subagent_workspace_trees(
+    cmd_cfg: CommandToolsConfig,
+    sub_session_id: str,
+) -> None:
+    """
+    删除 subagent 在隔离工作区下的目录（与 Bash 初始 cwd / ensure_workspace_owner_layout 一致）。
+
+    - ``{workspace_base_dir}/subagent/{subagent_id}/``
+    - ``/tmp/macchiato/subagent/{subagent_id}/``
+
+    路径经 ``relative_to`` 校验，防止误删；目录不存在则跳过。
+    供 CorePool.reap_zombie 在父会话拉取完整结果并收割 zombie 时调用。
+    """
+    sid = (sub_session_id or "").strip()
+    if not sid.startswith("sub:"):
+        return
+    raw_id = sid[4:].strip()
+    if not raw_id:
+        return
+    try:
+        uid = validate_logic_namespace_segment(_ns_segment(raw_id, ""), what="subagent_id")
+    except ValueError as exc:
+        logger.warning(
+            "remove_subagent_workspace_trees: invalid sub_session_id=%s: %s",
+            sid,
+            exc,
+        )
+        return
+
+    base_data = Path((cmd_cfg.workspace_base_dir or "./data/workspace").strip()).resolve() / "subagent"
+    owner_str = resolve_workspace_owner_dir(cmd_cfg, uid, source="subagent")
+    owner_p = Path(owner_str).resolve()
+    try:
+        owner_p.relative_to(base_data)
+    except ValueError:
+        logger.warning(
+            "remove_subagent_workspace_trees: refused path outside subagent workspace base owner=%s base=%s",
+            owner_p,
+            base_data,
+        )
+        return
+    if owner_p.is_dir():
+        shutil.rmtree(owner_p)
+        logger.info("removed subagent workspace dir %s", owner_p)
+
+    tmp_base = _TMP_BASE_DIR.resolve() / "subagent"
+    tmp_str = resolve_workspace_tmp_dir(cmd_cfg, uid, source="subagent")
+    tmp_p = Path(tmp_str).resolve()
+    try:
+        tmp_p.relative_to(tmp_base)
+    except ValueError:
+        logger.warning(
+            "remove_subagent_workspace_trees: refused path outside tmp subagent base tmp=%s base=%s",
+            tmp_p,
+            tmp_base,
+        )
+        return
+    if tmp_p.is_dir():
+        shutil.rmtree(tmp_p)
+        logger.info("removed subagent tmp workspace dir %s", tmp_p)

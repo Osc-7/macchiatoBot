@@ -71,11 +71,26 @@ def _debug_ndjson(
 
 # 与飞书 FeishuPushForwarder / CLI poll_push 一致：收 subagent inject_turn 等推送
 _SHUIYUAN_INJECT_POLL_INTERVAL_SEC = 2.0
-_SHUIYUAN_INJECT_MAX_WALL_SEC = 1800.0
+_SHUIYUAN_INJECT_MAX_WALL_SEC = 900.0
 # 收到至少一段非空 inject 文本后，自「最后一次追加文本」起若连续空闲 ≥ 该秒数则结束轮询（避免空转满 max_wall）。
 # 并行 subagent 若相邻两段间隔可能超过该值，应调大（否则可能只合并到前几条）。
-_SHUIYUAN_INJECT_IDLE_AFTER_LAST_CHUNK_SEC = 120.0
+_SHUIYUAN_INJECT_IDLE_AFTER_LAST_CHUNK_SEC = 300.0
 _SHUIYUAN_INJECT_CHUNK_SEP = "\n\n---\n\n"
+# 同一水源用户名：每次进入 inject 轮询时认领更高世代；旧轮询发现已不是最新则停止编辑该帖，
+# 避免新对话的 inject 被写入旧 post_id。FIFO 中遗留的旧 inject 可由新轮询消费编进新帖（可接受 trade-off）。
+_SHUIYUAN_INJECT_REPLY_GEN: Dict[str, int] = {}
+
+
+def _claim_shuiyuan_inject_poll_generation(username: str) -> int:
+    u = (username or "").strip() or "default"
+    n = _SHUIYUAN_INJECT_REPLY_GEN.get(u, 0) + 1
+    _SHUIYUAN_INJECT_REPLY_GEN[u] = n
+    return n
+
+
+def _is_shuiyuan_inject_poll_generation_stale(username: str, claimed: int) -> bool:
+    u = (username or "").strip() or "default"
+    return _SHUIYUAN_INJECT_REPLY_GEN.get(u, 0) != claimed
 
 
 def _should_poll_inject_followup(result: AgentRunResult) -> bool:
@@ -100,6 +115,7 @@ def _should_poll_inject_followup(result: AgentRunResult) -> bool:
 async def _poll_shuiyuan_inject_edits(
     ipc: AutomationIPCClient,
     *,
+    username: str,
     post_id: int,
     client: Any,
     base_text: str,
@@ -110,10 +126,13 @@ async def _poll_shuiyuan_inject_edits(
     飞书侧是后台线程逐条转发新消息；水源要单帖呈现，故用多次编辑叠上去。结束条件仍为
     idle + max_wall（只表示「不再 poll」），与是否已编辑无关。
 
+    若同一用户另一次回复已开始更新世代的 inject 轮询，本协程在每次 poll/编辑前退出，不再改旧帖。
+
     返回与帖面一致的最新合并正文（无 inject 时等于 ``base_text``）。
     """
     from .reply import update_post_reply
 
+    my_gen = _claim_shuiyuan_inject_poll_generation(username)
     merged = base_text
     inject_chunks_n = 0
     edit_calls = 0
@@ -122,14 +141,58 @@ async def _poll_shuiyuan_inject_edits(
     nonempty_batches = 0
     last_nonempty_mono: Optional[float] = None
     while time.monotonic() - start < _SHUIYUAN_INJECT_MAX_WALL_SEC:
+        if _is_shuiyuan_inject_poll_generation_stale(username, my_gen):
+            _debug_ndjson(
+                "H4",
+                "session._poll_shuiyuan_inject_edits",
+                "loop_exit",
+                {
+                    "exit_reason": "superseded_by_newer_inject_poll",
+                    "username": (username or "")[:32],
+                    "post_id": post_id,
+                    "my_gen": my_gen,
+                    "poll_rounds": poll_rounds,
+                    "inject_chunks_n": inject_chunks_n,
+                    "edit_calls": edit_calls,
+                },
+            )
+            return merged
         poll_rounds += 1
         batch = await ipc.poll_push()
+        if _is_shuiyuan_inject_poll_generation_stale(username, my_gen):
+            _debug_ndjson(
+                "H4",
+                "session._poll_shuiyuan_inject_edits",
+                "loop_exit",
+                {
+                    "exit_reason": "superseded_by_newer_inject_poll",
+                    "username": (username or "")[:32],
+                    "post_id": post_id,
+                    "my_gen": my_gen,
+                    "after": "poll_push",
+                },
+            )
+            return merged
         if batch:
             nonempty_batches += 1
         for pr in batch or []:
             t = (pr.get("output_text") or "").strip()
             if not t:
                 continue
+            if _is_shuiyuan_inject_poll_generation_stale(username, my_gen):
+                _debug_ndjson(
+                    "H4",
+                    "session._poll_shuiyuan_inject_edits",
+                    "loop_exit",
+                    {
+                        "exit_reason": "superseded_by_newer_inject_poll",
+                        "username": (username or "")[:32],
+                        "post_id": post_id,
+                        "my_gen": my_gen,
+                        "after": "before_inject_edit",
+                    },
+                )
+                return merged
             inject_chunks_n += 1
             merged = merged + _SHUIYUAN_INJECT_CHUNK_SEP + t
             ok_u, umsg = update_post_reply(
@@ -455,6 +518,7 @@ async def _run_via_daemon(
         elif created_post_id and _should:
             merged = await _poll_shuiyuan_inject_edits(
                 ipc,
+                username=username,
                 post_id=created_post_id,
                 client=client,
                 base_text=final_text,

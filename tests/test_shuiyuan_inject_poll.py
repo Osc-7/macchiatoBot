@@ -8,6 +8,8 @@ import pytest
 from agent_core.interfaces import AgentRunResult
 from frontend.shuiyuan_integration.session import (
     _SHUIYUAN_INJECT_CHUNK_SEP,
+    _claim_shuiyuan_inject_poll_generation,
+    _is_shuiyuan_inject_poll_generation_stale,
     _poll_shuiyuan_inject_edits,
     _should_poll_inject_followup,
 )
@@ -78,6 +80,7 @@ async def test_poll_edits_first_inject_after_many_empty(monkeypatch):
     base = "首帖正文"
     merged = await _poll_shuiyuan_inject_edits(
         ipc,  # type: ignore[arg-type]
+        username="test_user_first_inject",
         post_id=999,
         client=MagicMock(),
         base_text=base,
@@ -130,6 +133,7 @@ async def test_poll_parallel_inject_two_separate_edits(monkeypatch):
     base = "X"
     merged = await _poll_shuiyuan_inject_edits(
         ipc,  # type: ignore[arg-type]
+        username="test_user_parallel",
         post_id=1,
         client=MagicMock(),
         base_text=base,
@@ -178,8 +182,19 @@ async def test_poll_exits_after_idle_without_waiting_max_wall(monkeypatch):
     ipc = SimpleNamespace(poll_push=poll_push)
     merged = await _poll_shuiyuan_inject_edits(
         ipc,  # type: ignore[arg-type]
+        username="test_user_idle",
         post_id=1,
         client=MagicMock(),
         base_text="base",
     )
     assert "inject 完成" in merged
+
+
+def test_inject_poll_generation_supersedes():
+    """新一次认领后，旧世代视为 stale。"""
+    u = "gen_test_user"
+    g1 = _claim_shuiyuan_inject_poll_generation(u)
+    g2 = _claim_shuiyuan_inject_poll_generation(u)
+    assert g2 == g1 + 1
+    assert _is_shuiyuan_inject_poll_generation_stale(u, g1)
+    assert not _is_shuiyuan_inject_poll_generation_stale(u, g2)

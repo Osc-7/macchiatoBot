@@ -19,7 +19,21 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Literal, Optional
 
 if TYPE_CHECKING:
-    from agent_core.config import Config
+    from agent_core.config import Config, ToolsConfig
+
+
+def _resolve_tool_template_config(
+    *,
+    tool_template: str,
+    tools_config: Optional["ToolsConfig"] = None,
+) -> tuple[str, Literal["pinned", "empty"], List[str]]:
+    from agent_core.config import ToolsConfig
+
+    cfg = tools_config or ToolsConfig()
+    template_name = (tool_template or "default").strip() or "default"
+    template = cfg.get_template(template_name)
+    allowed = cfg.resolve_initial_tools(template_name)
+    return template_name, template.exposure, allowed
 
 
 @dataclass
@@ -35,8 +49,7 @@ class CoreProfile:
         Kernel 执行 ToolCallAction 时会二次校验，即使 LLM 发出了请求也会拒绝。
 
     allow_dangerous_commands:
-        是否允许使用 bash 工具（工具名层）；具体命令由 BashSecurity 再校验。
-        False 时 is_tool_allowed 对 bash 为否（见 is_tool_allowed 步骤 2）。
+        是否允许危险/破坏性命令；bash 工具始终注册，具体命令由 BashSecurity 再校验。
 
     visible_memory_scopes:
         允许 InternalLoader 加载的记忆层级。
@@ -58,7 +71,7 @@ class CoreProfile:
     - allowed_tools / deny_tools:
         工具白/黑名单，Kernel 在执行 ToolCallAction 时会再次校验。
     - allow_dangerous_commands:
-        是否允许 bash 工具名（见字段说明）。
+        是否允许危险/破坏性命令（见字段说明）。
     - visible_memory_scopes:
         InternalLoader 允许加载的记忆层级（working / long_term / content / chat）。
         空列表表示不加载任何记忆（适合一次性无状态 Core）。
@@ -101,22 +114,24 @@ class CoreProfile:
 
     frontend_id: str = ""
     dialog_window_id: str = ""
+    tool_template: str = "default"
+    tool_exposure_mode: Literal["pinned", "empty"] = "pinned"
 
     def is_tool_allowed(self, tool_name: str) -> bool:
         """判断指定工具名是否在该 Profile 的权限范围内。
 
         执行顺序：
         1. 如果 tool_name 在 deny_tools → False（黑名单优先）
-        2. 如果 allow_dangerous_commands=False 且 tool 为 bash → False
+        2. 核心工具（search_tools / call_tool / bash）始终允许
         3. 如果 allowed_tools 为 None → True（无白名单限制）
         4. 否则检查 allowed_tools 白名单
         """
-        _DANGEROUS_SHELL_TOOLS = {"bash"}
+        _CORE_TOOLS = {"search_tools", "call_tool", "bash"}
 
         if tool_name in self.deny_tools:
             return False
-        if not self.allow_dangerous_commands and tool_name in _DANGEROUS_SHELL_TOOLS:
-            return False
+        if tool_name in _CORE_TOOLS:
+            return True
         if self.allowed_tools is None:
             return True
         return tool_name in self.allowed_tools
@@ -133,15 +148,24 @@ class CoreProfile:
         dialog_window_id: str = "",
         max_context_tokens: int = 80_000,
         session_expired_seconds: int = 1_800,
+        tool_template: str = "default",
+        tools_config: Optional["ToolsConfig"] = None,
     ) -> "CoreProfile":
         """完整权限 Core（主对话场景）。"""
+        resolved_template, exposure, _ = _resolve_tool_template_config(
+            tool_template=tool_template,
+            tools_config=tools_config,
+        )
         return cls(
             mode="full",
+            allowed_tools=None,
             allow_dangerous_commands=False,
             frontend_id=frontend_id,
             dialog_window_id=dialog_window_id,
             max_context_tokens=max_context_tokens,
             session_expired_seconds=session_expired_seconds,
+            tool_template=resolved_template,
+            tool_exposure_mode=exposure,
         )
 
     @classmethod
@@ -151,8 +175,9 @@ class CoreProfile:
         *,
         frontend_id: str = "",
         dialog_window_id: str = "",
+        tool_template: str = "default",
     ) -> "CoreProfile":
-        """cli/feishu 主对话：完整权限（无白名单，pinned_tools 全可访问），危险命令按配置放行。"""
+        """cli/feishu 主对话：按模板限制可用工具，危险命令按配置放行。"""
         agent_cfg = getattr(config, "agent", None)
         cmd_cfg = getattr(config, "command_tools", None)
         allow_dangerous = bool(
@@ -160,14 +185,20 @@ class CoreProfile:
             and getattr(cmd_cfg, "enabled", False)
             and getattr(cmd_cfg, "allow_run", False)
         )
+        resolved_template, exposure, _ = _resolve_tool_template_config(
+            tool_template=tool_template,
+            tools_config=getattr(config, "tools", None),
+        )
         return cls(
             mode="full",
-            allowed_tools=None,  # 无白名单 = 全量工具（含 config.pinned_tools 全部）
+            allowed_tools=None,
             allow_dangerous_commands=allow_dangerous,
             frontend_id=frontend_id,
             dialog_window_id=dialog_window_id,
             max_context_tokens=getattr(agent_cfg, "max_context_tokens", 300000),
             session_expired_seconds=getattr(agent_cfg, "session_expired_seconds", 3600),
+            tool_template=resolved_template,
+            tool_exposure_mode=exposure,
         )
 
     @classmethod
@@ -181,6 +212,8 @@ class CoreProfile:
         max_total_tokens: Optional[int] = None,
         max_context_tokens: Optional[int] = None,
         allow_dangerous_commands: bool = False,
+        tool_template: str = "default",
+        tools_config: Optional["ToolsConfig"] = None,
     ) -> "CoreProfile":
         """子 Agent / 工具 Agent（受限工具集；allow_dangerous_commands=True 时允许 bash 工具名，执行仍受 BashSecurity / 白名单约束）。
 
@@ -188,6 +221,11 @@ class CoreProfile:
             profile 层上下文压缩阈值；None 表示不设该上限（仅由 WorkingMemory 的 max_tokens 约束）。
             历史上曾硬编码为 40_000，与 agent.subagent_max_tokens（累计用量）无关。
         """
+        template_name = (tool_template or "default").strip() or "default"
+        template_name, exposure, _ = _resolve_tool_template_config(
+            tool_template=template_name,
+            tools_config=tools_config,
+        )
         return cls(
             mode="sub",
             allowed_tools=allowed_tools,
@@ -199,6 +237,8 @@ class CoreProfile:
             dialog_window_id=dialog_window_id,
             max_iterations_override=max_iterations_override,
             max_total_tokens=max_total_tokens,
+            tool_template=template_name,
+            tool_exposure_mode=exposure,
         )
 
     @classmethod
@@ -208,8 +248,15 @@ class CoreProfile:
         *,
         frontend_id: str = "",
         dialog_window_id: str = "",
+        tool_template: str = "cron",
+        tools_config: Optional["ToolsConfig"] = None,
     ) -> "CoreProfile":
         """后台任务 Core（定时任务 / 心跳 / 监控；无记忆持久化，短 TTL）。"""
+        template_name = (tool_template or "cron").strip() or "cron"
+        template_name, exposure, _ = _resolve_tool_template_config(
+            tool_template=template_name,
+            tools_config=tools_config,
+        )
         return cls(
             mode="background",
             allowed_tools=allowed_tools,
@@ -220,6 +267,8 @@ class CoreProfile:
             session_expired_seconds=600,
             frontend_id=frontend_id,
             dialog_window_id=dialog_window_id,
+            tool_template=template_name,
+            tool_exposure_mode=exposure,
         )
 
     @classmethod
@@ -229,8 +278,14 @@ class CoreProfile:
         dialog_window_id: str = "",
         max_context_tokens: int = 200000,
         session_expired_seconds: int = 1800,
+        tool_template: str = "shuiyuan",
+        tools_config: Optional["ToolsConfig"] = None,
     ) -> "CoreProfile":
         """水源社区前端 Core：按普通前端走 full 权限，仍保留独立 frontend/user 记忆命名空间。"""
+        resolved_template, exposure, _ = _resolve_tool_template_config(
+            tool_template=tool_template,
+            tools_config=tools_config,
+        )
         return cls(
             mode="full",
             allowed_tools=None,
@@ -240,6 +295,8 @@ class CoreProfile:
             dialog_window_id=dialog_window_id,
             max_context_tokens=max_context_tokens,
             session_expired_seconds=session_expired_seconds,
+            tool_template=resolved_template,
+            tool_exposure_mode=exposure,
         )
 
     # 向后兼容别名

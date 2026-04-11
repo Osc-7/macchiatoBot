@@ -36,6 +36,7 @@ class ScheduleToolsMCPServer:
         base_profile = CoreProfile.default_full(
             frontend_id="cli",
             dialog_window_id="root",
+            tools_config=self._config.tools,
         )
         registry: VersionedToolRegistry = build_tool_registry(
             profile=base_profile,

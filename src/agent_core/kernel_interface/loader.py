@@ -73,16 +73,10 @@ class InternalLoader:
             messages = agent._append_pending_multimodal_messages(messages)
             agent._pending_multimodal_items.clear()
 
-        # 工具快照：kernel 模式取工作集，否则取全量
-        if agent._kernel_enabled:
-            agent._last_snapshot = agent._working_set.build_snapshot(
-                agent._tool_registry
-            )
-            tools = agent._last_snapshot.openai_tools
-            visible_names: set = set(agent._last_snapshot.tool_names)
-        else:
-            tools = agent._tool_registry.get_all_definitions()
-            visible_names = set(agent._tool_registry.list_names())
+        # 工具快照：统一由工作集决定首轮暴露 + 后续 search_tools 扩展的可见集
+        agent._last_snapshot = agent._working_set.build_snapshot(agent._tool_registry)
+        tools = agent._last_snapshot.openai_tools
+        visible_names: set = set(agent._last_snapshot.tool_names)
 
         # 用户态权限过滤：根据 CoreProfile 限制 LLM 可见的工具集
         profile = getattr(agent, "_core_profile", None)

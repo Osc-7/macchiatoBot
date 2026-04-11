@@ -72,7 +72,7 @@ def _make_workspace_sandbox_config(
 def _ctx(source: str = "cli", user_id: str = "u1", *, sub: bool = False) -> dict:
     ctx = {"source": source, "user_id": user_id}
     if sub:
-        ctx["tool_mode"] = "sub"
+        ctx["profile_mode"] = "sub"
     return ctx
 
 
@@ -305,7 +305,7 @@ class TestWriteFileTool:
         result = await tool.execute(
             path="x.txt",
             content="x",
-            __execution_context__={"tool_mode": "sub", "source": "cli"},
+            __execution_context__={"profile_mode": "sub", "source": "cli"},
         )
         assert not result.success
         assert result.error == "PERMISSION_DENIED"
@@ -387,7 +387,7 @@ class TestModifyFileTool:
             mode="search_replace",
             old_text="old",
             new_text="new",
-            __execution_context__={"tool_mode": "sub", "source": "cli"},
+            __execution_context__={"profile_mode": "sub", "source": "cli"},
         )
         assert not result.success
         assert result.error == "PERMISSION_DENIED"

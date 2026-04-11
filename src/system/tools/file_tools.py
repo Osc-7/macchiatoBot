@@ -36,8 +36,8 @@ def _redirect_memory_md_if_needed(path_str: str, exec_ctx: dict, config: Config)
 
 
 def _sub_mode_forbids_file_mutation(exec_ctx: dict) -> bool:
-    """sub 模式统一禁止写/改文件。"""
-    return (exec_ctx.get("tool_mode") or "kernel").lower() == "sub"
+    """sub Core 统一禁止写/改文件。"""
+    return (exec_ctx.get("profile_mode") or "full").lower() == "sub"
 
 
 def _resolve_workspace_root_for_exec_ctx(exec_ctx: dict, config: Config) -> Path:

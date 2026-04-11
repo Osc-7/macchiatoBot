@@ -321,8 +321,12 @@ class AutomationCoreGateway:
         if profile is None and (session_id or "").startswith("shuiyuan:"):
             username = session_id.split(":", 1)[1] if ":" in session_id else "default"
             from agent_core.kernel_interface import CoreProfile
+            from agent_core.config import get_config
 
-            profile = CoreProfile.for_shuiyuan(dialog_window_id=username)
+            profile = CoreProfile.for_shuiyuan(
+                dialog_window_id=username,
+                tools_config=get_config().tools,
+            )
             frontend_id = "shuiyuan"
             metadata.setdefault("user_id", username)
         request = KernelRequest.create(

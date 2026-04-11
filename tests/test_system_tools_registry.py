@@ -37,6 +37,6 @@ def test_build_tool_registry_respects_profile_allowlist() -> None:
     # 未在白名单中的 schedule 工具应被过滤掉
     assert "add_event" not in names
     assert "add_task" not in names
-    # 危险命令在 allow_dangerous_commands=False 时不应出现
+    # bash 由 AgentCore.__aenter__ 运行时自注册；build_tool_registry 只验证静态业务工具过滤
     assert "bash" not in names
     assert "run_command" not in names

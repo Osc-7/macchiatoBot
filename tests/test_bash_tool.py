@@ -296,7 +296,7 @@ class TestBashToolExecution:
         try:
             result = await tool_sub.execute(
                 command="ls",
-                __execution_context__={"tool_mode": "sub"},
+                __execution_context__={"profile_mode": "sub"},
             )
             assert not result.success
             assert result.error == "PERMISSION_DENIED"

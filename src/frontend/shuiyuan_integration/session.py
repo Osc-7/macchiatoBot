@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent_core.config import Config, get_config
+from agent_core.kernel_interface import CoreProfile
 from frontend.shuiyuan_integration.reply import AUTO_REPLY_MARK
 
 from agent_core import AgentCore
@@ -432,6 +433,10 @@ async def run_shuiyuan_reply(
         user_id=username,
         source="shuiyuan",
         session_logger=session_logger,
+        core_profile=CoreProfile.for_shuiyuan(
+            dialog_window_id=username,
+            tools_config=cfg.tools,
+        ),
     ) as agent:
         # 若存在图片引用，解析为 content_items 注入本轮多模态输入
         content_items: List[Dict[str, Any]] = []

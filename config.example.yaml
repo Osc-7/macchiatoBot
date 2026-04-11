@@ -197,30 +197,65 @@ agent:
   # subagent_max_context_tokens: null
   subagent_max_iterations: 15    # 默认最大迭代次数（工具未传 max_iterations 时使用）
   enable_debug: true
-  # 工具暴露模式：
-  # - kernel: 核心工具 search_tools/call_tool + pinned + working set（CLI/飞书）
-  # - sub: 受限模式，仅使用传入工具，禁止写入/危险命令（适合子 agent）
-  tool_mode: "kernel"
-  # 按 source 覆盖 tool_mode；未配置时沿用上面的全局 tool_mode
-  source_overrides: {}
-  # kernel 模式下 LRU 工作集大小（不含 pinned_tools）
+  # 工具工作集大小（search_tools 会把命中的工具加入该 LRU 集合）
   working_set_size: 6
-  # 核心工具 + pinned_tools，kernel 模式下始终暴露
-  # 核心：search_tools, call_tool；pinned：load_skill（skills 启用时）、read_file、write_file 等
-  pinned_tools:
+
+tools:
+  # 所有 Core 固定带的核心工具
+  core_tools:
     - "search_tools"
     - "call_tool"
+    - "bash"
+  # 当模板 exposure=pinned 时，除 core_tools 外还会默认暴露这些工具
+  pinned_tools:
     - "load_skill"
     - "web_search"
     - "read_file"
     - "write_file"
-    - "bash"
     - "extract_web_content"
     - "attach_media"
     - "memory_search_long_term"
     - "memory_search_content"
     - "memory_store"
     - "memory_ingest"
+  templates:
+    default:
+      exposure: "pinned"
+      extra: []
+    shuiyuan:
+      exposure: "empty"
+      extra:
+        - "shuiyuan_search"
+        - "shuiyuan_get_topic"
+        - "shuiyuan_browse_topic"
+        - "shuiyuan_get_latest"
+        - "shuiyuan_get_top"
+        - "shuiyuan_get_categories"
+        - "shuiyuan_get_category_topics"
+        - "shuiyuan_post_retort"
+        - "attach_image_to_reply"
+    cron:
+      exposure: "empty"
+      extra:
+        - "parse_time"
+        - "add_event"
+        - "add_task"
+        - "get_events"
+        - "get_tasks"
+        - "update_event"
+        - "update_task"
+        - "delete_schedule_data"
+        - "get_free_slots"
+        - "plan_tasks"
+        - "sync_sources"
+        - "get_sync_status"
+        - "get_digest"
+        - "list_notifications"
+        - "ack_notification"
+        - "configure_automation_policy"
+        - "get_automation_activity"
+        - "create_scheduled_job"
+        - "notify_owner"
 
 # MCP 客户端配置（可选）
 # 用于接入外部 MCP Server，并将远程工具自动注册到 Agent

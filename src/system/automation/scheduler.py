@@ -405,6 +405,7 @@ class AutomationScheduler:
         user_id = str(payload.get("user_id") or "default")
         memory_owner = str(payload.get("memory_owner") or "").strip()
         core_mode = str(payload.get("core_mode") or "").strip() or None
+        tool_template = str(payload.get("tool_template") or "").strip() or None
 
         task = make_cron_task(
             job.job_name,
@@ -412,5 +413,6 @@ class AutomationScheduler:
             user_id=user_id,
             memory_owner=memory_owner or None,
             core_mode=core_mode,
+            tool_template=tool_template,
         )
         self._task_queue.push(task)  # type: ignore[union-attr]

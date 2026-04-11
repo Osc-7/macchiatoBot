@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, List, Optional, TYPE_CHECKING
 
 from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from .versioned_registry import VersionedToolRegistry
@@ -19,10 +19,14 @@ class SearchToolsTool(BaseTool):
     """搜索工具库并更新工作集。"""
 
     def __init__(
-        self, registry: VersionedToolRegistry, working_set: "ToolWorkingSetManager"
+        self,
+        registry: VersionedToolRegistry,
+        working_set: "ToolWorkingSetManager",
+        profile_getter: Optional[Callable[[], Any]] = None,
     ):
         self._registry = registry
         self._working_set = working_set
+        self._profile_getter = profile_getter
 
     @property
     def name(self) -> str:
@@ -90,14 +94,35 @@ class SearchToolsTool(BaseTool):
         matches = self._registry.search(
             query=query, limit=limit, exclude_names=exclude_names, tags=tags
         )
-        self._working_set.add_to_working_set([item["name"] for item in matches])
+        profile = self._profile_getter() if self._profile_getter is not None else None
+        visible_names: List[str] = []
+        enriched: List[dict[str, Any]] = []
+        for item in matches:
+            name = str(item.get("name") or "").strip()
+            callable_in_current_core = (
+                True if profile is None else bool(profile.is_tool_allowed(name))
+            )
+            if callable_in_current_core and name:
+                visible_names.append(name)
+            enriched.append(
+                {
+                    **item,
+                    "callable_in_current_core": callable_in_current_core,
+                    "reason_if_denied": (
+                        None
+                        if callable_in_current_core
+                        else "工具不在当前 Core 的权限范围内"
+                    ),
+                }
+            )
+        self._working_set.add_to_working_set(visible_names)
 
         return ToolResult(
             success=True,
             data={
                 "query": query,
-                "count": len(matches),
-                "tools": matches,
+                "count": len(enriched),
+                "tools": enriched,
             },
-            message=f"已找到 {len(matches)} 个相关工具",
+            message=f"已找到 {len(enriched)} 个相关工具",
         )

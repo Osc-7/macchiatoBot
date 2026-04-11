@@ -442,10 +442,12 @@ class CreateScheduledJobTool(BaseTool):
         *,
         default_memory_owner: Optional[str] = None,
         default_core_mode: Optional[str] = None,
+        default_tool_template: Optional[str] = None,
     ):
         self._repo = JobDefinitionRepository(base_dir=base_dir)
         self._default_memory_owner = default_memory_owner
         self._default_core_mode = default_core_mode
+        self._default_tool_template = default_tool_template
 
     @property
     def name(self) -> str:
@@ -541,6 +543,12 @@ class CreateScheduledJobTool(BaseTool):
                     name="core_mode",
                     type="string",
                     description="可选：Core 运行模式：full / sub / background。不提供时与当前会话的 core_mode 对齐。",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="tool_template",
+                    type="string",
+                    description="可选：工具模板名，例如 default / cron / shuiyuan。不提供时由调度端按 Core 类型推导。",
                     required=False,
                 ),
             ],
@@ -674,6 +682,9 @@ class CreateScheduledJobTool(BaseTool):
         core_mode = (
             str(kwargs.get("core_mode") or "").strip() or self._default_core_mode
         )
+        tool_template = (
+            str(kwargs.get("tool_template") or "").strip() or self._default_tool_template
+        )
 
         try:
             cfg = get_config()
@@ -698,6 +709,7 @@ class CreateScheduledJobTool(BaseTool):
                 **({"start_time": start_time} if start_time is not None else {}),
                 **({"memory_owner": memory_owner} if memory_owner is not None else {}),
                 **({"core_mode": core_mode} if core_mode is not None else {}),
+                **({"tool_template": tool_template} if tool_template is not None else {}),
             },
         )
 

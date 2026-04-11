@@ -76,8 +76,6 @@ def mock_config():
         agent=AgentConfig(
             max_iterations=5,
             enable_debug=False,
-            tool_mode="sub",
-            source_overrides={},
         ),
     )
 

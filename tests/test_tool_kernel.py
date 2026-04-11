@@ -105,6 +105,32 @@ class TestKernelTools:
         assert "get_tasks" in snapshot.tool_names
 
     @pytest.mark.asyncio
+    async def test_search_tools_marks_uncallable_results(self):
+        registry = VersionedToolRegistry()
+        registry.register(DummyTool(name="secret_tool", description="秘密能力"))
+        working_set = ToolWorkingSetManager(
+            pinned_tools=["search_tools", "call_tool", "bash"],
+            working_set_size=3,
+        )
+        profile = CoreProfile(
+            mode="full",
+            allowed_tools=["search_tools", "call_tool", "bash"],
+        )
+        tool = SearchToolsTool(
+            registry=registry,
+            working_set=working_set,
+            profile_getter=lambda: profile,
+        )
+
+        result = await tool.execute(query="秘密")
+        assert result.success is True
+        assert result.data["tools"][0]["callable_in_current_core"] is False
+        assert result.data["tools"][0]["reason_if_denied"] is not None
+
+        snapshot = working_set.build_snapshot(registry)
+        assert "secret_tool" not in snapshot.tool_names
+
+    @pytest.mark.asyncio
     async def test_call_tool_executes_target(self):
         registry = VersionedToolRegistry()
         dummy = DummyTool(name="demo_tool")
@@ -142,14 +168,24 @@ class TestAgentKernelMode:
         config = Config(
             llm=LLMConfig(api_key="x", model="x"),
             agent=AgentConfig(
-                tool_mode="kernel",
-                pinned_tools=["search_tools", "call_tool"],
                 working_set_size=2,
                 max_iterations=6,
             ),
         )
         hidden_tool = DummyTool(name="hidden_tool", description="隐藏能力测试")
-        agent = AgentCore(config=config, tools=[hidden_tool], max_iterations=6)
+        profile = CoreProfile(
+            mode="full",
+            allowed_tools=["search_tools", "call_tool", "bash", "hidden_tool"],
+            tool_template="default",
+            tool_exposure_mode="empty",
+            allow_dangerous_commands=True,
+        )
+        agent = AgentCore(
+            config=config,
+            tools=[hidden_tool],
+            max_iterations=6,
+            core_profile=profile,
+        )
 
         responses = [
             LLMResponse(

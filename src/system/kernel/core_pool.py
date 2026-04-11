@@ -415,6 +415,7 @@ class CorePool:
             allowed_tools=None,
             frontend_id="subagent",
             dialog_window_id=subagent_id,
+            tools_config=self._config.tools,
         )
         entry = CoreEntry(
             agent=None,
@@ -713,6 +714,7 @@ class CorePool:
                     session_expired_seconds=getattr(
                         self._config.agent, "session_expired_seconds", 1_800
                     ),
+                    tools_config=self._config.tools,
                 )
 
         # 优先使用 system.tools.build_tool_registry，与 Kernel/MCP 工具装配一致
@@ -723,6 +725,13 @@ class CorePool:
             config=self._config,
             memory_owner_id=user_id,
             core_pool=self,
+        )
+        tool_catalog = build_tool_registry(
+            profile=profile,
+            config=self._config,
+            memory_owner_id=user_id,
+            core_pool=self,
+            filter_by_profile=False,
         )
         tools = list(reg.list_tools()[1].values())
         # search_tools / call_tool 需绑定 AgentCore 自身的 ToolWorkingSetManager；
@@ -741,6 +750,7 @@ class CorePool:
         agent = AgentCore(
             config=self._config,
             tools=tools,
+            tool_catalog=tool_catalog,
             max_iterations=max_iter,
             timezone=self._config.time.timezone,
             user_id=user_id,
@@ -908,7 +918,35 @@ class CorePool:
             memory_owner_id=user_id,
             core_pool=self,
         )
-        entry.agent._tool_registry = reg
+        tool_catalog = build_tool_registry(
+            profile=profile,
+            config=self._config,
+            memory_owner_id=user_id,
+            core_pool=self,
+            filter_by_profile=False,
+        )
+        from agent_core.tools import VersionedToolRegistry
+        reg_tools = list(reg.list_tools()[1].values())
+        reg_tools = [t for t in reg_tools if t.name not in {"search_tools", "call_tool"}]
+        stripped_reg = VersionedToolRegistry()
+        for tool in reg_tools:
+            stripped_reg.register(tool)
+        entry.agent._tool_registry = stripped_reg
+        entry.agent._tool_catalog = tool_catalog
+        from agent_core.tools import CallToolTool, SearchToolsTool
+        entry.agent._tool_registry.register(
+            SearchToolsTool(
+                registry=tool_catalog,
+                working_set=entry.agent._working_set,
+                profile_getter=lambda: getattr(entry.agent, "_core_profile", None),
+            )
+        )
+        entry.agent._tool_registry.register(
+            CallToolTool(
+                registry=tool_catalog,
+                profile_getter=lambda: getattr(entry.agent, "_core_profile", None),
+            )
+        )
         entry.agent._source = source
         entry.agent._user_id = user_id
         entry.agent._core_profile = profile

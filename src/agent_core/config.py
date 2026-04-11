@@ -354,7 +354,7 @@ class CommandToolsConfig(BaseModel):
     )
     allow_run_for_subagent: bool = Field(
         default=False,
-        description="是否允许受限模式（subagent、tool_mode=sub）使用 bash；开启后仅可执行 subagent_command_whitelist 内命令，禁止管道/重定向与危险命令",
+        description="是否允许受限模式（如 subagent）使用 bash；开启后仅可执行 subagent_command_whitelist 内命令，禁止管道/重定向与危险命令",
     )
     subagent_command_whitelist: List[str] = Field(
         default_factory=lambda: [
@@ -589,6 +589,111 @@ class SkillsConfig(BaseModel):
     )
 
 
+class ToolTemplateConfig(BaseModel):
+    """单个工具模板配置。"""
+
+    exposure: Literal["pinned", "empty"] = Field(
+        default="pinned",
+        description="工具初始暴露模式：pinned=暴露 core_tools+pinned_tools+extra；empty=仅暴露 core_tools+extra",
+    )
+    extra: List[str] = Field(
+        default_factory=list,
+        description="该模板专属追加的工具名列表",
+    )
+
+
+def _default_tool_templates() -> Dict[str, "ToolTemplateConfig"]:
+    return {
+        "default": ToolTemplateConfig(exposure="pinned", extra=[]),
+        "shuiyuan": ToolTemplateConfig(
+            exposure="empty",
+            extra=[
+                "shuiyuan_search",
+                "shuiyuan_get_topic",
+                "shuiyuan_browse_topic",
+                "shuiyuan_get_latest",
+                "shuiyuan_get_top",
+                "shuiyuan_get_categories",
+                "shuiyuan_get_category_topics",
+                "shuiyuan_post_retort",
+                "attach_image_to_reply",
+            ],
+        ),
+        "cron": ToolTemplateConfig(
+            exposure="empty",
+            extra=[
+                "parse_time",
+                "add_event",
+                "add_task",
+                "get_events",
+                "get_tasks",
+                "update_event",
+                "update_task",
+                "delete_schedule_data",
+                "get_free_slots",
+                "plan_tasks",
+                "sync_sources",
+                "get_sync_status",
+                "get_digest",
+                "list_notifications",
+                "ack_notification",
+                "configure_automation_policy",
+                "get_automation_activity",
+                "create_scheduled_job",
+                "notify_owner",
+            ],
+        ),
+    }
+
+
+class ToolsConfig(BaseModel):
+    """工具模板与初始暴露配置。"""
+
+    core_tools: List[str] = Field(
+        default_factory=lambda: ["search_tools", "call_tool", "bash"],
+        description="所有 Core 固定携带的核心工具",
+    )
+    pinned_tools: List[str] = Field(
+        default_factory=lambda: [
+            "load_skill",
+            "web_search",
+            "read_file",
+            "write_file",
+            "modify_file",
+            "extract_web_content",
+            "attach_media",
+            "memory_search_long_term",
+            "memory_search_content",
+            "memory_store",
+            "memory_ingest",
+        ],
+        description="默认模板在 exposure=pinned 时额外始终暴露给 LLM 的工具名列表",
+    )
+    templates: Dict[str, ToolTemplateConfig] = Field(
+        default_factory=_default_tool_templates,
+        description="按模板名定义的工具暴露与专属工具配置",
+    )
+
+    def get_template(self, name: Optional[str]) -> ToolTemplateConfig:
+        template_name = (name or "default").strip() or "default"
+        return self.templates.get(template_name) or self.templates.get(
+            "default", ToolTemplateConfig()
+        )
+
+    def resolve_initial_tools(self, template_name: Optional[str]) -> List[str]:
+        template = self.get_template(template_name)
+        names: List[str] = list(self.core_tools)
+        if template.exposure == "pinned":
+            names.extend(self.pinned_tools)
+        names.extend(template.extra)
+        deduped: List[str] = []
+        for name in names:
+            norm = str(name).strip()
+            if norm and norm not in deduped:
+                deduped.append(norm)
+        return deduped
+
+
 class AgentConfig(BaseModel):
     """Agent 配置"""
 
@@ -613,36 +718,10 @@ class AgentConfig(BaseModel):
         description="子 Agent 上下文压缩阈值（profile.max_context_tokens）；None 表示不设 profile 层上限，仅受 working memory 约束",
     )
     enable_debug: bool = Field(default=False, description="是否启用调试模式")
-    tool_mode: str = Field(
-        default="kernel",
-        description="工具暴露模式: kernel(核心工具+工作集) | sub(受限模式，仅使用传入工具，禁止写入/危险命令)",
-    )
-    source_overrides: Dict[str, str] = Field(
-        default_factory=dict,
-        description="按 source 覆盖 tool_mode；未覆盖时沿用全局 tool_mode",
-    )
     working_set_size: int = Field(
         default=6,
         ge=0,
-        description="kernel 模式下 LRU 工作集大小",
-    )
-    pinned_tools: List[str] = Field(
-        default_factory=lambda: [
-            "search_tools",
-            "call_tool",
-            "load_skill",  # 技能按需加载；仅 skills.enabled 时注册
-            "web_search",
-            "read_file",
-            "write_file",
-            "bash",
-            "extract_web_content",
-            "attach_media",
-            "memory_search_long_term",
-            "memory_search_content",
-            "memory_store",
-            "memory_ingest",
-        ],
-        description="kernel 模式下始终暴露给 LLM 的工具名列表",
+        description="工具工作集大小（search_tools 将命中的工具加入该 LRU 集合）",
     )
 
 
@@ -752,6 +831,10 @@ class AutomationJobConfig(BaseModel):
             ),
         )
     )
+    tool_template: Optional[str] = Field(
+        default=None,
+        description="可选：工具模板名，例如 default / shuiyuan / cron；未配置时按 Core 创建入口自动推导。",
+    )
     enabled: bool = Field(
         default=True,
         description="是否启用该任务。",
@@ -850,6 +933,10 @@ class Config(BaseModel):
     )
     storage: StorageConfig = Field(default_factory=StorageConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    tools: ToolsConfig = Field(
+        default_factory=ToolsConfig,
+        description="工具模板与初始暴露配置",
+    )
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     ui: UIConfig = Field(
         default_factory=UIConfig,
@@ -963,6 +1050,44 @@ def load_config(config_path: Optional[Path] = None) -> Config:
 
     if raw_config is None:
         raise ValueError(f"配置文件为空: {config_path}")
+
+    # 兼容旧工具配置：agent.tool_mode/source_overrides/pinned_tools -> tools
+    agent_raw = raw_config.get("agent")
+    if not isinstance(agent_raw, dict):
+        agent_raw = {}
+        raw_config["agent"] = agent_raw
+    tools_raw = raw_config.get("tools")
+    if not isinstance(tools_raw, dict):
+        tools_raw = {}
+        raw_config["tools"] = tools_raw
+    templates_raw = tools_raw.get("templates")
+    if not isinstance(templates_raw, dict):
+        templates_raw = {}
+        tools_raw["templates"] = templates_raw
+
+    legacy_pinned = agent_raw.pop("pinned_tools", None)
+    if legacy_pinned is not None and "pinned_tools" not in tools_raw:
+        tools_raw["pinned_tools"] = legacy_pinned
+
+    legacy_tool_mode = str(agent_raw.pop("tool_mode", "") or "").strip().lower()
+    if legacy_tool_mode and "default" not in templates_raw:
+        templates_raw["default"] = {
+            "exposure": "pinned" if legacy_tool_mode in ("kernel", "full") else "empty",
+            "extra": [],
+        }
+
+    legacy_overrides = agent_raw.pop("source_overrides", None)
+    if isinstance(legacy_overrides, dict):
+        for source, mode in legacy_overrides.items():
+            src = str(source or "").strip()
+            raw_mode = str(mode or "").strip().lower()
+            if not src:
+                continue
+            tpl = templates_raw.setdefault(src, {})
+            if "exposure" not in tpl:
+                tpl["exposure"] = (
+                    "pinned" if raw_mode in ("kernel", "full") else "empty"
+                )
 
     # 支持环境变量覆盖敏感配置
     if "llm" in raw_config:

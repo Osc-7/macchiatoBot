@@ -219,7 +219,6 @@ def build_system_prompt(
     has_file_tools: bool = False,
     mode: PromptMode = "full",
     max_section_chars: int = DEFAULT_MAX_SECTION_CHARS,
-    tool_mode: str = "kernel",
     sub_content_path: str | None = None,
 ) -> str:
     """
@@ -233,10 +232,7 @@ def build_system_prompt(
 
     # ---------- 1. Tooling（工具列表与使用说明）----------
     if mode in ("full", "minimal"):
-        if (tool_mode or "kernel").lower() == "kernel":
-            _maybe_append(parts, load("tools_kernel"))
-        else:
-            _maybe_append(parts, load("tools"))
+        _maybe_append(parts, load("tools_kernel"))
 
     # ---------- 2. Safety（简短防护）----------
     if mode in ("full", "minimal"):

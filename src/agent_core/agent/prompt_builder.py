@@ -34,7 +34,6 @@ def build_agent_system_prompt(agent: Any) -> str:
         config=agent._config,
         has_web_extractor=agent._tool_registry.has("extract_web_content"),
         has_file_tools=agent._tool_registry.has("read_file"),
-        tool_mode=agent._effective_tool_mode,
         sub_content_path=sub_content_path,
     )
 

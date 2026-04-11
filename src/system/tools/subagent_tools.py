@@ -145,6 +145,7 @@ async def _run_subagent_task(
         max_total_tokens=subagent_max_tokens,
         max_context_tokens=subagent_max_context_tokens,
         allow_dangerous_commands=allow_run_for_subagent,
+        tools_config=cfg.tools,
     )
     # 24h TTL 保护（任务完成后主动 evict，不依赖 TTL 扫描）
     profile.session_expired_seconds = 86400

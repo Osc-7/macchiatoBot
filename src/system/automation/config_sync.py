@@ -33,6 +33,7 @@ def _config_job_to_definition(cfg: Config, job_config: Any) -> JobDefinition:
     user_id = job_config.user_id or "default"
     memory_owner = getattr(job_config, "memory_owner", None) or ""
     core_mode = getattr(job_config, "core_mode", None)
+    tool_template = getattr(job_config, "tool_template", None) or ""
     timezone = cfg.time.timezone
 
     run_at: Optional[datetime] = None
@@ -64,6 +65,8 @@ def _config_job_to_definition(cfg: Config, job_config: Any) -> JobDefinition:
         payload["memory_owner"] = memory_owner
     if core_mode:
         payload["core_mode"] = core_mode
+    if tool_template:
+        payload["tool_template"] = tool_template
     if job_config.daily_time:
         payload["daily_time"] = job_config.daily_time
     if job_config.times:

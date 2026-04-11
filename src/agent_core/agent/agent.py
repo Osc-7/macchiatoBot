@@ -102,6 +102,7 @@ class AgentCore:
         self,
         config: Optional[Config] = None,
         tools: Optional[List[BaseTool]] = None,
+        tool_catalog: Optional[VersionedToolRegistry] = None,
         max_iterations: Optional[int] = 10,
         timezone: str = "Asia/Shanghai",
         session_logger: Optional["SessionLogger"] = None,
@@ -118,6 +119,7 @@ class AgentCore:
         Args:
             config: 配置对象，如果为 None 则使用全局配置
             tools: 工具列表，如果为 None 则使用空注册表
+            tool_catalog: 完整工具 catalog（供 search_tools / call_tool 搜索与按名调用全局工具）
             max_iterations: 最大工具调用迭代次数
             timezone: 时区
             session_logger: 会话日志记录器，用于记录完整 session 日志
@@ -138,25 +140,32 @@ class AgentCore:
             else self._llm_client
         )
         self._tool_registry = VersionedToolRegistry()
+        self._tool_catalog = tool_catalog
         self._context = ConversationContext()
         self._max_iterations = max_iterations
         self._timezone = timezone
         self._session_logger = session_logger
-        # 按 source 覆盖 tool_mode；full 视为 kernel 向后兼容
         agent_cfg = self._config.agent
-        raw_mode = (agent_cfg.source_overrides or {}).get(
-            self._source, agent_cfg.tool_mode or "kernel"
-        ) or "kernel"
-        if (raw_mode or "").lower() == "full":
-            raw_mode = "kernel"
-        self._effective_tool_mode = (raw_mode or "kernel").lower()
-        self._kernel_enabled = self._effective_tool_mode == "kernel"
-        pinned_tools = list(self._config.agent.pinned_tools or [])
-        for core_name in ["search_tools", "call_tool"]:
-            if core_name not in pinned_tools:
-                pinned_tools.append(core_name)
+        tools_cfg = self._config.tools
+        template_name = (
+            getattr(core_profile, "tool_template", None)
+            or ("shuiyuan" if self._source == "shuiyuan" else "default")
+        )
+        template = tools_cfg.get_template(template_name)
+        exposure_mode = getattr(
+            core_profile, "tool_exposure_mode", template.exposure
+        ) or template.exposure
+        pinned_tools = list(tools_cfg.core_tools or [])
+        if exposure_mode == "pinned":
+            pinned_tools.extend(tools_cfg.pinned_tools or [])
+        pinned_tools.extend(template.extra or [])
+        deduped_pinned: List[str] = []
+        for name in pinned_tools:
+            norm = str(name).strip()
+            if norm and norm not in deduped_pinned:
+                deduped_pinned.append(norm)
         self._working_set = ToolWorkingSetManager(
-            pinned_tools=pinned_tools,
+            pinned_tools=deduped_pinned,
             working_set_size=self._config.agent.working_set_size,
         )
         self._last_snapshot = ToolSnapshot(version=-1, tool_names=[], openai_tools=[])
@@ -244,6 +253,10 @@ class AgentCore:
         if tools:
             for tool in tools:
                 self._tool_registry.register(tool)
+            if self._core_profile is None:
+                # 向后兼容：无 CoreProfile 的独立 Agent（常见于单元测试/本地直连）
+                # 默认将显式传入的工具加入工作集，避免需要额外模板配置。
+                self._working_set.add_to_working_set([tool.name for tool in tools])
 
         # 注册对话历史检索工具
         if self._memory_enabled and self._chat_history_db is not None:
@@ -256,19 +269,20 @@ class AgentCore:
                 if not self._tool_registry.has(chat_tool.name):
                     self._tool_registry.register(chat_tool)
 
-        # Meta：search_tools / call_tool 对所有 Core 注册（与 kernel/sub 无关）；
-        # kernel 模式下 InternalLoader 仍通过工作集裁剪可见工具，sub 模式为全量 definitions + Profile 过滤。
+        # Meta：search_tools / call_tool 对所有 Core 注册；
+        # search/call 默认连接完整工具 catalog，当前 Core 的 registry 仍用于真实暴露与执行。
         if not self._tool_registry.has("search_tools"):
             self._tool_registry.register(
                 SearchToolsTool(
-                    registry=self._tool_registry,
+                    registry=self._tool_catalog or self._tool_registry,
                     working_set=self._working_set,
+                    profile_getter=lambda: getattr(self, "_core_profile", None),
                 )
             )
         if not self._tool_registry.has("call_tool"):
             self._tool_registry.register(
                 CallToolTool(
-                    registry=self._tool_registry,
+                    registry=self._tool_catalog or self._tool_registry,
                     profile_getter=lambda: getattr(self, "_core_profile", None),
                 )
             )
@@ -926,7 +940,7 @@ class AgentCore:
         Returns:
             工具执行结果
         """
-        if self._kernel_enabled and tool_call.name not in self._current_visible_tools:
+        if self._current_visible_tools and tool_call.name not in self._current_visible_tools:
             return ToolResult(
                 success=False,
                 error="TOOL_NOT_VISIBLE",
@@ -949,10 +963,19 @@ class AgentCore:
         else:
             kwargs = tool_call.arguments
 
-        # 注入执行上下文（供 bash/file_tools 等做来源/模式鉴权）
+        # 注入执行上下文（供 bash/file_tools 等做来源与权限鉴权）
         kwargs = dict(kwargs)
+        profile = getattr(self, "_core_profile", None)
         kwargs["__execution_context__"] = {
-            "tool_mode": self._effective_tool_mode,
+            "profile_mode": getattr(profile, "mode", "full") if profile is not None else "full",
+            "tool_template": getattr(profile, "tool_template", "default")
+            if profile is not None
+            else "default",
+            "allow_dangerous_commands": getattr(
+                profile, "allow_dangerous_commands", False
+            )
+            if profile is not None
+            else False,
             "source": self._source,
             "user_id": self._user_id,
         }

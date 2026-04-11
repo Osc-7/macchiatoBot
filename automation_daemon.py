@@ -151,6 +151,11 @@ async def _consume_loop(
 
             frontend_id = mem_source or task.source
             dialog_id = mem_user or task.user_id
+            tool_template = (
+                str(task.metadata.get("tool_template") or "").strip()
+                if isinstance(task.metadata, dict)
+                else ""
+            )
 
             if mode == "full":
                 # full 模式下对齐 cli/feishu 主对话的权限策略：
@@ -161,6 +166,7 @@ async def _consume_loop(
                     cfg,
                     frontend_id=frontend_id,
                     dialog_window_id=dialog_id,
+                    tool_template=tool_template or "default",
                 )
             elif mode == "sub":
                 cfg = get_config()
@@ -171,12 +177,16 @@ async def _consume_loop(
                     frontend_id=frontend_id,
                     dialog_window_id=dialog_id,
                     max_context_tokens=sub_ctx,
+                    tool_template=tool_template or "default",
+                    tools_config=cfg.tools,
                 )
             else:
                 # 默认后台任务权限（定时任务 / 心跳）
                 profile = CoreProfile.default_background(
                     frontend_id=frontend_id,
                     dialog_window_id=dialog_id,
+                    tool_template=tool_template or "cron",
+                    tools_config=get_config().tools,
                 )
 
             # 有 memory_owner 时，为该 Core 打开持久化记忆；否则仅使用工作记忆。
@@ -199,6 +209,9 @@ async def _consume_loop(
                 cm = str(task.metadata.get("core_mode") or "").strip()
                 if cm:
                     req_meta["core_mode"] = cm
+                tt = str(task.metadata.get("tool_template") or "").strip()
+                if tt:
+                    req_meta["tool_template"] = tt
             request = KernelRequest.create(
                 text=task.instruction,
                 session_id=task.session_id,

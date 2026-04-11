@@ -12,6 +12,7 @@ import pytest
 from agent_core.context import ConversationContext
 from agent_core.kernel_interface import CoreProfile, KernelRequest
 from agent_core.tools import VersionedToolRegistry
+from agent_core.orchestrator import ToolWorkingSetManager
 from system.kernel import AgentKernel, CoreEntry, CorePool, KernelScheduler
 
 
@@ -147,11 +148,11 @@ async def test_core_pool_acquire_hot_updates_profile(
         frontend_id="wechat",
         dialog_window_id="u2",
     )
-    fake_registry = object()
+    fake_registry = VersionedToolRegistry()
 
     captured: dict = {}
 
-    def _fake_build_tool_registry(*, profile=None, config=None, memory_owner_id=None, core_pool=None):  # type: ignore[no-untyped-def]
+    def _fake_build_tool_registry(*, profile=None, config=None, memory_owner_id=None, core_pool=None, **kwargs):  # type: ignore[no-untyped-def]
         captured["profile"] = profile
         captured["memory_owner_id"] = memory_owner_id
         return fake_registry
@@ -161,6 +162,8 @@ async def test_core_pool_acquire_hot_updates_profile(
     pool = CorePool()
     fake_agent = SimpleNamespace(
         _tool_registry=VersionedToolRegistry(),
+        _tool_catalog=VersionedToolRegistry(),
+        _working_set=ToolWorkingSetManager(pinned_tools=["search_tools", "call_tool", "bash"]),
         _source="cli",
         _user_id="u1",
         _core_profile=profile_old,
@@ -176,7 +179,8 @@ async def test_core_pool_acquire_hot_updates_profile(
     )
 
     assert agent is fake_agent
-    assert fake_agent._tool_registry is fake_registry
+    assert isinstance(fake_agent._tool_registry, VersionedToolRegistry)
+    assert fake_agent._tool_catalog is fake_registry
     assert fake_agent._source == "wechat"
     assert fake_agent._user_id == "u2"
     assert fake_agent._core_profile == profile_new
@@ -272,11 +276,12 @@ async def test_agent_prepare_turn_populates_recall_result(tmp_path) -> None:
     config.llm = MagicMock()
     config.llm.summary_model = None
     config.agent = MagicMock()
-    config.agent.tool_mode = "kernel"
-    config.agent.source_overrides = {}
-    config.agent.pinned_tools = []
     config.agent.working_set_size = 6
     config.agent.max_iterations = 10
+    config.tools = MagicMock()
+    config.tools.core_tools = ["search_tools", "call_tool", "bash"]
+    config.tools.pinned_tools = []
+    config.tools.get_template.return_value = SimpleNamespace(exposure="pinned", extra=[])
     config.memory = MagicMock()
     config.memory.enabled = False
     config.memory.max_working_tokens = 4000

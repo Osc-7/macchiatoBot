@@ -79,10 +79,15 @@ from .automation_tools import (
 )
 from .sjtu_jw_tools import FetchSjtuUndergradScheduleTool
 from .shuiyuan_tools import (
-    ShuiyuanSearchTool,
+    ShuiyuanBrowseTopicTool,
+    ShuiyuanGetCategoriesTool,
+    ShuiyuanGetCategoryTopicsTool,
+    ShuiyuanGetLatestTool,
     ShuiyuanGetTopicTool,
-    ShuiyuanRetortTool,
+    ShuiyuanGetTopTool,
     ShuiyuanPostReplyTool,
+    ShuiyuanRetortTool,
+    ShuiyuanSearchTool,
 )
 from .subagent_tools import (
     CancelSubagentTool,
@@ -234,6 +239,7 @@ def _build_canvas_tools(config: Config) -> List[BaseTool]:
 
 
 def _build_shuiyuan_tools(config: Config) -> List[BaseTool]:
+    """与 factory.get_default_tools 中水源块保持一致，供 build_tool_registry / CorePool 使用。"""
     tools: List[BaseTool] = []
     shuiyuan_cfg = getattr(config, "shuiyuan", None)
     if shuiyuan_cfg and getattr(shuiyuan_cfg, "enabled", False):
@@ -241,6 +247,11 @@ def _build_shuiyuan_tools(config: Config) -> List[BaseTool]:
         tools.append(ShuiyuanGetTopicTool(config=config))
         tools.append(ShuiyuanRetortTool(config=config))
         tools.append(ShuiyuanPostReplyTool(config=config))
+        tools.append(ShuiyuanGetLatestTool(config=config))
+        tools.append(ShuiyuanGetTopTool(config=config))
+        tools.append(ShuiyuanGetCategoriesTool(config=config))
+        tools.append(ShuiyuanGetCategoryTopicsTool(config=config))
+        tools.append(ShuiyuanBrowseTopicTool(config=config))
     return tools
 
 
@@ -268,8 +279,10 @@ def _build_automation_tools(
 ) -> List[BaseTool]:
     default_memory_owner: Optional[str] = None
     default_core_mode: Optional[str] = None
+    default_tool_template: Optional[str] = None
     if profile is not None:
         default_core_mode = getattr(profile, "mode", None) or "background"
+        default_tool_template = getattr(profile, "tool_template", None) or None
         if getattr(profile, "memory_enabled", False):
             src = getattr(profile, "frontend_id", None) or memory_source or ""
             uid = (
@@ -291,6 +304,7 @@ def _build_automation_tools(
         CreateScheduledJobTool(
             default_memory_owner=default_memory_owner,
             default_core_mode=default_core_mode,
+            default_tool_template=default_tool_template,
         ),
         NotifyOwnerTool(config=config),
     ]
@@ -399,6 +413,7 @@ def build_tool_registry(
     memory_owner_id: Optional[str] = None,
     memory_source: Optional[str] = None,
     core_pool: Optional["CorePool"] = None,
+    filter_by_profile: bool = True,
 ) -> VersionedToolRegistry:
     cfg = config or get_config()
     registry = VersionedToolRegistry()
@@ -445,7 +460,7 @@ def build_tool_registry(
         )
     )
 
-    if profile is not None:
+    if profile is not None and filter_by_profile:
         for tool in tools:
             if profile.is_tool_allowed(tool.name):
                 registry.register(tool)
@@ -454,18 +469,36 @@ def build_tool_registry(
             registry.register(tool)
 
     agent_cfg = getattr(cfg, "agent", None)
+    tools_cfg = getattr(cfg, "tools", None)
     pinned = list(
-        getattr(agent_cfg, "pinned_tools", None) or ["search_tools", "call_tool"]
+        getattr(tools_cfg, "core_tools", None) or ["search_tools", "call_tool", "bash"]
     )
-    for core in ["search_tools", "call_tool"]:
+    for core in ["search_tools", "call_tool", "bash"]:
         if core not in pinned:
             pinned.append(core)
+    if profile is not None:
+        template_name = getattr(profile, "tool_template", "default")
+        template = tools_cfg.get_template(template_name) if tools_cfg else None
+        exposure = getattr(profile, "tool_exposure_mode", None) or (
+            template.exposure if template is not None else "pinned"
+        )
+        if exposure == "pinned":
+            pinned.extend(list(getattr(tools_cfg, "pinned_tools", None) or []))
+        if template is not None:
+            pinned.extend(list(template.extra or []))
+    pinned = [name for idx, name in enumerate(pinned) if name and name not in pinned[:idx]]
     working_set_size = int(getattr(agent_cfg, "working_set_size", 6) or 6)
     working_set = ToolWorkingSetManager(
         pinned_tools=pinned, working_set_size=working_set_size
     )
     if not registry.has("search_tools"):
-        registry.register(SearchToolsTool(registry=registry, working_set=working_set))
+        registry.register(
+            SearchToolsTool(
+                registry=registry,
+                working_set=working_set,
+                profile_getter=(lambda: profile) if profile is not None else None,
+            )
+        )
     if not registry.has("call_tool"):
         registry.register(CallToolTool(registry=registry))
 

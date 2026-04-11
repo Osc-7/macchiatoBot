@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from agent_core.config import Config, get_config
 from agent_core.adapters import CoreSessionAdapter
 from agent_core.interfaces import AgentHooks, AgentRunInput, CoreSession, RunTurnCommand
+from agent_core.kernel_interface import CoreProfile
 from agent_core.tools import BaseTool
 
 from .agent_task import ContextPolicy
@@ -123,6 +124,17 @@ class SessionManager:
         AgentCore = _import_schedule_agent()
         tools = self._tools_factory() if self._tools_factory else []
         source, user_id = _parse_session_id(session_id)
+        if source == "shuiyuan":
+            profile = CoreProfile.for_shuiyuan(
+                dialog_window_id=user_id,
+                tools_config=self._config.tools,
+            )
+        else:
+            profile = CoreProfile.full_from_config(
+                self._config,
+                frontend_id=source,
+                dialog_window_id=user_id,
+            )
         agent = AgentCore(
             config=self._config,
             tools=tools,
@@ -131,6 +143,7 @@ class SessionManager:
             session_logger=session_logger,
             user_id=user_id,
             source=source,
+            core_profile=profile,
         )
         return agent
 

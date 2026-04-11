@@ -20,6 +20,7 @@ from agent_core.config import (
     CommandToolsConfig,
     MCPConfig,
     MCPServerConfig,
+    ToolsConfig,
     UIConfig,
     load_config,
     get_config,
@@ -95,12 +96,15 @@ class TestConfigModels:
         config = AgentConfig()
         assert config.max_iterations == 10
         assert config.enable_debug is False
-        # 默认使用 kernel 模式；full 作为向后兼容别名，在 Agent 内部被视为 kernel
-        assert config.tool_mode == "kernel"
-        assert config.source_overrides == {}
         assert config.working_set_size == 6
-        assert "search_tools" in config.pinned_tools
-        assert "call_tool" in config.pinned_tools
+
+    def test_tools_config_defaults(self):
+        """测试工具模板配置默认值"""
+        config = ToolsConfig()
+        assert config.core_tools == ["search_tools", "call_tool", "bash"]
+        assert "read_file" in config.pinned_tools
+        assert config.templates["default"].exposure == "pinned"
+        assert "shuiyuan_browse_topic" in config.templates["shuiyuan"].extra
 
     def test_shuiyuan_profile_is_full_mode(self):
         """水源前端默认走 full profile，而不是受限 sub。"""
@@ -280,6 +284,29 @@ llm:
         assert config.llm.temperature == 0.7
         assert config.time.timezone == "Asia/Shanghai"
         assert config.storage.type == "json"
+
+    def test_load_legacy_tool_mode_migrates_to_tools(self, tmp_path):
+        """旧 agent.tool_mode/source_overrides/pinned_tools 应迁移为 tools 配置。"""
+        config_content = """
+llm:
+  api_key: "legacy-key"
+  model: "legacy-model"
+agent:
+  tool_mode: "kernel"
+  source_overrides:
+    shuiyuan: "sub"
+  pinned_tools:
+    - "read_file"
+    - "write_file"
+"""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+
+        config = load_config(config_file)
+
+        assert config.tools.pinned_tools == ["read_file", "write_file"]
+        assert config.tools.templates["default"].exposure == "pinned"
+        assert config.tools.templates["shuiyuan"].exposure == "empty"
 
     def test_load_nonexistent_file(self):
         """测试加载不存在的文件"""

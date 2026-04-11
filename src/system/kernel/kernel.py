@@ -106,6 +106,23 @@ class AgentKernel:
 
             elif isinstance(action, ToolCallAction):
                 _maybe_touch()
+                visible_tools = set(getattr(agent, "_current_visible_tools", set()) or set())
+                if visible_tools and action.tool_name not in visible_tools:
+                    from agent_core.tools.base import ToolResult as _ToolResult
+
+                    denied_result = _ToolResult(
+                        success=False,
+                        data=None,
+                        message=f"工具 '{action.tool_name}' 当前不在可见工作集中",
+                        error="TOOL_NOT_VISIBLE",
+                    )
+                    action = await gen.asend(
+                        ToolResultEvent(
+                            tool_call_id=action.tool_call_id,
+                            result=denied_result,
+                        )
+                    )
+                    continue
                 # 内核态权限校验（双重防御：InternalLoader 已在用户态过滤，此处强制兜底）
                 profile = getattr(agent, "_core_profile", None)
                 if profile is not None and not profile.is_tool_allowed(
@@ -141,10 +158,18 @@ class AgentKernel:
                         data=None,
                     )
                 else:
-                    # 注入执行上下文：补全 AgentCore._execute_tool_call() 原本做的注入，
-                    # 让 bash / file_tools 等能感知 tool_mode 和 source。
+                    # 注入执行上下文：让 bash / file_tools 等能感知当前 CoreProfile。
+                    profile_mode = getattr(profile, "mode", "full") if profile is not None else "full"
                     _ctx = {
-                        "tool_mode": getattr(agent, "_effective_tool_mode", "kernel"),
+                        "profile_mode": profile_mode,
+                        "tool_template": getattr(profile, "tool_template", "default")
+                        if profile is not None
+                        else "default",
+                        "allow_dangerous_commands": getattr(
+                            profile, "allow_dangerous_commands", False
+                        )
+                        if profile is not None
+                        else False,
                         "source": getattr(agent, "_source", ""),
                         "user_id": getattr(agent, "_user_id", ""),
                         "session_id": getattr(agent, "_session_id", ""),

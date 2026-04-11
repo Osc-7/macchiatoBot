@@ -62,6 +62,7 @@ def make_cron_task(
     user_id: str = "default",
     memory_owner: str | None = None,
     core_mode: str | None = None,
+    tool_template: str | None = None,
 ) -> AgentTask:
     """构造定时任务 AgentTask（ephemeral，session_id 含日期保证唯一性）。"""
     today = date.today().isoformat()
@@ -71,6 +72,8 @@ def make_cron_task(
         metadata["memory_owner"] = memory_owner
     if core_mode:
         metadata["core_mode"] = core_mode
+    if tool_template:
+        metadata["tool_template"] = tool_template
 
     return AgentTask(
         source=source,

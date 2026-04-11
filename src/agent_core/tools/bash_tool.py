@@ -118,7 +118,6 @@ class BashTool(BaseTool):
 
     async def execute(self, **kwargs) -> ToolResult:
         exec_ctx = kwargs.pop("__execution_context__", None) or {}
-        tool_mode = (exec_ctx.get("tool_mode") or "kernel").lower()
 
         restart = kwargs.get("restart", False)
         if restart:
@@ -203,9 +202,10 @@ class BashTool(BaseTool):
         """从 __execution_context__ 推断 profile（用于安全校验）。"""
         from agent_core.kernel_interface.profile import CoreProfile
 
-        tool_mode = (exec_ctx.get("tool_mode") or "kernel").lower()
-        source = exec_ctx.get("source", "")
+        profile_mode = (exec_ctx.get("profile_mode") or "full").lower()
+        allow_dangerous = bool(exec_ctx.get("allow_dangerous_commands", False))
 
-        if tool_mode == "sub" or source == "subagent":
-            return CoreProfile(mode="sub")
-        return None
+        return CoreProfile(
+            mode=profile_mode if profile_mode in {"full", "sub", "background"} else "full",
+            allow_dangerous_commands=allow_dangerous,
+        )

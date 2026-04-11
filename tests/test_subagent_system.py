@@ -325,6 +325,7 @@ class TestToolRegistration:
             "send_message_to_agent",
             "reply_to_message",
             "get_subagent_status",
+            "reap_subagent",
             "cancel_subagent",
         ]:
             assert not reg.has(tool_name)
@@ -340,6 +341,7 @@ class TestToolRegistration:
         assert reg.has("send_message_to_agent")
         assert reg.has("reply_to_message")
         assert reg.has("get_subagent_status")
+        assert reg.has("reap_subagent")
         assert reg.has("cancel_subagent")
 
     def test_sub_mode_only_has_communication_tools(self):
@@ -353,6 +355,7 @@ class TestToolRegistration:
         assert not reg.has("create_subagent")
         assert not reg.has("create_parallel_subagents")
         assert not reg.has("get_subagent_status")
+        assert not reg.has("reap_subagent")
         assert not reg.has("cancel_subagent")
 
 
@@ -373,8 +376,8 @@ class TestGetSubagentStatusTool:
         assert result.data["status"] == "running"
 
     @pytest.mark.asyncio
-    async def test_get_status_completed_and_reap_zombie(self):
-        from system.tools.subagent_tools import GetSubagentStatusTool
+    async def test_get_status_completed_then_reap_removes_zombie(self):
+        from system.tools.subagent_tools import GetSubagentStatusTool, ReapSubagentTool
 
         pool, _ = _make_pool()
         entry = pool.register_sub(
@@ -387,15 +390,36 @@ class TestGetSubagentStatusTool:
         pool._zombies["sub:xyz789"] = entry
         pool._pool.pop("sub:xyz789", None)
 
-        tool = GetSubagentStatusTool(core_pool=pool)
-        result = await tool.execute(subagent_id="xyz789")
+        get_tool = GetSubagentStatusTool(core_pool=pool)
+        result = await get_tool.execute(subagent_id="xyz789")
         assert result.success
         assert "report content" in result.data.get("result_preview", "")
 
-        result_full = await tool.execute(subagent_id="xyz789", include_full_result=True)
+        result_full = await get_tool.execute(subagent_id="xyz789", include_full_result=True)
         assert result_full.success
         assert result_full.data["result"] == "report content"
+        assert pool.get_sub_info("sub:xyz789") is not None
+
+        reap_tool = ReapSubagentTool(core_pool=pool)
+        reap_result = await reap_tool.execute(subagent_id="xyz789")
+        assert reap_result.success
+        assert reap_result.data["result"] == "report content"
         assert pool.get_sub_info("sub:xyz789") is None
+
+    @pytest.mark.asyncio
+    async def test_reap_subagent_still_running(self):
+        from system.tools.subagent_tools import ReapSubagentTool
+
+        pool, _ = _make_pool()
+        pool.register_sub(
+            sub_session_id="sub:run001",
+            parent_session_id="cli:root",
+            task_description="running",
+        )
+        tool = ReapSubagentTool(core_pool=pool)
+        result = await tool.execute(subagent_id="run001")
+        assert result.success is False
+        assert result.error == "SUBAGENT_STILL_RUNNING"
 
 
 class TestCancelSubagentTool:

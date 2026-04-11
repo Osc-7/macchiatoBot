@@ -74,10 +74,18 @@
 |------|---------|
 | `create_subagent` | 派生单个后台子任务；立即返回，不等待结果 |
 | `create_parallel_subagents` | 派生多个并行后台子任务；谁先完成谁先通知 |
-| `get_subagent_status` | 查看子任务状态；`include_full_result=true` 时拉取完整结果并收割已结束任务 |
+| `get_subagent_status` | **只读**查看子任务状态；`include_full_result=true` 时拉取完整输出（不收割、不删盘） |
+| `reap_subagent` | **父侧必做**：子任务已结束（含 cancel）且你已不再需要其工作区时 **必须** 调用；回收 zombie、删盘、释放内存 |
 | `send_message_to_agent` | 向任意 session 发送 P2P 消息；**子 Agent 仅用于向父询问**，不用于汇报完成 |
 | `reply_to_message` | 回复收到的 query 消息（correlation_id 关联） |
-| `cancel_subagent` | **终止**正在运行的子 Agent（不可逆；查看状态/结果请用 get_subagent_status） |
+| `cancel_subagent` | **终止**正在运行的子 Agent（不可逆；**不删盘**；释放目录与 completed 相同，需另调 `reap_subagent`） |
+
+### 收割义务（必做）
+
+- 每创建一个 `subagent_id`，在父会话侧**处理完该子任务**（已用预览或 `get` 拿到所需内容、不再需要其隔离目录下的文件）后，**必须**调用 `reap_subagent(subagent_id=...)`。
+- **不要**依赖「系统会自动清理」：zombie 在内存中**不会**随会话 TTL 自动回收；不 reap 会长期占用 zombie 表与磁盘工作区。
+- 典型顺序：**按需** `get_subagent_status`（只读全文）→ **务必** `reap_subagent`（收尾）。并行多路：对**每一个**已结束的分支分别 reap（含已 `cancel_subagent` 的分支，若不再需要其目录）。
+- 若仍需从子工作区 `read_file` 拷贝文件，**先拷贝再 reap**；reap 后无法再查询该 id。
 
 ### 使用原则
 
@@ -111,15 +119,19 @@ result = create_parallel_subagents(tasks=[
 # [子任务 id1 完成]
 # 任务：从技术角度分析...
 # 结果预览：...（前200字）
-# 如需完整结果，调用 get_subagent_status(subagent_id="id1", include_full_result=True)
+# 如需只读完整结果，调用 get_subagent_status(subagent_id="id1", include_full_result=True)
 
-# 3. 按需拉取完整结果
+# 3. 按需只读拉取完整结果（不收割）
 get_subagent_status(subagent_id="id1", include_full_result=True)
 # → 返回 data.result（完整输出）
-# → 如果该子任务已结束且处于 zombie 状态，这一步也会顺带完成“收割”
 
-# 4. 若并行任务中已有足够结果，取消其余
+# 3b. 必做：本路结果已取用完毕、不再需要子目录 → reap（不依赖自动清理）
+reap_subagent(subagent_id="id1")
+
+# 4. 若并行任务中已有足够结果，取消其余（cancel 不删盘）
 cancel_subagent(subagent_id="id2")
+# 4b. 必做：对每个已结束/已取消且不再需要其工作区的 id 分别 reap_subagent
+reap_subagent(subagent_id="id2")
 
 # 5. 子 Agent 向父发消息（仅用于询问，不用于汇报完成）
 #    例：send_message_to_agent(session_id="cli:root", content="任务中「大厂」具体指哪些公司？")
@@ -136,7 +148,9 @@ reply_to_message(correlation_id="msg-001", sender_session_id="cli:root", content
 - 父 Agent 指定 `allowed_tools` 时，系统会自动合并上述通信工具
 - **完成信号**：子 Agent 完成后由系统自动推送，子 Agent **切勿**用 send_message_to_agent 汇报完成，否则重复通知
 - **send_message_to_agent**（子 Agent）：仅用于向父**询问**任务细节、实现要求、澄清歧义
-- `get_subagent_status(include_full_result=true)` 在已结束任务上可视作 `waitpid/reap`：拉取完整结果，并回收该子任务的 zombie 记录
+- **get** 与 **reap** 分工：`get_subagent_status` 只读；`reap_subagent` 才是 `waitpid/reap`（回收 zombie、删子工作区）
+- **`reap` 是父侧义务**：每个子任务在结束前都应 reap；未完成则勿 reap（会失败）。
+- **`cancel_subagent` 不删盘**：被取消的子任务终态仍为 `cancelled`，**仍须**按需 `reap_subagent` 释放目录（与完成/失败分支一致）
 
 ### 消息来源区分（重要）
 
@@ -145,14 +159,14 @@ reply_to_message(correlation_id="msg-001", sender_session_id="cli:root", content
 | 消息格式 | 来源 | 处理方式 |
 |----------|------|----------|
 | 普通自然语言（无特殊前缀） | **用户** | 响应用户需求 |
-| `[子任务 {subagent_id} 完成]` 开头 | **子 Agent 完成通知（系统注入）** | 这是预览通知，不是完整结果；先判断是否需要完整内容，再决定是否调用 `get_subagent_status(..., include_full_result=True)` 拉取 |
+| `[子任务 {subagent_id} 完成]` 开头 | **子 Agent 完成通知（系统注入）** | 预览 ≠ 全文；需要时用 `get_subagent_status(..., include_full_result=True)`；**处理完毕后必须 `reap_subagent`** |
 | `[来自 [{session_id}] 的消息]` 或 `[来自 X 的回复]` | **其他 Agent** | 处理来自其他 Agent 的汇报或回复 |
 
 **切勿将子任务完成通知误认为完整结果或用户输入**：
 - 通知中的「结果预览」只是前 200 字符，**不是完整输出**
-- 若需要完整输出才能继续，必须主动调用 `get_subagent_status(include_full_result=True)` 拉取
-- 当你已经拿到完整结果后，通常无需再次重复拉取；这一步已经完成了该已结束子任务的收割
-- 若预览已足够判断质量（如判断是否取消其他并行任务），可无需拉取完整结果
+- 若需要完整输出才能继续，必须主动调用 `get_subagent_status(include_full_result=True)` 只读拉取
+- 收割（删 zombie PCB、删 `data/workspace/subagent/<id>/` 等）**必须**通过 `reap_subagent` 完成，与只读 `get` 分开
+- 若预览已足够、无需 `get` 全文，**仍须在收尾时对对应 `subagent_id` 调用 `reap_subagent`**（除非你还在使用该子工作区内的文件）
 
 ## 9. 持续改进
 

@@ -68,12 +68,48 @@ POLL_INTERVAL_SECONDS = 5
 # 单条自动化任务超过此时长打 WARNING，便于发现「卡住整条队列」的长任务
 _CONSUME_SLOW_SECONDS = 300.0
 
+# 无 memory_owner 的定时任务共用这个 user_id 段，对应目录如
+# data/workspace/cron/_automation/ ，避免每个 job 名一层 cron/job-config-xxxx/。
+# 若需与用户飞书目录一致或任务间磁盘隔离，请为 job 配置 memory_owner。
+_AUTOMATION_SHARED_WORKSPACE_USER_ID = "_automation"
+
 
 def _instruction_preview(text: str, *, max_len: int = 120) -> str:
     t = (text or "").replace("\n", " ").strip()
     if len(t) <= max_len:
         return t
     return t[: max_len - 1] + "…"
+
+
+def _workspace_frontend_user_for_automation_task(
+    *,
+    raw_owner: str,
+    task_source: str,
+    task_user_id: str,
+) -> tuple[str, str]:
+    """
+    解析 CoreProfile.frontend_id / dialog_window_id。
+
+    须满足 memory_paths.validate_logic_namespace_segment（段内禁止 ':'、'/'）。
+    无 memory_owner 时 task.source 为 ``cron:{job_name}``，不能整段作为 frontend（否则会触发
+    ensure_workspace_owner_layout 校验失败）。此时工作区固定为 ``cron/_automation``，不按 job 名分目录。
+    """
+    ro = (raw_owner or "").strip()
+    if ro and ":" in ro:
+        ms, mu = ro.split(":", 1)
+        ms, mu = ms.strip(), mu.strip()
+        uid = (mu or task_user_id or "default").strip() or "default"
+        return ms, uid
+    if ro:
+        uid = (task_user_id or "default").strip() or "default"
+        return ro, uid
+
+    ts = (task_source or "").strip()
+    if ts.lower().startswith("cron:"):
+        return "cron", _AUTOMATION_SHARED_WORKSPACE_USER_ID
+    if ":" in ts:
+        return ts.replace(":", "_"), (task_user_id or "default").strip() or "default"
+    return ts or "cli", (task_user_id or "default").strip() or "default"
 
 
 async def _consume_loop(
@@ -137,20 +173,16 @@ async def _consume_loop(
                 raw_mode = str(task.metadata.get("core_mode") or "").strip()
                 raw_owner = str(task.metadata.get("memory_owner") or "").strip()
 
-            mem_source = ""
-            mem_user = ""
-            if raw_owner and ":" in raw_owner:
-                mem_source, mem_user = raw_owner.split(":", 1)
-            elif raw_owner:
-                mem_source, mem_user = raw_owner, "default"
-
             mode = (raw_mode or "").lower()
             # 兼容老配置：cron / heartbeat 都视为 background
             if mode in ("cron", "heartbeat"):
                 mode = "background"
 
-            frontend_id = mem_source or task.source
-            dialog_id = mem_user or task.user_id
+            frontend_id, dialog_id = _workspace_frontend_user_for_automation_task(
+                raw_owner=raw_owner,
+                task_source=task.source,
+                task_user_id=task.user_id,
+            )
             tool_template = (
                 str(task.metadata.get("tool_template") or "").strip()
                 if isinstance(task.metadata, dict)
@@ -215,7 +247,7 @@ async def _consume_loop(
             request = KernelRequest.create(
                 text=task.instruction,
                 session_id=task.session_id,
-                frontend_id=task.source,
+                frontend_id=frontend_id,
                 metadata=req_meta,
                 profile=profile,
             )

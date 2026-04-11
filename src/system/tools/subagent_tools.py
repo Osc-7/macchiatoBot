@@ -1,13 +1,14 @@
 """
 Subagent 工具集 — 通用异步 multi-agent 通信。
 
-提供 6 个工具：
+提供 7 个工具：
   1. create_subagent            — 创建单个子 agent 执行任务（fire-and-forget）
   2. create_parallel_subagents  — 并行创建多个子 agent（first-done 语义）
   3. send_message_to_agent      — 向任意已知 session 发送 P2P 消息
   4. reply_to_message           — 回复收到的 query 消息
-  5. get_subagent_status        — 查询子 agent 状态（只读，不取消）
-  6. cancel_subagent            — 取消正在运行的子 agent
+  5. get_subagent_status        — 查询子 agent 状态（只读，不取消、不收割）
+  6. reap_subagent              — 对已结束的子任务 waitpid：取回完整结果并收割 zombie、删工作区
+  7. cancel_subagent            — 取消正在运行的子 agent
 
 设计原则：
 - 工具本身不阻塞：create_subagent 立即返回 {subagent_id, status:"running"}
@@ -279,7 +280,8 @@ class CreateSubagentTool(BaseTool):
                 "调用本工具只会完成“派生子任务”这一步，不会等待子任务产出最终结果；"
                 "子任务会在系统进程表中独立运行，父 Agent 可继续当前工作流。\n\n"
                 "子任务完成或失败后，系统会向父 Agent 注入一条通知消息，只包含状态与结果预览。"
-                "若需要完整结果，应在收到通知后调用 `get_subagent_status(subagent_id=..., include_full_result=True)` 拉取。"
+                "若需要只读完整文本，调用 `get_subagent_status(..., include_full_result=True)`；"
+                "确认不再需要保留 zombie 与磁盘产物后，调用 `reap_subagent(subagent_id=...)` 完成收割。"
             ),
             parameters=[
                 ToolParameter(
@@ -335,8 +337,8 @@ class CreateSubagentTool(BaseTool):
             usage_notes=[
                 "create_subagent 只负责创建后台子任务，立即返回，不等待执行结束",
                 "子 Agent 完成后，父 Agent 只会收到预览通知，不会自动拿到完整输出",
-                "如果预览不足以继续决策，再调用 get_subagent_status(include_full_result=True) 拉取完整结果",
-                "查询状态或收割已完成子任务用 get_subagent_status；终止运行中的子任务用 cancel_subagent",
+                "如果预览不足以继续决策，可调用 get_subagent_status(include_full_result=True) 只读拉取完整文本",
+                "对已结束子任务需释放资源时调用 reap_subagent；查询状态用 get_subagent_status；终止运行中用 cancel_subagent",
                 "sub 模式的子 Agent 不能再创建子 Agent（防止无限递归）",
                 "若需并行多个子任务，使用 create_parallel_subagents 更高效",
             ],
@@ -482,7 +484,7 @@ class CreateParallelSubagentsTool(BaseTool):
             ],
             usage_notes=[
                 "各子 Agent 相互独立，谁先完成谁先通知父 Agent",
-                "通知只带预览；需要完整内容时，再按 subagent_id 调用 get_subagent_status(include_full_result=True)",
+                "通知只带预览；只读完整内容用 get_subagent_status(include_full_result=True)；收割 zombie 用 reap_subagent",
                 "若已有足够好的结果，应主动 cancel_subagent 取消其余任务，减少资源消耗",
                 "任务数量建议不超过 5 个，避免资源过度消耗",
             ],
@@ -906,7 +908,7 @@ class ReplyToMessageTool(BaseTool):
 
 
 class GetSubagentStatusTool(BaseTool):
-    """查询子 Agent 状态（只读，不会取消或修改任务）。"""
+    """查询子 Agent 状态（只读，不会取消、收割或删除工作区）。"""
 
     def __init__(self, core_pool: "CorePool") -> None:
         self._core_pool = core_pool
@@ -919,12 +921,11 @@ class GetSubagentStatusTool(BaseTool):
         return ToolDefinition(
             name="get_subagent_status",
             description=(
-                "查询子 Agent（subagent）的当前状态。\n\n"
-                "默认返回状态摘要和结果预览（前 500 字符），适合在收到完成通知后快速判断是否要继续处理。\n"
-                "设置 include_full_result=true 时，会返回完整输出；若该子任务已结束且处于待收割状态，"
-                "这次调用还会顺带完成“收割”操作：从 zombie 表移除，并删除该 subagent 在隔离工作区下的目录"
-                "（data/workspace/subagent/<id>/ 与 /tmp/macchiato/subagent/<id>/）。\n\n"
-                "若需要终止仍在运行的子任务，应使用 cancel_subagent。"
+                "查询子 Agent（subagent）的当前状态（**只读**，无任何副作用）。\n\n"
+                "默认返回状态摘要和结果预览（前 500 字符）。"
+                "设置 include_full_result=true 时，可返回完整输出文本，**仍不会**回收 zombie 或删除磁盘工作区。\n\n"
+                "对已结束子任务需要 **waitpid/reap**（从 zombie 表移除并删除 data/workspace/subagent/<id>/ 等）时，"
+                "请使用 **reap_subagent**。若需要终止仍在运行的子任务，使用 cancel_subagent。"
             ),
             parameters=[
                 ToolParameter(
@@ -937,9 +938,9 @@ class GetSubagentStatusTool(BaseTool):
                     name="include_full_result",
                     type="boolean",
                     description=(
-                        "是否返回子 Agent 的完整输出结果。\n"
+                        "是否返回子 Agent 的完整输出结果（仅只读，不收割）。\n"
                         "false（默认）：仅返回结果预览（前 500 字符）；\n"
-                        "true：返回完整结果；若该子任务已经完成/失败/取消且处于 zombie 状态，本次调用还会完成收割。"
+                        "true：在 data 中返回完整 result 文本（若已有）。"
                     ),
                     required=False,
                 ),
@@ -950,16 +951,15 @@ class GetSubagentStatusTool(BaseTool):
                     "params": {"subagent_id": "5c1d8838-453"},
                 },
                 {
-                    "description": "收到完成通知后，拉取子 Agent 的完整结果",
+                    "description": "只读拉取完整输出（不收割）",
                     "params": {"subagent_id": "5c1d8838-453", "include_full_result": True},
                 },
             ],
             usage_notes=[
-                "仅查看状态时可保持 include_full_result=false，避免过早拉取大结果",
+                "本工具不调用 reap；收割请用 reap_subagent",
                 "只能查询本 Agent 创建的子 Agent",
                 "status 可能为：running、completed、failed、cancelled",
-                "收到 [子任务 xxx 完成] 通知后，若需要完整输出，再调用 include_full_result=true",
-                "include_full_result=true 在已结束任务上相当于 waitpid/reap：既取完整结果，也回收 zombie 并删除子工作区目录",
+                "收到 [子任务 xxx 完成] 后，可先 get 预览或只读全文，再决定是否 reap_subagent",
             ],
             tags=["multi-agent", "subagent", "query"],
         )
@@ -1001,10 +1001,7 @@ class GetSubagentStatusTool(BaseTool):
         if entry.sub_error is not None:
             data["error"] = entry.sub_error
 
-        if include_full_result and entry.sub_status in {"completed", "failed", "cancelled"}:
-            self._core_pool.reap_zombie(sub_session_id)
-
-        msg_suffix = "（完整结果）" if include_full_result and entry.sub_result is not None else ""
+        msg_suffix = "（完整结果，只读）" if include_full_result and entry.sub_result is not None else ""
         return ToolResult(
             success=True,
             data=data,
@@ -1013,7 +1010,109 @@ class GetSubagentStatusTool(BaseTool):
 
 
 # ---------------------------------------------------------------------------
-# Tool 6: cancel_subagent
+# Tool 6: reap_subagent
+# ---------------------------------------------------------------------------
+
+
+class ReapSubagentTool(BaseTool):
+    """对已结束的子 Agent 执行 waitpid：返回完整结果、回收 zombie、删除子工作区目录。"""
+
+    def __init__(self, core_pool: "CorePool") -> None:
+        self._core_pool = core_pool
+
+    @property
+    def name(self) -> str:
+        return "reap_subagent"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="reap_subagent",
+            description=(
+                "对已 **结束** 的子 Agent（subagent）执行 **收割（reap）**：\n\n"
+                "- 返回完整 `result` 或 `error`（与 get_subagent_status 全文一致）\n"
+                "- 从 zombie 表移除 PCB\n"
+                "- 删除该 subagent 的隔离工作区目录（data/workspace/subagent/<id>/ 与 /tmp/macchiato/subagent/<id>/）\n\n"
+                "仅在子任务状态为 completed / failed / cancelled 时可调用；**仍在运行中**请用 cancel_subagent 或等待完成通知。\n"
+                "若只需**只读**查看全文而不回收，请用 get_subagent_status(include_full_result=true)。"
+            ),
+            parameters=[
+                ToolParameter(
+                    name="subagent_id",
+                    type="string",
+                    description="要收割的子 Agent 的 subagent_id（由 create_subagent / create_parallel_subagents 返回）",
+                    required=True,
+                ),
+            ],
+            examples=[
+                {
+                    "description": "子任务已完成，父已不需要再访问其工作区文件，执行收割",
+                    "params": {"subagent_id": "5c1d8838-453"},
+                },
+            ],
+            usage_notes=[
+                "收割后无法再 get_subagent_status（SUBAGENT_NOT_FOUND）",
+                "若仍需要子工作区内的文件，请先 read_file 拷贝到父工作区再 reap",
+                "与 get_subagent_status 分工：get 只读；reap 带副作用",
+            ],
+            tags=["multi-agent", "subagent", "lifecycle"],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        subagent_id = (kwargs.get("subagent_id") or "").strip()
+        if not subagent_id:
+            return ToolResult(
+                success=False, message="缺少 subagent_id 参数", error="MISSING_SUBAGENT_ID"
+            )
+
+        sub_session_id = f"sub:{subagent_id}"
+        entry = self._core_pool.get_sub_info(sub_session_id)
+        if entry is None:
+            return ToolResult(
+                success=False,
+                message=f"未找到 subagent_id={subagent_id}",
+                error="SUBAGENT_NOT_FOUND",
+            )
+
+        status = entry.sub_status or "running"
+        if status == "running":
+            return ToolResult(
+                success=False,
+                message=f"子 Agent {subagent_id} 仍在运行，无法收割。请等待完成通知或使用 cancel_subagent。",
+                error="SUBAGENT_STILL_RUNNING",
+            )
+
+        if status not in {"completed", "failed", "cancelled"}:
+            return ToolResult(
+                success=False,
+                message=f"子 Agent {subagent_id} 状态异常（{status}），无法收割",
+                error="SUBAGENT_NOT_REAPABLE",
+            )
+
+        data: Dict[str, Any] = {
+            "subagent_id": subagent_id,
+            "status": status,
+            "parent_session_id": entry.parent_session_id,
+            "task_description": (entry.task_description or "")[:100],
+            "created_at": entry.created_at,
+        }
+        if entry.sub_completed_at is not None:
+            data["completed_at"] = entry.sub_completed_at
+        if entry.sub_result is not None:
+            data["result"] = entry.sub_result
+        if entry.sub_error is not None:
+            data["error"] = entry.sub_error
+
+        self._core_pool.reap_zombie(sub_session_id)
+
+        return ToolResult(
+            success=True,
+            data=data,
+            message=f"已收割子 Agent {subagent_id}（状态：{status}）",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tool 7: cancel_subagent
 # ---------------------------------------------------------------------------
 
 
@@ -1034,7 +1133,9 @@ class CancelSubagentTool(BaseTool):
                 "**取消**正在运行的子 Agent（subagent），会终止其任务。\n\n"
                 "在并行子任务中，收到第一个满意结果后可取消其余子 Agent 节省资源。\n"
                 "已完成、失败或已取消的子 Agent 调用此工具不会报错。\n\n"
-                "⚠️ 仅查询状态或拉取结果请用 get_subagent_status。"
+                "**不删除磁盘**：本工具**不会**删除子工作区目录；与 `completed`/`failed` 一样，删盘仅在调用 "
+                "`reap_subagent` 时发生。\n\n"
+                "⚠️ 仅查询状态或只读全文请用 get_subagent_status；收割 zombie 与删除子工作区请用 reap_subagent。"
             ),
             parameters=[
                 ToolParameter(
@@ -1055,6 +1156,7 @@ class CancelSubagentTool(BaseTool):
                 "取消操作是尽力而为（best-effort），任务可能已完成",
                 "取消后不会再收到该子 Agent 的完成通知",
                 "若任务其实已经结束，cancel_subagent 只会返回当前最终状态，不会报错",
+                "取消不会删 `data/workspace/subagent/<id>/` 等目录；不再需要时对该 id 调用 reap_subagent",
             ],
             tags=["multi-agent", "subagent", "cancel"],
         )

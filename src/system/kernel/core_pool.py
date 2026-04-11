@@ -244,7 +244,7 @@ class CorePool:
 
         # 子 Agent 已终态时，尽快写入 zombie 表。否则后续 kill / summarize / close 多为长时间
         # await，此窗口内 get_entry 既不在 _pool 也未登记 _zombies，父会话会收到完成注入但
-        # get_subagent_status 恒为 SUBAGENT_NOT_FOUND（竞态）。
+        # get_subagent_status / reap_subagent 恒为 SUBAGENT_NOT_FOUND（竞态）。
         if (
             not shutdown
             and is_subagent
@@ -294,7 +294,7 @@ class CorePool:
 
         # ── Step 2: summarize — 写入长期记忆 ───────────────────────────────
         # background 模式不跑会话摘要：多为高频定时任务，避免长期记忆被刷屏。
-        # sub 模式（子 Agent）为一次性任务：可交付结果在 sub_result / zombie，由父 get_subagent_status
+        # sub 模式（子 Agent）为一次性任务：可交付结果在 sub_result / zombie，由父 get / reap
         # 拉取即可；不必再跑 LLM 会话摘要写入 data/memory/subagent/<id>/long_term（重复、费 token、拉长 evict）。
         # full（含带 memory_owner 的 cron 任务）使用与主会话一致的 LongTermMemory 时应正常摘要；
         # 此前误用 session_id.startswith("cron:") 一刀切，导致如 moltbook full 任务 evict 时从不写入 long_term。
@@ -392,7 +392,7 @@ class CorePool:
             self._zombies[session_id] = self._strip_entry_for_zombie(entry)
             logger.info(
                 "CorePool: subagent evicted session_id=%s parent_session_id=%s sub_status=%s "
-                "(zombie PCB retained until parent get_subagent_status reap)",
+                "(zombie PCB retained until parent reap_subagent)",
                 session_id,
                 entry.parent_session_id or "",
                 entry.sub_status,
@@ -501,11 +501,13 @@ class CorePool:
         task_preview = (entry.task_description or "")[:80]
         result_preview = (result or "")[:200]
         ellipsis = "..." if len(result or "") > 200 else ""
+        sid = self._subagent_id(sub_session_id)
         notification = (
-            f"[子任务 {self._subagent_id(sub_session_id)} 完成]\n"
+            f"[子任务 {sid} 完成]\n"
             f"任务：{task_preview}\n"
             f"结果预览：{result_preview}{ellipsis}\n\n"
-            f"如需完整结果，调用 get_subagent_status(subagent_id=\"{self._subagent_id(sub_session_id)}\", include_full_result=True)"
+            f"如需只读完整结果：get_subagent_status(subagent_id=\"{sid}\", include_full_result=True)。"
+            f"确认不再需要子工作区文件后，调用 reap_subagent(subagent_id=\"{sid}\") 完成收割。"
         )
         self._inject_to_parent(sub_session_id, entry, notification)
 

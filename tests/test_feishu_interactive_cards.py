@@ -5,11 +5,26 @@ from __future__ import annotations
 import json
 
 from frontend.feishu.interactive_cards import (
+    AGENT_REPLY_STREAM_ELEMENT_ID,
+    assistant_reply_card_summary,
+    build_agent_reply_card_streaming_shell,
     build_agent_reply_markdown_card,
     build_tool_call_pending_card,
     build_tool_trace_card,
     format_arguments_for_tool_card,
 )
+
+
+def test_build_agent_reply_card_streaming_shell() -> None:
+    card = build_agent_reply_card_streaming_shell()
+    assert card["schema"] == "2.0"
+    assert card["config"].get("streaming_mode") is True
+    assert "streaming_config" in card["config"]
+    blob = json.dumps(card, ensure_ascii=False)
+    assert "Streaming" in blob
+    els = card["body"]["elements"]
+    assert els[0]["tag"] == "markdown"
+    assert els[0]["element_id"] == AGENT_REPLY_STREAM_ELEMENT_ID
 
 
 def test_format_arguments_bash_plain() -> None:
@@ -87,9 +102,25 @@ def test_build_agent_reply_markdown_card() -> None:
     assert "标题" in body["content"]
     assert card["header"]["title"]["content"] == "回复"
     assert card["header"]["subtitle"]["content"] == "macchiato"
+    summary = card["config"]["summary"]["content"]
+    assert summary.startswith("Complete ·")
+    tags = card["header"].get("text_tag_list") or []
+    assert tags and tags[0]["text"]["content"] == "Complete"
 
-    mid = build_agent_reply_markdown_card(
-        "x", header_title="助手（进行中）"
-    )
-    assert mid["header"]["title"]["content"] == "助手（进行中）"
-    assert mid["header"]["template"] == "grey"
+    seg = build_agent_reply_markdown_card("中间", reply_phase="segment")
+    assert seg["config"]["summary"]["content"].startswith("Segment ·")
+    assert (seg["header"]["text_tag_list"][0]["text"]["content"]) == "Segment"
+
+    stream = build_agent_reply_markdown_card("流式", reply_phase="streaming")
+    assert stream["config"]["summary"]["content"].startswith("Streaming ·")
+    assert stream["header"]["text_tag_list"][0]["text"]["content"] == "Streaming"
+
+    custom = build_agent_reply_markdown_card("x", header_title="说明")
+    assert custom["header"]["title"]["content"] == "说明"
+    assert custom["header"]["template"] == "grey"
+
+
+def test_assistant_reply_card_summary() -> None:
+    assert assistant_reply_card_summary("final", "hello") == "Complete · hello"
+    assert assistant_reply_card_summary("segment", "x") == "Segment · x"
+    assert assistant_reply_card_summary("streaming", "") == "Streaming"

@@ -17,12 +17,24 @@ from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolR
 from agent_core.config import Config, FileToolsConfig, get_config
 from agent_core.agent.session_paths import expand_user_path_str_for_session
 
+# 工作区隔离下 ``data/memory`` 已嫁接至当前用户的 canonical owner（见 workspace_paths），
+# 相对工作区应使用此路径，勿再写 ``data/memory/{frontend}/{user}/...`` 以免路径重复一层。
+_MEMORY_MD_WORKSPACE_RELATIVE = "data/memory/long_term/MEMORY.md"
+
 
 def _redirect_memory_md_if_needed(path_str: str, exec_ctx: dict, config: Config) -> str:
-    """将裸 MEMORY.md 映射到 data/memory/{frontend}/{user}/long_term/MEMORY.md（支持 memory_owner）。"""
+    """将任意指向 MEMORY.md 的路径映射到当前用户的长期记忆文件。
+
+    - **未**开启工作区隔离：解析为仓库根下 ``data/memory/{frontend}/{user}/long_term/MEMORY.md``
+     （``memory_owner`` 等由 ``resolve_memory_owner_paths`` 决定）。
+    - **开启**工作区隔离：使用 ``data/memory/long_term/MEMORY.md``，由工作区根下的
+      ``data/memory`` symlink 解析到同一 canonical 文件。
+    """
     if Path(path_str).name != "MEMORY.md":
         return path_str
     try:
+        if getattr(config.command_tools, "workspace_isolation_enabled", False):
+            return _MEMORY_MD_WORKSPACE_RELATIVE
         from agent_core.config import MemoryConfig
         from agent_core.agent.memory_paths import (
             effective_memory_namespace_from_execution_context,

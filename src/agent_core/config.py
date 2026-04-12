@@ -961,6 +961,20 @@ class FeishuConfig(BaseModel):
         default="markdown_card",
         description="Agent 最终回复格式：plain=纯文本（历史行为）；markdown_card=交互卡片内 Markdown 渲染。",
     )
+    assistant_reply_stream: bool = Field(
+        default=True,
+        description=(
+            "reply_format=markdown_card 时，是否在生成过程中用 PATCH 流式更新同一条助手卡片；"
+            "关闭则仅在整段生成完成后发一条（与 plain 类似的「一次性」体验）。"
+        ),
+    )
+    assistant_cardkit_stream: bool = Field(
+        default=True,
+        description=(
+            "assistant_reply_stream 时是否使用飞书 CardKit 官方流式（创建卡片实体 + PUT 流式更新文本）；"
+            "需应用具备「创建与更新卡片 cardkit:card:write」。失败时自动回退为消息内嵌 JSON + PATCH。"
+        ),
+    )
 
 
 class Config(BaseModel):

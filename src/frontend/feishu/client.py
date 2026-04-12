@@ -169,6 +169,156 @@ class FeishuClient:
         if int(data.get("code", 0)) != 0:
             raise RuntimeError(f"更新飞书卡片失败: {data}")
 
+    async def create_cardkit_card_entity(self, *, card: Dict[str, Any]) -> str:
+        """
+        创建卡片实体（CardKit），用于流式更新等后续接口。
+
+        POST /open-apis/cardkit/v1/cards — 需「创建与更新卡片 cardkit:card:write」。
+        """
+        data_str = json.dumps(card, ensure_ascii=False)
+        token = await self._get_tenant_access_token()
+        url = f"{self._base_url}/open-apis/cardkit/v1/cards"
+        payload = {"type": "card_json", "data": data_str}
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        if int(data.get("code", 0)) != 0:
+            raise RuntimeError(f"创建卡片实体失败: {data}")
+        payload_data = data.get("data")
+        if not isinstance(payload_data, dict):
+            raise RuntimeError(f"创建卡片实体无 data: {data}")
+        cid = str(payload_data.get("card_id") or "").strip()
+        if not cid:
+            raise RuntimeError(f"创建卡片实体未返回 card_id: {data}")
+        return cid
+
+    async def send_message_with_card_id(self, *, chat_id: str, card_id: str) -> str:
+        """
+        发送引用卡片实体的消息（content 为 type=card + card_id，与内嵌整卡 JSON 二选一）。
+
+        返回 message_id（流式场景通常后续改卡走 card_id，不依赖 message_id）。
+        """
+        if not chat_id or not card_id:
+            raise ValueError("chat_id/card_id 不能为空")
+        content_obj = {"type": "card", "data": {"card_id": card_id}}
+        content_str = json.dumps(content_obj, ensure_ascii=False)
+        token = await self._get_tenant_access_token()
+        url = f"{self._base_url}/open-apis/im/v1/messages?receive_id_type=chat_id"
+        payload = {
+            "receive_id": chat_id,
+            "msg_type": "interactive",
+            "content": content_str,
+        }
+        headers = {"Authorization": f"Bearer {token}"}
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        if int(data.get("code", 0)) != 0:
+            raise RuntimeError(f"发送卡片实体消息失败: {data}")
+        payload_data = data.get("data")
+        mid = ""
+        if isinstance(payload_data, dict):
+            mid = str(payload_data.get("message_id") or "").strip()
+        return mid
+
+    async def cardkit_put_streaming_text_content(
+        self,
+        *,
+        card_id: str,
+        element_id: str,
+        content: str,
+        sequence: int,
+    ) -> None:
+        """
+        流式更新文本：传入当前全量 content；sequence 在同一张卡片上的所有 CardKit 操作中严格递增。
+
+        PUT /open-apis/cardkit/v1/cards/:card_id/elements/:element_id/content
+        """
+        cid = (card_id or "").strip()
+        eid = (element_id or "").strip()
+        if not cid or not eid:
+            raise ValueError("card_id/element_id 不能为空")
+        token = await self._get_tenant_access_token()
+        url = f"{self._base_url}/open-apis/cardkit/v1/cards/{cid}/elements/{eid}/content"
+        body = {"content": content, "sequence": int(sequence)}
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.put(url, headers=headers, json=body)
+            resp.raise_for_status()
+            data = resp.json()
+        if int(data.get("code", 0)) != 0:
+            raise RuntimeError(f"流式更新文本失败: {data}")
+
+    async def cardkit_patch_card_settings(
+        self,
+        *,
+        card_id: str,
+        settings: Dict[str, Any],
+        sequence: int,
+    ) -> None:
+        """PATCH /open-apis/cardkit/v1/cards/:card_id/settings（如关闭 streaming_mode）。"""
+        cid = (card_id or "").strip()
+        if not cid:
+            raise ValueError("card_id 不能为空")
+        settings_str = json.dumps(settings, ensure_ascii=False)
+        token = await self._get_tenant_access_token()
+        url = f"{self._base_url}/open-apis/cardkit/v1/cards/{cid}/settings"
+        body = {"settings": settings_str, "sequence": int(sequence)}
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.patch(url, headers=headers, json=body)
+            resp.raise_for_status()
+            data = resp.json()
+        if int(data.get("code", 0)) != 0:
+            raise RuntimeError(f"更新卡片配置失败: {data}")
+
+    async def cardkit_replace_card_entity(
+        self,
+        *,
+        card_id: str,
+        card: Dict[str, Any],
+        sequence: int,
+    ) -> None:
+        """
+        全量更新卡片实体（含 header 标签、body 等）。
+
+        PUT /open-apis/cardkit/v1/cards/:card_id
+        流式场景在结束后应用此接口，才能把标题区 text_tag 从 Streaming 改为 Complete/Segment
+        （仅 PATCH settings 不会更新 header）。
+        """
+        cid = (card_id or "").strip()
+        if not cid:
+            raise ValueError("card_id 不能为空")
+        data_str = json.dumps(card, ensure_ascii=False)
+        token = await self._get_tenant_access_token()
+        url = f"{self._base_url}/open-apis/cardkit/v1/cards/{cid}"
+        body = {
+            "card": {"type": "card_json", "data": data_str},
+            "sequence": int(sequence),
+        }
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.put(url, headers=headers, json=body)
+            resp.raise_for_status()
+            data = resp.json()
+        if int(data.get("code", 0)) != 0:
+            raise RuntimeError(f"全量更新卡片实体失败: {data}")
+
     async def upload_image(
         self, *, image_bytes: bytes, content_type: str = "image/png"
     ) -> str:

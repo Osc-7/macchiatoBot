@@ -319,6 +319,10 @@ feishu:
   # plain=助手输出均为纯文本（含中间轮次，会经 filter_markdown_for_feishu）；
   # markdown_card=中间轮次与最终回复均用交互卡片内 Markdown（不经该过滤）
   reply_format: markdown_card
+  # markdown_card 时是否对同一条助手卡片 PATCH 流式更新内容；false=整段生成完再发一条
+  assistant_reply_stream: true
+  # 与上一项同时为 true 时优先 CardKit 官方流式（需 cardkit:card:write）；失败则回退消息 PATCH
+  assistant_cardkit_stream: true
 
 # 记忆系统配置
 memory:

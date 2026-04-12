@@ -14,6 +14,7 @@ from agent_core.config import (
     CommandToolsConfig,
     MemoryConfig,
 )
+from agent_core.agent.workspace_paths import ensure_workspace_data_memory_symlink
 from system.tools.file_tools import ReadFileTool, WriteFileTool, ModifyFileTool
 from agent_core.tools.base import ToolDefinition
 
@@ -119,6 +120,45 @@ class TestReadFileTool:
         )
         assert result.success
         assert result.data["content"] == "workspace"
+
+    @pytest.mark.asyncio
+    async def test_read_memory_md_workspace_redirect(self, tmp_path):
+        """工作区隔离：任意 MEMORY.md 路径重定向为 data/memory/long_term/MEMORY.md（嫁接）。"""
+        pr = tmp_path
+        uid = "u_mem"
+        mem_lt = pr / "data" / "memory" / "feishu" / uid / "long_term"
+        mem_lt.mkdir(parents=True)
+        (mem_lt / "MEMORY.md").write_text("lt-content", encoding="utf-8")
+        ws_root = pr / "ws_root"
+        owner = ws_root / "feishu" / uid
+        owner.mkdir(parents=True)
+        ensure_workspace_data_memory_symlink(
+            owner, project_root=pr, source="feishu", user_id=uid
+        )
+        config = Config(
+            llm=LLMConfig(api_key="t", model="t"),
+            memory=MemoryConfig(memory_base_dir=str(pr / "data" / "memory")),
+            file_tools=FileToolsConfig(
+                enabled=True,
+                allow_read=True,
+                base_dir=str(pr),
+            ),
+            command_tools=CommandToolsConfig(
+                base_dir=str(pr),
+                workspace_base_dir=str(ws_root),
+                workspace_isolation_enabled=True,
+            ),
+        )
+        tool = ReadFileTool(config=config)
+        ctx = _ctx("feishu", uid)
+        for p in (
+            "MEMORY.md",
+            "data/memory/long_term/MEMORY.md",
+            "data/memory/feishu/u_mem/long_term/MEMORY.md",
+        ):
+            r = await tool.execute(path=p, __execution_context__=ctx)
+            assert r.success, f"path={p!r}: {r.message}"
+            assert r.data["content"] == "lt-content"
 
     @pytest.mark.asyncio
     async def test_read_file_workspace_allows_absolute_path_outside(self, tmp_path):

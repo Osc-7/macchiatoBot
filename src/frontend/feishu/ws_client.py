@@ -262,14 +262,15 @@ async def _handle_im_message_event_async(data: Any) -> None:
         )
         return
 
-    # 将 Agent 回复发回飞书
+    # 将 Agent 回复发回飞书（已在 IPC 内对流式 PATCH 最终标题时跳过重复发送）
     feishu_client = FeishuClient(timeout_seconds=feishu_cfg.timeout_seconds)
     try:
-        await send_feishu_agent_final_reply(
-            client=feishu_client,
-            chat_id=feishu_message.chat_id,
-            output_text=result.output_text,
-        )
+        if not (result.metadata or {}).get("feishu_skip_final_reply"):
+            await send_feishu_agent_final_reply(
+                client=feishu_client,
+                chat_id=feishu_message.chat_id,
+                output_text=result.output_text,
+            )
         attachments = getattr(result, "attachments", None)
         if attachments:
             await feishu_client.send_reply_attachments(

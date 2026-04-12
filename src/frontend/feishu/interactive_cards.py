@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
+
+# 助手回复卡片标题区标记：流式中 / 进工具前的片段 / 本轮最终
+AssistantReplyPhase = Literal["streaming", "segment", "final"]
 
 # 飞书卡片内 markdown 单元素不宜过长，避免发送失败
 _MAX_TOOL_ARG_JSON = 2400
@@ -346,26 +349,131 @@ def build_tool_trace_card(
     }
 
 
+# CardKit「流式更新文本」：markdown 组件须带稳定 element_id（≤20 字符）。
+# 见 https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/cardkit-v1/card-element/content
+AGENT_REPLY_STREAM_ELEMENT_ID = "mm_reply_md"
+
+
+def _reply_tag_for_phase(phase: AssistantReplyPhase) -> tuple[str, str]:
+    """返回 (标签文案, 飞书 text_tag color)。标签使用英文以便在会话列表里一眼区分。"""
+    if phase == "streaming":
+        return ("Streaming", "blue")
+    if phase == "segment":
+        return ("Segment", "blue")
+    return ("Complete", "violet")
+
+
+def _reply_summary_for_phase(phase: AssistantReplyPhase, content_preview: str) -> str:
+    one = (content_preview or "").replace("\n", " ").strip()
+    if len(one) > 80:
+        one = one[:79] + "…"
+    label = _reply_tag_for_phase(phase)[0]
+    if not one:
+        return _truncate(label, 100)
+    return _truncate(f"{label} · {one}", 100)
+
+
+def assistant_reply_card_summary(
+    phase: AssistantReplyPhase, content_preview: str
+) -> str:
+    """供 CardKit 关闭流式时写 config.summary，与 build_agent_reply_markdown_card 一致。"""
+    return _reply_summary_for_phase(phase, content_preview)
+
+
+def build_agent_reply_card_streaming_shell(
+    *,
+    reply_phase: AssistantReplyPhase = "streaming",
+) -> Dict[str, Any]:
+    """
+    创建卡片实体用 JSON（POST /open-apis/cardkit/v1/cards），开启 streaming_mode；
+    再通过 card_id 发消息，并用 PUT .../elements/{element_id}/content 流式推全量文本。
+
+    见 https://open.feishu.cn/document/cardkit-v1/streaming-updates-openapi-overview
+    """
+    title = "回复"
+    tag_txt, tag_color = _reply_tag_for_phase(reply_phase)
+    cfg: Dict[str, Any] = {
+        "update_multi": True,
+        "width_mode": "fill",
+        "summary": {"content": ""},
+        "streaming_mode": True,
+        "streaming_config": {
+            "print_frequency_ms": {
+                "default": 70,
+                "android": 70,
+                "ios": 70,
+                "pc": 70,
+            },
+            "print_step": {
+                "default": 1,
+                "android": 1,
+                "ios": 1,
+                "pc": 1,
+            },
+            "print_strategy": "fast",
+        },
+    }
+    header: Dict[str, Any] = {
+        "template": _REPLY_HEADER_TEMPLATE,
+        "title": {"tag": "plain_text", "content": title},
+        "subtitle": {"tag": "plain_text", "content": _SUBTITLE_COMPOSER},
+        "icon": {
+            "tag": "standard_icon",
+            "token": _ICON_ASSISTANT,
+            "color": "grey",
+        },
+        "text_tag_list": [
+            {
+                "tag": "text_tag",
+                "element_id": _element_id("tg_md", f"ck_{reply_phase}"),
+                "text": {"tag": "plain_text", "content": tag_txt},
+                "color": tag_color,
+            },
+        ],
+        "padding": "12px 14px 12px 14px",
+    }
+    return {
+        "schema": "2.0",
+        "config": cfg,
+        "header": header,
+        "body": {
+            "direction": "vertical",
+            "padding": "6px 14px 16px 14px",
+            "vertical_spacing": "medium",
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "element_id": AGENT_REPLY_STREAM_ELEMENT_ID,
+                    "content": "\u200b",
+                    "text_align": "left",
+                    "text_size": _MD_REPLY,
+                    "margin": "0px 0px 0px 0px",
+                },
+            ],
+        },
+    }
+
+
 def build_agent_reply_markdown_card(
     markdown: str,
     *,
     header_title: str = "回复",
+    reply_phase: AssistantReplyPhase = "final",
 ) -> Dict[str, Any]:
     """
     助手输出：卡片内 Markdown；标题区副标题 + 图标 + 会话摘要。
 
+    ``reply_phase``：streaming=Streaming（流式中）；segment=Segment（进工具前的段落）；final=Complete（本轮最终）。
     纯文本消息仍应走 send_text_message + filter_markdown_for_feishu。
     """
     raw = markdown or ""
     content = _truncate(raw, _MAX_REPLY_MARKDOWN)
     title = _truncate((header_title or "回复").strip() or "回复", 40)
     summary_seed = content[:80].replace("\n", " ")
-    is_intermediate = "进行中" in title
-
-    summary = _truncate(f"{title} · {summary_seed}", 100)
+    summary = _reply_summary_for_phase(reply_phase, summary_seed)
+    tag_label, tag_color = _reply_tag_for_phase(reply_phase)
 
     tpl = _REPLY_HEADER_TEMPLATE
-    tag_label = "stream" if is_intermediate else "reply"
 
     header: Dict[str, Any] = {
         "template": tpl,
@@ -382,9 +490,9 @@ def build_agent_reply_markdown_card(
         "text_tag_list": [
             {
                 "tag": "text_tag",
-                "element_id": _element_id("tg_md", summary_seed),
+                "element_id": _element_id("tg_md", f"{reply_phase}_{summary_seed}"),
                 "text": {"tag": "plain_text", "content": tag_label},
-                "color": "violet" if not is_intermediate else "blue",
+                "color": tag_color,
             },
         ],
         "padding": "12px 14px 12px 14px",

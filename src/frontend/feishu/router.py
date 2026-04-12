@@ -281,14 +281,15 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
             status_code=500,
         )
 
-    # 将 Agent 回复通过飞书再发回用户
+    # 将 Agent 回复通过飞书再发回用户（流式 PATCH 已完成时跳过重复卡片）
     feishu_client = _build_feishu_client()
     try:
-        await send_feishu_agent_final_reply(
-            client=feishu_client,
-            chat_id=msg.chat_id,
-            output_text=result.output_text,
-        )
+        if not (result.metadata or {}).get("feishu_skip_final_reply"):
+            await send_feishu_agent_final_reply(
+                client=feishu_client,
+                chat_id=msg.chat_id,
+                output_text=result.output_text,
+            )
         attachments = getattr(result, "attachments", None)
         if attachments:
             await feishu_client.send_reply_attachments(

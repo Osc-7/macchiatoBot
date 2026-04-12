@@ -7,7 +7,7 @@ import logging
 from agent_core.config import get_config
 
 from .client import FeishuClient
-from .interactive_cards import build_agent_reply_markdown_card
+from .interactive_cards import AssistantReplyPhase, build_agent_reply_markdown_card
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ async def send_feishu_agent_reply(
     chat_id: str,
     output_text: str,
     markdown_card_header_title: str = "回复",
+    reply_phase: AssistantReplyPhase = "final",
 ) -> None:
     """
     按 feishu.reply_format 发送助手文本。
@@ -39,7 +40,9 @@ async def send_feishu_agent_reply(
     try:
         if fmt == "markdown_card":
             card = build_agent_reply_markdown_card(
-                text, header_title=markdown_card_header_title
+                text,
+                header_title=markdown_card_header_title,
+                reply_phase=reply_phase,
             )
             await client.send_interactive_card(chat_id=chat_id, card=card)
         else:
@@ -61,4 +64,5 @@ async def send_feishu_agent_final_reply(
         chat_id=chat_id,
         output_text=output_text,
         markdown_card_header_title="回复",
+        reply_phase="final",
     )

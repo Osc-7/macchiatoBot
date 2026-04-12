@@ -1,4 +1,12 @@
-from frontend.shuiyuan_integration.client import ShuiyuanClient
+import time
+
+import pytest
+
+from frontend.shuiyuan_integration.client import (
+    ShuiyuanClient,
+    ShuiyuanClientPool,
+    extract_rate_limit_wait_seconds,
+)
 
 
 def test_update_post_put_json_body(monkeypatch):
@@ -354,3 +362,150 @@ def test_get_topic_posts_paged(monkeypatch):
     assert len(result) == 2
     assert result[0]["post_number"] == 1
     assert result[1]["post_number"] == 2
+
+
+def test_check_user_api_key_session_ok(monkeypatch):
+    def fake_get(url, **kwargs):
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {"current_user": {"id": 1, "username": "u"}}
+
+        return R()
+
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client._ensure_rate_limit", lambda: None
+    )
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client.requests.get", fake_get
+    )
+    assert ShuiyuanClient(user_api_key="k").check_user_api_key_session() is True
+
+
+def test_check_user_api_key_session_false_on_non_200(monkeypatch):
+    def fake_get(url, **kwargs):
+        class R:
+            status_code = 429
+
+        return R()
+
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client._ensure_rate_limit", lambda: None
+    )
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client.requests.get", fake_get
+    )
+    assert ShuiyuanClient(user_api_key="k").check_user_api_key_session() is False
+
+
+def test_pool_clears_stale_lockout_when_session_probe_ok(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client._ensure_rate_limit", lambda: None
+    )
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client.ShuiyuanClient.check_user_api_key_session",
+        lambda self: True,
+    )
+    state = tmp_path / "st.json"
+    pool = ShuiyuanClientPool(["a", "b"], state_path=state)
+    pool._stale_lockout_probe_interval_seconds = 0.0
+    far = time.time() + 99999.0
+    pool._blocked_until["a"] = far
+    pool._blocked_until["b"] = far
+    key = pool._select_key()
+    assert key in ("a", "b")
+    assert pool._blocked_until["a"] == 0.0
+    assert pool._blocked_until["b"] == 0.0
+
+
+def test_pool_stale_probe_throttled(monkeypatch, tmp_path):
+    calls = {"n": 0}
+
+    def fake_check(self):
+        calls["n"] += 1
+        return False
+
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client._ensure_rate_limit", lambda: None
+    )
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client.ShuiyuanClient.check_user_api_key_session",
+        fake_check,
+    )
+    pool = ShuiyuanClientPool(["x", "y"], state_path=tmp_path / "s.json")
+    far = time.time() + 99999.0
+    pool._blocked_until["x"] = far
+    pool._blocked_until["y"] = far
+    with pytest.raises(RuntimeError, match="已在冷却中"):
+        pool._select_key()
+    assert calls["n"] == 2
+    with pytest.raises(RuntimeError, match="已在冷却中"):
+        pool._select_key()
+    assert calls["n"] == 2
+
+
+def test_extract_rate_limit_wait_seconds_retry_after():
+    assert extract_rate_limit_wait_seconds({"Retry-After": "120"}, "") == 120
+    assert extract_rate_limit_wait_seconds({"retry-after": "60"}, "") == 60
+
+
+def test_extract_rate_limit_wait_seconds_extras_body():
+    body = '{"extras": {"wait_seconds": 300}}'
+    assert extract_rate_limit_wait_seconds({}, body) == 300
+    body2 = '{"extras": {"waitSeconds": 45}}'
+    assert extract_rate_limit_wait_seconds({}, body2) == 45
+
+
+def test_probe_user_api_key_health_429_parses_wait(monkeypatch):
+    class R:
+        status_code = 429
+        headers = {
+            "Retry-After": "42",
+            "discourse-rate-limit-error-code": "user_api_key_limiter_1_day",
+        }
+        text = "{}"
+
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client._ensure_rate_limit", lambda: None
+    )
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client.requests.get", lambda *a, **k: R()
+    )
+    pr = ShuiyuanClient(user_api_key="k").probe_user_api_key_health("Osc7")
+    assert pr["ok"] is False
+    assert pr["status_code"] == 429
+    assert pr["wait_seconds"] == 42
+    assert "user_api_key" in (pr.get("rate_limit_code") or "")
+
+
+def test_pool_probe_user_actions_429_updates_local_wait(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client._ensure_rate_limit", lambda: None
+    )
+
+    def fake_probe(self, username: str):
+        assert username == "u1"
+        return {
+            "ok": False,
+            "status_code": 429,
+            "wait_seconds": 90,
+            "rate_limit_code": "user_api_key_limiter_1_day",
+        }
+
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client.ShuiyuanClient.probe_user_api_key_health",
+        fake_probe,
+    )
+    pool = ShuiyuanClientPool(
+        ["k1"],
+        state_path=tmp_path / "st.json",
+        probe_username="u1",
+    )
+    pool._stale_lockout_probe_interval_seconds = 0.0
+    pool._blocked_until["k1"] = time.time() + 99999.0
+    with pytest.raises(RuntimeError, match="已在冷却中"):
+        pool._select_key()
+    bu = pool._blocked_until["k1"]
+    assert bu <= time.time() + 95
+    assert bu >= time.time() + 85

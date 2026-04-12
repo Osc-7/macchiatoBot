@@ -264,9 +264,16 @@ def get_shuiyuan_client_from_config(
     base_dir = Path(getattr(cfg, "db_base_dir", None) or "./data/shuiyuan")
     state_path = base_dir / "user_api_keys_state.json"
 
+    owner = getattr(cfg, "owner_username", None)
+    probe_username = (
+        owner.strip()
+        if isinstance(owner, str) and owner.strip()
+        else None
+    )
     # 无论是单 Key 还是多 Key，都通过 ShuiyuanClientPool 管理，统一支持日级限流切换
     return ShuiyuanClientPool(
         user_api_keys=keys,
         site_url=cfg.site_url,
         state_path=state_path,
+        probe_username=probe_username,
     )

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -15,6 +16,8 @@ from typing import Any, Optional
 from urllib.parse import quote
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 SITE_URL_BASE = "https://shuiyuan.sjtu.edu.cn"
 
@@ -54,6 +57,55 @@ def _format_rate_limit_headers(headers: Any) -> str:
     if retry_after is not None:
         parts.append(f"retry_after={retry_after}")
     return ", ".join(parts)
+
+
+def extract_rate_limit_wait_seconds(headers: Any, body_text: str) -> int:
+    """
+    从 429 响应中解析建议等待秒数，与 scripts/check_shuiyuan_api_limit.rb 的 extract_wait_seconds 一致：
+    - Retry-After（纯数字）
+    - JSON body 中 extras.wait_seconds / extras.waitSeconds
+    """
+    try:
+        h = dict(headers or {})
+    except Exception:
+        h = {}
+    ra = h.get("Retry-After") or h.get("retry-after")
+    if ra is not None and str(ra).strip().isdigit():
+        return int(str(ra).strip())
+    try:
+        body = json.loads(body_text or "")
+    except Exception:
+        return 0
+    if not isinstance(body, dict):
+        return 0
+    extras = body.get("extras") or {}
+    if not isinstance(extras, dict):
+        return 0
+    ws = extras.get("wait_seconds") if extras.get("wait_seconds") is not None else extras.get(
+        "waitSeconds"
+    )
+    if ws is None:
+        return 0
+    try:
+        return max(0, int(ws))
+    except Exception:
+        return 0
+
+
+def _wait_seconds_from_rate_limit_exc(exc: Exception) -> int:
+    """从 ShuiyuanRateLimitError / requests.HTTPError(429) 提取等待秒数。"""
+    if isinstance(exc, ShuiyuanRateLimitError):
+        headers = getattr(exc, "headers", None) or {}
+        return extract_rate_limit_wait_seconds(headers, getattr(exc, "body_preview", "") or "")
+    if isinstance(exc, requests.HTTPError):
+        resp = getattr(exc, "response", None)
+        if resp is not None and getattr(resp, "status_code", None) == 429:
+            return extract_rate_limit_wait_seconds(resp.headers, resp.text or "")
+    return 0
+
+
+# 本地冷却上限：避免异常响应导致超大数值
+_MAX_LOCAL_BLOCK_SECONDS = 86400 * 7
 
 
 class ShuiyuanRateLimitError(RuntimeError):
@@ -102,7 +154,12 @@ class ShuiyuanClientPool:
     - 当某个 Key 触发日级限流（user_api_key_limiter_1_day）时：
       - 将该 Key 标记为在未来 cooldown_hours 小时内不可用（写入 state_path，进程重启仍生效）
       - 自动切换到下一把 Key 重试本次请求
-    - 当所有 Key 均在冷却中时，抛出 RuntimeError 由上层处理
+    - 当所有 Key 均在冷却中时，先按间隔对仍被本地标记的 Key 做轻量在线探测：
+      - 若配置了 probe_username（主人水源用户名），则与 check_shuiyuan_api_limit.rb 相同，
+        请求 GET user_actions.json?username=&filter=7；200 则清除本地冷却；429 则按 Retry-After /
+        extras.wait_seconds 更新本地 blocked_until，避免与站点提示脱节。
+      - 未配置时回退为 GET /session/current.json。
+    - 若探测后仍无可用的 Key，抛出 RuntimeError 由上层处理
     """
 
     def __init__(
@@ -113,6 +170,8 @@ class ShuiyuanClientPool:
         timeout: float = 10.0,
         state_path: Optional[Path] = None,
         cooldown_hours: int = 5,
+        stale_lockout_probe_interval_seconds: float = 120.0,
+        probe_username: Optional[str] = None,
     ) -> None:
         if not user_api_keys:
             raise ValueError("user_api_keys 不能为空")
@@ -130,6 +189,12 @@ class ShuiyuanClientPool:
         self._clients: dict[str, ShuiyuanClient] = {}
         self._blocked_until: dict[str, float] = {k: 0.0 for k in self._keys}
         self._current_index: int = 0
+        self._stale_lockout_probe_interval_seconds = max(
+            30.0, float(stale_lockout_probe_interval_seconds)
+        )
+        self._last_stale_probe_at: float = 0.0
+        pu = (probe_username or "").strip()
+        self._probe_username: Optional[str] = pu if pu else None
 
         self._load_state()
 
@@ -174,10 +239,60 @@ class ShuiyuanClientPool:
 
     # -------- Key 选择与限流处理 --------
 
+    def _try_recover_stale_key_lockouts(self) -> None:
+        """本地认为全部 Key 在冷却时，按间隔探测站点；逻辑对齐 scripts/check_shuiyuan_api_limit.rb。"""
+        now = time.time()
+        if now - self._last_stale_probe_at < self._stale_lockout_probe_interval_seconds:
+            return
+        self._last_stale_probe_at = now
+
+        cleared: list[str] = []
+        updated_wait: list[tuple[str, int]] = []
+        for key in self._keys:
+            if self._blocked_until.get(key, 0.0) <= now:
+                continue
+            client = self._get_client_for_key(key)
+            try:
+                if self._probe_username:
+                    pr = client.probe_user_api_key_health(self._probe_username)
+                    if pr.get("ok"):
+                        self._blocked_until[key] = 0.0
+                        cleared.append(key)
+                    elif pr.get("status_code") == 429:
+                        ws = int(pr.get("wait_seconds") or 0)
+                        if ws > 0:
+                            until = now + min(max(ws, 1), _MAX_LOCAL_BLOCK_SECONDS)
+                            # 用服务端等待时间收紧本地冷却（避免 max 保留「假长」锁）
+                            self._blocked_until[key] = min(
+                                self._blocked_until.get(key, 0.0), until
+                            )
+                            updated_wait.append((key, ws))
+                    # 其它非 200：不改变本地冷却
+                elif client.check_user_api_key_session():
+                    self._blocked_until[key] = 0.0
+                    cleared.append(key)
+            except Exception:
+                continue
+        if cleared or updated_wait:
+            self._save_state()
+        if cleared:
+            logger.info(
+                "水源 User-Api-Key 在线探测成功，已清除 %s 把 Key 的本地冷却",
+                len(cleared),
+            )
+        for _key, ws in updated_wait:
+            logger.warning(
+                "水源 User-Api-Key 探测仍为 429，已按服务端建议等待约 %s 秒刷新本地冷却（与 check_shuiyuan_api_limit 一致）",
+                ws,
+            )
+
     def _select_key(self) -> str:
         now = time.time()
         # 所有可用 key 中，至少要有一把未处于日级冷却期
         available = any(self._blocked_until.get(k, 0.0) <= now for k in self._keys)
+        if not available:
+            self._try_recover_stale_key_lockouts()
+            available = any(self._blocked_until.get(k, 0.0) <= now for k in self._keys)
         if not available:
             raise RuntimeError("所有 User-Api-Key 已在冷却中，请稍后再试")
 
@@ -206,11 +321,13 @@ class ShuiyuanClientPool:
             self._clients[key] = client
         return client
 
-    def _mark_rate_limited(self, key: str) -> None:
+    def _mark_rate_limited(self, key: str, *, wait_hint_seconds: int = 0) -> None:
         now = time.time()
-        self._blocked_until[key] = max(
-            self._blocked_until.get(key, 0.0), now + self._cooldown_seconds
-        )
+        if wait_hint_seconds > 0:
+            until = now + min(max(wait_hint_seconds, 1), _MAX_LOCAL_BLOCK_SECONDS)
+        else:
+            until = now + self._cooldown_seconds
+        self._blocked_until[key] = max(self._blocked_until.get(key, 0.0), until)
         self._save_state()
 
     def _should_mark_daily_limit(self, exc: Exception) -> bool:
@@ -244,7 +361,8 @@ class ShuiyuanClientPool:
                 return method(*args, **kwargs)
             except Exception as e:  # noqa: BLE001
                 if self._should_mark_daily_limit(e):
-                    self._mark_rate_limited(key)
+                    ws = _wait_seconds_from_rate_limit_exc(e)
+                    self._mark_rate_limited(key, wait_hint_seconds=ws)
                     last_error = e
                     continue
                 raise
@@ -282,6 +400,71 @@ class ShuiyuanClient:
         self._base = site_url.rstrip("/")
         self._headers = {"User-Api-Key": user_api_key}
         self._timeout = timeout
+
+    def probe_user_api_key_health(self, username: str) -> dict[str, Any]:
+        """
+        与 scripts/check_shuiyuan_api_limit.rb 一致：GET /user_actions.json?username=&filter=7。
+
+        Returns:
+            ok, status_code, wait_seconds（429 时由 Retry-After / extras 解析）, rate_limit_code
+        """
+        _ensure_rate_limit()
+        r = requests.get(
+            f"{self._base}/user_actions.json",
+            params={"username": username, "filter": 7},
+            headers=self._headers,
+            timeout=self._timeout,
+        )
+        code: Optional[str] = None
+        try:
+            h = dict(r.headers)
+            code = h.get("discourse-rate-limit-error-code") or h.get(
+                "Discourse-Rate-Limit-Error-Code"
+            )
+        except Exception:
+            pass
+        if r.status_code == 200:
+            return {
+                "ok": True,
+                "status_code": 200,
+                "wait_seconds": 0,
+                "rate_limit_code": None,
+            }
+        if r.status_code == 429:
+            ws = extract_rate_limit_wait_seconds(r.headers, r.text or "")
+            return {
+                "ok": False,
+                "status_code": 429,
+                "wait_seconds": ws,
+                "rate_limit_code": str(code) if code else None,
+            }
+        return {
+            "ok": False,
+            "status_code": r.status_code,
+            "wait_seconds": 0,
+            "rate_limit_code": str(code) if code else None,
+        }
+
+    def check_user_api_key_session(self) -> bool:
+        """
+        轻量探测 User-Api-Key 是否仍被站点接受。
+
+        使用 GET /session/current.json（Discourse 标准），成功且返回 current_user 视为可用。
+        非 200 或解析失败返回 False，不抛异常，供 Key 池自动恢复逻辑使用。
+        """
+        _ensure_rate_limit()
+        r = requests.get(
+            f"{self._base}/session/current.json",
+            headers=self._headers,
+            timeout=self._timeout,
+        )
+        if r.status_code != 200:
+            return False
+        try:
+            data = r.json()
+        except Exception:
+            return False
+        return bool(data.get("current_user"))
 
     def search(
         self,

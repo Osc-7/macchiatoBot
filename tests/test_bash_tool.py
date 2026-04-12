@@ -20,6 +20,10 @@ from agent_core.bash_security import (
     SecurityAction,
 )
 from agent_core.kernel_interface.profile import CoreProfile
+from agent_core.permissions.bash_danger_approvals import (
+    clear_bash_danger_grant_for_tests,
+    register_bash_danger_grant,
+)
 from agent_core.tools.bash_tool import BashTool
 
 pytestmark = pytest.mark.asyncio
@@ -294,12 +298,47 @@ class TestBashToolExecution:
         finally:
             await rt.close()
 
-    async def test_dangerous_command_with_confirm(self):
+    async def test_dangerous_command_with_permission_grant(self):
+        clear_bash_danger_grant_for_tests()
         tool, rt = _make_tool()
         await rt.start()
         try:
-            result = await tool.execute(command="echo 'sudo test'", confirm=True)
+            cmd = "echo 'sudo test'"
+            r0 = await tool.execute(command=cmd)
+            assert not r0.success
+            assert r0.error == "CONFIRMATION_REQUIRED"
+            assert r0.data and r0.data.get("suggested_tool") == "request_permission"
+
+            pid = "test-grant-id"
+            register_bash_danger_grant(pid, cmd)
+            result = await tool.execute(command=cmd, permission_id=pid)
             assert result.success
+
+            # 一次性：批准已消费，同 id 不能再用
+            r_dup = await tool.execute(command=cmd, permission_id=pid)
+            assert not r_dup.success
+            assert r_dup.error == "CONFIRMATION_REQUIRED"
+
+            # 命令与批准时不一致（仍为危险命令）：不消费 grant，拒绝危险执行
+            register_bash_danger_grant(pid, cmd)
+            r_wrong = await tool.execute(command="sudo ls /", permission_id=pid)
+            assert not r_wrong.success
+            assert r_wrong.error == "CONFIRMATION_REQUIRED"
+            r_ok = await tool.execute(command=cmd, permission_id=pid)
+            assert r_ok.success
+        finally:
+            clear_bash_danger_grant_for_tests()
+            await rt.close()
+
+    async def test_confirm_kwarg_is_ignored(self):
+        """模型自传 confirm=true 不再绕过安全策略。"""
+        clear_bash_danger_grant_for_tests()
+        tool, rt = _make_tool()
+        await rt.start()
+        try:
+            r = await tool.execute(command="echo 'sudo test'", confirm=True)
+            assert not r.success
+            assert r.error == "CONFIRMATION_REQUIRED"
         finally:
             await rt.close()
 
@@ -353,4 +392,5 @@ class TestBashToolDefinition:
         assert "command" in param_names
         assert "restart" in param_names
         assert "timeout" in param_names
-        assert "confirm" in param_names
+        assert "permission_id" in param_names
+        assert "confirm" not in param_names

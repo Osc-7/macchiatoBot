@@ -58,7 +58,8 @@ class BashTool(BaseTool):
 - 执行多步工作流（cd 到目录 → 安装 → 构建 → 测试）
 
 注意事项：
-- 危险操作（rm -rf、chmod -R、sudo 等）需先向用户展示命令，待确认后传 confirm=true
+- 危险操作（rm -rf、chmod -R、sudo 等）须先调用 request_permission（kind=bash_dangerous_command，
+  details 为含 command 字段的 JSON）；人类批准后，用返回的 permission_id 与**完全相同**的 command 再调 bash（一次性）
 - 超时后 bash 会话会自动重启
 - 使用 restart=true 可手动重启 bash 会话（清除所有状态）""",
             parameters=[
@@ -82,11 +83,13 @@ class BashTool(BaseTool):
                     required=False,
                 ),
                 ToolParameter(
-                    name="confirm",
-                    type="boolean",
-                    description="危险操作需用户过目确认后设为 true（如 rm -rf、chmod -R、sudo 等）",
+                    name="permission_id",
+                    type="string",
+                    description=(
+                        "危险命令专用：人类批准 request_permission(bash_dangerous_command) 后返回的 "
+                        "permission_id；须与批准时 details 中的 command 完全一致，一次性有效"
+                    ),
                     required=False,
-                    default=False,
                 ),
             ],
             examples=[
@@ -109,7 +112,7 @@ class BashTool(BaseTool):
             ],
             usage_notes=[
                 "这是持久化 bash 会话：cd、export 等在后续命令中生效",
-                "危险命令（rm -rf、sudo 等）需先向用户展示，待确认后传 confirm=true",
+                "危险命令须先 request_permission，人类批准后用 permission_id + 同一 command 执行一次",
                 "超时会导致 bash 会话重启，所有状态清空",
                 "使用 restart=true 可手动重置会话",
             ],
@@ -135,7 +138,18 @@ class BashTool(BaseTool):
                 message="缺少必需参数: command（或使用 restart=true 重启会话）",
             )
 
-        confirmed = kwargs.get("confirm", False) is True
+        # 忽略模型可能仍传入的 confirm（不再具有效力；批准仅能通过 request_permission）
+        kwargs.pop("confirm", None)
+
+        from agent_core.permissions.bash_danger_approvals import (
+            consume_bash_danger_grant,
+        )
+
+        perm_id = kwargs.get("permission_id")
+        perm_str = str(perm_id).strip() if perm_id is not None else ""
+        confirmed = (
+            bool(perm_str) and consume_bash_danger_grant(perm_str, command)
+        )
 
         if self._security and getattr(self._security, "_workspace_jail_root", None):
             self._security.refresh_write_roots_from_config(
@@ -166,10 +180,19 @@ class BashTool(BaseTool):
             )
 
         if verdict.needs_confirmation:
+            import json as _json
+
             return ToolResult(
                 success=False,
                 error=verdict.error_code,
                 message=verdict.reason,
+                data={
+                    "suggested_tool": "request_permission",
+                    "permission_kind": "bash_dangerous_command",
+                    "details_json": _json.dumps(
+                        {"command": command}, ensure_ascii=False
+                    ),
+                },
             )
 
         timeout = kwargs.get("timeout")

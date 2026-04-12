@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Dict, Optional
 
 import agent_core.config as _config_mod
@@ -14,6 +15,27 @@ from agent_core.permissions.wait_registry import (
 from agent_core.agent.writable_roots_store import append_user_writable_prefix
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from agent_core.tools.permission_path_infer import infer_writable_prefix_from_details
+
+
+def _bash_command_from_details(details: Any) -> Optional[str]:
+    """从 details（JSON 字符串或 dict）解析 bash 危险命令的 command 字段。"""
+    if details is None:
+        return None
+    if isinstance(details, dict):
+        cmd = details.get("command")
+        return str(cmd).strip() if cmd is not None and str(cmd).strip() else None
+    if isinstance(details, str):
+        s = details.strip()
+        if not s:
+            return None
+        try:
+            d = json.loads(s)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(d, dict):
+            cmd = d.get("command")
+            return str(cmd).strip() if cmd is not None and str(cmd).strip() else None
+    return None
 
 
 class RequestPermissionTool(BaseTool):
@@ -31,6 +53,7 @@ class RequestPermissionTool(BaseTool):
 用于：
 - 需要写入全局配置目录（如 ~/.agents/skills）
 - 需要一次性或长期扩展可写路径前缀
+- 危险 bash（rm -rf、sudo 等）：kind=bash_dangerous_command，details 为 JSON，必须含 command 字段（与将执行的命令完全一致）。人类批准后，用返回的 data.permission_id 与同一 command 再调 bash（一次性）
 
 调用后进程会等待人类在前端选择允许/拒绝；超时默认视为拒绝。
 批准后若提供 path_prefix，将把该绝对路径前缀写入当前用户的持久可写列表。""",
@@ -44,7 +67,7 @@ class RequestPermissionTool(BaseTool):
                 ToolParameter(
                     name="kind",
                     type="string",
-                    description="类别，如 bash_write_outside_workspace、file_write、other",
+                    description="类别：bash_write_outside_workspace、file_write、bash_dangerous_command、other",
                     required=False,
                 ),
                 ToolParameter(
@@ -62,7 +85,8 @@ class RequestPermissionTool(BaseTool):
             ],
             examples=[],
             usage_notes=[
-                "仅在工具返回 WORKSPACE_WRITE_DENIED 等且需要人类决策时调用",
+                "仅在工具返回 WORKSPACE_WRITE_DENIED、CONFIRMATION_REQUIRED 等且需要人类决策时调用",
+                "bash_dangerous_command：details 必须含 command，与后续 bash 的 command 逐字一致",
                 "前端需调用 resolve_permission(permission_id, decision) 唤醒",
             ],
             tags=["权限", "审批"],
@@ -133,6 +157,16 @@ class RequestPermissionTool(BaseTool):
                 message=decision.note or "人类拒绝了该权限请求",
                 data={"permission_id": pid},
             )
+
+        kind_l = kind.strip().lower().replace("-", "_")
+        if kind_l in ("bash_dangerous_command", "bash_dangerous"):
+            from agent_core.permissions.bash_danger_approvals import (
+                register_bash_danger_grant,
+            )
+
+            bc = _bash_command_from_details(details)
+            if bc:
+                register_bash_danger_grant(pid, bc)
 
         prefix_msg = ""
         if decision.path_prefix and str(decision.path_prefix).strip():

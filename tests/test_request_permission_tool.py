@@ -13,6 +13,10 @@ from agent_core.permissions.wait_registry import (
     resolve_permission,
     set_permission_notify_hook,
 )
+from agent_core.permissions.bash_danger_approvals import (
+    clear_bash_danger_grant_for_tests,
+    consume_bash_danger_grant,
+)
 from agent_core.tools.request_permission_tool import RequestPermissionTool
 
 pytestmark = pytest.mark.asyncio
@@ -70,6 +74,48 @@ async def test_request_permission_allow_with_prefix_persists_acl(
     assert acl_file.is_file()
     data = json.loads(acl_file.read_text(encoding="utf-8"))
     assert str(tmp_path / "extra") in data["prefixes"]
+
+
+async def test_request_permission_bash_dangerous_registers_grant(
+    patched_get_config, monkeypatch
+):
+    """bash_dangerous_command 批准后登记一次性 bash 执行权。"""
+    tmp_path, _c = patched_get_config
+    clear_bash_danger_grant_for_tests()
+    captured: list[str] = []
+
+    def _notify(pid: str, payload: object) -> None:
+        captured.append(pid)
+
+    set_permission_notify_hook(_notify)
+    tool = RequestPermissionTool()
+    exec_ctx = {"source": "cli", "user_id": "alice"}
+    cmd = "rm -rf /tmp/x"
+
+    async def _run():
+        return await tool.execute(
+            summary="delete",
+            kind="bash_dangerous_command",
+            details=json.dumps({"command": cmd}),
+            timeout_seconds=5.0,
+            __execution_context__=exec_ctx,
+        )
+
+    task = asyncio.create_task(_run())
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if captured:
+            break
+    assert captured, "permission_id should be notified"
+    pid = captured[0]
+    ok = resolve_permission(pid, PermissionDecision(allowed=True))
+    assert ok
+    result = await task
+    assert result.success
+    assert result.data and result.data.get("permission_id") == pid
+    assert consume_bash_danger_grant(pid, cmd)
+    assert not consume_bash_danger_grant(pid, cmd)
+    clear_bash_danger_grant_for_tests()
 
 
 async def test_request_permission_timeout(monkeypatch, tmp_path):

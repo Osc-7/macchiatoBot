@@ -4,7 +4,7 @@ BashSecurity -- 命令安全校验模块。
 三层校验架构：
   Layer 1 -- 规则快速路径：受限模式白名单 + shell 运算符禁止
   Layer 2 -- 危险模式检测：正则匹配破坏性命令（rm -rf、sudo 等）
-  Layer 3 -- 交互审批：危险命令返回 ASK_USER，由 BashTool 提示模型请求用户确认
+  Layer 3 -- 交互审批：危险命令返回 ASK_USER，须经 request_permission 人类批准后方可执行
 
 参考：
 - Claude Code bashSecurity.ts (23 条校验)
@@ -198,7 +198,7 @@ class BashSecurity:
         Args:
             command: shell 命令字符串
             profile: CoreProfile（None 则视为 full 模式）
-            confirmed: 用户是否已确认（跳过 Layer 3）
+            confirmed: 已通过 request_permission 登记的一次性批准（BashTool 内部传入，非 LLM 自设）
         """
         command = command.strip()
         if not command:
@@ -237,8 +237,11 @@ class BashSecurity:
             # ── Layer 3: 交互审批 ────────────────────
             return SecurityVerdict(
                 SecurityAction.ASK_USER,
-                reason=f"该命令可能造成不可逆损害（{danger}）。请先向用户展示命令内容，"
-                       f"待用户确认后再调用并传 confirm=true 执行",
+                reason=(
+                    f"该命令可能造成不可逆损害（{danger}）。请调用 request_permission，"
+                    f"kind=bash_dangerous_command，details 为 JSON 且含与本次完全相同的 command 字段；"
+                    f"人类批准后，再使用返回的 permission_id 与同一 command 调用 bash（一次性）。"
+                ),
                 error_code="CONFIRMATION_REQUIRED",
             )
 

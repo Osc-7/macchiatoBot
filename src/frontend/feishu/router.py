@@ -38,6 +38,7 @@ from .ipc_bridge import (
 from .session_mapping import map_event_to_session
 from .card_callback import handle_feishu_card_action
 from .event_crypto import decrypt_feishu_event_body, verify_feishu_http_signature
+from .reply_dispatch import send_feishu_agent_final_reply
 
 
 logger = logging.getLogger(__name__)
@@ -281,8 +282,10 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
     # 将 Agent 回复通过飞书再发回用户
     feishu_client = _build_feishu_client()
     try:
-        await feishu_client.send_text_message(
-            chat_id=msg.chat_id, text=result.output_text
+        await send_feishu_agent_final_reply(
+            client=feishu_client,
+            chat_id=msg.chat_id,
+            output_text=result.output_text,
         )
         attachments = getattr(result, "attachments", None)
         if attachments:

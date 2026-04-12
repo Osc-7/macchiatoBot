@@ -8,7 +8,11 @@ from bs4 import BeautifulSoup
 飞书端 Markdown 过滤工具。
 
 飞书文本消息（msg_type="text"）不支持 Markdown 渲染，这里统一在发送前
-将 Markdown 转为适合飞书展示的纯文本：
+将 Markdown 转为适合飞书展示的纯文本。
+
+说明：Agent 主回复若配置为 feishu.reply_format=markdown_card，则走交互卡片发送，
+由卡片内 markdown 组件渲染，**不会**调用本模块；本模块仅用于仍使用
+send_text_message 的路径（错误提示、斜杠指令回显、部分系统通知等）。
 
 - 用 markdown-it-py 将 Markdown 解析为 HTML
 - 用 BeautifulSoup 提取可读文本，并保留链接/图片 URL

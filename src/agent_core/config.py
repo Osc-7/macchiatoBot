@@ -938,6 +938,14 @@ class FeishuConfig(BaseModel):
         default=None,
         description="用于接收 automation 活动通知的飞书 chat_id；仅在 automation_activity_enabled=true 且非空时生效。",
     )
+    tool_trace_cards_enabled: bool = Field(
+        default=True,
+        description="是否在飞书会话中推送每次工具调用的交互卡片（Input/Result），便于对齐 CLI 中间输出。",
+    )
+    reply_format: str = Field(
+        default="markdown_card",
+        description="Agent 最终回复格式：plain=纯文本（历史行为）；markdown_card=交互卡片内 Markdown 渲染。",
+    )
 
 
 class Config(BaseModel):

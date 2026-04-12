@@ -310,6 +310,11 @@ feishu:
   # 建议填写一个专门用于接收系统通知的群聊/单聊 chat_id，而不是普通对话窗口。
   automation_activity_enabled: false
   automation_activity_chat_id: ""  # 目标 chat_id；也可通过环境变量 FEISHU_AUTOMATION_CHAT_ID 覆盖
+  # 飞书对话体验：工具 trace 卡片（Input/Result）；最终回复用交互卡片内 Markdown（标题/列表/链接等）
+  tool_trace_cards_enabled: true
+  # plain=助手输出均为纯文本（含中间轮次，会经 filter_markdown_for_feishu）；
+  # markdown_card=中间轮次与最终回复均用交互卡片内 Markdown（不经该过滤）
+  reply_format: markdown_card
 
 # 记忆系统配置
 memory:

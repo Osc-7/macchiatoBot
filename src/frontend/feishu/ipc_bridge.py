@@ -6,10 +6,13 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
-from system.automation import AutomationIPCClient, default_socket_path
+from agent_core.config import get_config
 from agent_core.interfaces import AgentHooks, AgentRunInput, AgentRunResult
+from system.automation import AutomationIPCClient, default_socket_path
 
 from .client import FeishuClient
+from .interactive_cards import build_tool_trace_card
+from .reply_dispatch import send_feishu_agent_reply
 from .slash_commands import try_handle_slash_command
 
 """
@@ -168,6 +171,12 @@ class FeishuIPCBridge:
             # 与最终回复共用同一个 FeishuClient，避免重复创建 token cache
             feishu_client = FeishuClient(timeout_seconds=self._timeout_seconds)
 
+        tool_trace_cards_enabled = bool(
+            chat_id and get_config().feishu.tool_trace_cards_enabled
+        )
+        # tool_call_id -> {name, arguments}，在 tool_result 时组卡并弹出
+        pending_tool_args: Dict[str, Dict[str, Any]] = {}
+
         # 累积当前 LLM 调用的可见回复内容，用于在多轮工具调用时输出「中间轮次」的
         # Agent 自然语言说明（不含思维链，不含工具内部细节）。
         assistant_buffer: str = ""
@@ -181,7 +190,14 @@ class FeishuIPCBridge:
             if not text_out:
                 return
             try:
-                await feishu_client.send_text_message(chat_id=chat_id, text=text_out)
+                # 与最终回复一致：reply_format=markdown_card 时中间轮次也用卡片 Markdown，
+                # 不走 filter_markdown_for_feishu；plain 时仍为纯文本消息（会过滤）。
+                await send_feishu_agent_reply(
+                    client=feishu_client,
+                    chat_id=chat_id,
+                    output_text=text_out,
+                    markdown_card_header_title="助手（进行中）",
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "failed to send feishu intermediate assistant message: %s", exc
@@ -201,14 +217,48 @@ class FeishuIPCBridge:
                 return
             evt_type = str(evt.get("type") or "")
 
+            if evt_type == "tool_call" and tool_trace_cards_enabled:
+                tcid = str(evt.get("tool_call_id") or "").strip()
+                if tcid:
+                    pending_tool_args[tcid] = {
+                        "name": str(evt.get("name") or ""),
+                        "arguments": evt.get("arguments"),
+                    }
+                return
+
+            if evt_type == "tool_result" and tool_trace_cards_enabled:
+                tcid = str(evt.get("tool_call_id") or "").strip()
+                meta = pending_tool_args.pop(tcid, None) if tcid else None
+                name = str(
+                    evt.get("name") or (meta or {}).get("name") or ""
+                ).strip() or "unknown"
+                arguments: Any = (meta or {}).get("arguments")
+                try:
+                    card = build_tool_trace_card(
+                        tool_name=name,
+                        arguments=arguments,
+                        success=bool(evt.get("success")),
+                        message=str(evt.get("message") or ""),
+                        duration_ms=int(evt.get("duration_ms") or 0),
+                        error=evt.get("error"),
+                    )
+                    await feishu_client.send_interactive_card(
+                        chat_id=chat_id, card=card
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "failed to send feishu tool trace card (tool=%s): %s",
+                        name,
+                        exc,
+                    )
+                return
+
             # 当进入新一轮 LLM 调用时，若上一轮已经产生了可见回复内容，
             # 则先将其作为「中间输出」发到飞书，再开始下一轮累积。
             if evt_type == "llm_request":
                 if assistant_buffer.strip():
                     await _flush_assistant_buffer()
                 return
-            # 对于 tool_call / tool_result 等事件，移动端可以省略具体细节，
-            # 因此这里不再单独输出，只依赖 Agent 自然语言说明。
             return
 
         agent_input = AgentRunInput(text=text, metadata=meta_dict)

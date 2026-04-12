@@ -72,17 +72,28 @@ def build_permission_request_card(
         value_allow["path_prefix"] = path_prefix
         value_deny["path_prefix"] = path_prefix
 
+    summary_preview = _truncate(f"权限 · {summary_t}", 100)
+
     return {
         "schema": "2.0",
-        "config": {"update_multi": True},
+        "config": {
+            "update_multi": True,
+            "width_mode": "fill",
+            "summary": {"content": summary_preview},
+        },
         "header": {
             "template": "orange",
             "title": {"tag": "plain_text", "content": "权限申请"},
-            "padding": "12px 12px 12px 12px",
+            "subtitle": {
+                "tag": "plain_text",
+                "content": "Macchiato · 安全确认",
+            },
+            "padding": "16px 16px 16px 16px",
         },
         "body": {
             "direction": "vertical",
-            "padding": "12px 12px 12px 12px",
+            "padding": "8px 16px 16px 16px",
+            "vertical_spacing": "medium",
             "elements": [
                 {
                     "tag": "markdown",

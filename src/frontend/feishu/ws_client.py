@@ -46,6 +46,7 @@ from .ipc_bridge import (
     try_handle_slash_command_via_ipc,
 )
 from .router import _is_duplicate_event  # 复用去重缓存
+from .reply_dispatch import send_feishu_agent_final_reply
 from .session_mapping import map_event_to_session
 
 logger = logging.getLogger(__name__)
@@ -262,9 +263,10 @@ async def _handle_im_message_event_async(data: Any) -> None:
     # 将 Agent 回复发回飞书
     feishu_client = FeishuClient(timeout_seconds=feishu_cfg.timeout_seconds)
     try:
-        await feishu_client.send_text_message(
+        await send_feishu_agent_final_reply(
+            client=feishu_client,
             chat_id=feishu_message.chat_id,
-            text=result.output_text,
+            output_text=result.output_text,
         )
         attachments = getattr(result, "attachments", None)
         if attachments:

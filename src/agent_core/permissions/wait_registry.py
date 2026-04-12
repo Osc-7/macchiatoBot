@@ -1,0 +1,78 @@
+"""request_permission：pending Future 与前端通知钩子。"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import uuid
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+_notify_hook: Optional[Callable[[str, Dict[str, Any]], None]] = None
+
+
+def set_permission_notify_hook(
+    fn: Optional[Callable[[str, Dict[str, Any]], None]],
+) -> None:
+    """由前端/connector 注册：收到 (permission_id, payload) 时推送到人类。"""
+    global _notify_hook
+    _notify_hook = fn
+
+
+def get_permission_notify_hook() -> Optional[Callable[[str, Dict[str, Any]], None]]:
+    return _notify_hook
+
+
+@dataclass
+class PermissionDecision:
+    """人类或系统对权限请求的裁决。"""
+
+    allowed: bool
+    """是否允许（一次性或已追加前缀）。"""
+    path_prefix: Optional[str] = None
+    """若允许持久写某前缀，规范化绝对路径；仅当 allowed 为 True 时有效。"""
+    note: Optional[str] = None
+
+
+_futures: Dict[str, asyncio.Future[PermissionDecision]] = {}
+
+
+def register_permission_wait() -> tuple[str, asyncio.Future[PermissionDecision]]:
+    """创建等待中的 permission_id 与 Future（由 request_permission 工具 await）。"""
+    pid = str(uuid.uuid4())
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future[PermissionDecision] = loop.create_future()
+    _futures[pid] = fut
+    return pid, fut
+
+
+def resolve_permission(permission_id: str, decision: PermissionDecision) -> bool:
+    """由前端在用户操作后调用，唤醒挂起的工具。"""
+    pid = (permission_id or "").strip()
+    fut = _futures.pop(pid, None)
+    if fut is None:
+        logger.warning("resolve_permission: unknown or already resolved id=%s", pid)
+        return False
+    if fut.done():
+        return False
+    fut.set_result(decision)
+    return True
+
+
+def cancel_permission_wait(permission_id: str, *, reason: str = "cancelled") -> bool:
+    """取消等待（例如 Core 关闭）。"""
+    fut = _futures.pop(permission_id, None)
+    if fut is None or fut.done():
+        return False
+    fut.set_exception(asyncio.CancelledError(reason))
+    return True
+
+
+def notify_permission_pending(permission_id: str, payload: Dict[str, Any]) -> None:
+    if _notify_hook is not None:
+        try:
+            _notify_hook(permission_id, payload)
+        except Exception as exc:
+            logger.warning("permission notify hook failed: %s", exc)

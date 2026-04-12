@@ -185,6 +185,10 @@ command_tools:
   workspace_isolation_enabled: true   # false 时所有 Core 均用 base_dir 作为初始 cwd，且不注入 cd 防护
   # 具有「全盘」bash 工作目录的管理员（memory_owner 形如 cli:root）；亦可对单个 Core 设 CoreProfile.bash_workspace_admin
   # workspace_admin_memory_owners: ["cli:root"]
+  # 全局额外可写路径前缀（bash / file_tools 与工作区 jail 合并）；相对路径相对仓库根
+  # bash_extra_write_roots: []
+  # 每用户批准后持久化的可写前缀（JSON），勿放在 data/workspace 下
+  # acl_base_dir: "./data/acl"
   # base_dir: "."                      # 管理员或未开隔离时 bash 的初始目录（通常为项目根）
 
 # Agent 配置
@@ -206,6 +210,7 @@ tools:
     - "search_tools"
     - "call_tool"
     - "bash"
+    - "request_permission"
   # 当模板 exposure=pinned 时，除 core_tools 外还会默认暴露这些工具
   pinned_tools:
     - "load_skill"
@@ -291,13 +296,14 @@ skills:
 # 飞书集成配置（可选）
 # 若要在飞书中使用 Schedule Agent，请在飞书开放平台创建企业自建应用并填写下列字段。
 # 推荐使用环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_VERIFICATION_TOKEN / FEISHU_ENCRYPT_KEY 覆盖敏感信息。
+# 权限申请「批准/拒绝」按钮依赖：开发配置 — 事件与回调 — 订阅「卡片回传交互」(card.action.trigger)，回调 URL 与本入口一致。
 feishu:
   enabled: false
   # App ID 与 App Secret 建议通过环境变量配置，这里仅作占位示例
   app_id: ""              # 飞书应用 App ID（可留空，使用 FEISHU_APP_ID）
   app_secret: ""          # 飞书应用 App Secret（可留空，使用 FEISHU_APP_SECRET）
   verification_token: ""  # 飞书事件订阅 Verification Token（可留空，使用 FEISHU_VERIFICATION_TOKEN）
-  encrypt_key: ""         # 飞书事件订阅 Encrypt Key（启用消息加密时必填，可留空使用 FEISHU_ENCRYPT_KEY）
+  encrypt_key: ""         # 与开放平台「Encrypt Key」一致；启用加密时 HTTP 回调体为 {"encrypt":...}，须配置否则卡片按钮会报 200671
   base_url: "https://open.feishu.cn"  # 国际版可改为 https://open.larksuite.com
   domain: "feishu"        # feishu(中国大陆版) | lark(国际版)
   # 可选：将 automation Daemon 写入的 automation_activity.jsonl 活动简报同步到指定飞书会话

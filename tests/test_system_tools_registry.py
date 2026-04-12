@@ -20,6 +20,8 @@ def test_build_tool_registry_returns_registry() -> None:
     assert "get_tasks" in names
     assert "get_free_slots" in names
     assert "plan_tasks" in names
+    # call_tool 查的是同一 registry，须能解析 request_permission（与 AgentCore 自注册一致）
+    assert "request_permission" in names
 
 
 def test_build_tool_registry_respects_profile_allowlist() -> None:

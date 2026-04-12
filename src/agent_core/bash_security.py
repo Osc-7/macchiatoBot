@@ -10,6 +10,7 @@ BashSecurity -- 命令安全校验模块。
 - Claude Code bashSecurity.ts (23 条校验)
 - Codex approval/sandbox 分层
 - 早期命令工具的白名单与危险模式检测思路
+- 更强隔离可考虑 Linux bubblewrap（见 Claude/Codex 文档），本模块仍为启发式校验
 """
 
 from __future__ import annotations
@@ -95,6 +96,37 @@ _WORKSPACE_WRITE_MUTATING_LAST_PATH = frozenset(
 )
 _WORKSPACE_SEGMENT_OPERATORS = frozenset({"&&", "||", ";", "|"})
 
+# 重定向等「写」目标视为无害设备，不触发工作区外写入拒绝（对齐常见 shell 用法如 >/dev/null）
+_WORKSPACE_WRITE_EXEMPT_POSIX_DEVS = frozenset(
+    {
+        "/dev/null",
+        "/dev/stdout",
+        "/dev/stderr",
+    }
+)
+
+
+def is_workspace_write_exempt_target(path_str: str) -> bool:
+    """若为绝对路径且指向无害 POSIX 设备，则跳过工作区写范围检测。"""
+    s = (path_str or "").strip()
+    if not s.startswith("/"):
+        return False
+    try:
+        resolved = Path(s).resolve()
+    except OSError:
+        return False
+    key = str(resolved)
+    if key in _WORKSPACE_WRITE_EXEMPT_POSIX_DEVS:
+        return True
+    # 兼容 /dev/null 等符号链接解析结果
+    for dev in _WORKSPACE_WRITE_EXEMPT_POSIX_DEVS:
+        try:
+            if resolved == Path(dev).resolve():
+                return True
+        except OSError:
+            continue
+    return False
+
 
 class BashSecurity:
     """
@@ -112,6 +144,7 @@ class BashSecurity:
         allow_run_for_restricted: bool = False,
         workspace_jail_root: Optional[str] = None,
         workspace_tmp_root: Optional[str] = None,
+        workspace_extra_write_roots: Optional[List[Path]] = None,
     ) -> None:
         self._restricted_whitelist = frozenset(
             restricted_whitelist
@@ -119,6 +152,38 @@ class BashSecurity:
         self._allow_run_for_restricted = allow_run_for_restricted
         self._workspace_jail_root = workspace_jail_root
         self._workspace_tmp_root = workspace_tmp_root
+        self._workspace_extra_write_roots: List[Path] = list(workspace_extra_write_roots or [])
+
+    def refresh_write_roots_from_config(
+        self,
+        source: str,
+        user_id: str,
+    ) -> None:
+        """从全局 Config 重新合并可写根（含 ACL 文件），供 request_permission 写入后下一轮 bash 生效。"""
+        if not self._workspace_jail_root:
+            return
+        from agent_core.config import get_config
+        from agent_core.agent.workspace_paths import merged_bash_write_root_paths
+
+        cfg = get_config()
+        merged = merged_bash_write_root_paths(
+            cfg.command_tools,
+            source,
+            user_id,
+            app_config=cfg,
+        )
+        jail = Path(self._workspace_jail_root).resolve()
+        tmp_r = (
+            Path(self._workspace_tmp_root).resolve() if self._workspace_tmp_root else None
+        )
+        self._workspace_extra_write_roots = []
+        for p in merged:
+            pr = p.resolve()
+            if pr == jail:
+                continue
+            if tmp_r is not None and pr == tmp_r:
+                continue
+            self._workspace_extra_write_roots.append(pr)
 
     def check(
         self,
@@ -208,13 +273,18 @@ class BashSecurity:
         roots = [Path(self._workspace_jail_root or "").resolve()]
         if self._workspace_tmp_root:
             roots.append(Path(self._workspace_tmp_root).resolve())
+        roots.extend(self._workspace_extra_write_roots)
         for segment in self._split_command_segments(command):
             tokens = self._tokenize_segment(segment)
             if not tokens:
                 continue
             for path_str in self._extract_write_targets(tokens):
+                if is_workspace_write_exempt_target(path_str):
+                    continue
                 candidate = self._resolve_candidate_path(path_str, roots[0])
                 if candidate is None:
+                    continue
+                if is_workspace_write_exempt_target(str(candidate)):
                     continue
                 if not any(self._path_within_root(candidate, root) for root in roots):
                     return SecurityVerdict(

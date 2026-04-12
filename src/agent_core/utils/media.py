@@ -9,7 +9,10 @@ from __future__ import annotations
 import base64
 import mimetypes
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+
+if TYPE_CHECKING:
+    from agent_core.config import Config
 
 
 def _project_root() -> Path:
@@ -17,17 +20,29 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _resolve_media_path(media_path: str) -> Path:
+def _resolve_media_path(
+    media_path: str,
+    *,
+    config: Optional["Config"] = None,
+    exec_ctx: Optional[dict] = None,
+) -> Path:
     """
     将媒体路径解析为绝对路径。
 
     解析策略：
-    1) 绝对路径：直接使用
-    2) 相对路径（如 user_file/a.png）：相对于项目根目录
-    3) 仅文件名（如 a.png）：默认在项目根目录的 user_file/ 下查找
+    1) ``~`` / ``~/``：若传入 ``config``，与会话工作区对齐（见 ``session_paths``）
+    2) 绝对路径：直接使用
+    3) 相对路径（如 user_file/a.png）：相对于项目根目录
+    4) 仅文件名（如 a.png）：默认在项目根目录的 user_file/ 下查找
     """
     raw = (media_path or "").strip()
-    p = Path(raw).expanduser()
+    if config is not None:
+        from agent_core.agent.session_paths import expand_user_path_str_for_session
+
+        raw = expand_user_path_str_for_session(raw, config, exec_ctx=exec_ctx or {})
+    else:
+        raw = str(Path(raw).expanduser())
+    p = Path(raw)
     if p.is_absolute():
         return p.resolve()
 
@@ -59,14 +74,21 @@ def _file_to_data_url(path: Path) -> Tuple[Optional[str], Optional[str], Optiona
 
 def resolve_media_to_content_item(
     media_path: str,
+    *,
+    config: Optional["Config"] = None,
+    exec_ctx: Optional[dict] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     将媒体路径转换为多模态 content item（image_url / video_url）。
 
+    传入 ``config`` / ``exec_ctx`` 时，``~`` 与会话工作区一致（与 attach_media 路径对齐）。
+
     Returns:
         (content_item, error)
     """
-    path = _resolve_media_path(media_path)
+    path = _resolve_media_path(
+        media_path, config=config, exec_ctx=exec_ctx
+    )
     data_url, mime, err = _file_to_data_url(path)
     if err:
         return None, err

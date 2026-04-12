@@ -18,7 +18,7 @@ Skills 采用渐进式披露：system prompt 仅注入 metadata（name + descrip
 
 import re
 from pathlib import Path
-from typing import Literal, Optional, Tuple
+from typing import Any, Literal, Optional, Tuple
 
 import yaml
 
@@ -49,6 +49,41 @@ def _resolve_cli_dir(cli_dir: Optional[str]) -> Optional[Path]:
     if not cli_dir or not str(cli_dir).strip():
         return None
     p = Path(cli_dir.strip()).expanduser().resolve()
+    return p if p.is_dir() else None
+
+
+def resolve_skills_cli_path(
+    config: Config,
+    *,
+    source: str,
+    user_id: str,
+    profile: Optional[Any] = None,
+    bash_workspace_admin: Optional[bool] = None,
+) -> Optional[Path]:
+    """
+    当前 Core 使用的 Skills CLI 根目录（各 skill 子目录下含 SKILL.md）。
+
+    与 bash / write_file / ``session_paths`` 一致：隔离模式下即会话 ``~/.agents/skills`` 实体路径。
+    """
+    from agent_core.agent.session_paths import session_home_path
+
+    default_cli = _resolve_cli_dir(getattr(config.skills, "cli_dir", None))
+    home = session_home_path(
+        config,
+        source=source,
+        user_id=user_id,
+        profile=profile,
+        bash_workspace_admin=bash_workspace_admin,
+    )
+    if home.resolve() == Path.home().resolve() and default_cli is not None:
+        return default_cli
+
+    p = (home / ".agents" / "skills").resolve()
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        if not p.is_dir():
+            return None
     return p if p.is_dir() else None
 
 
@@ -220,6 +255,7 @@ def build_system_prompt(
     mode: PromptMode = "full",
     max_section_chars: int = DEFAULT_MAX_SECTION_CHARS,
     sub_content_path: str | None = None,
+    skills_cli_path: Optional[Path] = None,
 ) -> str:
     """
     构建 Agent 系统提示。按 OpenClaw 风格固定部分 + 工作区引导注入顺序组装。
@@ -257,7 +293,11 @@ def build_system_prompt(
         user_content = _load_user_section(max_section_chars)
         if user_content:
             parts.append(user_content)
-        cli_path = _resolve_cli_dir(getattr(config.skills, "cli_dir", None))
+        cli_path = (
+            skills_cli_path
+            if skills_cli_path is not None
+            else _resolve_cli_dir(getattr(config.skills, "cli_dir", None))
+        )
         skills_index = _format_skills_index(config.skills.enabled or [], cli_path)
         if skills_index:
             _maybe_append(parts, skills_index)

@@ -3,15 +3,14 @@
 
 与 loader 配合：system prompt 仅注入 skill 的 metadata，
 Agent 在需要时调用此工具获取完整 SKILL 说明。
-技能仅从 cli_dir（~/.agents/skills）读取。
+
+技能目录与当前会话一致：工作区隔离时为 ``{workspace}/{frontend}/{user}/.agents/skills``，
+与 bash / write_file 下的 ``~/.agents/skills`` 为同一树；非隔离或工作区管理员时为配置项 ``skills.cli_dir``（默认进程 ``~/.agents/skills``）。
 """
 
+from agent_core.agent.memory_paths import effective_memory_namespace_from_execution_context
 from agent_core.config import Config
-from agent_core.prompts.loader import (
-    _list_cli_dir_skills,
-    _resolve_cli_dir,
-    load_skill_content,
-)
+from agent_core.prompts.loader import load_skill_content, resolve_skills_cli_path
 
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 
@@ -26,18 +25,15 @@ class LoadSkillTool(BaseTool):
     def name(self) -> str:
         return "load_skill"
 
-    def _get_all_available_skills(self) -> list[str]:
-        """从 cli_dir 列出技能；enabled 非空时仅返回 enabled 中且存在的。"""
-        cli_path = _resolve_cli_dir(getattr(self._config.skills, "cli_dir", None))
-        if not cli_path:
-            return []
-        all_skills = set(_list_cli_dir_skills(cli_path))
-        enabled = self._config.skills.enabled or []
-        return [n for n in (enabled if enabled else all_skills) if n in all_skills]
+    def _usage_skills_hint(self) -> str:
+        """工具定义无执行上下文，仅能用配置中的 enabled 作名称提示。"""
+        en = self._config.skills.enabled or []
+        if en:
+            return ", ".join(f"`{s}`" for s in en)
+        return "以系统提示 **Available Skills** 索引中的名称为准"
 
     def get_definition(self) -> ToolDefinition:
-        all_skills = self._get_all_available_skills()
-        skill_list = ", ".join(f"`{s}`" for s in all_skills) if all_skills else "(none)"
+        skill_list = self._usage_skills_hint()
         return ToolDefinition(
             name=self.name,
             description=(
@@ -59,7 +55,8 @@ class LoadSkillTool(BaseTool):
                 },
             ],
             usage_notes=[
-                f"Available skills (from ~/.agents/skills): {skill_list}.",
+                "读取本会话技能目录下的 SKILL.md（隔离模式下与 shell 中 ~/.agents/skills 为同一目录）。"
+                f" 技能名：{skill_list}。",
             ],
             tags=["skill", "load", "progressive-disclosure"],
         )
@@ -73,7 +70,15 @@ class LoadSkillTool(BaseTool):
                 message="skill_name cannot be empty",
             )
 
-        cli_path = _resolve_cli_dir(getattr(self._config.skills, "cli_dir", None))
+        ctx = kwargs.get("__execution_context__") or {}
+        src, uid = effective_memory_namespace_from_execution_context(ctx)
+        cli_path = resolve_skills_cli_path(
+            self._config,
+            source=src,
+            user_id=uid,
+            profile=None,
+            bash_workspace_admin=ctx.get("bash_workspace_admin"),
+        )
         content = load_skill_content(skill_name, cli_dir_path=cli_path)
         if not content:
             return ToolResult(

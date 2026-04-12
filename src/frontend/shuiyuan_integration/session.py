@@ -702,7 +702,7 @@ async def run_shuiyuan_reply(
         ShuiyuanGetCategoriesTool(config=cfg),
         ShuiyuanGetCategoryTopicsTool(config=cfg, max_results=30),
         ShuiyuanRetortTool(config=cfg),
-        AttachImageToReplyTool(),
+        AttachImageToReplyTool(config=cfg),
     ]
     if extra_tools:
         tools.extend(extra_tools)

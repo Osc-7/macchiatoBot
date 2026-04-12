@@ -164,6 +164,15 @@ class AgentCore:
             norm = str(name).strip()
             if norm and norm not in deduped_pinned:
                 deduped_pinned.append(norm)
+        # 与内核约定一致：交互式 Core 必须能调用人类审批；勿依赖用户是否在 config 中列出。
+        # background（cron/heartbeat）无人工在前端，不强制加入 request_permission，避免挂起。
+        _required_in_working_set = ("search_tools", "call_tool", "bash")
+        for req in _required_in_working_set:
+            if req not in deduped_pinned:
+                deduped_pinned.append(req)
+        _mode = getattr(core_profile, "mode", None) if core_profile is not None else None
+        if _mode != "background" and "request_permission" not in deduped_pinned:
+            deduped_pinned.append("request_permission")
         self._working_set = ToolWorkingSetManager(
             pinned_tools=deduped_pinned,
             working_set_size=self._config.agent.working_set_size,
@@ -286,6 +295,10 @@ class AgentCore:
                     profile_getter=lambda: getattr(self, "_core_profile", None),
                 )
             )
+        if not self._tool_registry.has("request_permission"):
+            from agent_core.tools.request_permission_tool import RequestPermissionTool
+
+            self._tool_registry.register(RequestPermissionTool())
 
         # MCP 客户端（在 __aenter__ 中连接，或 defer 时由 ensure_mcp_connected 连接）
         self._mcp_manager: Optional[MCPClientManager] = None
@@ -976,6 +989,11 @@ class AgentCore:
             )
             if profile is not None
             else False,
+            "bash_workspace_admin": bool(
+                getattr(profile, "bash_workspace_admin", False)
+            )
+            if profile is not None
+            else False,
             "source": self._source,
             "user_id": self._user_id,
         }
@@ -985,10 +1003,24 @@ class AgentCore:
 
     def _queue_media_for_next_call(self, result: ToolResult) -> None:
         """将工具结果中声明的媒体挂载到下一次 LLM 调用。"""
+        prof = getattr(self, "_core_profile", None)
+        media_ctx = {
+            "source": self._source,
+            "user_id": self._user_id,
+            "bash_workspace_admin": bool(getattr(prof, "bash_workspace_admin", False))
+            if prof is not None
+            else False,
+        }
+
+        def _resolver(p: str):
+            return resolve_media_to_content_item(
+                p, config=self._config, exec_ctx=media_ctx
+            )
+
         queue_media_for_next_call(
             result,
             self._pending_multimodal_items,
-            media_resolver=resolve_media_to_content_item,
+            media_resolver=_resolver,
         )
 
     def _collect_outgoing_attachment(self, result: ToolResult) -> None:
@@ -1262,11 +1294,14 @@ class AgentCore:
             from agent_core.bash_security import BashSecurity
             from agent_core.tools.bash_tool import BashTool
 
+            from agent_core.agent.memory_paths import resolve_memory_owner_paths
             from agent_core.agent.workspace_paths import (
                 build_bash_workspace_guard_init,
                 ensure_workspace_owner_layout,
                 is_bash_workspace_admin,
+                merged_bash_write_root_paths,
                 resolve_bash_working_dir,
+                resolve_project_root,
                 resolve_workspace_tmp_dir,
             )
 
@@ -1278,8 +1313,24 @@ class AgentCore:
             ws_restricted = cmd_cfg.workspace_isolation_enabled and not is_bash_workspace_admin(
                 cmd_cfg, self._source, self._user_id, profile
             )
+            mem_lt: Optional[str] = None
+            mem_owner_dir: Optional[str] = None
+            if self._memory_enabled:
+                mp = resolve_memory_owner_paths(
+                    self._config.memory,
+                    self._user_id,
+                    config=self._config,
+                    source=self._source,
+                )
+                mem_lt = mp["long_term_dir"]
+                mem_owner_dir = str(Path(mp["chat_history_db_path"]).parent)
             guard_init = (
-                build_bash_workspace_guard_init(str(Path(bash_cwd).resolve()))
+                build_bash_workspace_guard_init(
+                    str(Path(bash_cwd).resolve()),
+                    project_root=str(resolve_project_root().resolve()),
+                    memory_long_term_dir=mem_lt,
+                    memory_owner_dir=mem_owner_dir,
+                )
                 if ws_restricted
                 else []
             )
@@ -1290,6 +1341,16 @@ class AgentCore:
                 resolve_workspace_tmp_dir(cmd_cfg, self._user_id, source=self._source)
                 if ws_restricted
                 else None
+            )
+            extra_write_roots = (
+                merged_bash_write_root_paths(
+                    cmd_cfg,
+                    self._source,
+                    self._user_id,
+                    app_config=self._config,
+                )
+                if ws_restricted
+                else []
             )
             init_cmds = guard_init + list(cmd_cfg.init_commands or [])
             rt_config = BashRuntimeConfig(
@@ -1310,6 +1371,7 @@ class AgentCore:
                 allow_run_for_restricted=cmd_cfg.allow_run_for_subagent,
                 workspace_jail_root=jail_root,
                 workspace_tmp_root=tmp_root,
+                workspace_extra_write_roots=extra_write_roots if ws_restricted else None,
             )
             if not self._tool_registry.has("bash"):
                 self._tool_registry.register(

@@ -75,9 +75,14 @@ class AgentKernel:
         turn_id: int = 0,
         hooks: Optional[AgentHooks] = None,
         on_signal: Optional[Callable[[], None]] = None,
+        *,
+        channel_metadata: Optional[Dict[str, Any]] = None,
     ) -> AgentRunResult:
         """
         驱动 AgentCore 的 run_loop()。
+
+        channel_metadata: 来自 KernelRequest.metadata 的渠道字段（如 feishu_chat_id），
+        会并入工具 __execution_context__，供 request_permission 等推送到对应前端。
 
         响应的系统调用：
         - ToolCallAction        → 执行工具，结果 asend 回 Core
@@ -170,6 +175,11 @@ class AgentKernel:
                         )
                         if profile is not None
                         else False,
+                        "bash_workspace_admin": bool(
+                            getattr(profile, "bash_workspace_admin", False)
+                        )
+                        if profile is not None
+                        else False,
                         "source": getattr(agent, "_source", ""),
                         "user_id": getattr(agent, "_user_id", ""),
                         "session_id": getattr(agent, "_session_id", ""),
@@ -177,6 +187,11 @@ class AgentKernel:
                     _jmo = getattr(agent, "_job_memory_owner", None)
                     if _jmo:
                         _ctx["memory_owner"] = _jmo
+                    if channel_metadata:
+                        for _k in ("feishu_chat_id", "feishu_open_id"):
+                            _v = channel_metadata.get(_k)
+                            if _v is not None and str(_v).strip():
+                                _ctx[_k] = str(_v).strip()
                     parsed_args["__execution_context__"] = _ctx
                     result = await agent_registry.execute(
                         action.tool_name, **parsed_args

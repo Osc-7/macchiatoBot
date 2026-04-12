@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, List
+from typing import Any, List, Optional
 
+from agent_core.config import Config, get_config
+from agent_core.agent.session_paths import expand_user_path_str_for_session
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 
 
@@ -127,6 +129,9 @@ class AttachImageToReplyTool(BaseTool):
     调用后，图片会随 Agent 的文本回复一并发送到当前会话（如飞书会收到一条图片消息）。
     """
 
+    def __init__(self, config: Optional[Config] = None) -> None:
+        self._config = config or get_config()
+
     @property
     def name(self) -> str:
         return "attach_image_to_reply"
@@ -189,8 +194,13 @@ class AttachImageToReplyTool(BaseTool):
             )
 
         if image_path:
-            path_str = str(image_path).strip()
-            p = Path(path_str).expanduser().resolve()
+            ctx = kwargs.get("__execution_context__") or {}
+            path_str = expand_user_path_str_for_session(
+                str(image_path).strip(),
+                self._config,
+                exec_ctx=ctx,
+            )
+            p = Path(path_str).resolve()
             if not p.exists() or not p.is_file():
                 return ToolResult(
                     success=False,

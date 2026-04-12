@@ -8,6 +8,7 @@ import pytest
 
 from agent_core.agent.workspace_paths import (
     build_bash_workspace_guard_init,
+    ensure_workspace_data_memory_symlink,
     ensure_workspace_owner_layout,
     is_bash_workspace_admin,
     list_user_ids_under_workspace,
@@ -107,10 +108,34 @@ def test_is_bash_workspace_admin_profile_overrides_empty_list(tmp_path) -> None:
 
 def test_build_bash_workspace_guard_init_contains_root(tmp_path) -> None:
     root = str(tmp_path / "ws" / "cli" / "u1")
-    lines = build_bash_workspace_guard_init(root)
+    lines = build_bash_workspace_guard_init(
+        root,
+        project_root="/proj",
+        memory_long_term_dir="/proj/data/memory/cli/u1/long_term",
+        memory_owner_dir="/proj/data/memory/cli/u1",
+    )
     assert len(lines) == 1
-    assert "MACCHIATO_WORKSPACE_ROOT=" in lines[0]
-    assert "cd()" in lines[0]
+    script = lines[0]
+    assert "MACCHIATO_REAL_HOME=" in script
+    assert "MACCHIATO_WORKSPACE_ROOT=" in script
+    assert "MACCHIATO_USER_ROOT=" in script
+    assert "MACCHIATO_PROJECT_ROOT=" in script
+    assert ".sandbox_home" not in script
+    assert 'export HOME="$MACCHIATO_WORKSPACE_ROOT"' in script
+    assert "MACCHIATO_MEMORY_LONG_TERM=" in script
+    assert "MACCHIATO_MEMORY_OWNER_DIR=" in script
+    assert "cd()" in script
+
+
+def test_ensure_workspace_data_memory_symlink_grafts(tmp_path) -> None:
+    pr = tmp_path / "repo"
+    (pr / "data" / "memory" / "cli" / "u1").mkdir(parents=True)
+    owner = pr / "data" / "workspace" / "cli" / "u1"
+    owner.mkdir(parents=True)
+    ensure_workspace_data_memory_symlink(owner, project_root=pr, source="cli", user_id="u1")
+    link = owner / "data" / "memory"
+    assert link.is_symlink()
+    assert link.resolve() == (pr / "data" / "memory" / "cli" / "u1").resolve()
 
 
 def test_validate_rejects_bad_user_for_workspace(tmp_path) -> None:

@@ -105,6 +105,33 @@ class FeishuClient:
             # 失败时抛出异常，由上层记录日志并向用户返回友好错误
             raise RuntimeError(f"发送飞书消息失败: {data}")
 
+    async def send_interactive_card(self, *, chat_id: str, card: Dict[str, Any]) -> None:
+        """
+        发送交互卡片（JSON 2.0）。
+
+        content 为整卡对象序列化后的字符串，参见「发送消息内容」— 卡片 interactive。
+        https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/im-v1/message/create_json
+        """
+        if not chat_id:
+            raise ValueError("chat_id 不能为空")
+        from .permission_card import interactive_content_string
+
+        content_str = interactive_content_string(card)
+        token = await self._get_tenant_access_token()
+        url = f"{self._base_url}/open-apis/im/v1/messages?receive_id_type=chat_id"
+        payload = {
+            "receive_id": chat_id,
+            "msg_type": "interactive",
+            "content": content_str,
+        }
+        headers = {"Authorization": f"Bearer {token}"}
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        if int(data.get("code", 0)) != 0:
+            raise RuntimeError(f"发送飞书卡片失败: {data}")
+
     async def upload_image(
         self, *, image_bytes: bytes, content_type: str = "image/png"
     ) -> str:

@@ -134,7 +134,7 @@ def get_default_tools(
 
     if config and config.multimodal.enabled:
         tools.append(AttachMediaTool())
-        tools.append(AttachImageToReplyTool())
+        tools.append(AttachImageToReplyTool(config=config))
 
     tools.append(SyncCanvasTool(config=config))
     tools.append(FetchCanvasOverviewTool(config=config))

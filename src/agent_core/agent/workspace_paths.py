@@ -6,15 +6,141 @@ import logging
 import shlex
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from agent_core.config import CommandToolsConfig
 
-from .memory_paths import validate_logic_namespace_segment
+from .memory_paths import resolve_memory_owner_paths, validate_logic_namespace_segment
+from .writable_roots_store import load_user_writable_prefixes
+
+if TYPE_CHECKING:
+    from agent_core.config import Config
 
 logger = logging.getLogger(__name__)
 
 _TMP_BASE_DIR = Path("/tmp/macchiato")
+
+# workspace_paths.py -> agent/ -> agent_core/ -> src/ -> 仓库根
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
+
+def resolve_project_root() -> Path:
+    """仓库根目录（含 config.yaml、src/ 的目录）。"""
+    return _PROJECT_ROOT
+
+
+def resolve_configured_write_roots(entries: List[str], *, project_root: Path) -> List[Path]:
+    """将配置中的可写根（~、相对仓库根）解析为绝对 Path。"""
+    out: List[Path] = []
+    for e in entries or []:
+        s = (e or "").strip()
+        if not s:
+            continue
+        p = Path(s).expanduser()
+        if not p.is_absolute():
+            p = (project_root / p).resolve()
+        else:
+            p = p.resolve()
+        out.append(p)
+    return out
+
+
+def merged_bash_write_root_paths(
+    cmd_cfg: CommandToolsConfig,
+    source: str,
+    user_id: str,
+    *,
+    app_config: Optional["Config"] = None,
+    include_canonical_memory_owner: bool = True,
+) -> List[Path]:
+    """全局 bash_extra_write_roots + 每用户 ACL + 可选真实 data/memory/{fe}/{uid}，去重后供 BashSecurity/file_tools。"""
+    pr = resolve_project_root().resolve()
+    from_cfg = resolve_configured_write_roots(
+        list(cmd_cfg.bash_extra_write_roots or []),
+        project_root=pr,
+    )
+    user_strs = load_user_writable_prefixes(
+        cmd_cfg.acl_base_dir, source, user_id, config=app_config
+    )
+    user_paths = [Path(p).resolve() for p in user_strs]
+    mem_paths: List[Path] = []
+    if include_canonical_memory_owner and app_config is not None:
+        mem = getattr(app_config, "memory", None)
+        if mem is not None and getattr(mem, "enabled", True):
+            try:
+                mp = resolve_memory_owner_paths(mem, user_id, config=app_config, source=source)
+                mem_paths.append(Path(mp["chat_history_db_path"]).parent.resolve())
+            except Exception:
+                pass
+    seen: set[str] = set()
+    merged: List[Path] = []
+    for p in from_cfg + user_paths + mem_paths:
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            merged.append(p)
+    return merged
+
+
+def ensure_workspace_data_memory_symlink(
+    owner_dir: Path,
+    *,
+    project_root: Optional[Path] = None,
+    source: str = "cli",
+    user_id: str = "root",
+) -> None:
+    """
+    在工作区下创建 ``data/memory`` -> **仅当前用户**的 ``data/memory/{frontend}/{user_id}/``。
+
+    历史上曾指向整棵 ``data/memory``，导致在用户目录里能看到所有前端子目录，像「整仓数据搬进工作区」；
+    现改为只嫁接本会话 owner 目录，与 ``MACCHIATO_MEMORY_*`` 语义一致。
+
+    在用户根下相对路径请用 ``data/memory/long_term``、``content`` 等（不要再叠一层 ``data/memory/feishu/...``）。
+    """
+    import os
+
+    pr = (project_root or resolve_project_root()).resolve()
+    fe = validate_logic_namespace_segment(_ns_segment(source, "cli"), what="frontend")
+    uid = validate_logic_namespace_segment(_ns_segment(user_id, "root"), what="user_id")
+    target = (pr / "data" / "memory" / fe / uid).resolve()
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning("ensure_workspace_data_memory_symlink: cannot mkdir target %s: %s", target, exc)
+        return
+
+    data_sub = owner_dir / "data"
+    try:
+        data_sub.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning("ensure_workspace_data_memory_symlink: cannot mkdir %s: %s", data_sub, exc)
+        return
+
+    link = data_sub / "memory"
+    if link.is_symlink():
+        try:
+            if link.resolve() == target:
+                return
+        except OSError:
+            pass
+        try:
+            link.unlink()
+        except OSError as exc:
+            logger.warning("ensure_workspace_data_memory_symlink: cannot replace symlink %s: %s", link, exc)
+            return
+    elif link.exists():
+        logger.warning(
+            "ensure_workspace_data_memory_symlink: %s exists and is not a symlink; skip graft",
+            link,
+        )
+        return
+
+    try:
+        rel = os.path.relpath(str(target), str(data_sub))
+        os.symlink(rel, link, target_is_directory=True)
+        logger.info("grafted workspace data/memory symlink %s -> %s", link, rel)
+    except OSError as exc:
+        logger.warning("ensure_workspace_data_memory_symlink: symlink failed %s: %s", link, exc)
 
 
 def _ns_segment(value: str, default: str) -> str:
@@ -70,6 +196,14 @@ def ensure_workspace_owner_layout(
         else:
             path_obj.mkdir(parents=True, exist_ok=True)
             created_paths.append(str(path_obj))
+
+    try:
+        ensure_workspace_data_memory_symlink(
+            owner, project_root=resolve_project_root(), source=source, user_id=uid
+        )
+    except Exception as exc:
+        logger.warning("ensure_workspace_owner_layout: data/memory graft skipped: %s", exc)
+
     return {
         "frontend": fe,
         "user_id": uid,
@@ -140,17 +274,43 @@ def resolve_bash_working_dir(
     return (cmd_cfg.base_dir or ".").strip() or "."
 
 
-def build_bash_workspace_guard_init(workspace_root_resolved: str) -> List[str]:
+def build_bash_workspace_guard_init(
+    workspace_root_resolved: str,
+    *,
+    project_root: Optional[str] = None,
+    memory_long_term_dir: Optional[str] = None,
+    memory_owner_dir: Optional[str] = None,
+    real_home: Optional[str] = None,
+) -> List[str]:
     """
-    返回写入 bash 启动序列的脚本：覆盖 cd/pushd/popd，并把 HOME 指到工作区。
+    返回写入 bash 启动序列的脚本：覆盖 cd/pushd/popd；**HOME 即用户单元格根目录**
+    （``MACCHIATO_WORKSPACE_ROOT``），不再嵌套 ``.sandbox_home``，避免「工作区里再套一层家目录」。
 
-    在每次成功 cd 后用 pwd -P 校验是否仍位于 MACCHIATO_WORKSPACE_ROOT 之下；
-    无法兜住「直接对文件使用绝对路径读写」等情形，另由工具层与运维策略约束。
+    并导出 ``MACCHIATO_PROJECT_ROOT``、``MACCHIATO_REAL_HOME``（进程级真实主目录）、记忆路径。
+
+    在每次成功 cd 后用 pwd -P 校验是否仍位于 MACCHIATO_WORKSPACE_ROOT 之下。
+
+    会话内 ``~`` / ``$HOME`` = 该用户数据根；需写**宿主机**用户主目录下路径时使用
+    ``$MACCHIATO_REAL_HOME``（或经 ``request_permission`` 批准后的绝对路径）。
     """
     q = shlex.quote(str(Path(workspace_root_resolved).resolve()))
+    pr = project_root or str(_PROJECT_ROOT.resolve())
+    q_pr = shlex.quote(pr)
+    q_real_home = shlex.quote(
+        str(Path(real_home).resolve()) if real_home else str(Path.home().resolve())
+    )
+    extra_exports = ""
+    if memory_long_term_dir:
+        extra_exports += f'\nexport MACCHIATO_MEMORY_LONG_TERM={shlex.quote(memory_long_term_dir)}'
+    if memory_owner_dir:
+        extra_exports += f'\nexport MACCHIATO_MEMORY_OWNER_DIR={shlex.quote(memory_owner_dir)}'
     script = f"""
+export MACCHIATO_REAL_HOME={q_real_home}
 export MACCHIATO_WORKSPACE_ROOT={q}
-export HOME="$MACCHIATO_WORKSPACE_ROOT"
+export MACCHIATO_USER_ROOT="$MACCHIATO_WORKSPACE_ROOT"
+export MACCHIATO_PROJECT_ROOT={q_pr}
+mkdir -p "$MACCHIATO_WORKSPACE_ROOT" || true
+export HOME="$MACCHIATO_WORKSPACE_ROOT"{extra_exports}
 unset CDPATH
 cd() {{
   builtin cd "$@" || return $?

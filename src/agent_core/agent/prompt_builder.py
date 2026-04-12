@@ -6,7 +6,10 @@ from typing import Any, List
 
 from agent_core.context import get_time_context
 from agent_core.memory import RecallResult
-from agent_core.prompts import build_system_prompt as build_prompt
+from agent_core.prompts.loader import (
+    build_system_prompt as build_prompt,
+    resolve_skills_cli_path,
+)
 
 
 def _visible_scopes(agent: Any) -> set:
@@ -29,12 +32,19 @@ def build_agent_system_prompt(agent: Any) -> str:
     scopes = _visible_scopes(agent)
 
     sub_content_path = "shuiyuan/system" if agent._source == "shuiyuan" else None
+    skills_cli = resolve_skills_cli_path(
+        agent._config,
+        source=getattr(agent, "_source", "cli") or "cli",
+        user_id=getattr(agent, "_user_id", "root") or "root",
+        profile=getattr(agent, "_core_profile", None),
+    )
     prompt = build_prompt(
         time_context=time_str,
         config=agent._config,
         has_web_extractor=agent._tool_registry.has("extract_web_content"),
         has_file_tools=agent._tool_registry.has("read_file"),
         sub_content_path=sub_content_path,
+        skills_cli_path=skills_cli,
     )
 
     if agent._memory_enabled:

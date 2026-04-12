@@ -13,6 +13,8 @@
 
 本模块复用现有 HTTP 回调实现中的会话映射、去重与 IPC 逻辑，只是将事件来源
 从 Webhook Request URL 换成飞书的 WebSocket 长连接，无需公网 IP / ngrok。
+卡片「批准/拒绝」的 card.action.trigger 也由长连接投递，须注册
+``register_p2_card_action_trigger``，否则会报 processor not found（客户端 200671）。
 """
 
 from __future__ import annotations
@@ -47,6 +49,69 @@ from .router import _is_duplicate_event  # 复用去重缓存
 from .session_mapping import map_event_to_session
 
 logger = logging.getLogger(__name__)
+
+
+def _handle_p2_card_action_trigger(data: Any) -> Any:
+    """
+    长连接上的 card.action.trigger（与 HTTP 回调语义一致）。
+
+    若未注册此处理器，SDK 会报 processor not found，客户端表现为 200671。
+    批准/拒绝须通过 IPC 转发到 automation_daemon（Future 仅存在于 daemon 进程）。
+    """
+    import asyncio
+
+    from lark_oapi.event.callback.model.p2_card_action_trigger import (
+        CallBackToast,
+        P2CardActionTriggerResponse,
+    )
+
+    from .card_callback import resolve_card_via_daemon_ipc
+
+    cfg = get_config().feishu
+    hdr = getattr(data, "header", None)
+    if (
+        hdr
+        and cfg.verification_token
+        and getattr(hdr, "token", None)
+        and hdr.token != cfg.verification_token
+    ):
+        t = CallBackToast()
+        t.type = "error"
+        t.content = "verification_token 与开放平台配置不一致"
+        r = P2CardActionTriggerResponse()
+        r.toast = t
+        return r
+
+    event_key = str(getattr(hdr, "event_id", None) or "") if hdr else ""
+    if event_key and _is_duplicate_event(event_key):
+        t = CallBackToast()
+        t.type = "info"
+        t.content = "重复事件已忽略"
+        r = P2CardActionTriggerResponse()
+        r.toast = t
+        return r
+
+    ev = getattr(data, "event", None)
+    action = getattr(ev, "action", None) if ev else None
+    raw_val = getattr(action, "value", None) if action else None
+
+    try:
+        kind, msg = asyncio.run(resolve_card_via_daemon_ipc(raw_val))
+    except RuntimeError:
+        # 极少数环境下当前线程已有运行中的 loop
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            kind, msg = pool.submit(
+                lambda: asyncio.run(resolve_card_via_daemon_ipc(raw_val))
+            ).result(timeout=35.0)
+
+    t = CallBackToast()
+    t.type = kind
+    t.content = msg
+    r = P2CardActionTriggerResponse()
+    r.toast = t
+    return r
 
 
 async def _handle_im_message_event_async(data: Any) -> None:
@@ -253,13 +318,14 @@ def build_ws_client() -> lark.ws.Client:
     if not (feishu_cfg.app_id and feishu_cfg.app_secret):
         raise RuntimeError("Feishu app_id/app_secret 未配置，无法启动长连接客户端")
 
-    # 使用 v2 事件分发器，仅注册 im.message.receive_v1 事件
+    # 使用 v2 事件分发器：IM 消息 + 卡片按钮回传（须同时注册，否则 card.action.trigger 报 processor not found）
     event_handler = (
         lark.EventDispatcherHandler.builder(
             feishu_cfg.verification_token or "",
             feishu_cfg.encrypt_key or "",
         )
         .register_p2_im_message_receive_v1(_handle_im_message_event)
+        .register_p2_card_action_trigger(_handle_p2_card_action_trigger)
         .build()
     )
 

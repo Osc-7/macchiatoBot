@@ -3,8 +3,10 @@
 
 读取受 allow_read 配置控制；写入和修改需要 allow_write/allow_modify 权限。
 开启工作区隔离时，相对路径默认落在当前 frontend/user 的工作区；
-写入/修改仅允许发生在该工作区或临时目录 `/tmp/macchiato/{frontend}/{user}/`
-内，其他路径保持只读。
+``~/`` 与单独的 ``~`` 与 bash 一致，解析为**用户单元格根目录**（与 ``MACCHIATO_WORKSPACE_ROOT`` 相同，不嵌套 ``.sandbox_home``）。
+写入/修改允许发生在该工作区、临时目录 `/tmp/macchiato/{frontend}/{user}/`、
+真实 `data/memory/{frontend}/{user}/`（与配置/ACL 额外可写根）内；其他路径保持只读。
+需写真实用户主目录时请使用绝对路径（例如 ``$MACCHIATO_REAL_HOME`` 在 shell 中的展开值）。
 modify_file 支持三种模式：search_replace（局部替换）、append（追加）、overwrite（覆盖）。
 """
 
@@ -13,6 +15,7 @@ from typing import Awaitable, Callable, Optional, Tuple
 
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from agent_core.config import Config, FileToolsConfig, get_config
+from agent_core.agent.session_paths import expand_user_path_str_for_session
 
 
 def _redirect_memory_md_if_needed(path_str: str, exec_ctx: dict, config: Config) -> str:
@@ -81,6 +84,7 @@ def _resolve_path_for_file_tool(
     config: Config,
 ) -> tuple[Optional[Path], Optional[str]]:
     """解析读取路径。开启工作区隔离时，相对路径相对当前工作区；绝对路径可读任意位置。"""
+    path_str = expand_user_path_str_for_session(path_str, config, exec_ctx=exec_ctx)
     if getattr(config.command_tools, "workspace_isolation_enabled", False):
         workspace_root = _resolve_workspace_root_for_exec_ctx(exec_ctx, config)
         try:
@@ -115,13 +119,22 @@ def _resolve_mutation_path_for_file_tool(
     if getattr(config.command_tools, "workspace_isolation_enabled", False):
         workspace_root = _resolve_workspace_root_for_exec_ctx(exec_ctx, config)
         tmp_root = _resolve_workspace_tmp_root_for_exec_ctx(exec_ctx, config)
-        if not (
-            _is_path_within_root(resolved, workspace_root)
-            or _is_path_within_root(resolved, tmp_root)
-        ):
+        from agent_core.agent.memory_paths import (
+            effective_memory_namespace_from_execution_context,
+        )
+        from agent_core.agent.workspace_paths import merged_bash_write_root_paths
+
+        src, uid = effective_memory_namespace_from_execution_context(exec_ctx)
+        extras = merged_bash_write_root_paths(
+            config.command_tools,
+            src,
+            uid,
+            app_config=config,
+        )
+        allowed = [workspace_root, tmp_root] + extras
+        if not any(_is_path_within_root(resolved, r) for r in allowed):
             return None, (
-                "文件写入/修改仅允许在当前工作区或临时目录内: "
-                f"{workspace_root} ; {tmp_root}"
+                "文件写入/修改仅允许在当前工作区、临时目录或可写白名单内（含 canonical memory）"
             )
     return resolved, None
 
@@ -413,6 +426,7 @@ class WriteFileTool(BaseTool):
             usage_notes=[
                 "写入和覆盖需要配置允许：file_tools.allow_write: true",
                 "开启工作区隔离时，仅允许写入当前 frontend/user 的工作区或 `/tmp/macchiato/{frontend}/{user}/`；其他路径保持只读",
+                "工作区隔离下 ``~/`` 与 bash 一致，指向该用户单元格根目录（与 ``MACCHIATO_WORKSPACE_ROOT`` 一致）",
                 "会完全覆盖已存在的文件",
             ],
             tags=["文件", "写入"],
@@ -460,7 +474,12 @@ class WriteFileTool(BaseTool):
                 success=False,
                 error=(
                     "FORBIDDEN_PATH"
-                    if "工作区内" in err or "工作区或临时目录内" in err
+                    if (
+                        "工作区内" in err
+                        or "工作区或临时目录内" in err
+                        or "可写白名单" in err
+                        or "canonical memory" in err
+                    )
                     else "INVALID_PATH"
                 ),
                 message=err,
@@ -734,7 +753,12 @@ class ModifyFileTool(BaseTool):
                 success=False,
                 error=(
                     "FORBIDDEN_PATH"
-                    if "工作区内" in err or "工作区或临时目录内" in err
+                    if (
+                        "工作区内" in err
+                        or "工作区或临时目录内" in err
+                        or "可写白名单" in err
+                        or "canonical memory" in err
+                    )
                     else "INVALID_PATH"
                 ),
                 message=err,

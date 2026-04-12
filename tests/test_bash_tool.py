@@ -162,6 +162,16 @@ class TestBashSecurity:
         assert v.denied
         assert v.error_code == "WORKSPACE_WRITE_DENIED"
 
+    def test_workspace_jail_allows_redirect_to_dev_null(self):
+        sec = self._sec(workspace_jail_root="/tmp/ws")
+        v = sec.check("echo hi > /dev/null", profile=CoreProfile(mode="full"))
+        assert v.allowed
+
+    def test_workspace_jail_allows_stderr_redirect_to_dev_null(self):
+        sec = self._sec(workspace_jail_root="/tmp/ws")
+        v = sec.check("ls /nope 2>/dev/null", profile=CoreProfile(mode="full"))
+        assert v.allowed
+
     def test_workspace_jail_allows_redirect_inside_workspace(self):
         sec = self._sec(workspace_jail_root="/tmp/ws")
         v = sec.check("echo hi > /tmp/ws/out.txt", profile=CoreProfile(mode="full"))
@@ -204,6 +214,22 @@ class TestBashSecurity:
         )
         assert v.denied
         assert v.error_code == "WORKSPACE_WRITE_DENIED"
+
+    def test_workspace_jail_allows_extra_write_root(self, tmp_path):
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        sec = self._sec(
+            workspace_jail_root=str(ws),
+            workspace_tmp_root=str(tmp_path / "t"),
+            workspace_extra_write_roots=[extra.resolve()],
+        )
+        v = sec.check(
+            f"echo hi > {extra}/note.txt",
+            profile=CoreProfile(mode="full"),
+        )
+        assert v.allowed
 
 
 # ── BashTool 集成测试 ─────────────────────────────────────────

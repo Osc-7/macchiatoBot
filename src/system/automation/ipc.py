@@ -315,6 +315,27 @@ class AutomationIPCServer:
             turn_count = self._gateway.get_turn_count(session_id=active_session)
             return {"turn_count": turn_count}
 
+        if method == "resolve_permission":
+            # 卡片批准/拒绝由 feishu_ws_gateway 等独立进程触发，须在 daemon 内唤醒 Future
+            from agent_core.permissions.wait_registry import (
+                PermissionDecision,
+                resolve_permission as _resolve_permission_wait,
+            )
+
+            pid = str(params.get("permission_id") or "").strip()
+            if not pid:
+                raise ValueError("permission_id 不能为空")
+            allowed = bool(params.get("allowed"))
+            path_prefix = params.get("path_prefix")
+            note_raw = params.get("note")
+            decision = PermissionDecision(
+                allowed=allowed,
+                path_prefix=str(path_prefix).strip() if path_prefix else None,
+                note=None if note_raw is None else str(note_raw),
+            )
+            ok = _resolve_permission_wait(pid, decision)
+            return {"ok": bool(ok)}
+
         if method == "poll_push":
             # 非阻塞轮询：批量取出该 session 所有 [out] 队列结果（统一出口）
             results = []
@@ -575,6 +596,26 @@ class AutomationIPCClient:
         except Exception:
             self._turn_count_cache = 0
         return self._turn_count_cache
+
+    async def resolve_permission(
+        self,
+        *,
+        permission_id: str,
+        allowed: bool,
+        path_prefix: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> bool:
+        """在 daemon 进程内调用 resolve_permission（跨进程网关须用此接口）。"""
+        data = await self._request(
+            "resolve_permission",
+            {
+                "permission_id": permission_id,
+                "allowed": allowed,
+                "path_prefix": path_prefix,
+                "note": note,
+            },
+        )
+        return bool(data.get("ok"))
 
     async def poll_push(self) -> list:
         """非阻塞轮询当前 session 的 inject_turn 推送结果列表（空则返回 []）。

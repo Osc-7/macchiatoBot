@@ -279,7 +279,7 @@ async def test_agent_prepare_turn_populates_recall_result(tmp_path) -> None:
     config.agent.working_set_size = 6
     config.agent.max_iterations = 10
     config.tools = MagicMock()
-    config.tools.core_tools = ["search_tools", "call_tool", "bash"]
+    config.tools.core_tools = ["search_tools", "call_tool", "bash", "request_permission"]
     config.tools.pinned_tools = []
     config.tools.get_template.return_value = SimpleNamespace(exposure="pinned", extra=[])
     config.memory = MagicMock()

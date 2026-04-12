@@ -460,11 +460,17 @@ class KernelScheduler:
                 def _on_signal() -> None:
                     self._core_pool.touch(session_id)
 
+                md_ch: Dict[str, Any] = {}
+                if isinstance(request.metadata, dict):
+                    for _k in ("feishu_chat_id", "feishu_open_id"):
+                        if _k in request.metadata and request.metadata[_k]:
+                            md_ch[_k] = request.metadata[_k]
                 run_result = await self._kernel.run(
                     agent,
                     turn_id=turn_id,
                     hooks=hooks,
                     on_signal=_on_signal,
+                    channel_metadata=md_ch or None,
                 )
 
                 # 后处理

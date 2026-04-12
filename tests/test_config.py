@@ -101,7 +101,7 @@ class TestConfigModels:
     def test_tools_config_defaults(self):
         """测试工具模板配置默认值"""
         config = ToolsConfig()
-        assert config.core_tools == ["search_tools", "call_tool", "bash"]
+        assert config.core_tools == ["search_tools", "call_tool", "bash", "request_permission"]
         assert "read_file" in config.pinned_tools
         assert config.templates["default"].exposure == "pinned"
         assert "shuiyuan_browse_topic" in config.templates["shuiyuan"].extra
@@ -160,6 +160,8 @@ class TestConfigModels:
         assert ct.workspace_base_dir == "./data/workspace"
         assert ct.workspace_isolation_enabled is True
         assert ct.workspace_admin_memory_owners == []
+        assert ct.bash_extra_write_roots == []
+        assert ct.acl_base_dir == "./data/acl"
 
     def test_config_has_command_tools_default(self):
         """测试 Config 未指定 command_tools 时使用默认值"""

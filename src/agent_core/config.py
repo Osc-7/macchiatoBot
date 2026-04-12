@@ -384,7 +384,10 @@ class CommandToolsConfig(BaseModel):
     )
     workspace_base_dir: str = Field(
         default="./data/workspace",
-        description="bash 工作区根目录；与 memory 一致为 {base}/{frontend}/{user}/",
+        description=(
+            "每用户数据根（单元格）的父目录：实际路径为 {base}/{frontend}/{user}/；"
+            "该目录同时作为隔离 bash 的 cwd、HOME 与 cd 牢笼根（不再嵌套 .sandbox_home）"
+        ),
     )
     workspace_isolation_enabled: bool = Field(
         default=True,
@@ -396,6 +399,17 @@ class CommandToolsConfig(BaseModel):
             "具有 bash 全盘工作目录权限的 memory_owner 列表（形如 cli:root、feishu:ou_xxx）；"
             "亦可对单个 Core 设置 CoreProfile.bash_workspace_admin"
         ),
+    )
+    bash_extra_write_roots: List[str] = Field(
+        default_factory=list,
+        description=(
+            "全局额外可写路径前缀（已 resolve）；~ 展开；相对路径相对仓库根。"
+            "与每用户 data/acl 下持久列表及 jail/tmp 合并后供 bash 与工作区写校验使用"
+        ),
+    )
+    acl_base_dir: str = Field(
+        default="./data/acl",
+        description="每用户可写前缀持久化目录（writable_roots.json），勿放在 data/workspace 下",
     )
     default_timeout_seconds: float = Field(
         default=30.0,
@@ -594,7 +608,10 @@ class SkillsConfig(BaseModel):
     )
     cli_dir: Optional[str] = Field(
         default="~/.agents/skills",
-        description="Skills CLI 安装目录（npx skills add -g 默认安装位置），技能仅从此目录读取",
+        description=(
+            "非工作区隔离（或 bash 工作区管理员）时 Skills CLI 根目录；"
+            "开启隔离且非管理员时实际使用 {workspace_base_dir}/{frontend}/{user}/.agents/skills，与此处默认的进程主目录 ~/.agents/skills 脱钩"
+        ),
     )
 
 
@@ -659,7 +676,7 @@ class ToolsConfig(BaseModel):
     """工具模板与初始暴露配置。"""
 
     core_tools: List[str] = Field(
-        default_factory=lambda: ["search_tools", "call_tool", "bash"],
+        default_factory=lambda: ["search_tools", "call_tool", "bash", "request_permission"],
         description="所有 Core 固定携带的核心工具",
     )
     pinned_tools: List[str] = Field(

@@ -10,6 +10,7 @@ event_id / message_id 级别去重，避免同一条消息被多次处理。
 """
 
 from __future__ import annotations
+import json
 import logging
 import time
 from collections import deque
@@ -35,6 +36,8 @@ from .ipc_bridge import (
     try_handle_slash_command_via_ipc,
 )
 from .session_mapping import map_event_to_session
+from .card_callback import handle_feishu_card_action
+from .event_crypto import decrypt_feishu_event_body, verify_feishu_http_signature
 
 
 logger = logging.getLogger(__name__)
@@ -90,7 +93,8 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
     飞书事件回调处理入口。
 
     - type == url_verification: 返回 challenge 完成 URL 验证
-    - 其他：按 header.event_type 分发，目前仅处理 im.message.receive_v1
+    - header.event_type == card.action.trigger: 卡片按钮回传（权限批准/拒绝）
+    - 其他：按 header.event_type 分发，处理 im.message.receive_v1
     """
     cfg = get_feishu_config()
     if not cfg.enabled:
@@ -98,7 +102,44 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
             status_code=503, detail="Feishu integration is disabled in config.yaml"
         )
 
-    body: Dict[str, Any] = await request.json()
+    body_bytes = await request.body()
+    try:
+        raw: Dict[str, Any] = json.loads(body_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.warning("feishu event: invalid json body: %s", exc)
+        raise HTTPException(status_code=400, detail="invalid json") from exc
+
+    if not verify_feishu_http_signature(
+        body_bytes=body_bytes,
+        encrypt_key=cfg.encrypt_key,
+        headers=request.headers,
+    ):
+        # 非 HTTP 200 时飞书客户端报 200671；签名校验失败仍返回 200 + toast
+        return JSONResponse(
+            status_code=200,
+            content={
+                "toast": {
+                    "type": "error",
+                    "content": "签名校验失败，请核对 feishu.encrypt_key 与开放平台是否一致",
+                }
+            },
+        )
+
+    try:
+        body = decrypt_feishu_event_body(raw, cfg.encrypt_key)
+    except ValueError as exc:
+        logger.warning("feishu event decrypt: %s", exc)
+        return JSONResponse(
+            status_code=200,
+            content={"toast": {"type": "error", "content": str(exc)}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("feishu event decrypt failed: %s", exc)
+        return JSONResponse(
+            status_code=200,
+            content={"toast": {"type": "error", "content": "事件解密失败"}},
+        )
+
     event_type = str(body.get("type") or "")
 
     # URL 验证
@@ -111,6 +152,21 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
         ):
             raise HTTPException(status_code=403, detail="invalid verification token")
         return JSONResponse({"challenge": challenge_req.challenge})
+
+    # 卡片按钮回传（需在开平订阅 card.action.trigger，与 HTTP 回调同 URL）
+    header_raw = body.get("header") or {}
+    if str(header_raw.get("event_type") or "") == "card.action.trigger":
+        event_key_cb = str(header_raw.get("event_id") or "")
+        if event_key_cb and _is_duplicate_event(event_key_cb):
+            return JSONResponse(
+                content={
+                    "toast": {
+                        "type": "info",
+                        "content": "重复事件已忽略",
+                    }
+                }
+            )
+        return await handle_feishu_card_action(body)
 
     # 普通事件（schema 2.0）
     envelope = FeishuEventEnvelope(**body)

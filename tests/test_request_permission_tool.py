@@ -1,0 +1,91 @@
+"""request_permission 工具与 wait_registry。"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+import pytest
+
+from agent_core.config import CommandToolsConfig, Config, LLMConfig
+from agent_core.permissions.wait_registry import (
+    PermissionDecision,
+    resolve_permission,
+    set_permission_notify_hook,
+)
+from agent_core.tools.request_permission_tool import RequestPermissionTool
+
+pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture
+def patched_get_config(monkeypatch, tmp_path):
+    c = Config(
+        llm=LLMConfig(api_key="k", model="m"),
+        command_tools=CommandToolsConfig(acl_base_dir=str(tmp_path / "acl")),
+    )
+    import agent_core.config as cfg_mod
+
+    monkeypatch.setattr(cfg_mod, "get_config", lambda: c)
+    return tmp_path, c
+
+
+async def test_request_permission_allow_with_prefix_persists_acl(
+    patched_get_config, monkeypatch
+):
+    tmp_path, _c = patched_get_config
+    captured: list[str] = []
+
+    def _notify(pid: str, payload: object) -> None:
+        captured.append(pid)
+
+    set_permission_notify_hook(_notify)
+
+    tool = RequestPermissionTool()
+    exec_ctx = {"source": "cli", "user_id": "alice"}
+
+    async def _run() -> object:
+        return await tool.execute(
+            summary="need write",
+            kind="bash_write",
+            timeout_seconds=5.0,
+            __execution_context__=exec_ctx,
+        )
+
+    task = asyncio.create_task(_run())
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if captured:
+            break
+    assert captured, "permission_id should be notified"
+    pid = captured[0]
+    ok = resolve_permission(
+        pid,
+        PermissionDecision(allowed=True, path_prefix=str(tmp_path / "extra")),
+    )
+    assert ok
+    result = await task
+    assert result.success
+    acl_file = tmp_path / "acl" / "cli" / "alice" / "writable_roots.json"
+    assert acl_file.is_file()
+    data = json.loads(acl_file.read_text(encoding="utf-8"))
+    assert str(tmp_path / "extra") in data["prefixes"]
+
+
+async def test_request_permission_timeout(monkeypatch, tmp_path):
+    c = Config(
+        llm=LLMConfig(api_key="k", model="m"),
+        command_tools=CommandToolsConfig(acl_base_dir=str(tmp_path / "acl")),
+    )
+    import agent_core.config as cfg_mod
+
+    monkeypatch.setattr(cfg_mod, "get_config", lambda: c, raising=True)
+    set_permission_notify_hook(lambda *_: None)
+    tool = RequestPermissionTool()
+    r = await tool.execute(
+        summary="x",
+        timeout_seconds=0.2,
+        __execution_context__={},
+    )
+    assert not r.success
+    assert r.error == "PERMISSION_TIMEOUT"

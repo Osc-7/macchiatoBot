@@ -122,11 +122,11 @@ class CoreProfile:
 
         执行顺序：
         1. 如果 tool_name 在 deny_tools → False（黑名单优先）
-        2. 核心工具（search_tools / call_tool / bash）始终允许
+        2. 核心工具（search_tools / call_tool / bash / request_permission）始终允许
         3. 如果 allowed_tools 为 None → True（无白名单限制）
         4. 否则检查 allowed_tools 白名单
         """
-        _CORE_TOOLS = {"search_tools", "call_tool", "bash"}
+        _CORE_TOOLS = {"search_tools", "call_tool", "bash", "request_permission"}
 
         if tool_name in self.deny_tools:
             return False

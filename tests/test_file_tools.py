@@ -327,6 +327,30 @@ class TestWriteFileTool:
         assert expected.read_text() == "print(1)"
 
     @pytest.mark.asyncio
+    async def test_write_file_tilde_is_user_cell_root_like_bash(self, tmp_path):
+        """隔离模式下 ``~/.agents/...`` 与 bash 一致，落在用户单元格根下（无 .sandbox_home 嵌套）。"""
+        config = _make_workspace_sandbox_config(tmp_path, source="feishu", allow_write=True)
+        tool = WriteFileTool(config=config)
+        result = await tool.execute(
+            path="~/.agents/skills/find-skills/SKILL.md",
+            content="# skill",
+            __execution_context__=_ctx("feishu", "wbzd"),
+        )
+        assert result.success
+        expected = (
+            tmp_path
+            / "workspace_parent"
+            / "feishu"
+            / "wbzd"
+            / ".agents"
+            / "skills"
+            / "find-skills"
+            / "SKILL.md"
+        )
+        assert expected.read_text() == "# skill"
+        assert ".sandbox_home" not in (result.data.get("path") or "")
+
+    @pytest.mark.asyncio
     async def test_write_file_forbidden_outside_workspace(self, tmp_path):
         """工作区外路径对 write_file 保持只读。"""
         config = _make_workspace_sandbox_config(tmp_path, source="feishu", allow_write=True)

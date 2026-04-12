@@ -1,0 +1,163 @@
+"""request_permission：阻塞等待人类在前端批准或拒绝（及可选持久写前缀）。"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any, Dict, Optional
+
+import agent_core.config as _config_mod
+from agent_core.permissions.wait_registry import (
+    PermissionDecision,
+    notify_permission_pending,
+    register_permission_wait,
+)
+from agent_core.agent.writable_roots_store import append_user_writable_prefix
+from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from agent_core.tools.permission_path_infer import infer_writable_prefix_from_details
+
+
+class RequestPermissionTool(BaseTool):
+    """挂起当前 turn，直到 resolve_permission 或超时。"""
+
+    @property
+    def name(self) -> str:
+        return "request_permission"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self.name,
+            description="""当 bash / 文件写入因工作区隔离或缺少可写路径被拒绝时，请求人类批准。
+
+用于：
+- 需要写入全局配置目录（如 ~/.agents/skills）
+- 需要一次性或长期扩展可写路径前缀
+
+调用后进程会等待人类在前端选择允许/拒绝；超时默认视为拒绝。
+批准后若提供 path_prefix，将把该绝对路径前缀写入当前用户的持久可写列表。""",
+            parameters=[
+                ToolParameter(
+                    name="summary",
+                    type="string",
+                    description="人类可读摘要：需要什么权限、为何需要",
+                    required=True,
+                ),
+                ToolParameter(
+                    name="kind",
+                    type="string",
+                    description="类别，如 bash_write_outside_workspace、file_write、other",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="details",
+                    type="string",
+                    description='可选 JSON 字符串：如 path、path_prefix、reason；含 path 时批准后会把对应目录前缀写入可写白名单（如 path 为文件则取其父目录）',
+                    required=False,
+                ),
+                ToolParameter(
+                    name="timeout_seconds",
+                    type="number",
+                    description="等待秒数，默认 300",
+                    required=False,
+                ),
+            ],
+            examples=[],
+            usage_notes=[
+                "仅在工具返回 WORKSPACE_WRITE_DENIED 等且需要人类决策时调用",
+                "前端需调用 resolve_permission(permission_id, decision) 唤醒",
+            ],
+            tags=["权限", "审批"],
+        )
+
+    async def execute(self, **kwargs) -> ToolResult:
+        exec_ctx = kwargs.pop("__execution_context__", None) or {}
+        summary = str(kwargs.get("summary") or "").strip()
+        if not summary:
+            return ToolResult(
+                success=False,
+                error="MISSING_SUMMARY",
+                message="缺少 summary",
+            )
+        kind = str(kwargs.get("kind") or "").strip() or "other"
+        details = kwargs.get("details")
+        timeout_s = kwargs.get("timeout_seconds")
+        try:
+            timeout = float(timeout_s) if timeout_s is not None else 300.0
+        except (TypeError, ValueError):
+            timeout = 300.0
+
+        cfg = _config_mod.get_config()
+        cmd_cfg = cfg.command_tools
+
+        pid, fut = register_permission_wait()
+        feishu_cid = str(exec_ctx.get("feishu_chat_id") or "").strip()
+        payload: Dict[str, Any] = {
+            "summary": summary,
+            "kind": kind,
+            "details": details,
+            "timeout_seconds": timeout,
+            "memory_owner": exec_ctx.get("memory_owner"),
+            "session_id": exec_ctx.get("session_id"),
+            "source": exec_ctx.get("source"),
+            "user_id": exec_ctx.get("user_id"),
+        }
+        if feishu_cid:
+            payload["feishu_chat_id"] = feishu_cid
+        inferred = infer_writable_prefix_from_details(
+            details, config=cfg, exec_ctx=dict(exec_ctx)
+        )
+        if inferred:
+            payload["path_prefix"] = inferred
+        notify_permission_pending(pid, payload)
+
+        try:
+            decision: PermissionDecision = await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            return ToolResult(
+                success=False,
+                error="PERMISSION_TIMEOUT",
+                message="等待人类批准超时，视为拒绝",
+                data={"permission_id": pid},
+            )
+        except asyncio.CancelledError as exc:
+            return ToolResult(
+                success=False,
+                error="PERMISSION_CANCELLED",
+                message=str(exc),
+                data={"permission_id": pid},
+            )
+
+        if not decision.allowed:
+            return ToolResult(
+                success=False,
+                error="PERMISSION_DENIED",
+                message=decision.note or "人类拒绝了该权限请求",
+                data={"permission_id": pid},
+            )
+
+        prefix_msg = ""
+        if decision.path_prefix and str(decision.path_prefix).strip():
+            pfx = str(decision.path_prefix).strip()
+            try:
+                src = str(exec_ctx.get("source") or "cli").strip() or "cli"
+                uid = str(exec_ctx.get("user_id") or "root").strip() or "root"
+                append_user_writable_prefix(
+                    cmd_cfg.acl_base_dir, src, uid, pfx, config=cfg
+                )
+                prefix_msg = f" 已持久化可写前缀: {pfx}"
+            except Exception as exc:
+                return ToolResult(
+                    success=False,
+                    error="ACL_PERSIST_FAILED",
+                    message=f"批准但写入 ACL 失败: {exc}",
+                    data={"permission_id": pid},
+                )
+
+        return ToolResult(
+            success=True,
+            message="已批准。" + prefix_msg,
+            data={
+                "permission_id": pid,
+                "path_prefix": decision.path_prefix,
+                "note": decision.note,
+            },
+        )

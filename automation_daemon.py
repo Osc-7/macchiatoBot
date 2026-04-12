@@ -47,6 +47,7 @@ from agent_core.llm.client import LLMClient
 from system.tools import build_tool_registry
 
 from frontend.feishu.client import FeishuClient
+from frontend.feishu.permission_notify import install_feishu_permission_notify_hook
 
 from system.tools import get_default_tools
 
@@ -351,6 +352,7 @@ async def _maybe_notify_feishu_activity(record: dict[str, Any]) -> None:
 
 async def _main() -> None:
     cfg = get_config()
+    install_feishu_permission_notify_hook()
     owner_id = (sys.argv[1].strip() if len(sys.argv) > 1 else "root") or "root"
     source = (sys.argv[2].strip() if len(sys.argv) > 2 else "cli") or "cli"
     # 工具在 daemon 进程内加载；修改工具实现/定义（如 file_tools.read_file）后需重启本 daemon 才能生效

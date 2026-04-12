@@ -226,7 +226,7 @@ def _build_multimodal_tools(config: Config) -> List[BaseTool]:
     mm_cfg = getattr(config, "multimodal", None)
     if mm_cfg and getattr(mm_cfg, "enabled", False):
         tools.append(AttachMediaTool())
-        tools.append(AttachImageToReplyTool())
+        tools.append(AttachImageToReplyTool(config=config))
     return tools
 
 
@@ -473,9 +473,10 @@ def build_tool_registry(
     agent_cfg = getattr(cfg, "agent", None)
     tools_cfg = getattr(cfg, "tools", None)
     pinned = list(
-        getattr(tools_cfg, "core_tools", None) or ["search_tools", "call_tool", "bash"]
+        getattr(tools_cfg, "core_tools", None)
+        or ["search_tools", "call_tool", "bash", "request_permission"]
     )
-    for core in ["search_tools", "call_tool", "bash"]:
+    for core in ["search_tools", "call_tool", "bash", "request_permission"]:
         if core not in pinned:
             pinned.append(core)
     if profile is not None:
@@ -493,6 +494,13 @@ def build_tool_registry(
     working_set = ToolWorkingSetManager(
         pinned_tools=pinned, working_set_size=working_set_size
     )
+    # call_tool 按名查的是本 registry；须与 AgentCore._tool_registry 中的 meta 工具一致，
+    # 否则 LLM 通过 call_tool 调用 request_permission 会报 TOOL_NOT_FOUND（直接函数名调用仍走 session registry）。
+    if not registry.has("request_permission"):
+        from agent_core.tools.request_permission_tool import RequestPermissionTool
+
+        if profile is None or profile.is_tool_allowed("request_permission"):
+            registry.register(RequestPermissionTool())
     if not registry.has("search_tools"):
         registry.register(
             SearchToolsTool(

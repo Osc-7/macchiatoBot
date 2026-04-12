@@ -137,6 +137,12 @@ class BashTool(BaseTool):
 
         confirmed = kwargs.get("confirm", False) is True
 
+        if self._security and getattr(self._security, "_workspace_jail_root", None):
+            self._security.refresh_write_roots_from_config(
+                str(exec_ctx.get("source") or "cli"),
+                str(exec_ctx.get("user_id") or "root"),
+            )
+
         profile = self._resolve_profile(exec_ctx)
         verdict = self._security.check(
             command,
@@ -145,10 +151,18 @@ class BashTool(BaseTool):
         )
 
         if verdict.denied:
+            data = None
+            if verdict.error_code == "WORKSPACE_WRITE_DENIED":
+                data = {
+                    "suggested_tool": "request_permission",
+                    "denied_command": command,
+                    "error_code": verdict.error_code,
+                }
             return ToolResult(
                 success=False,
                 error=verdict.error_code,
                 message=verdict.reason,
+                data=data,
             )
 
         if verdict.needs_confirmation:

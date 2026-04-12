@@ -1,0 +1,18 @@
+[Unit]
+Description=macchiatoBot automation daemon (IPC + scheduler)
+After=network.target
+
+[Service]
+Type=simple
+User=__MACCHIATO_USER__
+Group=__MACCHIATO_USER__
+WorkingDirectory=__MACCHIATO_ROOT__
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=__MACCHIATO_ROOT__/src
+ExecStart=__MACCHIATO_ROOT__/.venv/bin/python __MACCHIATO_ROOT__/automation_daemon.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

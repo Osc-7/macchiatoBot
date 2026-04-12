@@ -1,0 +1,19 @@
+[Unit]
+Description=macchiatoBot Feishu WebSocket gateway
+After=network.target macchiato-automation.service
+Wants=macchiato-automation.service
+
+[Service]
+Type=simple
+User=__MACCHIATO_USER__
+Group=__MACCHIATO_USER__
+WorkingDirectory=__MACCHIATO_ROOT__
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=__MACCHIATO_ROOT__/src
+ExecStart=__MACCHIATO_ROOT__/.venv/bin/python __MACCHIATO_ROOT__/feishu_ws_gateway.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

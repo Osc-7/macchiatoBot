@@ -1,0 +1,4 @@
+[Unit]
+Description=macchiatoBot (automation + Feishu gateway + Shuiyuan connector)
+Wants=macchiato-automation.service macchiato-feishu-gateway.service macchiato-shuiyuan-connector.service
+After=network.target

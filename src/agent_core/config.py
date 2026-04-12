@@ -475,6 +475,15 @@ class MCPConfig(BaseModel):
     """MCP 客户端配置。"""
 
     enabled: bool = Field(default=False, description="是否启用 MCP 客户端")
+    inject_builtin_schedule_mcp: bool = Field(
+        default=False,
+        description=(
+            "若为 True：启用 MCP 且 servers 中未配置本地 mcp_server.py 时，"
+            "自动追加 schedule_tools stdio（每 AgentCore 一子进程）。"
+            "进程内 Agent 默认用 ToolRegistry 即可，无需此项；"
+            "仅在为 Claude Desktop 等纯 MCP 宿主暴露日程工具时打开。"
+        ),
+    )
     call_timeout_seconds: int = Field(
         default=30,
         ge=1,

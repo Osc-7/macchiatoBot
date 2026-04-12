@@ -38,7 +38,11 @@ class CallToolTool(BaseTool):
                 ToolParameter(
                     name="name",
                     type="string",
-                    description="目标工具名称，例如 add_event、mcp_local.get_tasks",
+                    description=(
+                        "目标工具名称，须与 ToolRegistry 中已注册名一致，例如 add_event、get_tasks；"
+                        "MCP 工具一般为「前缀.远端名」，如 tavily.xxx、discourse.xxx（取决于 mcp.servers 里 "
+                        "的 name / tool_name_prefix，无统一 mcp.* 命名空间）。"
+                    ),
                     required=True,
                 ),
                 ToolParameter(

@@ -174,6 +174,7 @@ class TestConfigModels:
         """测试 MCP 配置默认值"""
         mcp = MCPConfig()
         assert mcp.enabled is False
+        assert mcp.inject_builtin_schedule_mcp is False
         assert mcp.call_timeout_seconds == 30
         assert mcp.servers == []
 

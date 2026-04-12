@@ -2,6 +2,7 @@
 MCP 客户端管理器。
 
 管理多个 MCP Server 连接，并提供远程工具调用能力。
+外部 stdio MCP（如 Tavily、Discourse）通过进程内共享池复用子进程；本地 mcp_server.py 仍独占连接。
 """
 
 from __future__ import annotations
@@ -9,26 +10,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import sys
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from agent_core.config import MCPConfig, MCPServerConfig
 from agent_core.tools.base import ToolResult
 
+from .pool import get_shared_mcp_pool, should_pool_stdio_server
 from .proxy_tool import MCPProxyTool
+from .stdio_transport import MCPServerRuntime, connect_stdio_mcp_with_retries
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class _ServerRuntime:
-    """单个 MCP Server 的运行时信息。"""
-
-    config: MCPServerConfig
-    session: Any
 
 
 class MCPClientManager:
@@ -37,24 +29,27 @@ class MCPClientManager:
     def __init__(self, config: MCPConfig):
         self._config = config
         self._exit_stack = AsyncExitStack()
-        self._server_stacks: List[AsyncExitStack] = []  # 每个成功连接的 server 一个 stack，便于重试时只清理单次尝试
-        self._servers: Dict[str, _ServerRuntime] = {}
+        self._server_stacks: List[AsyncExitStack] = []
+        self._servers: Dict[str, MCPServerRuntime] = {}
         self._proxy_tools: List[MCPProxyTool] = []
         self._connected = False
+        self._pooled_release_keys: List[str] = []
+        self._pool_key_by_server: Dict[str, str] = {}
 
     async def connect(self) -> None:
         """连接所有启用的 MCP Server，并构建代理工具。"""
         if self._connected:
             return
 
-        # 延迟导入，避免未安装 mcp SDK 时影响非 MCP 场景。
         try:
-            from mcp import ClientSession, StdioServerParameters
-            from mcp.client.stdio import stdio_client
+            from mcp import ClientSession, StdioServerParameters  # noqa: F401
+            from mcp.client.stdio import stdio_client  # noqa: F401
         except ImportError as e:
             raise RuntimeError(
                 "未安装 mcp 依赖，请先执行: source init.sh（或 uv sync --all-groups）"
             ) from e
+
+        pool = get_shared_mcp_pool()
 
         for server in self._config.servers:
             if not server.enabled:
@@ -62,123 +57,81 @@ class MCPClientManager:
             if server.transport != "stdio":
                 continue
 
-            args_preview = " ".join(server.args)
-            if len(args_preview) > 60:
-                args_preview = args_preview[:57] + "..."
-            max_attempts = 1 + getattr(server, "init_retries", 0)
-            retry_delay = getattr(server, "init_retry_delay_seconds", 2.0)
+            if should_pool_stdio_server(server):
+                pooled = await pool.acquire(server)
+                if pooled is None:
+                    continue
+                pool_key, runtime, tool_metas = pooled
+                self._servers[server.name] = runtime
+                self._pool_key_by_server[server.name] = pool_key
+                self._pooled_release_keys.append(pool_key)
 
-            for attempt in range(max_attempts):
-                if attempt > 0:
-                    logger.info(
-                        "MCP server %s retry %s/%s in %.1fs...",
-                        server.name,
-                        attempt + 1,
-                        max_attempts,
-                        retry_delay,
-                    )
-                    await asyncio.sleep(retry_delay)
-                else:
-                    logger.info(
-                        "Connecting to MCP server: %s (%s %s)...",
-                        server.name,
-                        server.command,
-                        args_preview,
-                    )
+                for remote_name, description, input_schema in tool_metas:
+                    local_prefix = server.tool_name_prefix or server.name
+                    local_name = f"{local_prefix}.{remote_name}"
+                    if any(t.name == local_name for t in self._proxy_tools):
+                        raise ValueError(f"MCP 工具名冲突: {local_name}")
 
-                attempt_stack: Optional[AsyncExitStack] = None
-                try:
-                    # 合并环境变量：确保 stderr 被重定向，避免 MCP server 日志污染 CLI
-                    merged_env = {**os.environ, **(server.env or {})}
-                    merged_env["NODE_NO_WARNINGS"] = "1"
-                    merged_env["NODE_ENV"] = "production"
-
-                    server_params = StdioServerParameters(
-                        command=server.command,
-                        args=server.args,
-                        env=merged_env,
-                        cwd=server.cwd,
-                    )
-
-                    # 单次尝试使用独立 stack，失败时可整栈关闭后重试
-                    attempt_stack = AsyncExitStack()
-                    await attempt_stack.__aenter__()
-
-                    if server.command == "npx" and any(
-                        arg == "mcp-remote" for arg in server.args
-                    ):
-                        errlog = attempt_stack.enter_context(open(os.devnull, "w"))
-                    else:
-                        errlog = sys.stderr
-
-                    read_stream, write_stream = await attempt_stack.enter_async_context(
-                        stdio_client(server_params, errlog=errlog)
-                    )
-                    session = await attempt_stack.enter_async_context(
-                        ClientSession(read_stream, write_stream)
-                    )
-
-                    await asyncio.wait_for(
-                        session.initialize(),
-                        timeout=server.init_timeout_seconds,
-                    )
-
-                    self._servers[server.name] = _ServerRuntime(
-                        config=server, session=session
-                    )
-
-                    tool_resp = await asyncio.wait_for(
-                        session.list_tools(),
-                        timeout=server.init_timeout_seconds,
-                    )
-                    tools = getattr(tool_resp, "tools", []) or []
-                    for tool in tools:
-                        remote_name = getattr(tool, "name", "")
-                        if not remote_name:
-                            continue
-                        local_prefix = server.tool_name_prefix or server.name
-                        local_name = f"{local_prefix}.{remote_name}"
-                        if any(t.name == local_name for t in self._proxy_tools):
-                            raise ValueError(f"MCP 工具名冲突: {local_name}")
-
-                        self._proxy_tools.append(
-                            MCPProxyTool(
-                                manager=self,
-                                local_name=local_name,
-                                server_name=server.name,
-                                remote_name=remote_name,
-                                description=getattr(tool, "description", "")
-                                or "MCP 远程工具",
-                                input_schema=getattr(tool, "inputSchema", None)
-                                or getattr(tool, "input_schema", None)
-                                or {"type": "object", "properties": {}},
-                            )
+                    self._proxy_tools.append(
+                        MCPProxyTool(
+                            manager=self,
+                            local_name=local_name,
+                            server_name=server.name,
+                            remote_name=remote_name,
+                            description=description,
+                            input_schema=input_schema,
                         )
+                    )
+                continue
 
-                    self._server_stacks.append(attempt_stack)
-                    attempt_stack = None  # 所有权已交给 _server_stacks，不再在 except 里关闭
-                    break
+            connected = await connect_stdio_mcp_with_retries(server)
+            if connected is None:
+                continue
+            attempt_stack, runtime = connected
+            self._servers[server.name] = runtime
 
-                except Exception as exc:
-                    if attempt_stack is not None:
-                        await attempt_stack.aclose()
-                        attempt_stack = None
-                    if attempt < max_attempts - 1:
-                        logger.warning(
-                            "MCP server %s attempt %s failed (will retry): %s (%s)",
-                            server.name,
-                            attempt + 1,
-                            type(exc).__name__,
-                            exc,
-                        )
-                    else:
-                        logger.warning(
-                            "MCP server %s failed after %s attempt(s) (skipping): %s (%s)",
-                            server.name,
-                            max_attempts,
-                            type(exc).__name__,
-                            exc,
-                        )
+            try:
+                tool_resp = await asyncio.wait_for(
+                    runtime.session.list_tools(),
+                    timeout=server.init_timeout_seconds,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "MCP server %s list_tools failed (skipping): %s (%s)",
+                    server.name,
+                    type(exc).__name__,
+                    exc,
+                )
+                await attempt_stack.aclose()
+                del self._servers[server.name]
+                continue
+
+            tools = getattr(tool_resp, "tools", []) or []
+            for tool in tools:
+                remote_name = getattr(tool, "name", "")
+                if not remote_name:
+                    continue
+                local_prefix = server.tool_name_prefix or server.name
+                local_name = f"{local_prefix}.{remote_name}"
+                if any(t.name == local_name for t in self._proxy_tools):
+                    await attempt_stack.aclose()
+                    del self._servers[server.name]
+                    raise ValueError(f"MCP 工具名冲突: {local_name}")
+
+                self._proxy_tools.append(
+                    MCPProxyTool(
+                        manager=self,
+                        local_name=local_name,
+                        server_name=server.name,
+                        remote_name=remote_name,
+                        description=getattr(tool, "description", "") or "MCP 远程工具",
+                        input_schema=getattr(tool, "inputSchema", None)
+                        or getattr(tool, "input_schema", None)
+                        or {"type": "object", "properties": {}},
+                    )
+                )
+
+            self._server_stacks.append(attempt_stack)
 
         self._connected = True
         if self._servers:
@@ -212,11 +165,26 @@ class MCPClientManager:
         timeout_seconds = (
             runtime.config.call_timeout_seconds or self._config.call_timeout_seconds
         )
-        try:
-            result = await asyncio.wait_for(
-                runtime.session.call_tool(remote_tool_name, arguments=arguments),
-                timeout=timeout_seconds,
+        pool_key = self._pool_key_by_server.get(server_name)
+
+        async def _invoke():
+            return await runtime.session.call_tool(
+                remote_tool_name, arguments=arguments
             )
+
+        try:
+            pool = get_shared_mcp_pool()
+            if pool_key:
+                async with pool.locked_session_call(pool_key):
+                    result = await asyncio.wait_for(
+                        _invoke(),
+                        timeout=timeout_seconds,
+                    )
+            else:
+                result = await asyncio.wait_for(
+                    _invoke(),
+                    timeout=timeout_seconds,
+                )
             return self._convert_call_result(result)
         except asyncio.TimeoutError:
             return ToolResult(
@@ -236,6 +204,12 @@ class MCPClientManager:
         """关闭所有 MCP 连接。"""
         if not self._connected:
             return
+        pool = get_shared_mcp_pool()
+        for key in self._pooled_release_keys:
+            await pool.release(key)
+        self._pooled_release_keys.clear()
+        self._pool_key_by_server.clear()
+
         for stack in self._server_stacks:
             await stack.aclose()
         self._server_stacks.clear()

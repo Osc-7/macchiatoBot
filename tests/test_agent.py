@@ -5,15 +5,21 @@ Agent 测试用例
 """
 
 from typing import Any, Dict, Optional
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_core.config import AgentConfig, Config, LLMConfig
+from agent_core.config import AgentConfig, Config, LLMConfig, MCPConfig
 from agent_core.agent import AgentCore
 from agent_core.context import ConversationContext
 from agent_core.llm import LLMResponse, ToolCall
-from agent_core.tools import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from agent_core.tools import (
+    BaseTool,
+    ToolDefinition,
+    ToolParameter,
+    ToolResult,
+    VersionedToolRegistry,
+)
 
 
 # ============== 测试工具 ==============
@@ -568,6 +574,33 @@ class TestProcessInput:
 
 
 # ============== 上下文管理器测试 ==============
+
+
+class TestMcpToolCatalogSync:
+    """MCP 代理工具须进入 tool_catalog，供 Kernel 下 search_tools / call_tool 发现。"""
+
+    @pytest.mark.asyncio
+    async def test_mcp_proxies_merged_into_tool_catalog(self, mock_config):
+        mock_config.mcp = MCPConfig(enabled=True, servers=[])
+        cat = VersionedToolRegistry()
+        proxy = MockTool(name="tavily.stub_search")
+
+        with patch("agent_core.agent.agent.MCPClientManager") as MCM:
+            mgr = MagicMock()
+            MCM.return_value = mgr
+            mgr.connect = AsyncMock()
+            mgr.get_proxy_tools = MagicMock(return_value=[proxy])
+            mgr.close = AsyncMock()
+
+            async with AgentCore(
+                config=mock_config,
+                tools=[MockTool(name="ordinary")],
+                tool_catalog=cat,
+            ) as agent:
+                assert agent._tool_registry.has("tavily.stub_search")
+                assert cat.has(
+                    "tavily.stub_search"
+                ), "search_tools/call_tool 使用 tool_catalog 时必须能解析 MCP 工具名"
 
 
 class TestAsyncContextManager:

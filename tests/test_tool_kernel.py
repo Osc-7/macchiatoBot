@@ -3,7 +3,7 @@ Agent Kernel 工具分层测试。
 """
 
 from typing import Any, Dict, Optional
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -12,6 +12,7 @@ from agent_core.agent import AgentCore
 from agent_core.llm import LLMResponse, ToolCall
 from agent_core.orchestrator import ToolWorkingSetManager
 from agent_core.kernel_interface.profile import CoreProfile
+from agent_core.mcp.proxy_tool import MCPProxyTool
 from agent_core.tools import (
     BaseTool,
     CallToolTool,
@@ -85,6 +86,59 @@ class TestVersionedRegistry:
         names = [item["name"] for item in results]
         assert "sync_canvas" in names
 
+    def test_search_name_prefix(self):
+        registry = VersionedToolRegistry()
+        registry.register(DummyTool(name="tavily.alpha", description="a"))
+        registry.register(DummyTool(name="tavily.beta", description="b"))
+        registry.register(DummyTool(name="get_tasks", description="任务"))
+
+        results = registry.search(
+            query="", limit=10, name_prefix="tavily.", tags=None
+        )
+        names = [item["name"] for item in results]
+        assert set(names) == {"tavily.alpha", "tavily.beta"}
+
+    def test_search_hits_tool_tags_via_query(self):
+        """工具 tags 参与语料：用户只写 query 也能命中仅 tag 含关键词的工具。"""
+        registry = VersionedToolRegistry()
+        registry.register(
+            DummyTool(
+                name="obscure_tool",
+                description="描述里不出现日程二字",
+                tags=["日程", "同步"],
+            )
+        )
+        results = registry.search("日程", limit=5)
+        assert any(r["name"] == "obscure_tool" for r in results)
+
+    def test_search_weak_match_when_no_keyword_hit(self):
+        registry = VersionedToolRegistry()
+        registry.register(DummyTool(name="get_tasks", description="查询任务列表"))
+        results = registry.search("totally_unrelated_xyz", limit=5)
+        assert len(results) >= 1
+        assert all(r.get("weak_match") is True for r in results)
+
+    def test_search_matches_usage_notes(self):
+        registry = VersionedToolRegistry()
+        registry.register(
+            DummyTool(
+                name="plain",
+                description="无关",
+            )
+        )
+        proxy = MCPProxyTool(
+            manager=MagicMock(),
+            local_name="discourse.list_topics",
+            server_name="discourse",
+            remote_name="list_topics",
+            description="列出话题",
+            input_schema={"type": "object", "properties": {}},
+        )
+        registry.register(proxy)
+        results = registry.search("MCP Server", limit=5)
+        names = [item["name"] for item in results]
+        assert "discourse.list_topics" in names
+
 
 class TestKernelTools:
     @pytest.mark.asyncio
@@ -103,6 +157,35 @@ class TestKernelTools:
 
         snapshot = working_set.build_snapshot(registry)
         assert "get_tasks" in snapshot.tool_names
+
+    @pytest.mark.asyncio
+    async def test_search_tools_name_prefix_and_tool_source(self):
+        registry = VersionedToolRegistry()
+        registry.register(DummyTool(name="tavily.x", description="x"))
+        proxy = MCPProxyTool(
+            manager=MagicMock(),
+            local_name="tavily.remote_z",
+            server_name="tavily",
+            remote_name="z",
+            description="z tool",
+            input_schema={"type": "object", "properties": {}},
+        )
+        registry.register(proxy)
+        working_set = ToolWorkingSetManager(
+            pinned_tools=["search_tools", "call_tool"],
+            working_set_size=5,
+        )
+        tool = SearchToolsTool(registry=registry, working_set=working_set)
+        result = await tool.execute(name_prefix="tavily.")
+        assert result.success
+        names = [t["name"] for t in result.data["tools"]]
+        assert "tavily.remote_z" in names
+        row = next(r for r in result.data["tools"] if r["name"] == "tavily.remote_z")
+        assert row["tool_source"] == "mcp"
+        assert row["mcp_server"] == "tavily"
+        plain = next(r for r in result.data["tools"] if r["name"] == "tavily.x")
+        assert plain["tool_source"] == "native"
+        assert plain.get("mcp_server") is None
 
     @pytest.mark.asyncio
     async def test_search_tools_marks_uncallable_results(self):

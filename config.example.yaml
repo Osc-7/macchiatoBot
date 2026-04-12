@@ -258,22 +258,16 @@ tools:
         - "notify_owner"
 
 # MCP 客户端配置（可选）
-# 用于接入外部 MCP Server，并将远程工具自动注册到 Agent
+# 用于接入外部 MCP Server，并将远程工具自动注册到 Agent。
+# 日程等内置工具已由进程内 ToolRegistry 提供，默认不再为每个 AgentCore 拉起 mcp_server.py。
+# 若需给 Claude Desktop 等「纯 MCP 宿主」暴露日程工具：将 inject_builtin_schedule_mcp 设为 true，
+# 或在 servers 中自行配置一条指向 mcp_server.py 的 stdio（仍按进程数各起一份，且不参与连接池）。
+# 外部 stdio MCP（如 Tavily）在进程内按「启动命令等价」自动复用同一子进程。
 mcp:
   enabled: true
+  inject_builtin_schedule_mcp: false
   call_timeout_seconds: 30
   servers:
-    # 本地工具 MCP（自动注册到 Agent）
-    - name: "schedule_tools"
-      enabled: true
-      transport: "stdio"
-      command: "python"
-      args: ["mcp_server.py"]
-      env: {}
-      cwd: "."
-      tool_name_prefix: "mcp_local"
-      init_timeout_seconds: 15
-      call_timeout_seconds: 30
     # Tavily 联网搜索 MCP（本地 stdio，推荐：避免 mcp-remote 远程握手在国内易超时）
     # 在 .env 中配置 TAVILY_API_KEY=tvly-xxx 后启用；从 https://tavily.com 获取 Key
     - name: "tavily"

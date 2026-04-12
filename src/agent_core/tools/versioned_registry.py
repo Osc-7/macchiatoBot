@@ -10,12 +10,104 @@
 
 from __future__ import annotations
 
+import math
 import re
 import threading
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import BaseTool, ToolResult
+
+# 极简停用词：削弱「的/什么/the」等对 IDF 的稀释（无 ML、无外部词表）
+_STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "to",
+        "of",
+        "and",
+        "or",
+        "for",
+        "in",
+        "on",
+        "at",
+        "it",
+        "do",
+        "does",
+        "did",
+        "什么",
+        "怎么",
+        "如何",
+        "哪些",
+        "为什么",
+        "的",
+        "了",
+        "和",
+        "与",
+        "或",
+        "请",
+        "帮我",
+        "能否",
+        "可以",
+        "一下",
+    }
+)
+
+
+def _tokenize_query(q: str) -> List[str]:
+    q = (q or "").strip().lower()
+    if not q:
+        return []
+    return [t for t in re.split(r"[\s,，。:：;；/\\|]+", q) if t]
+
+
+def _cjk_ngram_bonus(q: str, corpus: str, cap: float = 2.4) -> float:
+    """整句无空格时，用短子串在语料中做弱命中（中日文等）。"""
+    if len(q) < 2:
+        return 0.0
+    bonus = 0.0
+    for L in (2, 3, 4):
+        if len(q) < L:
+            continue
+        step = max(1, (len(q) - L) // 14 + 1)
+        for i in range(0, len(q) - L + 1, step):
+            frag = q[i : i + L]
+            if frag in corpus:
+                bonus += 0.36
+            if bonus >= cap:
+                return cap
+    return bonus
+
+
+def _terms_for_weighted_match(tokens: List[str]) -> List[str]:
+    """参与 IDF 加权的词项（去掉过短与停用词）。"""
+    return [t for t in tokens if len(t) >= 2 and t not in _STOPWORDS]
+
+
+def _idf_weight(df: int, n_docs: int) -> float:
+    """经典 IDF 变体：log((N+1)/(df+1))+1，df 为含该词的候选工具数。"""
+    return math.log((n_docs + 1.0) / (float(df) + 1.0)) + 1.0
+
+
+def _tool_params_meta(definition: Any) -> List[Dict[str, Any]]:
+    params_meta: List[Dict[str, Any]] = []
+    for param in definition.parameters:
+        params_meta.append(
+            {
+                "name": param.name,
+                "type": param.type,
+                "required": param.required,
+                "description": param.description,
+            }
+        )
+    return params_meta
 
 
 @dataclass
@@ -27,16 +119,20 @@ class ToolSearchItem:
     parameters: List[Dict[str, Any]]
     tags: List[str]
     score: float
+    weak_match: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为可序列化字典。"""
-        return {
+        d: Dict[str, Any] = {
             "name": self.name,
             "description": self.description,
             "parameters": self.parameters,
             "tags": self.tags,
             "score": round(self.score, 4),
         }
+        if self.weak_match:
+            d["weak_match"] = True
+        return d
 
 
 class VersionedToolRegistry:
@@ -164,20 +260,27 @@ class VersionedToolRegistry:
         limit: int = 8,
         exclude_names: Optional[List[str]] = None,
         tags: Optional[List[str]] = None,
+        name_prefix: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         按关键字和/或标签搜索工具。
 
-        支持：
-        - 关键词搜索：匹配 name / description / 参数描述
-        - 标签搜索：匹配工具标签
-        - 组合搜索：同时使用关键词和标签
+        支持（均为确定性、无机器学习排序）：
+        - 关键词：匹配 name / description / 参数 / usage_notes / **工具自身 tags 文本**
+        - **IDF 加权**：分词在越少工具中出现的，命中加分越高（经典 log(N/df)+1）
+        - **停用词表**：削弱「的/the/什么」等对匹配的稀释
+        - 名称子串：整 query 或分词命中 **工具名** 时加分（同样可带 IDF）
+        - 中日文：整句无空格时辅以短 n-gram 在语料中弱命中
+        - 标签筛选：与现有一致（传入 tags 时至少命中其一）
+        - 名称前缀：name_prefix 过滤
+        - **零强命中时**：用名称/描述与 query 的相似度弱排序；仍无则返回候选集字典序弱推荐（标记 weak_match）
 
         Args:
             query: 搜索关键词（可为空）
             limit: 返回数量上限
             exclude_names: 要排除的工具名称列表
             tags: 要匹配的标签列表（可为空）
+            name_prefix: 工具名前缀过滤（可为空）
 
         Returns:
             搜索结果列表，按分数降序排列
@@ -187,18 +290,19 @@ class VersionedToolRegistry:
 
         exclude = set(exclude_names or [])
         q = (query or "").strip().lower()
-        tokens = [t for t in re.split(r"[\s,，。:：;；/\\|]+", q) if t]
+        tokens = _tokenize_query(q)
         tag_filter = {
             str(tag).strip().lower() for tag in (tags or []) if str(tag).strip()
         }
-        items: List[ToolSearchItem] = []
+        pref = (name_prefix or "").strip()
 
+        candidates: List[Tuple[str, BaseTool, Any, set]] = []
         for name, tool in tools.items():
             if name in exclude:
                 continue
+            if pref and not name.startswith(pref):
+                continue
             definition = tool.get_definition()
-
-            # 标签过滤
             def_tags = {
                 str(tag).strip().lower()
                 for tag in (definition.tags or [])
@@ -206,35 +310,65 @@ class VersionedToolRegistry:
             }
             if tag_filter and not tag_filter.intersection(def_tags):
                 continue
+            candidates.append((name, tool, definition, def_tags))
 
-            text_parts: List[str] = [name, definition.description]
-            params_meta: List[Dict[str, Any]] = []
+        prepared: List[Tuple[str, Any, Any, set, str, List[Dict[str, Any]]]] = []
+        for name, tool, definition, def_tags in candidates:
+            text_parts: List[str] = [name, definition.description or ""]
+            for note in definition.usage_notes or []:
+                text_parts.append(str(note))
             for param in definition.parameters:
                 text_parts.extend([param.name, param.description])
-                params_meta.append(
-                    {
-                        "name": param.name,
-                        "type": param.type,
-                        "required": param.required,
-                        "description": param.description,
-                    }
-                )
-
+            if def_tags:
+                text_parts.append(" ".join(sorted(def_tags)))
             corpus = " ".join(text_parts).lower()
-            score = 0.0
+            params_meta = _tool_params_meta(definition)
+            prepared.append((name, tool, definition, def_tags, corpus, params_meta))
 
-            # 关键词评分
+        n_docs = max(1, len(prepared))
+        term_set = _terms_for_weighted_match(tokens)
+        token_df: Dict[str, int] = {}
+        for _name, _tool, _definition, _def_tags, corpus, _pm in prepared:
+            for term in term_set:
+                if term in corpus:
+                    token_df[term] = token_df.get(term, 0) + 1
+
+        items: List[ToolSearchItem] = []
+
+        for name, tool, definition, def_tags, corpus, params_meta in prepared:
+            score = 0.0
+            nm = name.lower()
+
             if q:
                 if q in corpus:
                     score += 2.0
-                score += sum(1.0 for token in tokens if token in corpus)
+                if term_set:
+                    for term in term_set:
+                        if term in corpus:
+                            score += _idf_weight(token_df[term], n_docs) * 1.08
+                else:
+                    for token in tokens:
+                        if len(token) >= 2 and token in corpus:
+                            score += 1.0
+                if q in nm:
+                    score += 1.65
+                if term_set:
+                    for term in term_set:
+                        if len(term) >= 2 and term in nm:
+                            score += 0.88 * _idf_weight(token_df.get(term, 0), n_docs)
+                else:
+                    for token in tokens:
+                        if len(token) >= 2 and token in nm:
+                            score += 0.9
+                # 仅中日文查询启用 n-gram，避免英文长串的随机双字母误命中工具名/描述
+                if len(tokens) <= 2 and re.search(r"[\u4e00-\u9fff]", q):
+                    score += _cjk_ngram_bonus(q, corpus)
             else:
                 score = 1.0
 
-            # 标签匹配加分
             if tag_filter:
                 matched_tags = tag_filter.intersection(def_tags)
-                score += len(matched_tags) * 0.5
+                score += len(matched_tags) * 0.55
 
             if score <= 0:
                 continue
@@ -246,10 +380,49 @@ class VersionedToolRegistry:
                     parameters=params_meta,
                     tags=definition.tags,
                     score=score,
+                    weak_match=False,
                 )
             )
 
         items.sort(key=lambda x: (-x.score, x.name))
+
+        if not items and q and candidates:
+            weak: List[ToolSearchItem] = []
+            for name, tool, definition, def_tags in candidates:
+                desc = (definition.description or "")[:400].lower()
+                r = max(
+                    SequenceMatcher(None, q, name.lower()).ratio(),
+                    SequenceMatcher(None, q, desc).ratio() * 0.92,
+                )
+                if r < 0.24:
+                    continue
+                weak.append(
+                    ToolSearchItem(
+                        name=name,
+                        description=definition.description,
+                        parameters=_tool_params_meta(definition),
+                        tags=definition.tags,
+                        score=max(0.25, r * 2.2),
+                        weak_match=True,
+                    )
+                )
+            weak.sort(key=lambda x: (-x.score, x.name))
+            items = weak[:limit] if limit > 0 else weak
+
+        if not items and candidates and limit > 0:
+            pool = sorted(candidates, key=lambda c: c[0])[:limit]
+            items = [
+                ToolSearchItem(
+                    name=n,
+                    description=defn.description,
+                    parameters=_tool_params_meta(defn),
+                    tags=defn.tags,
+                    score=0.02,
+                    weak_match=True,
+                )
+                for n, _t, defn, _dt in pool
+            ]
+
         if limit > 0:
             items = items[:limit]
         return [item.to_dict() for item in items]

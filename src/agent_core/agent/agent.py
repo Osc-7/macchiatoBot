@@ -1332,9 +1332,7 @@ class AgentCore:
             if not self._defer_mcp_connect:
                 await self._mcp_manager.connect()
                 proxy_tools = self._mcp_manager.get_proxy_tools()
-                self._tool_registry.update_tools(
-                    cast(List[BaseTool], proxy_tools)
-                )
+                self._apply_mcp_proxy_tools(proxy_tools)
                 self._mcp_connected = True
         return self
 
@@ -1348,9 +1346,21 @@ class AgentCore:
             return self._mcp_connected
         await self._mcp_manager.connect()
         proxy_tools = self._mcp_manager.get_proxy_tools()
-        self._tool_registry.update_tools(cast(List[BaseTool], proxy_tools))
+        self._apply_mcp_proxy_tools(proxy_tools)
         self._mcp_connected = True
         return True
+
+    def _apply_mcp_proxy_tools(self, proxy_tools: List[BaseTool]) -> None:
+        """
+        将 MCP 代理工具写入当前 Core 的 ToolRegistry，并同步到 tool_catalog。
+
+        Kernel/CorePool 下 search_tools / call_tool 绑定的是「全量 catalog」副本；
+        若不同步，MCP 工具只会出现在 _tool_registry 中，导致搜不到、call_tool 报不存在。
+        """
+        self._tool_registry.update_tools(cast(List[BaseTool], proxy_tools))
+        cat = self._tool_catalog
+        if cat is not None and cat is not self._tool_registry:
+            cat.update_tools(cast(List[BaseTool], proxy_tools))
 
     def _build_runtime_mcp_servers(
         self, servers: List[MCPServerConfig]
@@ -1358,9 +1368,12 @@ class AgentCore:
         """
         构建运行期 MCP servers：
         - 保留用户配置
-        - 若缺少本地 schedule_tools server，则自动补充
+        - 仅当 mcp.inject_builtin_schedule_mcp 为 True 且未显式配置本地 mcp_server.py 时，自动追加 schedule_tools
         """
         runtime_servers = [s.model_copy(deep=True) for s in servers]
+
+        if not self._config.mcp.inject_builtin_schedule_mcp:
+            return runtime_servers
 
         script_path = Path(__file__).resolve().parents[4] / "mcp_server.py"
         script_path_str = str(script_path)

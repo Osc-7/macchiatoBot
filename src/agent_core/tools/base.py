@@ -209,6 +209,40 @@ class ToolResult:
             return {k: self._serialize_data(v) for k, v in data.items()}
         return data
 
+    def data_preview_str(self, max_len: int = 6000) -> str:
+        """
+        供 trace / 飞书卡片展示的 data 文本。
+
+        对典型 shell 结果 dict（含 stdout/stderr）**只展示流输出**，避免与 Input 里
+        的 command 重复。LLM 侧完整上下文仍见 `to_json()`。
+        """
+        if self.data is None:
+            return ""
+        if isinstance(self.data, dict):
+            d = self.data
+            if "stdout" in d or "stderr" in d:
+                parts: list[str] = []
+                out = d.get("stdout", "")
+                err = d.get("stderr", "")
+                if out is not None and str(out).strip():
+                    parts.append(f"--- stdout ---\n{out}")
+                if err is not None and str(err).strip():
+                    parts.append(f"--- stderr ---\n{err}")
+                s = "\n\n".join(parts).strip()
+                if not s:
+                    return ""
+                if max_len > 0 and len(s) > max_len:
+                    return s[: max_len - 1] + "…"
+                return s
+        try:
+            serialized = self._serialize_data(self.data)
+            s = json.dumps(serialized, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            s = str(self.data)
+        if max_len > 0 and len(s) > max_len:
+            return s[: max_len - 1] + "…"
+        return s
+
 
 class BaseTool(ABC):
     """

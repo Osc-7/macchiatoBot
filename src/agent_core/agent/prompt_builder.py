@@ -7,6 +7,7 @@ from typing import Any, List
 from agent_core.context import get_time_context
 from agent_core.memory import RecallResult
 from agent_core.prompts.loader import (
+    PromptMode,
     build_system_prompt as build_prompt,
     resolve_skills_cli_path,
 )
@@ -21,8 +22,26 @@ def _visible_scopes(agent: Any) -> set:
     return set(scopes)
 
 
+def _loader_prompt_mode(agent: Any) -> PromptMode:
+    """映射 CoreProfile.mode → build_system_prompt 的 mode。
+
+    - full / sub：全量片段（identity、soul、Workspace 引导等）；子 Agent 与主会话一致。
+    - background：minimal（time → safety → tools + 条件 runtime），省 token。
+    """
+    profile = getattr(agent, "_core_profile", None)
+    if profile is None:
+        return "full"
+    m = getattr(profile, "mode", None) or "full"
+    if m == "background":
+        return "minimal"
+    return "full"
+
+
 def build_agent_system_prompt(agent: Any) -> str:
     """Build the current system prompt from agent runtime state.
+
+    ``build_system_prompt`` 的 ``mode`` 由 ``CoreProfile.mode`` 决定：``full`` 与 ``sub`` 均用
+    全量片段；仅 ``background`` 用 ``minimal``（无人设块与 Workspace 引导文件段）。
 
     工作记忆不再单独注入 system：会话状态即 ``ConversationContext.messages`` 滑动窗口
     （含 Kernel 折叠产生的 ``[会话进行中摘要]`` user 条）；长期记忆等仍见「# 记忆上下文」。
@@ -43,6 +62,7 @@ def build_agent_system_prompt(agent: Any) -> str:
         config=agent._config,
         has_web_extractor=agent._tool_registry.has("extract_web_content"),
         has_file_tools=agent._tool_registry.has("read_file"),
+        mode=_loader_prompt_mode(agent),
         sub_content_path=sub_content_path,
         skills_cli_path=skills_cli,
     )

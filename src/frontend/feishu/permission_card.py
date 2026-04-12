@@ -86,9 +86,9 @@ def build_permission_request_card(
             "title": {"tag": "plain_text", "content": "权限申请"},
             "subtitle": {
                 "tag": "plain_text",
-                "content": "Macchiato · 安全确认",
+                "content": "Policy · approval",
             },
-            "padding": "16px 16px 16px 16px",
+            "padding": "12px 14px 12px 14px",
         },
         "body": {
             "direction": "vertical",

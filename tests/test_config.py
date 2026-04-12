@@ -8,6 +8,7 @@ import pytest
 
 from agent_core.config import (
     Config,
+    FeishuConfig,
     LLMConfig,
     TimeConfig,
     StorageConfig,
@@ -59,6 +60,11 @@ class TestConfigModels:
         assert config.timezone == "Asia/Shanghai"
         assert config.sleep_start == "23:00"
         assert config.sleep_end == "08:00"
+
+    def test_feishu_automation_ipc_timeout_default(self):
+        """飞书 automation IPC 读超时与 LLM HTTP 超时解耦，默认应足够长。"""
+        fei = FeishuConfig()
+        assert fei.automation_ipc_timeout_seconds == 1800.0
 
     def test_multimodal_config_defaults(self):
         """测试多模态配置默认值"""
@@ -161,6 +167,7 @@ class TestConfigModels:
         assert ct.workspace_isolation_enabled is True
         assert ct.workspace_admin_memory_owners == []
         assert ct.bash_extra_write_roots == []
+        assert ct.bash_real_home_path_suffixes == []
         assert ct.acl_base_dir == "./data/acl"
 
     def test_config_has_command_tools_default(self):

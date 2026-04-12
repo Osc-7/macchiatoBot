@@ -105,12 +105,15 @@ class FeishuClient:
             # 失败时抛出异常，由上层记录日志并向用户返回友好错误
             raise RuntimeError(f"发送飞书消息失败: {data}")
 
-    async def send_interactive_card(self, *, chat_id: str, card: Dict[str, Any]) -> None:
+    async def send_interactive_card(self, *, chat_id: str, card: Dict[str, Any]) -> str:
         """
         发送交互卡片（JSON 2.0）。
 
         content 为整卡对象序列化后的字符串，参见「发送消息内容」— 卡片 interactive。
         https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/im-v1/message/create_json
+
+        Returns:
+            成功时返回 message_id，便于后续 PATCH 更新同一条消息（见 patch_interactive_card_message）。
         """
         if not chat_id:
             raise ValueError("chat_id 不能为空")
@@ -131,6 +134,40 @@ class FeishuClient:
             data = resp.json()
         if int(data.get("code", 0)) != 0:
             raise RuntimeError(f"发送飞书卡片失败: {data}")
+        payload_data = data.get("data")
+        mid = ""
+        if isinstance(payload_data, dict):
+            mid = str(payload_data.get("message_id") or "").strip()
+        return mid
+
+    async def patch_interactive_card_message(
+        self, *, message_id: str, card: Dict[str, Any]
+    ) -> None:
+        """
+        更新已发送的 interactive 卡片（整条替换为新的卡片 JSON）。
+
+        https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/patch
+        要求卡片 config 含 update_multi: true（与发送时一致）。
+        """
+        mid = (message_id or "").strip()
+        if not mid:
+            raise ValueError("message_id 不能为空")
+        from .permission_card import interactive_content_string
+
+        content_str = interactive_content_string(card)
+        token = await self._get_tenant_access_token()
+        url = f"{self._base_url}/open-apis/im/v1/messages/{mid}"
+        payload = {"content": content_str}
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.patch(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        if int(data.get("code", 0)) != 0:
+            raise RuntimeError(f"更新飞书卡片失败: {data}")
 
     async def upload_image(
         self, *, image_bytes: bytes, content_type: str = "image/png"

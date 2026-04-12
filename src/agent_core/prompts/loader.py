@@ -2,15 +2,18 @@
 Prompt 加载与组合
 
 参考 [OpenClaw 系统提示词](https://docs.openclaw.ai/zh-CN/concepts/system-prompt) 架构：
-- 设计紧凑，使用固定部分（Tooling、Safety、Skills、Runtime）
-- 工作区引导文件在「Workspace Files (injected)」下按顺序注入
+- 设计紧凑：人设与时间、Safety、Tooling、Workspace 引导、条件 Runtime 扩展分段组合
+- 工作区引导文件在「Workspace Files (injected)」下按顺序注入（不含已上文的 identity / soul）
 
-固定部分顺序：
-1. Tooling — 工具列表与使用说明
-2. Safety — 简短防护提醒
-3. Workspace Files (injected) — 以下为引导文件
-4. 引导文件：identity → soul → agents → schedule → user → skills(可选)
-5. Runtime — 当前时间、联网/文件/记忆等
+组装顺序（``mode=full``：主会话与子 Agent）：
+1. Identity / Soul — 人设与基调（先于大段工具说明，便于「是谁」定调）
+2. Runtime: time — 当前时间上下文（尽早锚定「何时」）
+3. Safety — 简短防护（在读长工具说明前建立边界）
+4. Tooling — tools_kernel 工具列表与使用说明
+5. Workspace Files (injected) — agents → schedule → user → skills 索引（行为规范与日程等，默认已了解工具能力）
+6. Runtime 扩展 — 联网搜索、抓取、文件工具、记忆等（按配置条件注入）
+
+minimal（后台 Core / background）：与 full 同步前段骨架（time → safety → tools），不含 Workspace 引导块与 identity/soul；仍带条件 runtime 扩展。
 
 Skills 采用渐进式披露：system prompt 仅注入 metadata（name + description），
 完整内容需通过 load_skill 工具按需加载。
@@ -27,8 +30,8 @@ from agent_core.config import Config
 PromptMode = Literal["full", "minimal", "none"]
 """系统提示组装模式：
 
-- full: 主 Agent，包含全部固定部分 + 引导文件
-- minimal: 子 Agent，仅 Tooling + Safety + Runtime
+- full: 主会话与子 Agent（``CoreProfile.mode`` 为 full/sub），identity/soul → time → safety → tools → Workspace 引导 → runtime 扩展
+- minimal: 后台 background Core，time → safety → tools → runtime 扩展（无人设块与 Workspace 引导）
 - none: 仅 Identity（基本身份）
 """
 
@@ -258,7 +261,7 @@ def build_system_prompt(
     skills_cli_path: Optional[Path] = None,
 ) -> str:
     """
-    构建 Agent 系统提示。按 OpenClaw 风格固定部分 + 工作区引导注入顺序组装。
+    构建 Agent 系统提示。先人设与时间、安全边界，再工具长文，最后行为规范与条件能力段。
     """
     parts: list[str] = []
 
@@ -266,28 +269,35 @@ def build_system_prompt(
         """按给定 name 加载 system section，封装 _load_section 以便复用。"""
         return _load_section(name, max_section_chars)
 
-    # ---------- 1. Tooling（工具列表与使用说明）----------
-    if mode in ("full", "minimal"):
-        _maybe_append(parts, load("tools_kernel"))
-
-    # ---------- 2. Safety（简短防护）----------
-    if mode in ("full", "minimal"):
-        _maybe_append(parts, load("runtime_safety"))
-
     if mode == "none":
         _maybe_append(parts, load("identity"))
         return "\n\n".join(parts)
 
-    # ---------- 3. Workspace Files (injected) — 以下为引导文件 ----------
-    if mode == "full":
-        parts.append(
-            "---\n# Workspace Files (injected)\n以下为工作区引导文件，已注入。\n---"
-        )
-
-    # ---------- 4. 引导文件顺序：IDENTITY → SOUL → AGENTS → SCHEDULE → USER → SKILLS ----------
+    # ---------- 1. Identity / Soul（仅 full；minimal 从时间段起）----------
     if mode == "full":
         _maybe_append(parts, load("identity"))
         _maybe_append(parts, load("soul"))
+
+    # ---------- 2. Runtime: 当前时间（full / minimal 均尽早注入）----------
+    if mode in ("full", "minimal"):
+        time_section = load("runtime_time")
+        if time_section:
+            _maybe_append(parts, time_section.format(time_context=time_context))
+
+    # ---------- 3. Safety ----------
+    if mode in ("full", "minimal"):
+        _maybe_append(parts, load("runtime_safety"))
+
+    # ---------- 4. Tooling ----------
+    if mode in ("full", "minimal"):
+        _maybe_append(parts, load("tools_kernel"))
+
+    # ---------- 5. Workspace：agents → schedule → user → skills（仅 full）----------
+    if mode == "full":
+        parts.append(
+            "---\n# Workspace Files (injected)\n"
+            "以下为行为规范、日程与用户偏好等引导文件（identity / soul 已置于上文），已注入。\n---"
+        )
         _maybe_append(parts, load("agents"))
         _maybe_append(parts, load("schedule"))
         user_content = _load_user_section(max_section_chars)
@@ -302,11 +312,8 @@ def build_system_prompt(
         if skills_index:
             _maybe_append(parts, skills_index)
 
-    # ---------- 5. Runtime（当前时间、联网/文件/记忆）----------
+    # ---------- 6. Runtime 扩展（联网 / 抓取 / 文件 / 记忆）；不含 runtime_time ----------
     if mode in ("full", "minimal"):
-        time_section = load("runtime_time")
-        if time_section:
-            _maybe_append(parts, time_section.format(time_context=time_context))
         if config.mcp.enabled:
             web_capabilities = [
                 "- 当前新闻、热点事件",

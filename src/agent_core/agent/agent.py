@@ -717,20 +717,21 @@ class AgentCore:
                         result = tool_event.result
 
                         # Trace 事件（收到结果后记录，含耗时）
-                        await self._emit_trace(
-                            hooks,
-                            {
-                                "type": "tool_result",
-                                "turn_id": turn_id,
-                                "iteration": iteration,
-                                "tool_call_id": tool_call.id,
-                                "name": tool_call.name,
-                                "success": result.success,
-                                "message": result.message,
-                                "duration_ms": duration_ms,
-                                "error": result.error,
-                            },
-                        )
+                        tr_payload: Dict[str, Any] = {
+                            "type": "tool_result",
+                            "turn_id": turn_id,
+                            "iteration": iteration,
+                            "tool_call_id": tool_call.id,
+                            "name": tool_call.name,
+                            "success": result.success,
+                            "message": result.message,
+                            "duration_ms": duration_ms,
+                            "error": result.error,
+                        }
+                        data_preview = result.data_preview_str(6000)
+                        if data_preview:
+                            tr_payload["data_preview"] = data_preview
+                        await self._emit_trace(hooks, tr_payload)
                         if self._session_logger:
                             self._session_logger.on_tool_result(
                                 turn_id, iteration, tool_call.id, result, duration_ms
@@ -1330,6 +1331,9 @@ class AgentCore:
                     project_root=str(resolve_project_root().resolve()),
                     memory_long_term_dir=mem_lt,
                     memory_owner_dir=mem_owner_dir,
+                    extra_real_home_path_suffixes=list(
+                        cmd_cfg.bash_real_home_path_suffixes or []
+                    ),
                 )
                 if ws_restricted
                 else []

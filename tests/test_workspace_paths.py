@@ -124,6 +124,15 @@ def test_build_bash_workspace_guard_init_contains_root(tmp_path) -> None:
     assert 'export HOME="$MACCHIATO_WORKSPACE_ROOT"' in script
     assert "MACCHIATO_MEMORY_LONG_TERM=" in script
     assert "MACCHIATO_MEMORY_OWNER_DIR=" in script
+    assert "_macchiato_path_if_dir" in script
+    assert "node_modules/.bin" in script
+    assert ".nvm/versions/node" in script
+    assert "XDG_CONFIG_HOME" in script
+    assert '$HOME/.local/bin' in script
+    assert "MACCHIATO_PROJECT_ROOT" in script
+    ws_bin = script.find("${MACCHIATO_WORKSPACE_ROOT:-}/node_modules/.bin")
+    pr_bin = script.find("${MACCHIATO_PROJECT_ROOT:-}/node_modules/.bin")
+    assert ws_bin != -1 and pr_bin != -1 and ws_bin < pr_bin
     assert "cd()" in script
 
 

@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from agent_core.bash_user_env import render_terminal_like_bootstrap_bash
 from agent_core.config import CommandToolsConfig
 
 from .memory_paths import resolve_memory_owner_paths, validate_logic_namespace_segment
@@ -281,6 +282,7 @@ def build_bash_workspace_guard_init(
     memory_long_term_dir: Optional[str] = None,
     memory_owner_dir: Optional[str] = None,
     real_home: Optional[str] = None,
+    extra_real_home_path_suffixes: Optional[List[str]] = None,
 ) -> List[str]:
     """
     返回写入 bash 启动序列的脚本：覆盖 cd/pushd/popd；**HOME 即用户单元格根目录**
@@ -292,6 +294,9 @@ def build_bash_workspace_guard_init(
 
     会话内 ``~`` / ``$HOME`` = 该用户数据根；需写**宿主机**用户主目录下路径时使用
     ``$MACCHIATO_REAL_HOME``（或经 ``request_permission`` 批准后的绝对路径）。
+
+    ``HOME`` 设置后由 ``agent_core.bash_user_env`` 注入 **XDG 基线** 与 **类终端 PATH**
+    （项目 / 工作区 node_modules、宿主常见工具链目录）；详见 ``render_terminal_like_bootstrap_bash``。
     """
     q = shlex.quote(str(Path(workspace_root_resolved).resolve()))
     pr = project_root or str(_PROJECT_ROOT.resolve())
@@ -304,6 +309,9 @@ def build_bash_workspace_guard_init(
         extra_exports += f'\nexport MACCHIATO_MEMORY_LONG_TERM={shlex.quote(memory_long_term_dir)}'
     if memory_owner_dir:
         extra_exports += f'\nexport MACCHIATO_MEMORY_OWNER_DIR={shlex.quote(memory_owner_dir)}'
+    user_env = render_terminal_like_bootstrap_bash(
+        extra_real_home_suffixes=list(extra_real_home_path_suffixes or []),
+    )
     script = f"""
 export MACCHIATO_REAL_HOME={q_real_home}
 export MACCHIATO_WORKSPACE_ROOT={q}
@@ -311,6 +319,7 @@ export MACCHIATO_USER_ROOT="$MACCHIATO_WORKSPACE_ROOT"
 export MACCHIATO_PROJECT_ROOT={q_pr}
 mkdir -p "$MACCHIATO_WORKSPACE_ROOT" || true
 export HOME="$MACCHIATO_WORKSPACE_ROOT"{extra_exports}
+{user_env}
 unset CDPATH
 cd() {{
   builtin cd "$@" || return $?

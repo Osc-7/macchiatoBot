@@ -11,6 +11,7 @@ import pytest
 
 from agent_core.config import AgentConfig, Config, LLMConfig, MCPConfig
 from agent_core.agent import AgentCore
+from agent_core.kernel_interface.profile import CoreProfile
 from agent_core.context import ConversationContext
 from agent_core.llm import LLMResponse, ToolCall
 from agent_core.tools import (
@@ -216,6 +217,32 @@ class TestBuildSystemPrompt:
         agent._working_memory.running_summary = "不应出现在 system"
         prompt = agent._build_system_prompt()
         assert "# 工作记忆摘要" not in prompt
+
+    def test_build_system_prompt_sub_vs_background_loader_mode(
+        self, mock_config, mock_tools
+    ):
+        """sub 与主会话同为 full；仅 background 走 minimal。"""
+        sub = AgentCore(
+            config=mock_config,
+            tools=mock_tools,
+            max_iterations=3,
+            core_profile=CoreProfile(mode="sub"),
+        )
+        sub_prompt = sub._build_system_prompt()
+        assert "# IDENTITY" in sub_prompt
+        assert "# Workspace Files" in sub_prompt
+
+        bg = AgentCore(
+            config=mock_config,
+            tools=mock_tools,
+            max_iterations=3,
+            core_profile=CoreProfile(mode="background"),
+        )
+        bg_prompt = bg._build_system_prompt()
+        assert "# IDENTITY" not in bg_prompt
+        assert "# Workspace Files" not in bg_prompt
+        assert "当前时间上下文" in bg_prompt
+        assert "# 工具使用" in bg_prompt
 
     @pytest.mark.skip(reason="不再需要这些信息")
     def test_build_system_prompt_contains_agent_info(self, agent):

@@ -80,7 +80,9 @@ def _is_duplicate_event(event_key: str) -> bool:
 
 def _build_ipc_bridge() -> FeishuIPCBridge:
     cfg = get_config()
-    return FeishuIPCBridge(timeout_seconds=cfg.llm.request_timeout_seconds)
+    return FeishuIPCBridge(
+        ipc_timeout_seconds=cfg.feishu.automation_ipc_timeout_seconds,
+    )
 
 
 def _build_feishu_client() -> FeishuClient:
@@ -225,7 +227,7 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
             reply = await try_handle_slash_command_via_ipc(
                 session_id=session_id,
                 text=text,
-                timeout_seconds=get_config().llm.request_timeout_seconds,
+                timeout_seconds=get_config().feishu.automation_ipc_timeout_seconds,
             )
             if reply is not None:
                 feishu_client = _build_feishu_client()

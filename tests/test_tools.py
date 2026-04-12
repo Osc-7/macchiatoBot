@@ -243,6 +243,23 @@ class TestToolResult:
 
         assert '"key": "value"' in json_str
 
+    def test_data_preview_str_includes_structured_data(self):
+        result = ToolResult(
+            success=False,
+            message="命令执行结束，返回码为 127",
+            error="NON_ZERO_EXIT",
+            data={
+                "stderr": "/bin/bash: pip: command not found\n",
+                "stdout": "",
+                "return_code": 127,
+            },
+        )
+        preview = result.data_preview_str(500)
+        assert "pip" in preview
+        assert "stderr" in preview
+        # 飞书/trace 预览只展示流，不包含整段 data 里的 return_code 重复
+        assert "return_code" not in preview
+
 
 class TestBaseTool:
     """测试 BaseTool"""

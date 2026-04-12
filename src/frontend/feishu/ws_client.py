@@ -209,7 +209,7 @@ async def _handle_im_message_event_async(data: Any) -> None:
                 session_id=session_id,
                 text=text,
                 socket_path=None,
-                timeout_seconds=cfg.llm.request_timeout_seconds,
+                timeout_seconds=feishu_cfg.automation_ipc_timeout_seconds,
             )
             if reply is not None:
                 feishu_client = FeishuClient(timeout_seconds=feishu_cfg.timeout_seconds)
@@ -232,7 +232,9 @@ async def _handle_im_message_event_async(data: Any) -> None:
             logger.warning("slash command failed, fallback to agent: %s", exc)
             # 非斜杠或处理失败，继续走 Agent
 
-    ipc = FeishuIPCBridge(timeout_seconds=cfg.llm.request_timeout_seconds)
+    ipc = FeishuIPCBridge(
+        ipc_timeout_seconds=feishu_cfg.automation_ipc_timeout_seconds,
+    )
     try:
         result = await ipc.send_message(
             session_id=session_id,

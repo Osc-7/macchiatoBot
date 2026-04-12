@@ -11,7 +11,7 @@ from agent_core.interfaces import AgentHooks, AgentRunInput, AgentRunResult
 from system.automation import AutomationIPCClient, default_socket_path
 
 from .client import FeishuClient
-from .interactive_cards import build_tool_trace_card
+from .interactive_cards import build_tool_call_pending_card, build_tool_trace_card
 from .reply_dispatch import send_feishu_agent_reply
 from .slash_commands import try_handle_slash_command
 
@@ -121,10 +121,15 @@ class FeishuIPCBridge:
         self,
         *,
         socket_path: Optional[str] = None,
-        timeout_seconds: float = 120.0,
+        ipc_timeout_seconds: Optional[float] = None,
     ) -> None:
         self._socket_path = socket_path or default_socket_path()
-        self._timeout_seconds = float(timeout_seconds)
+        if ipc_timeout_seconds is not None:
+            self._ipc_timeout_seconds = float(ipc_timeout_seconds)
+        else:
+            self._ipc_timeout_seconds = float(
+                get_config().feishu.automation_ipc_timeout_seconds
+            )
 
     async def send_message(
         self,
@@ -152,7 +157,7 @@ class FeishuIPCBridge:
             owner_id=owner_id,
             source=source,
             socket_path=self._socket_path,
-            timeout_seconds=self._timeout_seconds,
+            timeout_seconds=self._ipc_timeout_seconds,
         )
 
         # 快速探测 daemon 是否在线
@@ -168,14 +173,18 @@ class FeishuIPCBridge:
         chat_id = str(meta_dict.get("feishu_chat_id") or "").strip()
         feishu_client: Optional[FeishuClient] = None
         if chat_id:
-            # 与最终回复共用同一个 FeishuClient，避免重复创建 token cache
-            feishu_client = FeishuClient(timeout_seconds=self._timeout_seconds)
+            # Open API 超时用 feishu.timeout_seconds；长回复/卡片单独保底 120s，避免与 IPC 长超时混用
+            fei = get_config().feishu
+            feishu_http_timeout = max(float(fei.timeout_seconds), 120.0)
+            feishu_client = FeishuClient(timeout_seconds=feishu_http_timeout)
 
         tool_trace_cards_enabled = bool(
             chat_id and get_config().feishu.tool_trace_cards_enabled
         )
-        # tool_call_id -> {name, arguments}，在 tool_result 时组卡并弹出
+        # tool_call_id -> {name, arguments}；tool_result 时弹出
         pending_tool_args: Dict[str, Dict[str, Any]] = {}
+        # tool_call 发出的「running」卡片对应 message_id，tool_result 时 PATCH 为结果卡（同一条消息）
+        pending_tool_message_ids: Dict[str, str] = {}
 
         # 累积当前 LLM 调用的可见回复内容，用于在多轮工具调用时输出「中间轮次」的
         # Agent 自然语言说明（不含思维链，不含工具内部细节）。
@@ -224,27 +233,73 @@ class FeishuIPCBridge:
                         "name": str(evt.get("name") or ""),
                         "arguments": evt.get("arguments"),
                     }
+                    try:
+                        name_call = str(evt.get("name") or "").strip() or "unknown"
+                        card_pending = build_tool_call_pending_card(
+                            tool_name=name_call,
+                            arguments=evt.get("arguments"),
+                            tool_call_id=tcid,
+                        )
+                        mid = await feishu_client.send_interactive_card(
+                            chat_id=chat_id, card=card_pending
+                        )
+                        if mid:
+                            pending_tool_message_ids[tcid] = mid
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "failed to send feishu tool_call pending card (tool=%s): %s",
+                            evt.get("name"),
+                            exc,
+                        )
                 return
 
             if evt_type == "tool_result" and tool_trace_cards_enabled:
                 tcid = str(evt.get("tool_call_id") or "").strip()
                 meta = pending_tool_args.pop(tcid, None) if tcid else None
+                msg_id = (
+                    pending_tool_message_ids.pop(tcid, "") if tcid else ""
+                ).strip()
                 name = str(
                     evt.get("name") or (meta or {}).get("name") or ""
                 ).strip() or "unknown"
-                arguments: Any = (meta or {}).get("arguments")
                 try:
+                    dp_raw = evt.get("data_preview")
+                    data_preview = (
+                        str(dp_raw).strip()
+                        if isinstance(dp_raw, str) and dp_raw.strip()
+                        else None
+                    )
+                    args_resolved = (meta or {}).get("arguments")
+                    if args_resolved is None:
+                        args_resolved = evt.get("arguments")
                     card = build_tool_trace_card(
                         tool_name=name,
-                        arguments=arguments,
                         success=bool(evt.get("success")),
                         message=str(evt.get("message") or ""),
                         duration_ms=int(evt.get("duration_ms") or 0),
                         error=evt.get("error"),
+                        data_preview=data_preview,
+                        arguments=args_resolved,
+                        tool_call_id=tcid or None,
                     )
-                    await feishu_client.send_interactive_card(
-                        chat_id=chat_id, card=card
-                    )
+                    if msg_id:
+                        try:
+                            await feishu_client.patch_interactive_card_message(
+                                message_id=msg_id, card=card
+                            )
+                        except Exception as patch_exc:  # noqa: BLE001
+                            logger.warning(
+                                "feishu patch tool card failed (tool=%s), send new: %s",
+                                name,
+                                patch_exc,
+                            )
+                            await feishu_client.send_interactive_card(
+                                chat_id=chat_id, card=card
+                            )
+                    else:
+                        await feishu_client.send_interactive_card(
+                            chat_id=chat_id, card=card
+                        )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "failed to send feishu tool trace card (tool=%s): %s",

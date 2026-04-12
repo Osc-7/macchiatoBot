@@ -190,6 +190,8 @@ command_tools:
   # 每用户批准后持久化的可写前缀（JSON），勿放在 data/workspace 下
   # acl_base_dir: "./data/acl"
   # base_dir: "."                      # 管理员或未开隔离时 bash 的初始目录（通常为项目根）
+  # 隔离 bash 内 PATH 额外包含的、相对「服务进程真实家目录」(MACCHIATO_REAL_HOME) 的路径（目录存在才加入）
+  # bash_real_home_path_suffixes: [".local/share/pnpm"]
 
 # Agent 配置
 agent:
@@ -306,6 +308,8 @@ feishu:
   encrypt_key: ""         # 与开放平台「Encrypt Key」一致；启用加密时 HTTP 回调体为 {"encrypt":...}，须配置否则卡片按钮会报 200671
   base_url: "https://open.feishu.cn"  # 国际版可改为 https://open.larksuite.com
   domain: "feishu"        # feishu(中国大陆版) | lark(国际版)
+  # 飞书网关 ↔ automation_daemon（run_turn_stream 每读一行 JSON）的超时；长工具静默期间须足够大。与 llm.request_timeout_seconds 无关。
+  automation_ipc_timeout_seconds: 1800
   # 可选：将 automation Daemon 写入的 automation_activity.jsonl 活动简报同步到指定飞书会话
   # 建议填写一个专门用于接收系统通知的群聊/单聊 chat_id，而不是普通对话窗口。
   automation_activity_enabled: false

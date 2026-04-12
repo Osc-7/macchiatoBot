@@ -439,6 +439,13 @@ class CommandToolsConfig(BaseModel):
         default_factory=list,
         description="bash 启动时执行的初始化命令列表",
     )
+    bash_real_home_path_suffixes: List[str] = Field(
+        default_factory=list,
+        description=(
+            "隔离 bash 的「类 Linux 用户」PATH：除内置宿主目录外，追加相对 MACCHIATO_REAL_HOME 的 bin 路径"
+            "（目录存在才加入）；用于 pnpm/fnm 等非标准前缀，勿含 .. 或绝对路径"
+        ),
+    )
     snapshot_enabled: bool = Field(
         default=False,
         description="Core evict 时是否写入 bash 环境快照（用于恢复）",
@@ -929,6 +936,14 @@ class FeishuConfig(BaseModel):
         default=10.0,
         gt=0,
         description="调用飞书开放平台 API 的默认超时时间（秒）。",
+    )
+    automation_ipc_timeout_seconds: float = Field(
+        default=1800.0,
+        gt=0,
+        description=(
+            "飞书网关/HTTP 回调与 automation_daemon 之间 Unix socket 流式 IPC 的单次读超时（秒）。"
+            "每次等待下一行 JSON（含长工具执行期间无输出）不得超过此时长；与 llm.request_timeout_seconds（LLM HTTP）无关。"
+        ),
     )
     automation_activity_enabled: bool = Field(
         default=False,

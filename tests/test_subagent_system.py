@@ -17,6 +17,7 @@ def _make_pool():
     scheduler.inject_turn = MagicMock()
     scheduler.cancel_session_tasks = MagicMock(return_value=True)
     scheduler.notify_subagent_terminal_waiter = MagicMock(return_value=False)
+    scheduler.session_inflight_request_count = MagicMock(return_value=0)
     pool.set_scheduler(scheduler)
     return pool, scheduler
 
@@ -280,33 +281,33 @@ class TestCorePoolSubagentLifecycle:
         assert request.session_id == "cli:root"
         assert "任务完成" in request.text
 
-    @pytest.mark.asyncio
-    async def test_on_complete_defers_inject_when_event_loop_and_grace_positive(self):
-        """有运行中的 loop 且 grace>0 时，生命周期注入应延后而非同步 enqueue。"""
+    def test_on_complete_stages_inject_when_parent_has_inflight(self):
+        """父会话仍有 kernel 请求在执行时只入暂存区，flush 后再 inject_turn。"""
         pool, scheduler = _make_pool()
-        pool._config.agent.subagent_lifecycle_inject_grace_seconds = 0.06
+        scheduler.session_inflight_request_count = MagicMock(return_value=1)
         pool.register_sub(
-            sub_session_id="sub:defer-1",
+            sub_session_id="sub:stage-1",
             parent_session_id="cli:root",
             task_description="t",
         )
-        pool.on_sub_complete("sub:defer-1", "done")
+        pool.on_sub_complete("sub:stage-1", "done")
         scheduler.inject_turn.assert_not_called()
-        await asyncio.sleep(0.12)
+        scheduler.session_inflight_request_count = MagicMock(return_value=0)
+        pool.flush_pending_subagent_lifecycle_for_parent("cli:root")
         scheduler.inject_turn.assert_called_once()
 
-    @pytest.mark.asyncio
-    async def test_cancel_deferred_lifecycle_inject_skips_later_fire(self):
+    def test_discard_pending_skips_flush(self):
         pool, scheduler = _make_pool()
-        pool._config.agent.subagent_lifecycle_inject_grace_seconds = 0.08
+        scheduler.session_inflight_request_count = MagicMock(return_value=1)
         pool.register_sub(
-            sub_session_id="sub:defer-2",
+            sub_session_id="sub:stage-2",
             parent_session_id="cli:root",
             task_description="t",
         )
-        pool.on_sub_complete("sub:defer-2", "done")
-        pool.cancel_deferred_subagent_lifecycle_inject("sub:defer-2")
-        await asyncio.sleep(0.15)
+        pool.on_sub_complete("sub:stage-2", "done")
+        pool.discard_pending_subagent_lifecycle_inject("sub:stage-2")
+        scheduler.session_inflight_request_count = MagicMock(return_value=0)
+        pool.flush_pending_subagent_lifecycle_for_parent("cli:root")
         scheduler.inject_turn.assert_not_called()
 
     def test_on_fail_updates_status_and_injects(self):

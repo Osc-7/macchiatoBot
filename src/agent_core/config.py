@@ -760,15 +760,6 @@ class AgentConfig(BaseModel):
         ge=1,
         description="wait_subagent / wait_for_agent_message 默认最长阻塞等待秒数",
     )
-    subagent_lifecycle_inject_grace_seconds: float = Field(
-        default=3.0,
-        ge=0,
-        description=(
-            "子任务终态后向父会话注入「[子任务 x 完成/失败]」用户消息的延迟秒数；"
-            "给父会话留出调用 wait_subagent 的时间窗口，阻塞式 wait 开始时会取消待注入。"
-            "0 表示不延迟（与旧行为一致，仅建议在单测或无事件循环场景使用）。"
-        ),
-    )
     subagent_zombie_ttl_seconds: Optional[float] = Field(
         default=None,
         description=(

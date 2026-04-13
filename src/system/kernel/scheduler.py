@@ -847,11 +847,26 @@ class KernelScheduler:
                     )
                     await self._out_bus.publish(session_id, request.request_id, err_result)
             finally:
-                pending = self._inflight_sessions.get(session_id, 0) - 1
-                if pending > 0:
-                    self._inflight_sessions[session_id] = pending
+                remaining = self._inflight_sessions.get(session_id, 0) - 1
+                if remaining > 0:
+                    self._inflight_sessions[session_id] = remaining
                 else:
                     self._inflight_sessions.pop(session_id, None)
+                # 仅当该 session 已无任何已派发的 _run_and_route 在途时 flush（含队列里排在后面的任务）
+                if remaining == 0:
+                    try:
+                        self._core_pool.flush_pending_subagent_lifecycle_for_parent(session_id)
+                    except Exception as exc:
+                        logger.debug(
+                            "KernelScheduler: flush_pending_subagent_lifecycle_for_parent failed "
+                            "session_id=%s: %s",
+                            session_id,
+                            exc,
+                        )
+
+    def session_inflight_request_count(self, session_id: str) -> int:
+        """已为该 session 派发且尚未在 finally 中结案的 _run_and_route 数量（可能含等 session 锁的任务）。"""
+        return int(self._inflight_sessions.get(session_id, 0))
 
     def clear_cancelled(self, session_id: str) -> None:
         """清除指定 session 的取消标记（当该 session 再次变为活跃时调用）。"""

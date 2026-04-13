@@ -1268,7 +1268,7 @@ class WaitSubagentTool(BaseTool):
 
         # 阻塞路径：父即将 wait —— 取消延后「[子任务 x 完成]」注入，终态仅由本工具返回
         for sid in sub_sessions:
-            self._core_pool.cancel_deferred_subagent_lifecycle_inject(sid)
+            self._core_pool.discard_pending_subagent_lifecycle_inject(sid)
 
         # ---------- 阻塞：注册 Future ----------
         fut_to_aid: Dict[asyncio.Future[Any], str] = {}

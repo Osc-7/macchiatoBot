@@ -79,7 +79,7 @@
 | 对等 P2P | `send_message_to_agent` / `reply_to_message` → `inject_turn` + 信封；同步回复依赖双方按协议调工具 |
 | **进程表** | `list_agents(scope=…)`：本 Kernel 进程内会话快照（内存态）；`my_children` 仅自己的子，`namespace` 同根命名空间，`siblings` 同父兄弟；用于查找 `session_id` 再 P2P |
 
-**子任务完成 vs 回收**：子 Core 以与主会话一致的 **自然停轮**（本轮跑到最终回复、无挂起工具链）结束任务 → 系统 **`inject_turn` 通知父**；**complete 后**父仍可 `send_message_to_agent` 多轮协作，或再 **`reap_subagent`** 收尾；二者独立，不必完成即 reap。
+**子任务完成 vs 回收**：子终态后系统先把完成/失败文案放入 **暂存区**，仅在父会话 **kernel 侧无并发请求** 或 **本轮 `_run_and_route` 结束** 时再 `inject_turn`（类比 OS 延后信号到安全点）；阻塞式 **`wait_subagent` 开始**时会丢弃对应暂存，终态只经工具返回。**complete 后**父仍可 `send_message_to_agent` 多轮协作，或再 **`reap_subagent`** 收尾；二者独立，不必完成即 reap。
 
 ```mermaid
 flowchart LR

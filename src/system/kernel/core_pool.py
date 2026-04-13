@@ -110,8 +110,8 @@ class CorePool:
         self._reaped_subagent_at: Dict[str, float] = {}
         # sub:xxx：父已通过 wait_subagent（阻塞路径）拿到终态；子先于 wait 完成时 on_sub_complete 仍会 inject，迟到注入应丢弃
         self._parent_got_terminal_via_wait_tool: set[str] = set()
-        # sub:xxx -> TimerHandle：终态后延迟向父注入生命周期消息（与 wait_subagent 竞态时由 grace + 取消定时器解决）
-        self._deferred_lifecycle_inject_handles: Dict[str, asyncio.TimerHandle] = {}
+        # sub:xxx -> 待注入父侧的正文：先入暂存区，仅在父会话 kernel 请求「安全点」flush（类比 OS 延后信号）
+        self._pending_subagent_lifecycle: Dict[str, str] = {}
         # per-session 锁，防止并发创建
         self._locks: Dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
@@ -129,79 +129,72 @@ class CorePool:
     def should_suppress_lifecycle_inject_after_wait_tool(self, sub_session_id: str) -> bool:
         return (sub_session_id or "").strip() in self._parent_got_terminal_via_wait_tool
 
-    def cancel_deferred_subagent_lifecycle_inject(self, sub_session_id: str) -> None:
-        """取消该子会话待发送的延迟生命周期注入（如父即将阻塞 wait_subagent）。"""
-        sid = (sub_session_id or "").strip()
-        if not sid:
+    def discard_pending_subagent_lifecycle_inject(self, sub_session_id: str) -> None:
+        """丢弃暂存区中该子会话的生命周期通知（如父即将阻塞 wait_subagent，终态仅由工具返回）。"""
+        self._pending_subagent_lifecycle.pop((sub_session_id or "").strip(), None)
+
+    def flush_pending_subagent_lifecycle_for_parent(self, parent_session_id: str) -> None:
+        """将指向该父会话的暂存通知注入 kernel（在父会话 inflight 归零或本轮 _run_and_route 结束时调用）。"""
+        pid = (parent_session_id or "").strip()
+        if not pid:
             return
-        h = self._deferred_lifecycle_inject_handles.pop(sid, None)
-        if h is not None and not h.cancelled():
-            h.cancel()
+        for sub_sid in list(self._pending_subagent_lifecycle.keys()):
+            ent = self._pool.get(sub_sid) or self._zombies.get(sub_sid)
+            if ent is None:
+                self._pending_subagent_lifecycle.pop(sub_sid, None)
+                continue
+            if (ent.parent_session_id or "").strip() != pid:
+                continue
+            if self.should_suppress_lifecycle_inject_after_wait_tool(sub_sid):
+                self._pending_subagent_lifecycle.pop(sub_sid, None)
+                logger.info(
+                    "CorePool: drop pending lifecycle (parent got terminal via wait_subagent) "
+                    "session_id=%s parent_session_id=%s",
+                    sub_sid,
+                    pid,
+                    extra={"session_id": sub_sid, "parent_session_id": pid},
+                )
+                continue
+            if sub_sid.startswith("sub:") and self.was_subagent_reaped_in_process(sub_sid):
+                self._pending_subagent_lifecycle.pop(sub_sid, None)
+                logger.info(
+                    "CorePool: drop pending lifecycle (child reaped) session_id=%s",
+                    sub_sid,
+                    extra={"session_id": sub_sid},
+                )
+                continue
+            notification = self._pending_subagent_lifecycle.pop(sub_sid, None)
+            if not notification:
+                continue
+            self._inject_to_parent(sub_sid, ent, notification)
 
-    def _lifecycle_inject_grace_seconds(self) -> float:
-        agent_cfg = getattr(self._config, "agent", None)
-        raw = getattr(agent_cfg, "subagent_lifecycle_inject_grace_seconds", 3.0)
-        try:
-            g = float(raw)
-        except (TypeError, ValueError):
-            g = 3.0
-        return max(0.0, g)
-
-    def _schedule_deferred_subagent_lifecycle_inject(
-        self, sub_session_id: str, entry: CoreEntry, notification: str
-    ) -> None:
-        """子终态且未通过 notify 唤醒 wait 时，延迟注入父侧生命周期消息；无事件循环时立即注入。"""
+    def _stage_parent_lifecycle_notification(self, sub_session_id: str, notification: str) -> None:
+        """子终态且未通过 notify 唤醒 wait：写入暂存区；父会话当前无 inflight 请求时立即 flush。"""
         sid = (sub_session_id or "").strip()
-        prev = self._deferred_lifecycle_inject_handles.pop(sid, None)
-        if prev is not None and not prev.cancelled():
-            prev.cancel()
-
-        grace = self._lifecycle_inject_grace_seconds()
-        if grace <= 0:
-            self._inject_to_parent(sid, entry, notification)
-            return
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.debug(
-                "CorePool: no running loop for deferred lifecycle inject, injecting immediately "
-                "session_id=%s",
-                sid,
-            )
-            self._inject_to_parent(sid, entry, notification)
-            return
-
-        def _fire() -> None:
-            self._fire_deferred_subagent_lifecycle_inject(sid, notification)
-
-        handle = loop.call_later(grace, _fire)
-        self._deferred_lifecycle_inject_handles[sid] = handle
-
-    def _fire_deferred_subagent_lifecycle_inject(self, sub_session_id: str, notification: str) -> None:
-        """call_later 回调：若父已通过 wait/reap，则不再注入。"""
-        sid = (sub_session_id or "").strip()
-        self._deferred_lifecycle_inject_handles.pop(sid, None)
+        self._pending_subagent_lifecycle[sid] = notification
         entry = self._pool.get(sid) or self._zombies.get(sid)
         if entry is None:
             return
-        if self.should_suppress_lifecycle_inject_after_wait_tool(sid):
-            logger.info(
-                "CorePool: skip deferred inject_to_parent (parent received terminal via wait_subagent) "
-                "session_id=%s parent_session_id=%s",
-                sid,
-                entry.parent_session_id,
-                extra={"session_id": sid, "parent_session_id": entry.parent_session_id},
-            )
+        parent_id = (entry.parent_session_id or "").strip()
+        if not parent_id:
             return
-        if sid.startswith("sub:") and self.was_subagent_reaped_in_process(sid):
-            logger.info(
-                "CorePool: skip deferred inject_to_parent (child reaped) session_id=%s",
-                sid,
-                extra={"session_id": sid},
-            )
-            return
-        self._inject_to_parent(sid, entry, notification)
+        sched = self._scheduler
+        if sched is not None:
+            cnt_fn = getattr(sched, "session_inflight_request_count", None)
+            if callable(cnt_fn):
+                try:
+                    n = int(cnt_fn(parent_id))
+                    if n > 0:
+                        logger.debug(
+                            "CorePool: staged subagent lifecycle (parent has inflight kernel request) "
+                            "sub_session_id=%s parent_session_id=%s",
+                            sid,
+                            parent_id,
+                        )
+                        return
+                except (TypeError, ValueError):
+                    pass
+        self.flush_pending_subagent_lifecycle_for_parent(parent_id)
 
     async def acquire(
         self,
@@ -364,7 +357,7 @@ class CorePool:
         if entry is None:
             return
         if session_id.startswith("sub:"):
-            self.cancel_deferred_subagent_lifecycle_inject(session_id)
+            self.discard_pending_subagent_lifecycle_inject(session_id)
         agent = entry.agent
         is_subagent = bool(entry.parent_session_id) or session_id.startswith("sub:")
 
@@ -649,7 +642,7 @@ class CorePool:
             f"如需只读完整结果：get_subagent_status(subagent_id=\"{sid}\", include_full_result=True)。"
             f"确认不再需要子工作区文件后，调用 reap_subagent(subagent_id=\"{sid}\") 完成收割。"
         )
-        self._schedule_deferred_subagent_lifecycle_inject(sub_session_id, entry, notification)
+        self._stage_parent_lifecycle_notification(sub_session_id, notification)
 
     def on_sub_fail(self, sub_session_id: str, error: str) -> None:
         entry = self._pool.get(sub_session_id) or self._zombies.get(sub_session_id)
@@ -690,9 +683,8 @@ class CorePool:
                 extra={"session_id": sub_session_id, "parent_session_id": entry.parent_session_id},
             )
             return
-        self._schedule_deferred_subagent_lifecycle_inject(
+        self._stage_parent_lifecycle_notification(
             sub_session_id,
-            entry,
             f"[子任务 {self._subagent_id(sub_session_id)} 失败]\n错误：{error}",
         )
 
@@ -755,7 +747,7 @@ class CorePool:
 
     def reap_zombie(self, session_id: str) -> None:
         if session_id.startswith("sub:"):
-            self.cancel_deferred_subagent_lifecycle_inject(session_id)
+            self.discard_pending_subagent_lifecycle_inject(session_id)
             try:
                 from agent_core.agent.workspace_paths import remove_subagent_workspace_trees
 

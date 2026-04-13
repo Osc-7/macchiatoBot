@@ -24,6 +24,8 @@ from agent_core.interfaces import AgentHooks, AgentRunResult
 from agent_core.kernel_interface import KernelRequest
 
 from .output_bus import OutputBus
+from system.multi_agent.constants import P2P_REQUEST_FRONTEND_TAG
+
 if TYPE_CHECKING:
     from .kernel import AgentKernel
     from .core_pool import CorePool
@@ -31,6 +33,48 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _IN_QUEUE_WARN_THRESHOLD = 500
+
+
+def _infer_memory_owner_from_session_id(session_id: str) -> tuple[str, str]:
+    """从 session_id 推断记忆命名空间 (mem_source, mem_user_id)。
+
+    P2P 工具使用 KernelRequest.frontend_id=P2P_REQUEST_FRONTEND_TAG 仅作投递标签，不得作为
+    CoreProfile / CoreLifecycleLogger 的 source；此时用 session_id 反推真实 owner。
+    与 CorePool.register_sub(default_sub: frontend_id=subagent, dialog_window_id=uuid) 对齐。
+    """
+    sid = (session_id or "").strip()
+    if sid.startswith("sub:"):
+        return "subagent", sid[4:]
+    if sid.startswith("feishu:"):
+        return "feishu", sid[7:]
+    if ":" in sid:
+        prefix, rest = sid.split(":", 1)
+        p, r = prefix.strip(), rest.strip()
+        return p, (r or "root")
+    return "cli", "root"
+
+
+def memory_owner_for_kernel_acquire(request: KernelRequest) -> tuple[str, str]:
+    """解析 acquire(..., source=, user_id=) 使用的记忆 owner，供调度与单测断言。"""
+    md = request.metadata if isinstance(request.metadata, dict) else {}
+    mo_raw = str(md.get("memory_owner") or "").strip()
+    profile = request.profile
+    if mo_raw and ":" in mo_raw:
+        mem_source, mem_user_id = mo_raw.split(":", 1)
+        return mem_source.strip(), mem_user_id.strip()
+    if profile and (profile.frontend_id or "").strip():
+        mem_source = profile.frontend_id.strip()
+        mem_user_id = (profile.dialog_window_id or "").strip() or "root"
+        return mem_source, mem_user_id
+    md_source = str(md.get("source") or "").strip()
+    if md_source:
+        mem_user_id = str(md.get("user_id") or "root").strip() or "root"
+        return md_source, mem_user_id
+    if (request.frontend_id or "").strip() == P2P_REQUEST_FRONTEND_TAG:
+        return _infer_memory_owner_from_session_id(request.session_id)
+    mem_source = str(request.frontend_id or "cli").strip() or "cli"
+    mem_user_id = str(md.get("user_id") or "root").strip() or "root"
+    return mem_source, mem_user_id
 
 
 class SubmitHandle:
@@ -101,6 +145,8 @@ class KernelScheduler:
         self._session_active_tasks: Dict[str, set[asyncio.Task]] = defaultdict(set)
         # 已取消的 session_id，用于拦截仍在队列中尚未 dispatch 的请求
         self._cancelled_sessions: set[str] = set()
+        # send_message_to_agent(require_reply=True) 注册的等待：message_id -> Future[回复正文]
+        self._p2p_reply_waiters: Dict[str, asyncio.Future[str]] = {}
 
     async def start(self) -> None:
         """启动调度循环和 TTL 扫描后台任务。
@@ -163,8 +209,42 @@ class KernelScheduler:
         except Exception as exc:
             logger.warning("KernelScheduler: evict_all on stop failed: %s", exc)
         finally:
+            self._cancel_all_p2p_reply_waiters()
             self._out_bus.cancel_all()
         logger.info("KernelScheduler: stopped")
+
+    def register_p2p_reply_waiter(self, message_id: str) -> asyncio.Future[str]:
+        """供 send_message_to_agent(require_reply=True) 注册，等待 reply_to_message 唤醒。"""
+        fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._p2p_reply_waiters[message_id] = fut
+        return fut
+
+    def has_p2p_reply_waiter(self, message_id: str) -> bool:
+        """对方 send_message(require_reply=True) 是否仍在阻塞等待本 correlation_id 的回复。"""
+        fut = self._p2p_reply_waiters.get(message_id)
+        return fut is not None and not fut.done()
+
+    def complete_p2p_reply(self, message_id: str, reply_text: str) -> bool:
+        """reply_to_message 成功投递后调用，唤醒阻塞中的 send_message_to_agent。"""
+        fut = self._p2p_reply_waiters.pop(message_id, None)
+        if fut is None:
+            return False
+        if fut.done():
+            return False
+        fut.set_result(reply_text)
+        return True
+
+    def cancel_p2p_reply_waiter(self, message_id: str) -> None:
+        """超时或投递失败时取消防抖，避免悬挂 Future。"""
+        fut = self._p2p_reply_waiters.pop(message_id, None)
+        if fut is not None and not fut.done():
+            fut.cancel()
+
+    def _cancel_all_p2p_reply_waiters(self) -> None:
+        for _mid, fut in list(self._p2p_reply_waiters.items()):
+            if not fut.done():
+                fut.cancel()
+        self._p2p_reply_waiters.clear()
 
     async def _get_session_lock(self, session_id: str) -> asyncio.Lock:
         """
@@ -324,6 +404,30 @@ class KernelScheduler:
             except asyncio.CancelledError:
                 break
             await self._evict_expired()
+            await self._reap_stale_sub_zombies()
+
+    async def _reap_stale_sub_zombies(self) -> None:
+        """终态 sub zombie 超过配置 TTL 时由系统 reap_zombie（兜底）。"""
+        cfg = getattr(self._core_pool, "_config", None)
+        agent_cfg = getattr(cfg, "agent", None) if cfg is not None else None
+        ttl = getattr(agent_cfg, "subagent_zombie_ttl_seconds", None)
+        if ttl is None or float(ttl) <= 0:
+            return
+        stale = self._core_pool.scan_stale_subagent_zombies(float(ttl))
+        for sid in stale:
+            try:
+                self._core_pool.reap_zombie(sid)
+                logger.info(
+                    "KernelScheduler: system reap stale sub zombie session_id=%s (ttl=%ss)",
+                    sid,
+                    ttl,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "KernelScheduler: system reap_zombie failed session_id=%s: %s",
+                    sid,
+                    exc,
+                )
 
     async def _evict_expired(self) -> None:
         """扫描并驱逐所有超时 session。"""
@@ -408,18 +512,11 @@ class KernelScheduler:
                 # 获取 AgentCore（懒加载）
                 # 记忆路径：优先 metadata.memory_owner（feishu:uid），与 job 配置一致；
                 # 否则用 CoreProfile.frontend_id/dialog_window_id；再否则 metadata.source/user_id。
+                # frontend_id=P2P 标签仅为投递语义，不得作为 mem_source（见 memory_owner_for_kernel_acquire）。
                 md = request.metadata if isinstance(request.metadata, dict) else {}
                 mo_raw = str(md.get("memory_owner") or "").strip()
                 profile = request.profile
-                if mo_raw and ":" in mo_raw:
-                    mem_source, mem_user_id = mo_raw.split(":", 1)
-                    mem_source, mem_user_id = mem_source.strip(), mem_user_id.strip()
-                elif profile and (profile.frontend_id or "").strip():
-                    mem_source = profile.frontend_id.strip()
-                    mem_user_id = (profile.dialog_window_id or "").strip() or "root"
-                else:
-                    mem_source = str(md.get("source") or request.frontend_id or "cli")
-                    mem_user_id = str(md.get("user_id") or "root")
+                mem_source, mem_user_id = memory_owner_for_kernel_acquire(request)
 
                 agent = await self._core_pool.acquire(
                     request.session_id,

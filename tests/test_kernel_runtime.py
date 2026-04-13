@@ -14,6 +14,36 @@ from agent_core.kernel_interface import CoreProfile, KernelRequest
 from agent_core.tools import VersionedToolRegistry
 from agent_core.orchestrator import ToolWorkingSetManager
 from system.kernel import AgentKernel, CoreEntry, CorePool, KernelScheduler
+from system.kernel.scheduler import memory_owner_for_kernel_acquire
+from system.multi_agent.constants import METADATA_KEY_AGENT_MESSAGE, P2P_REQUEST_FRONTEND_TAG
+
+
+def test_memory_owner_agent_msg_uses_session_id_not_frontend_tag() -> None:
+    """P2P 的 frontend_id=agent_msg 不得作为 acquire source（避免 session-agent_msg:* 误日志）。"""
+    req = KernelRequest.create(
+        text="hi",
+        session_id="sub:abc-uuid",
+        frontend_id=P2P_REQUEST_FRONTEND_TAG,
+        metadata={METADATA_KEY_AGENT_MESSAGE: {}},
+    )
+    src, uid = memory_owner_for_kernel_acquire(req)
+    assert src == "subagent"
+    assert uid == "abc-uuid"
+
+    req2 = KernelRequest.create(
+        text="hi",
+        session_id="feishu:ou_test",
+        frontend_id=P2P_REQUEST_FRONTEND_TAG,
+        metadata={},
+    )
+    assert memory_owner_for_kernel_acquire(req2) == ("feishu", "ou_test")
+
+    req3 = KernelRequest.create(
+        text="hi",
+        session_id="cli:root",
+        frontend_id=P2P_REQUEST_FRONTEND_TAG,
+    )
+    assert memory_owner_for_kernel_acquire(req3) == ("cli", "root")
 
 
 @pytest.mark.asyncio

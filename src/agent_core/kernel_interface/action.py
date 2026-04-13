@@ -103,7 +103,9 @@ KernelAction = Union[
 
 @dataclass
 class AgentMessage:
-    """Agent 间 P2P 消息信封，附加在 KernelRequest.metadata["_agent_message"] 中。
+    """Agent 间 P2P 消息信封，附加在 KernelRequest.metadata[METADATA_KEY_AGENT_MESSAGE] 中。
+
+    键名见 `system.multi_agent.constants.METADATA_KEY_AGENT_MESSAGE`（值为 "_agent_message"）。
 
     用途：
     - create_subagent / create_parallel_subagents 完成后由 CorePool 注入

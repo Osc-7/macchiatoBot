@@ -66,6 +66,32 @@
 
 ## 8. Multi-Agent 协作（Subagent）
 
+本架构**原生多会话**：每个 `session_id` 在 Kernel 里对应一个独立 **AgentCore**（独立上下文与 `CoreProfile`），由 **KernelScheduler** 调度——跨会话并行、同一会话串行。父子关系与对等 P2P 共用同一套 `inject_turn` 与 **AgentMessage** 信封（常量见代码包 `system.multi_agent`）。
+
+### 架构一览
+
+| 概念 | 实现要点 |
+|------|----------|
+| 会话 / 对等体 | `session_id`（如 `feishu:user:…`、`sub:<uuid>`、`cli:root`） |
+| 「进程」 | `CorePool` 中 `CoreEntry` + `AgentCore`，权限由 `CoreProfile.mode`（如 `full` / `sub`）约束 |
+| 调度 | `KernelScheduler`：多 session **并发**，同一 session **串行**（避免上下文竞争） |
+| 父子委托 | `create_subagent` → 子跑完后系统向父 **inject** 完成通知（**不是**子用 `send_message` 汇报） |
+| 对等 P2P | `send_message_to_agent` / `reply_to_message` → `inject_turn` + 信封；同步回复依赖双方按协议调工具 |
+| **进程表** | `list_agents(scope=…)`：本 Kernel 进程内会话快照（内存态）；`my_children` 仅自己的子，`namespace` 同根命名空间，`siblings` 同父兄弟；用于查找 `session_id` 再 P2P |
+
+**子任务完成 vs 回收**：子 Core 以与主会话一致的 **自然停轮**（本轮跑到最终回复、无挂起工具链）结束任务 → 系统 **`inject_turn` 通知父**；**complete 后**父仍可 `send_message_to_agent` 多轮协作，或再 **`reap_subagent`** 收尾；二者独立，不必完成即 reap。
+
+```mermaid
+flowchart LR
+  Q[KernelScheduler 队列]
+  P[CorePool]
+  Q --> P
+  P --> M[主会话 feishu/cli mode=full]
+  P --> C[子会话 sub:… mode=sub]
+  M <-->|inject_turn P2P / 完成通知| Q
+  C <-->|inject_turn P2P / 完成通知| Q
+```
+
 当任务可以拆分或并行时，可使用以下工具委托子 Agent 处理：
 
 ### 工具速查
@@ -74,11 +100,12 @@
 |------|---------|
 | `create_subagent` | 派生单个后台子任务；立即返回，不等待结果 |
 | `create_parallel_subagents` | 派生多个并行后台子任务；谁先完成谁先通知 |
-| `get_subagent_status` | **只读**查看子任务状态；`include_full_result=true` 时拉取完整输出（不收割、不删盘） |
-| `reap_subagent` | **父侧必做**：子任务已结束（含 cancel）且你已不再需要其工作区时 **必须** 调用；回收 zombie、删盘、释放内存 |
+| `list_agents` | **进程表**：按 `scope` 列出可见会话（含 `session_id`、父指针、状态）；寻址 P2P 前优先调用，避免猜 id |
+| `get_subagent_status` | **只读**查看子任务状态；`include_full_result=true` 时拉取完整输出（不收割、不删盘）；**仅创建该子的父会话**可查询 |
+| `reap_subagent` | **父侧必做**：子任务已结束（含 cancel）且你已不再需要其工作区时 **必须** 调用；回收 zombie、删盘、释放内存；**仅父会话**可调用 |
 | `send_message_to_agent` | 向任意 session 发送 P2P 消息；**子 Agent 仅用于向父询问**，不用于汇报完成 |
 | `reply_to_message` | 回复收到的 query 消息（correlation_id 关联） |
-| `cancel_subagent` | **终止**正在运行的子 Agent（不可逆；**不删盘**；释放目录与 completed 相同，需另调 `reap_subagent`） |
+| `cancel_subagent` | **终止**正在运行的子 Agent（不可逆；**不删盘**；释放目录与 completed 相同，需另调 `reap_subagent`）；**仅父会话**可调用 |
 
 ### 收割义务（必做）
 
@@ -147,7 +174,7 @@ reply_to_message(correlation_id="msg-001", sender_session_id="cli:root", content
   不能再创建子 Agent（防止无限递归）
 - 父 Agent 指定 `allowed_tools` 时，系统会自动合并上述通信工具
 - **完成信号**：子 Agent 完成后由系统自动推送，子 Agent **切勿**用 send_message_to_agent 汇报完成，否则重复通知
-- **send_message_to_agent**（子 Agent）：仅用于向父**询问**任务细节、实现要求、澄清歧义
+- **send_message_to_agent**（子 Agent）：仅用于向父**询问**任务细节、实现要求、澄清歧义；**默认会阻塞等待**父侧 `reply_to_message`，仅单向通知时须显式 `require_reply=false`
 - **get** 与 **reap** 分工：`get_subagent_status` 只读；`reap_subagent` 才是 `waitpid/reap`（回收 zombie、删子工作区）
 - **`reap` 是父侧义务**：每个子任务在结束前都应 reap；未完成则勿 reap（会失败）。
 - **`cancel_subagent` 不删盘**：被取消的子任务终态仍为 `cancelled`，**仍须**按需 `reap_subagent` 释放目录（与完成/失败分支一致）

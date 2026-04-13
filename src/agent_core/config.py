@@ -750,6 +750,22 @@ class AgentConfig(BaseModel):
         default=None,
         description="子 Agent 上下文压缩阈值（profile.max_context_tokens）；None 表示不设 profile 层上限，仅受 working memory 约束",
     )
+    p2p_reply_timeout_seconds: int = Field(
+        default=600,
+        ge=1,
+        description="send_message_to_agent(require_reply=True) 阻塞等待对方 reply_to_message 的最长秒数，超时则工具失败",
+    )
+    subagent_zombie_ttl_seconds: Optional[float] = Field(
+        default=None,
+        description=(
+            "终态子会话 zombie 超过该秒数后由系统 reap_zombie 兜底回收（None 表示不启用）；"
+            "建议生产环境设较大值（如 7 天）或 None，避免与父侧多轮协作竞态"
+        ),
+    )
+    list_agents_allow_namespace_for_subagent: bool = Field(
+        default=False,
+        description="mode=sub 时是否允许 list_agents(scope=namespace) 查看同命名空间会话；默认仅 my_children/siblings",
+    )
     enable_debug: bool = Field(default=False, description="是否启用调试模式")
     working_set_size: int = Field(
         default=6,

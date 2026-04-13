@@ -24,6 +24,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Literal, Optional
 
+from system.multi_agent.constants import METADATA_KEY_AGENT_MESSAGE
+
 if TYPE_CHECKING:
     from agent_core.config import Config
     from agent_core.agent.agent import AgentCore
@@ -157,8 +159,18 @@ class CorePool:
                     "cannot create new session"
                 )
 
+            # 无显式 profile 时继承占位 / zombie 上的 CoreProfile。
+            # 典型场景：子任务已完成并 evict 后，父通过 send_message_to_agent 再次 inject_turn，
+            # 请求不带 profile；若此处误用 default_full，子会话会以 full 工具集回复自然语言，
+            # 不会调用 reply_to_message，导致父侧 P2P 阻塞至超时。
+            load_profile = profile
+            if load_profile is None:
+                holder = self._pool.get(session_id) or self._zombies.get(session_id)
+                if holder is not None and getattr(holder, "profile", None) is not None:
+                    load_profile = holder.profile
+
             agent, entry_profile, core_logger = await self._load(
-                session_id, source=source, user_id=user_id, profile=profile
+                session_id, source=source, user_id=user_id, profile=load_profile
             )
             # 若从检查点恢复，用 TTL 偏移量将 last_active_ts 往回拨，
             # 使 CoreEntry.is_expired() 以"剩余 TTL"而非"满 TTL"触发。
@@ -168,6 +180,8 @@ class CorePool:
                 profile=entry_profile,
                 logger=core_logger,
             )
+            # 占位符在 _pool、或仅存在于 _zombies（子任务已 evict 后因 inject_turn 再次加载）
+            zombie_prev = self._zombies.get(session_id)
             if existing is not None:
                 entry.created_at = existing.created_at
                 entry.last_active_ts = existing.last_active_ts
@@ -179,6 +193,25 @@ class CorePool:
                 entry.sub_result = existing.sub_result
                 entry.sub_error = existing.sub_error
                 entry.sub_completed_at = existing.sub_completed_at
+                entry.feishu_chat_id = existing.feishu_chat_id
+                if zombie_prev is not None:
+                    # 不应与 register_sub 占位并存；丢弃陈旧 zombie，避免重复 PCB
+                    self._zombies.pop(session_id, None)
+            elif zombie_prev is not None:
+                # 子 Agent 已结束并入 zombie 后，再次 acquire（如 reply_to_message 注入子会话）
+                # 须继承 sub_status / sub_result，否则 get_subagent_status 会误报 running
+                self._zombies.pop(session_id, None)
+                entry.created_at = zombie_prev.created_at
+                entry.last_active_ts = zombie_prev.last_active_ts
+                entry.session_start_ts = zombie_prev.session_start_ts
+                entry.parent_session_id = zombie_prev.parent_session_id
+                entry.task_description = zombie_prev.task_description
+                entry.bg_task = zombie_prev.bg_task
+                entry.sub_status = zombie_prev.sub_status
+                entry.sub_result = zombie_prev.sub_result
+                entry.sub_error = zombie_prev.sub_error
+                entry.sub_completed_at = zombie_prev.sub_completed_at
+                entry.feishu_chat_id = zombie_prev.feishu_chat_id
             if ttl_offset > 0:
                 entry.last_active_ts = time.monotonic() - ttl_offset
             self._pool[session_id] = entry
@@ -582,6 +615,23 @@ class CorePool:
         entry.sub_completed_at = time.time()
         return True
 
+    def scan_stale_subagent_zombies(self, ttl_seconds: float) -> List[str]:
+        """终态 sub zombie 在 `sub_completed_at`（或 created_at）后超过 ttl_seconds 的 session_id 列表。"""
+        if ttl_seconds <= 0:
+            return []
+        now = time.time()
+        stale: List[str] = []
+        for sid, entry in self._zombies.items():
+            if not sid.startswith("sub:"):
+                continue
+            st = entry.sub_status
+            if st not in ("completed", "failed", "cancelled"):
+                continue
+            base_ts = entry.sub_completed_at if entry.sub_completed_at is not None else entry.created_at
+            if now - float(base_ts) > ttl_seconds:
+                stale.append(sid)
+        return stale
+
     def reap_zombie(self, session_id: str) -> None:
         if session_id.startswith("sub:"):
             try:
@@ -755,7 +805,17 @@ class CorePool:
         from .core_logger import CoreLifecycleLogger
 
         if profile is None:
-            if source in ("cli", "feishu"):
+            # sub:* 会话必须与 register_sub / _run_subagent_task 一致使用 default_sub，
+            # 否则 subagent 源会被 default_full 误判为 mode=full（工具全开），破坏 P2P 协议。
+            if (session_id or "").startswith("sub:"):
+                subagent_id = session_id[4:]
+                profile = _CoreProfile.default_sub(
+                    allowed_tools=None,
+                    frontend_id="subagent",
+                    dialog_window_id=subagent_id,
+                    tools_config=self._config.tools,
+                )
+            elif source in ("cli", "feishu"):
                 profile = _CoreProfile.full_from_config(
                     self._config,
                     frontend_id=source,
@@ -1060,7 +1120,7 @@ class CorePool:
             message_type=msg_type,
             subagent_id=self._subagent_id(session_id),
         )
-        inject_md: Dict[str, Any] = {"_agent_message": agent_msg}
+        inject_md: Dict[str, Any] = {METADATA_KEY_AGENT_MESSAGE: agent_msg}
         # 飞书父会话：inject_turn 侧流式卡片 + 工具 trace（与 FeishuIPCBridge 主路径一致）
         if parent_session_id.startswith("feishu:"):
             try:

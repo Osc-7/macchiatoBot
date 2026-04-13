@@ -20,6 +20,19 @@ def _make_pool():
     return pool, scheduler
 
 
+def _exec_cli_root() -> dict:
+    return {"session_id": "cli:root"}
+
+
+def _seed_parent_session(pool, session_id: str = "cli:root") -> None:
+    """为 list_agents / 父权校验测试在进程表中放入父会话占位条目。"""
+    from agent_core.kernel_interface import CoreProfile
+    from system.kernel.core_pool import CoreEntry
+
+    prof = CoreProfile.default_full(frontend_id="cli", dialog_window_id="root")
+    pool._pool[session_id] = CoreEntry(agent=None, profile=prof)
+
+
 class TestAgentMessage:
     def test_basic_fields(self):
         from agent_core.kernel_interface.action import AgentMessage
@@ -68,6 +81,24 @@ class TestCorePoolSubagentLifecycle:
         )
         children = pool.list_subs_by_parent("cli:root")
         assert len(children) == 2
+
+    def test_scan_stale_subagent_zombies(self):
+        import time
+
+        pool, _ = _make_pool()
+        entry = pool.register_sub(
+            sub_session_id="sub:stale-1",
+            parent_session_id="cli:root",
+            task_description="z",
+        )
+        entry.sub_status = "completed"
+        entry.sub_result = "ok"
+        entry.sub_completed_at = time.time() - 4000.0
+        pool._pool.pop("sub:stale-1", None)
+        pool._zombies["sub:stale-1"] = entry
+        stale = pool.scan_stale_subagent_zombies(3600.0)
+        assert "sub:stale-1" in stale
+        assert pool.scan_stale_subagent_zombies(86400.0 * 365) == []
 
     def test_on_complete_updates_status_and_injects(self):
         pool, scheduler = _make_pool()
@@ -200,6 +231,50 @@ class TestCorePoolSubagentLifecycle:
         assert final is not None
         assert final.agent is None
 
+    @pytest.mark.asyncio
+    async def test_acquire_rehydrate_subagent_merges_zombie_sub_status(self):
+        """子任务 evict 入 zombie 后再次 acquire 须保留 completed，避免 get_subagent_status 误报 running。"""
+        from agent_core.kernel_interface import CoreProfile
+        from system.kernel import CoreEntry
+
+        pool, _ = _make_pool()
+        profile = CoreProfile.default_sub(
+            allowed_tools=None,
+            frontend_id="subagent",
+            dialog_window_id="rehydrate-001",
+        )
+        entry = CoreEntry(
+            agent=MagicMock(),
+            profile=profile,
+            parent_session_id="cli:root",
+            task_description="t",
+            sub_status="completed",
+            sub_result="final answer",
+            sub_completed_at=1700000000.0,
+        )
+        pool._pool["sub:rehydrate-001"] = entry
+        pool._kernel = MagicMock()
+        pool._kernel.kill = AsyncMock(return_value=None)
+        await pool.evict("sub:rehydrate-001")
+        assert pool.get_sub_info("sub:rehydrate-001").sub_status == "completed"
+
+        fake_agent = MagicMock()
+        fake_agent._checkpoint_ttl_offset = 0.0
+
+        async def fake_load(sid: str, **kwargs: object):
+            return fake_agent, profile, None
+
+        pool._load = fake_load  # type: ignore[method-assign]
+
+        out = await pool.acquire("sub:rehydrate-001")
+        assert out is fake_agent
+        live = pool.get_live_entry("sub:rehydrate-001")
+        assert live is not None
+        assert live.sub_status == "completed"
+        assert live.sub_result == "final answer"
+        assert live.sub_completed_at == 1700000000.0
+        assert pool.is_zombie("sub:rehydrate-001") is False
+
 
 class TestInjectTurn:
     def test_has_waiter_returns_false_for_unregistered_request(self):
@@ -253,15 +328,56 @@ class TestSendMessageToAgentTool:
 
         mock_scheduler = MagicMock()
         mock_scheduler.inject_turn = MagicMock()
+        mock_scheduler.register_p2p_reply_waiter = MagicMock()
         tool = SendMessageToAgentTool(scheduler=mock_scheduler)
         result = await tool.execute(
             session_id="shuiyuan:Osc7",
             content="Hello from test",
+            require_reply=False,
             __execution_context__={"session_id": "cli:root"},
         )
         assert result.success is True
         assert result.data["target_session"] == "shuiyuan:Osc7"
         mock_scheduler.inject_turn.assert_called_once()
+        mock_scheduler.register_p2p_reply_waiter.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_message_require_reply_blocks_until_complete(self):
+        from system.kernel.scheduler import KernelScheduler
+        from system.tools.subagent_tools import SendMessageToAgentTool
+
+        core_pool = MagicMock()
+        core_pool.set_scheduler = MagicMock()
+        sched = KernelScheduler(kernel=MagicMock(), core_pool=core_pool)
+        mids: list[str] = []
+
+        def fake_inject(req: object) -> None:
+            from agent_core.kernel_interface.action import AgentMessage
+
+            meta = getattr(req, "metadata", None) or {}
+            am = meta.get("_agent_message")
+            if isinstance(am, AgentMessage):
+                mids.append(am.message_id)
+
+        sched.inject_turn = fake_inject  # type: ignore[method-assign]
+
+        tool = SendMessageToAgentTool(scheduler=sched)
+
+        async def run_send() -> object:
+            return await tool.execute(
+                session_id="cli:b",
+                content="question",
+                require_reply=True,
+                __execution_context__={"session_id": "cli:a"},
+            )
+
+        task = asyncio.create_task(run_send())
+        await asyncio.sleep(0)
+        assert len(mids) == 1
+        assert sched.complete_p2p_reply(mids[0], "answer body") is True
+        result = await task
+        assert result.success is True
+        assert result.data["reply_content"] == "answer body"
 
     @pytest.mark.asyncio
     async def test_send_message_rejected_when_sender_cancelled(self):
@@ -299,6 +415,8 @@ class TestReplyToMessageTool:
         captured = []
         mock_scheduler = MagicMock()
         mock_scheduler.inject_turn = lambda req: captured.append(req)
+        mock_scheduler.complete_p2p_reply = MagicMock(return_value=True)
+        mock_scheduler.has_p2p_reply_waiter = MagicMock(return_value=False)
         tool = ReplyToMessageTool(scheduler=mock_scheduler)
         result = await tool.execute(
             correlation_id="msg-001",
@@ -311,6 +429,26 @@ class TestReplyToMessageTool:
         agent_msg: AgentMessage = req.metadata["_agent_message"]
         assert agent_msg.message_type == "reply"
         assert agent_msg.correlation_id == "msg-001"
+        mock_scheduler.complete_p2p_reply.assert_called_once_with("msg-001", "回复内容")
+
+    @pytest.mark.asyncio
+    async def test_reply_skips_inject_when_blocking_waiter(self):
+        from system.tools.subagent_tools import ReplyToMessageTool
+
+        mock_scheduler = MagicMock()
+        mock_scheduler.inject_turn = MagicMock()
+        mock_scheduler.has_p2p_reply_waiter = MagicMock(return_value=True)
+        mock_scheduler.complete_p2p_reply = MagicMock(return_value=True)
+        tool = ReplyToMessageTool(scheduler=mock_scheduler)
+        result = await tool.execute(
+            correlation_id="msg-wait",
+            sender_session_id="cli:root",
+            content="仅唤醒",
+            __execution_context__={"session_id": "sub:other"},
+        )
+        assert result.success is True
+        mock_scheduler.inject_turn.assert_not_called()
+        mock_scheduler.complete_p2p_reply.assert_called_once_with("msg-wait", "仅唤醒")
 
 
 class TestToolRegistration:
@@ -327,6 +465,7 @@ class TestToolRegistration:
             "get_subagent_status",
             "reap_subagent",
             "cancel_subagent",
+            "list_agents",
         ]:
             assert not reg.has(tool_name)
 
@@ -343,6 +482,7 @@ class TestToolRegistration:
         assert reg.has("get_subagent_status")
         assert reg.has("reap_subagent")
         assert reg.has("cancel_subagent")
+        assert reg.has("list_agents")
 
     def test_sub_mode_only_has_communication_tools(self):
         from agent_core.kernel_interface import CoreProfile
@@ -352,11 +492,56 @@ class TestToolRegistration:
         reg = build_tool_registry(profile=CoreProfile(mode="sub"), core_pool=pool)
         assert reg.has("send_message_to_agent")
         assert reg.has("reply_to_message")
+        assert reg.has("list_agents")
         assert not reg.has("create_subagent")
         assert not reg.has("create_parallel_subagents")
         assert not reg.has("get_subagent_status")
         assert not reg.has("reap_subagent")
         assert not reg.has("cancel_subagent")
+
+
+class TestListAgentsTool:
+    @pytest.mark.asyncio
+    async def test_my_children_filter(self):
+        from system.tools.subagent_tools import ListAgentsTool
+
+        pool, _ = _make_pool()
+        _seed_parent_session(pool, "cli:root")
+        pool.register_sub(
+            sub_session_id="sub:c1",
+            parent_session_id="cli:root",
+            task_description="t1",
+        )
+        pool.register_sub(
+            sub_session_id="sub:c2",
+            parent_session_id="feishu:u1",
+            task_description="t2",
+        )
+        tool = ListAgentsTool(core_pool=pool)
+        r = await tool.execute(
+            scope="my_children", __execution_context__=_exec_cli_root()
+        )
+        assert r.success
+        assert r.data["count"] == 1
+        assert r.data["agents"][0]["session_id"] == "sub:c1"
+
+    @pytest.mark.asyncio
+    async def test_parent_guard_get_foreign_sub(self):
+        from system.tools.subagent_tools import GetSubagentStatusTool
+
+        pool, _ = _make_pool()
+        pool.register_sub(
+            sub_session_id="sub:orphan",
+            parent_session_id="cli:root",
+            task_description="x",
+        )
+        tool = GetSubagentStatusTool(core_pool=pool)
+        r = await tool.execute(
+            subagent_id="orphan",
+            __execution_context__={"session_id": "feishu:intruder"},
+        )
+        assert r.success is False
+        assert r.error == "FORBIDDEN_NOT_YOUR_SUB"
 
 
 class TestGetSubagentStatusTool:
@@ -371,7 +556,9 @@ class TestGetSubagentStatusTool:
             task_description="test task",
         )
         tool = GetSubagentStatusTool(core_pool=pool)
-        result = await tool.execute(subagent_id="abc123")
+        result = await tool.execute(
+            subagent_id="abc123", __execution_context__=_exec_cli_root()
+        )
         assert result.success
         assert result.data["status"] == "running"
 
@@ -391,22 +578,25 @@ class TestGetSubagentStatusTool:
         pool._pool.pop("sub:xyz789", None)
 
         get_tool = GetSubagentStatusTool(core_pool=pool)
-        result = await get_tool.execute(subagent_id="xyz789")
+        ctx = _exec_cli_root()
+        result = await get_tool.execute(subagent_id="xyz789", __execution_context__=ctx)
         assert result.success
         assert "report content" in result.data.get("result_preview", "")
 
-        result_full = await get_tool.execute(subagent_id="xyz789", include_full_result=True)
+        result_full = await get_tool.execute(
+            subagent_id="xyz789", include_full_result=True, __execution_context__=ctx
+        )
         assert result_full.success
         assert result_full.data["result"] == "report content"
         assert pool.get_sub_info("sub:xyz789") is not None
 
         reap_tool = ReapSubagentTool(core_pool=pool)
-        reap_result = await reap_tool.execute(subagent_id="xyz789")
+        reap_result = await reap_tool.execute(subagent_id="xyz789", __execution_context__=ctx)
         assert reap_result.success
         assert reap_result.data["result"] == "report content"
         assert pool.get_sub_info("sub:xyz789") is None
 
-        reap_again = await reap_tool.execute(subagent_id="xyz789")
+        reap_again = await reap_tool.execute(subagent_id="xyz789", __execution_context__=ctx)
         assert reap_again.success is True
         assert reap_again.data.get("already_reaped") is True
 
@@ -416,7 +606,9 @@ class TestGetSubagentStatusTool:
 
         pool, _ = _make_pool()
         tool = ReapSubagentTool(core_pool=pool)
-        r = await tool.execute(subagent_id="definitely-not-created")
+        r = await tool.execute(
+            subagent_id="definitely-not-created", __execution_context__=_exec_cli_root()
+        )
         assert r.success is False
         assert r.error == "SUBAGENT_NOT_FOUND"
 
@@ -431,7 +623,9 @@ class TestGetSubagentStatusTool:
             task_description="running",
         )
         tool = ReapSubagentTool(core_pool=pool)
-        result = await tool.execute(subagent_id="run001")
+        result = await tool.execute(
+            subagent_id="run001", __execution_context__=_exec_cli_root()
+        )
         assert result.success is False
         assert result.error == "SUBAGENT_STILL_RUNNING"
 
@@ -448,7 +642,9 @@ class TestCancelSubagentTool:
             task_description="test",
         )
         tool = CancelSubagentTool(core_pool=pool)
-        result = await tool.execute(subagent_id="abc123")
+        result = await tool.execute(
+            subagent_id="abc123", __execution_context__=_exec_cli_root()
+        )
         assert result.success is True
         assert pool.get_sub_info("sub:abc123").sub_status == "cancelled"
 

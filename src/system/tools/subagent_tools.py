@@ -1,14 +1,15 @@
 """
 Subagent 工具集 — 通用异步 multi-agent 通信。
 
-提供 7 个工具：
+提供 8 个工具：
   1. create_subagent            — 创建单个子 agent 执行任务（fire-and-forget）
   2. create_parallel_subagents  — 并行创建多个子 agent（first-done 语义）
-  3. send_message_to_agent      — 向任意已知 session 发送 P2P 消息
-  4. reply_to_message           — 回复收到的 query 消息
-  5. get_subagent_status        — 查询子 agent 状态（只读，不取消、不收割）
-  6. reap_subagent              — 对已结束的子任务 waitpid：取回完整结果并收割 zombie、删工作区
-  7. cancel_subagent            — 取消正在运行的子 agent
+  3. list_agents                — 系统级进程表快照（按 scope 过滤，用于寻址 P2P）
+  4. send_message_to_agent      — 向任意已知 session 发送 P2P 消息
+  5. reply_to_message           — 回复收到的 query 消息
+  6. get_subagent_status        — 查询子 agent 状态（只读，不取消、不收割）
+  7. reap_subagent              — 对已结束的子任务 waitpid：取回完整结果并收割 zombie、删工作区
+  8. cancel_subagent            — 取消正在运行的子 agent
 
 设计原则：
 - 工具本身不阻塞：create_subagent 立即返回 {subagent_id, status:"running"}
@@ -30,12 +31,40 @@ import uuid
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from system.multi_agent.constants import METADATA_KEY_AGENT_MESSAGE, P2P_REQUEST_FRONTEND_TAG
 
 if TYPE_CHECKING:
-    from system.kernel.core_pool import CorePool
+    from system.kernel.core_pool import CoreEntry, CorePool
     from system.kernel.scheduler import KernelScheduler
 
 logger = logging.getLogger(__name__)
+
+
+def _guard_subagent_parent(
+    core_pool: "CorePool",
+    *,
+    exec_ctx: Dict[str, Any],
+    entry: "CoreEntry",
+) -> Optional[ToolResult]:
+    """仅创建该 sub 的父会话可执行 get / reap / cancel。"""
+    my_sid = str(exec_ctx.get("session_id") or "").strip()
+    if not my_sid:
+        return ToolResult(
+            success=False,
+            message="缺少 __execution_context__.session_id，无法校验父权",
+            error="MISSING_EXECUTION_CONTEXT",
+        )
+    parent = (entry.parent_session_id or "").strip()
+    if not parent:
+        return None
+    if parent != my_sid:
+        return ToolResult(
+            success=False,
+            message="无权操作该子 Agent：仅创建该子任务的父会话可执行此操作",
+            error="FORBIDDEN_NOT_YOUR_SUB",
+        )
+    return None
+
 
 # 子 Agent 必须能调用的通信工具，用于向父 Agent 汇报结果。创建 subagent 时若指定了
 # allowed_tools，会自动合并此列表，避免父 Agent 配置遗漏导致子 Agent 无法汇报。
@@ -604,7 +633,7 @@ class CreateParallelSubagentsTool(BaseTool):
 
 
 class SendMessageToAgentTool(BaseTool):
-    """向任意已知 session 发送 P2P 消息（fire-and-forget，可选 require_reply）。"""
+    """向任意已知 session 发送 P2P 消息；默认阻塞至对方 reply_to_message（require_reply=False 为仅投递）。"""
 
     def __init__(self, scheduler: "KernelScheduler") -> None:
         self._scheduler = scheduler
@@ -618,9 +647,10 @@ class SendMessageToAgentTool(BaseTool):
             name="send_message_to_agent",
             description=(
                 "向任意已知 session 发送 P2P 消息。\n\n"
-                "消息立即投递（inject_turn），目标 session 会被唤醒处理消息。\n"
-                "发送方不等待回复，立即返回 message_id。\n"
-                "若 require_reply=True，目标 Agent 应使用 reply_to_message 回复。\n\n"
+                "消息立即投递（inject_turn），目标 session 会被唤醒处理。\n"
+                "- **require_reply=True（默认）**：阻塞当前工具调用，直到对方使用 `reply_to_message` 回复同一 message_id；"
+                "工具结果中包含 `reply_content`。超时见配置 `agent.p2p_reply_timeout_seconds`。\n"
+                "- **require_reply=False**：不等待对方，仅返回 message_id（单向通知）。\n\n"
                 "**子 Agent 注意**：完成结果由系统自动推送，本工具**仅用于向父询问**任务细节、实现要求、澄清歧义，"
                 "**切勿**用于汇报完成，否则会导致重复通知。\n\n"
                 "主 Agent 可用于向子任务补充信息、对子任务发指令、或与其他已知 session 协调。"
@@ -644,33 +674,42 @@ class SendMessageToAgentTool(BaseTool):
                     name="require_reply",
                     type="boolean",
                     description=(
-                        "是否需要对方回复（默认 False）。"
-                        "True 时对方应调用 reply_to_message 返回 correlation_id。"
+                        "是否需要对方回复（默认 True，阻塞直到 reply_to_message 或超时）。"
+                        "设为 False 时仅单向通知，立即返回 message_id。"
                     ),
                     required=False,
-                    default=False,
+                    default=True,
+                ),
+                ToolParameter(
+                    name="reply_timeout_seconds",
+                    type="number",
+                    description=(
+                        "仅当 require_reply=True 时有效：最长等待秒数；"
+                        "不传则使用配置 agent.p2p_reply_timeout_seconds（默认 600）。"
+                    ),
+                    required=False,
                 ),
             ],
             examples=[
                 {
-                    "description": "子 Agent 向父询问任务细节（不用于汇报完成）",
+                    "description": "子 Agent 向父询问任务细节（默认等待回复，不用于汇报完成）",
                     "params": {
                         "session_id": "cli:root",
                         "content": "任务描述中「大厂」具体指哪些公司？是否需要包含外企？",
                     },
                 },
                 {
-                    "description": "向另一个 Agent 发起查询请求（需要回复）",
+                    "description": "仅通知、不要求对方回复（fire-and-forget）",
                     "params": {
                         "session_id": "shuiyuan:Osc7",
-                        "content": "请告知当前水源最热门的技术类帖子前 3 条",
-                        "require_reply": True,
+                        "content": "子任务进度：已拉取日志，正在分析。",
+                        "require_reply": False,
                     },
                 },
             ],
             usage_notes=[
-                "send_message_to_agent 是 fire-and-forget，不等待目标响应",
-                "若需等待回复，在 content 中说明期望，并设置 require_reply=True",
+                "默认 require_reply=True：阻塞至 reply_to_message 或超时；单向通知请显式设 require_reply=False",
+                "对方须用 reply_to_message(correlation_id=你的 message_id) 完成同步回复",
                 "目标 session 必须已存在（在 CorePool 中或可从 checkpoint 恢复）",
                 "子 Agent 可从 __execution_context__.session_id 获取自身 session_id",
                 "子 Agent：完成信号由系统自动推送；本工具只用于询问、澄清、补充协作上下文",
@@ -688,7 +727,15 @@ class SendMessageToAgentTool(BaseTool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         target_session_id = (kwargs.get("session_id") or "").strip()
         content = (kwargs.get("content") or "").strip()
-        require_reply = bool(kwargs.get("require_reply", False))
+        _rr = kwargs.get("require_reply")
+        require_reply = True if _rr is None else bool(_rr)
+        reply_timeout_raw = kwargs.get("reply_timeout_seconds")
+        reply_timeout_seconds: Optional[float] = None
+        if reply_timeout_raw is not None:
+            try:
+                reply_timeout_seconds = float(reply_timeout_raw)
+            except (TypeError, ValueError):
+                reply_timeout_seconds = None
 
         if not target_session_id:
             return ToolResult(
@@ -731,14 +778,20 @@ class SendMessageToAgentTool(BaseTool):
         request = KernelRequest.create(
             text=inject_text,
             session_id=target_session_id,
-            frontend_id="agent_msg",
+            frontend_id=P2P_REQUEST_FRONTEND_TAG,
             priority=-1,
-            metadata={"_agent_message": agent_msg},
+            metadata={METADATA_KEY_AGENT_MESSAGE: agent_msg},
         )
+
+        reply_waiter: Optional[asyncio.Future[str]] = None
+        if require_reply:
+            reply_waiter = self._scheduler.register_p2p_reply_waiter(message_id)
 
         try:
             self._scheduler.inject_turn(request)
         except Exception as exc:
+            if reply_waiter is not None:
+                self._scheduler.cancel_p2p_reply_waiter(message_id)
             logger.exception(
                 "send_message_to_agent: inject_turn failed target=%s: %s",
                 target_session_id,
@@ -758,10 +811,50 @@ class SendMessageToAgentTool(BaseTool):
             require_reply,
         )
 
+        if not require_reply or reply_waiter is None:
+            return ToolResult(
+                success=True,
+                data={"message_id": message_id, "target_session": target_session_id},
+                message=f"消息已发送至 {target_session_id}（message_id={message_id}）",
+            )
+
+        from agent_core.config import get_config
+
+        cfg = get_config()
+        default_to = float(getattr(cfg.agent, "p2p_reply_timeout_seconds", 600))
+        wait_to = (
+            reply_timeout_seconds
+            if reply_timeout_seconds is not None and reply_timeout_seconds > 0
+            else default_to
+        )
+
+        try:
+            reply_text = await asyncio.wait_for(reply_waiter, timeout=wait_to)
+        except asyncio.TimeoutError:
+            self._scheduler.cancel_p2p_reply_waiter(message_id)
+            return ToolResult(
+                success=False,
+                data={"message_id": message_id, "target_session": target_session_id},
+                message=(
+                    f"等待 {target_session_id} 回复超时（{wait_to:.0f}s），"
+                    f"message_id={message_id}"
+                ),
+                error="P2P_REPLY_TIMEOUT",
+            )
+        except asyncio.CancelledError:
+            self._scheduler.cancel_p2p_reply_waiter(message_id)
+            raise
+
         return ToolResult(
             success=True,
-            data={"message_id": message_id, "target_session": target_session_id},
-            message=f"消息已发送至 {target_session_id}（message_id={message_id}）",
+            data={
+                "message_id": message_id,
+                "target_session": target_session_id,
+                "reply_content": reply_text,
+            },
+            message=(
+                f"已收到来自 {target_session_id} 的回复（message_id={message_id}）"
+            ),
         )
 
 
@@ -822,7 +915,7 @@ class ReplyToMessageTool(BaseTool):
             usage_notes=[
                 "correlation_id 即收到消息时的 message_id，可从消息元数据中读取",
                 "sender_session_id 在收到消息时由系统注入（[来自 {sender} 的消息]）",
-                "reply_to_message 也是 fire-and-forget，不等待对方处理完成",
+                "若对方 send_message 时 require_reply=True：只唤醒阻塞中的工具并返回正文，不再向对方会话 inject 重复一轮",
                 "若只是子任务正常完成，不要用 reply_to_message 汇报；完成通知会由系统自动处理",
             ],
             tags=["multi-agent", "p2p", "messaging"],
@@ -869,10 +962,27 @@ class ReplyToMessageTool(BaseTool):
         request = KernelRequest.create(
             text=inject_text,
             session_id=sender_session_id,
-            frontend_id="agent_msg",
+            frontend_id=P2P_REQUEST_FRONTEND_TAG,
             priority=-1,
-            metadata={"_agent_message": agent_msg},
+            metadata={METADATA_KEY_AGENT_MESSAGE: agent_msg},
         )
+
+        # send_message(require_reply=True) 已通过工具返回值送达正文；若再 inject_turn，会在首轮 turn
+        # 结束并 evict 后排队第二轮请求，导致同一 sub 会话再 load Core、多打一轮 LLM（且日志落到
+        # 误用 P2P 标签作 source 的历史问题已修）。存在阻塞等待者时只 complete，不再注入重复 user 轮次。
+        if self._scheduler.has_p2p_reply_waiter(correlation_id):
+            self._scheduler.complete_p2p_reply(correlation_id, content)
+            logger.info(
+                "reply_to_message: p2p waiter only (skip inject) %s → %s correlation_id=%s",
+                my_session_id,
+                sender_session_id,
+                correlation_id,
+            )
+            return ToolResult(
+                success=True,
+                data={"message_id": reply_message_id, "correlation_id": correlation_id},
+                message=f"已唤醒对方阻塞中的 send_message（correlation_id={correlation_id}）",
+            )
 
         try:
             self._scheduler.inject_turn(request)
@@ -887,6 +997,8 @@ class ReplyToMessageTool(BaseTool):
                 message=f"回复投递失败：{exc}",
                 error="INJECT_FAILED",
             )
+
+        self._scheduler.complete_p2p_reply(correlation_id, content)
 
         logger.info(
             "reply_to_message: %s → %s correlation_id=%s",
@@ -903,7 +1015,127 @@ class ReplyToMessageTool(BaseTool):
 
 
 # ---------------------------------------------------------------------------
-# Tool 5: get_subagent_status
+# Tool 5: list_agents（系统级进程表）
+# ---------------------------------------------------------------------------
+
+
+class ListAgentsTool(BaseTool):
+    """列出当前进程内 Agent 会话快照（类 OS 进程表），用于寻址 P2P 与管理子任务。"""
+
+    def __init__(self, core_pool: "CorePool") -> None:
+        self._core_pool = core_pool
+
+    @property
+    def name(self) -> str:
+        return "list_agents"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="list_agents",
+            description=(
+                "列出本 Kernel 进程内活跃的 Agent 会话快照（内存态，重启后清空）。\n\n"
+                "每行含 session_id、parent_session_id、status、profile_mode 等，用于：\n"
+                "- **scope=my_children**：仅自己创建的子会话（sub）\n"
+                "- **scope=namespace**：与当前会话同一命名空间（沿父链归约到根会话的 memory 键）\n"
+                "- **scope=siblings**：与自己同父的其它子会话\n\n"
+                "找到目标 session_id 后，用 send_message_to_agent 发起 P2P。"
+            ),
+            parameters=[
+                ToolParameter(
+                    name="scope",
+                    type="string",
+                    description=(
+                        "my_children | namespace | siblings；默认 namespace。"
+                        "子 Agent（mode=sub）默认不允许 namespace，除非配置开启。"
+                    ),
+                    required=False,
+                ),
+            ],
+            examples=[
+                {
+                    "description": "查看同命名空间下可协作的会话",
+                    "params": {"scope": "namespace"},
+                },
+                {
+                    "description": "仅列出我创建的子任务",
+                    "params": {"scope": "my_children"},
+                },
+            ],
+            usage_notes=[
+                "仅本进程内会话；不含其它机器或已 reap 的 sub",
+                "子 Agent 若需 namespace，需在配置中开启 list_agents_allow_namespace_for_subagent",
+            ],
+            tags=["multi-agent", "subagent", "registry"],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        from agent_core.config import get_config
+
+        from system.multi_agent.registry import (
+            build_full_process_table,
+            filter_agent_rows,
+        )
+
+        raw = (kwargs.get("scope") or "namespace").strip().lower()
+        if raw not in ("my_children", "namespace", "siblings"):
+            scope = "namespace"
+        else:
+            scope = raw  # type: ignore[assignment]
+
+        exec_ctx: Dict[str, Any] = kwargs.get("__execution_context__") or {}
+        caller_sid = str(exec_ctx.get("session_id") or "").strip()
+        if not caller_sid:
+            return ToolResult(
+                success=False,
+                message="缺少当前会话 session_id（__execution_context__ 未注入）",
+                error="MISSING_SESSION",
+            )
+
+        caller_entry = self._core_pool.get_entry(caller_sid)
+        if caller_entry is None:
+            return ToolResult(
+                success=False,
+                message="当前会话不在进程表中（无法列出）",
+                error="CALLER_NOT_IN_POOL",
+            )
+
+        cfg = get_config()
+        prof = caller_entry.profile
+        mode = getattr(prof, "mode", None) or "full"
+        if mode == "sub" and scope == "namespace":
+            if not getattr(cfg.agent, "list_agents_allow_namespace_for_subagent", False):
+                return ToolResult(
+                    success=False,
+                    message=(
+                        "子 Agent 默认不允许 scope=namespace；请使用 my_children 或 siblings，"
+                        "或在配置 agent.list_agents_allow_namespace_for_subagent 中开启"
+                    ),
+                    error="NAMESPACE_SCOPE_FORBIDDEN_FOR_SUB",
+                )
+
+        full = build_full_process_table(self._core_pool)
+        filtered = filter_agent_rows(
+            full,
+            scope=scope,
+            caller_session_id=caller_sid,
+            caller_entry=caller_entry,
+            pool=self._core_pool,
+        )
+
+        return ToolResult(
+            success=True,
+            data={
+                "scope": scope,
+                "caller_session_id": caller_sid,
+                "agents": filtered,
+                "count": len(filtered),
+            },
+            message=f"共 {len(filtered)} 条会话（scope={scope}）",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tool 6: get_subagent_status
 # ---------------------------------------------------------------------------
 
 
@@ -982,6 +1214,13 @@ class GetSubagentStatusTool(BaseTool):
                 error="SUBAGENT_NOT_FOUND",
             )
 
+        exec_ctx = kwargs.get("__execution_context__") or {}
+        denied = _guard_subagent_parent(
+            self._core_pool, exec_ctx=exec_ctx, entry=entry
+        )
+        if denied is not None:
+            return denied
+
         data: Dict[str, Any] = {
             "subagent_id": subagent_id,
             "status": entry.sub_status or "running",
@@ -1010,7 +1249,7 @@ class GetSubagentStatusTool(BaseTool):
 
 
 # ---------------------------------------------------------------------------
-# Tool 6: reap_subagent
+# Tool 7: reap_subagent
 # ---------------------------------------------------------------------------
 
 
@@ -1092,6 +1331,13 @@ class ReapSubagentTool(BaseTool):
                 error="SUBAGENT_NOT_FOUND",
             )
 
+        exec_ctx = kwargs.get("__execution_context__") or {}
+        denied = _guard_subagent_parent(
+            self._core_pool, exec_ctx=exec_ctx, entry=entry
+        )
+        if denied is not None:
+            return denied
+
         status = entry.sub_status or "running"
         if status == "running":
             return ToolResult(
@@ -1131,7 +1377,7 @@ class ReapSubagentTool(BaseTool):
 
 
 # ---------------------------------------------------------------------------
-# Tool 7: cancel_subagent
+# Tool 8: cancel_subagent
 # ---------------------------------------------------------------------------
 
 
@@ -1195,6 +1441,11 @@ class CancelSubagentTool(BaseTool):
                 message=f"未找到 subagent_id={subagent_id}",
                 error="SUBAGENT_NOT_FOUND",
             )
+
+        exec_ctx = kwargs.get("__execution_context__") or {}
+        denied = _guard_subagent_parent(self._core_pool, exec_ctx=exec_ctx, entry=info)
+        if denied is not None:
+            return denied
 
         cancelled = self._core_pool.cancel_sub(sub_session_id)
         final_status = self._core_pool.get_sub_info(sub_session_id)

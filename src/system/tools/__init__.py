@@ -94,6 +94,7 @@ from .subagent_tools import (
     CreateParallelSubagentsTool,
     CreateSubagentTool,
     GetSubagentStatusTool,
+    ListAgentsTool,
     ReapSubagentTool,
     ReplyToMessageTool,
     SendMessageToAgentTool,
@@ -326,6 +327,7 @@ def _build_subagent_tools(
     if mode == "sub":
         tools.append(_LazySchedulerSendMessageTool(core_pool))
         tools.append(_LazySchedulerReplyToMessageTool(core_pool))
+        tools.append(ListAgentsTool(core_pool=core_pool))
     else:
         tools.append(
             CreateSubagentTool(
@@ -344,6 +346,7 @@ def _build_subagent_tools(
         tools.append(GetSubagentStatusTool(core_pool=core_pool))
         tools.append(ReapSubagentTool(core_pool=core_pool))
         tools.append(CancelSubagentTool(core_pool=core_pool))
+        tools.append(ListAgentsTool(core_pool=core_pool))
 
     return tools
 

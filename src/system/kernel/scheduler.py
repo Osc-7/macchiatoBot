@@ -15,16 +15,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional, Union
 
 from agent_core.interfaces import AgentHooks, AgentRunResult
 from agent_core.kernel_interface import KernelRequest
 
 from .output_bus import OutputBus
-from system.multi_agent.constants import P2P_REQUEST_FRONTEND_TAG
+from system.multi_agent.constants import METADATA_KEY_AGENT_MESSAGE, P2P_REQUEST_FRONTEND_TAG
 
 if TYPE_CHECKING:
     from .kernel import AgentKernel
@@ -33,6 +34,71 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _IN_QUEUE_WARN_THRESHOLD = 500
+
+# 子任务完成/失败通知：CorePool._inject_to_parent 使用此前端标签（与 P2P 的 agent_msg 区分）
+_SUBAGENT_LIFECYCLE_FRONTEND_ID = "subagent"
+
+# 与 CorePool._inject_to_parent 生成的通知首行一致（信封缺失时仍可从正文解析子 id）
+_SUBAGENT_LIFECYCLE_LINE_RE = re.compile(
+    r"^\[子任务 (?P<sub_id>[0-9a-fA-F\-]+) (完成|失败)\]",
+    re.MULTILINE,
+)
+
+
+def _child_sub_session_from_subagent_lifecycle_request(
+    request: KernelRequest,
+) -> Optional[str]:
+    """从生命周期 inject 解析 sub:… 子会话 id（兼容 AgentMessage / dict / 正文前缀）。"""
+    md = request.metadata if isinstance(request.metadata, dict) else {}
+    raw = md.get(METADATA_KEY_AGENT_MESSAGE)
+    if raw is not None:
+        from agent_core.kernel_interface.action import AgentMessage
+
+        if isinstance(raw, AgentMessage):
+            sender = (raw.sender_session or "").strip()
+            if sender.startswith("sub:"):
+                return sender
+            sid = (raw.subagent_id or "").strip()
+            if sid:
+                return f"sub:{sid}"
+            return None
+        if isinstance(raw, Mapping):
+            sender = str(raw.get("sender_session") or "").strip()
+            if sender.startswith("sub:"):
+                return sender
+            sid = str(raw.get("subagent_id") or "").strip()
+            if sid:
+                return f"sub:{sid}"
+            return None
+        sender = str(getattr(raw, "sender_session", "") or "").strip()
+        if sender.startswith("sub:"):
+            return sender
+        sid = str(getattr(raw, "subagent_id", "") or "").strip()
+        if sid:
+            return f"sub:{sid}"
+        return None
+    text = request.text or ""
+    m = _SUBAGENT_LIFECYCLE_LINE_RE.match(text.strip())
+    if m:
+        return f"sub:{m.group('sub_id').strip()}"
+    return None
+
+
+def _should_suppress_reaped_subagent_parent_notify(
+    request: KernelRequest, core_pool: "CorePool"
+) -> bool:
+    """丢弃父侧 lifecycle inject：子已 reap，或父已通过 wait_subagent 拿到终态（含子先完成、wait 瞬时返回）。"""
+    _fi = (request.frontend_id or "").strip()
+    if _fi != _SUBAGENT_LIFECYCLE_FRONTEND_ID:
+        return False
+    child_sid = _child_sub_session_from_subagent_lifecycle_request(request)
+    if not child_sid or not child_sid.startswith("sub:"):
+        return False
+    wait_ok = core_pool.should_suppress_lifecycle_inject_after_wait_tool(child_sid)
+    reaped_ok = bool(core_pool.was_subagent_reaped_in_process(child_sid))
+    if wait_ok:
+        return True
+    return reaped_ok
 
 
 def _infer_memory_owner_from_session_id(session_id: str) -> tuple[str, str]:
@@ -147,6 +213,10 @@ class KernelScheduler:
         self._cancelled_sessions: set[str] = set()
         # send_message_to_agent(require_reply=True) 注册的等待：message_id -> Future[回复正文]
         self._p2p_reply_waiters: Dict[str, asyncio.Future[str]] = {}
+        # wait_subagent：sub_session_id -> Future[终态信息]
+        self._subagent_terminal_waiters: Dict[str, asyncio.Future[Dict[str, Any]]] = {}
+        # wait_for_agent_message：接收方 session_id -> Future[P2P 载荷]
+        self._agent_inbox_waiters: Dict[str, asyncio.Future[Dict[str, Any]]] = {}
 
     async def start(self) -> None:
         """启动调度循环和 TTL 扫描后台任务。
@@ -209,6 +279,7 @@ class KernelScheduler:
         except Exception as exc:
             logger.warning("KernelScheduler: evict_all on stop failed: %s", exc)
         finally:
+            self._cancel_subagent_and_inbox_waiters()
             self._cancel_all_p2p_reply_waiters()
             self._out_bus.cancel_all()
         logger.info("KernelScheduler: stopped")
@@ -245,6 +316,100 @@ class KernelScheduler:
             if not fut.done():
                 fut.cancel()
         self._p2p_reply_waiters.clear()
+
+    def _subagent_terminal_result_dict(self, sub_session_id: str) -> Dict[str, Any]:
+        entry = self._core_pool.get_sub_info(sub_session_id)
+        sid = sub_session_id[4:] if sub_session_id.startswith("sub:") else sub_session_id
+        if entry is None:
+            return {"status": "unknown", "subagent_id": sid, "sub_session_id": sub_session_id}
+        out: Dict[str, Any] = {
+            "status": entry.sub_status,
+            "subagent_id": sid,
+            "sub_session_id": sub_session_id,
+        }
+        if entry.sub_result is not None:
+            out["result"] = entry.sub_result
+        if entry.sub_error is not None:
+            out["error"] = entry.sub_error
+        return out
+
+    def register_subagent_terminal_waiter(self, sub_session_id: str) -> asyncio.Future[Dict[str, Any]]:
+        """父会话 wait_subagent：阻塞直至子进入终态（或已终态则立即完成）。"""
+        loop = asyncio.get_running_loop()
+        entry = self._core_pool.get_sub_info(sub_session_id)
+        if entry and entry.sub_status in ("completed", "failed", "cancelled"):
+            fut: asyncio.Future[Dict[str, Any]] = loop.create_future()
+            fut.set_result(self._subagent_terminal_result_dict(sub_session_id))
+            return fut
+        old = self._subagent_terminal_waiters.get(sub_session_id)
+        if old is not None and not old.done():
+            old.cancel()
+        fut = loop.create_future()
+        self._subagent_terminal_waiters[sub_session_id] = fut
+        return fut
+
+    def peek_subagent_terminal_status(self, sub_session_id: str) -> Dict[str, Any]:
+        """只读快照（不注册 waiter），供 wait_subagent(wnohang=True) 等使用。"""
+        return self._subagent_terminal_result_dict(sub_session_id)
+
+    def notify_subagent_terminal_waiter(self, sub_session_id: str) -> bool:
+        """子终态更新后唤醒 wait_subagent（在 inject 父通知之前调用）。
+
+        Returns:
+            True 若本调用唤醒了阻塞中的 wait_subagent（父已通过工具拿到终态，无需再 inject 生命周期文案）。
+        """
+        fut = self._subagent_terminal_waiters.pop(sub_session_id, None)
+        if fut is None or fut.done():
+            return False
+        fut.set_result(self._subagent_terminal_result_dict(sub_session_id))
+        return True
+
+    def register_agent_inbox_waiter(self, session_id: str) -> asyncio.Future[Dict[str, Any]]:
+        """子 Agent wait_for_agent_message：下一条 P2P 投递前注册（同 session 仅保留最新 waiter）。"""
+        loop = asyncio.get_running_loop()
+        old = self._agent_inbox_waiters.get(session_id)
+        if old is not None and not old.done():
+            old.cancel()
+        fut = loop.create_future()
+        self._agent_inbox_waiters[session_id] = fut
+        return fut
+
+    def _maybe_wake_agent_inbox_waiter(self, request: KernelRequest) -> None:
+        """P2P 注入即将被本 session 处理时，先唤醒 wait_for_agent_message。"""
+        if (request.frontend_id or "").strip() != P2P_REQUEST_FRONTEND_TAG:
+            return
+        md = request.metadata if isinstance(request.metadata, dict) else {}
+        raw = md.get(METADATA_KEY_AGENT_MESSAGE)
+        if raw is None:
+            return
+        from agent_core.kernel_interface.action import AgentMessage
+
+        if not isinstance(raw, AgentMessage):
+            return
+        sid = request.session_id
+        fut = self._agent_inbox_waiters.pop(sid, None)
+        if fut is None or fut.done():
+            return
+        agent_msg = raw
+        fut.set_result(
+            {
+                "message_id": agent_msg.message_id,
+                "sender_session": agent_msg.sender_session,
+                "message_type": agent_msg.message_type,
+                "content": request.text or "",
+                "require_reply": agent_msg.require_reply,
+            }
+        )
+
+    def _cancel_subagent_and_inbox_waiters(self) -> None:
+        for fut in list(self._subagent_terminal_waiters.values()):
+            if not fut.done():
+                fut.cancel()
+        self._subagent_terminal_waiters.clear()
+        for fut in list(self._agent_inbox_waiters.values()):
+            if not fut.done():
+                fut.cancel()
+        self._agent_inbox_waiters.clear()
 
     async def _get_session_lock(self, session_id: str) -> asyncio.Lock:
         """
@@ -481,6 +646,24 @@ class KernelScheduler:
                 asyncio.CancelledError("session cancelled before dispatch"),
             )
             return
+
+        if _should_suppress_reaped_subagent_parent_notify(request, self._core_pool):
+            child_sid = _child_sub_session_from_subagent_lifecycle_request(request) or ""
+            logger.info(
+                "KernelScheduler: suppress subagent lifecycle inject (child already reaped) "
+                "parent_session_id=%s child_session_id=%s request_id=%s",
+                session_id,
+                child_sid,
+                request.request_id[:8],
+                extra={
+                    "parent_session_id": session_id,
+                    "child_session_id": child_sid,
+                    "request_id": request.request_id,
+                },
+            )
+            return
+
+        self._maybe_wake_agent_inbox_waiter(request)
 
         self._inflight_sessions[session_id] += 1
         try:

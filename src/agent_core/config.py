@@ -751,9 +751,23 @@ class AgentConfig(BaseModel):
         description="子 Agent 上下文压缩阈值（profile.max_context_tokens）；None 表示不设 profile 层上限，仅受 working memory 约束",
     )
     p2p_reply_timeout_seconds: int = Field(
-        default=600,
+        default=300,
         ge=1,
         description="send_message_to_agent(require_reply=True) 阻塞等待对方 reply_to_message 的最长秒数，超时则工具失败",
+    )
+    subagent_wait_timeout_seconds: int = Field(
+        default=300,
+        ge=1,
+        description="wait_subagent / wait_for_agent_message 默认最长阻塞等待秒数",
+    )
+    subagent_lifecycle_inject_grace_seconds: float = Field(
+        default=3.0,
+        ge=0,
+        description=(
+            "子任务终态后向父会话注入「[子任务 x 完成/失败]」用户消息的延迟秒数；"
+            "给父会话留出调用 wait_subagent 的时间窗口，阻塞式 wait 开始时会取消待注入。"
+            "0 表示不延迟（与旧行为一致，仅建议在单测或无事件循环场景使用）。"
+        ),
     )
     subagent_zombie_ttl_seconds: Optional[float] = Field(
         default=None,

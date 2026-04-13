@@ -71,6 +71,35 @@ def _guard_subagent_parent(
 SUBAGENT_COMMUNICATION_TOOLS = ["send_message_to_agent", "reply_to_message"]
 
 
+def _inherit_tool_policy_from_parent(
+    core_pool: "CorePool",
+    parent_session_id: str,
+    *,
+    add_bash: bool,
+) -> tuple[Optional[List[str]], List[str], str, bool]:
+    """未显式传 allowed_tools 时，从父会话 CoreProfile 继承工具白/黑名单与危险命令策略。
+
+    Returns:
+        (effective_allowed_after_merge, deny_tools_copy, tool_template, allow_dangerous_commands)
+    """
+    entry = core_pool.get_entry(parent_session_id)
+    if entry is None:
+        logger.warning(
+            "inherit_tool_policy_from_parent: parent session not in pool session_id=%s — using default sub profile",
+            parent_session_id,
+            extra={"parent_session_id": parent_session_id},
+        )
+        merged = _merge_allowed_tools_for_subagent(None, add_bash=add_bash)
+        return merged, [], "default", False
+    prof = entry.profile
+    merged = _merge_allowed_tools_for_subagent(
+        prof.allowed_tools, add_bash=add_bash
+    )
+    deny = list(prof.deny_tools) if prof.deny_tools else []
+    tmpl = (prof.tool_template or "default").strip() or "default"
+    return merged, deny, tmpl, bool(prof.allow_dangerous_commands)
+
+
 def _merge_allowed_tools_for_subagent(
     allowed_tools: Optional[List[str]],
     *,
@@ -163,20 +192,42 @@ async def _run_subagent_task(
     max_iter_override = max_iterations if max_iterations else subagent_max_iterations_default
 
     # 构造 subagent 的 CoreProfile（mode="sub"，按 allowed_tools 限制 + 时间/token 上限）
-    # 若配置允许，为子 Agent 开放 bash（执行时仍受 BashSecurity 白名单限制）
-    effective_allowed = _merge_allowed_tools_for_subagent(
-        allowed_tools, add_bash=allow_run_for_subagent
-    )
-    profile = CoreProfile.default_sub(
-        allowed_tools=effective_allowed,
-        frontend_id="subagent",
-        dialog_window_id=subagent_id,
-        max_iterations_override=max_iter_override,
-        max_total_tokens=subagent_max_tokens,
-        max_context_tokens=subagent_max_context_tokens,
-        allow_dangerous_commands=allow_run_for_subagent,
-        tools_config=getattr(config, "tools", None),
-    )
+    # 未传 allowed_tools 时继承父会话工具模板与白/黑名单；显式传参仍以调用方为准
+    if allowed_tools is None:
+        effective_allowed, deny_copy, tool_tmpl, inherit_dangerous = (
+            _inherit_tool_policy_from_parent(
+                core_pool,
+                parent_session_id,
+                add_bash=allow_run_for_subagent,
+            )
+        )
+        allow_cmd = inherit_dangerous or allow_run_for_subagent
+        profile = CoreProfile.default_sub(
+            allowed_tools=effective_allowed,
+            deny_tools=deny_copy,
+            frontend_id="subagent",
+            dialog_window_id=subagent_id,
+            max_iterations_override=max_iter_override,
+            max_total_tokens=subagent_max_tokens,
+            max_context_tokens=subagent_max_context_tokens,
+            allow_dangerous_commands=allow_cmd,
+            tool_template=tool_tmpl,
+            tools_config=getattr(config, "tools", None),
+        )
+    else:
+        effective_allowed = _merge_allowed_tools_for_subagent(
+            allowed_tools, add_bash=allow_run_for_subagent
+        )
+        profile = CoreProfile.default_sub(
+            allowed_tools=effective_allowed,
+            frontend_id="subagent",
+            dialog_window_id=subagent_id,
+            max_iterations_override=max_iter_override,
+            max_total_tokens=subagent_max_tokens,
+            max_context_tokens=subagent_max_context_tokens,
+            allow_dangerous_commands=allow_run_for_subagent,
+            tools_config=getattr(config, "tools", None),
+        )
     # 24h TTL 保护（任务完成后主动 evict，不依赖 TTL 扫描）
     profile.session_expired_seconds = 86400
 
@@ -323,7 +374,8 @@ class CreateSubagentTool(BaseTool):
                     name="allowed_tools",
                     type="array",
                     description=(
-                        "子 Agent 可用的工具名称列表。留空（null）表示使用 sub 模式默认权限。\n\n"
+                        "子 Agent 可用的工具名称列表。**留空（null）时继承父会话的工具模板与白/黑名单**（与父能力对齐）；"
+                        "若显式传入数组，则以该列表为准（系统仍会合并 send_message_to_agent、reply_to_message）。\n\n"
                         "⚠️ 权限配置说明：\n"
                         "- 系统会**自动加入** send_message_to_agent、reply_to_message，确保子 Agent 在需要澄清时能联系父 Agent\n"
                         "- bash 可由配置 command_tools.allow_run_for_subagent 开启，开启后仅可执行白名单内只读命令（禁止管道、重定向与危险命令）\n"
@@ -492,7 +544,7 @@ class CreateParallelSubagentsTool(BaseTool):
                     description=(
                         "任务列表，每项为对象，包含：\n"
                         "  - task (string, 必填): 任务描述\n"
-                        "  - allowed_tools (array, 可选): 工具列表；系统会自动加入 send_message_to_agent、reply_to_message\n"
+                        "  - allowed_tools (array, 可选): 工具列表；省略时继承父会话工具策略；系统会自动加入 send_message_to_agent、reply_to_message\n"
                         "  - context (string, 可选): 背景信息\n"
                         "  - max_iterations (integer, 可选): 最大迭代次数（默认从 config.yaml 的 agent.subagent_max_iterations 读取，配置未设置时默认 50）"
                     ),
@@ -724,6 +776,10 @@ class SendMessageToAgentTool(BaseTool):
         """
         return None
 
+    def _extra_target_validation(self, target_session_id: str) -> Optional[ToolResult]:
+        """子类可检查目标 session（如 sub 已 reap）。"""
+        return None
+
     async def execute(self, **kwargs: Any) -> ToolResult:
         target_session_id = (kwargs.get("session_id") or "").strip()
         content = (kwargs.get("content") or "").strip()
@@ -745,6 +801,10 @@ class SendMessageToAgentTool(BaseTool):
             return ToolResult(
                 success=False, message="缺少 content 参数", error="MISSING_CONTENT"
             )
+
+        extra_tgt = self._extra_target_validation(target_session_id)
+        if extra_tgt is not None:
+            return extra_tgt
 
         exec_ctx: Dict[str, Any] = kwargs.get("__execution_context__") or {}
         sender_session_id: str = exec_ctx.get("session_id", "unknown")
@@ -1015,6 +1075,405 @@ class ReplyToMessageTool(BaseTool):
 
 
 # ---------------------------------------------------------------------------
+# wait_subagent / wait_for_agent_message（类 waitpid / 阻塞 read）
+# ---------------------------------------------------------------------------
+
+
+def _parse_subagent_id_list(kwargs: Dict[str, Any]) -> Optional[List[str]]:
+    """解析 subagent_ids（数组或 JSON 字符串）或单个 subagent_id。"""
+    import json as _json
+
+    raw_multi = kwargs.get("subagent_ids")
+    if isinstance(raw_multi, str):
+        raw_multi = raw_multi.strip()
+        if raw_multi.startswith("["):
+            try:
+                raw_multi = _json.loads(raw_multi)
+            except Exception:
+                raw_multi = None
+    ids: List[str] = []
+    if isinstance(raw_multi, list):
+        ids = [str(x).strip() for x in raw_multi if str(x).strip()]
+    single = (kwargs.get("subagent_id") or "").strip()
+    if not ids and single:
+        ids = [single]
+    if not ids:
+        return None
+    seen: set[str] = set()
+    out: List[str] = []
+    for i in ids:
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out
+
+
+def _is_subagent_terminal_status(status: Optional[str]) -> bool:
+    return status in ("completed", "failed", "cancelled")
+
+
+class WaitSubagentTool(BaseTool):
+    """父会话等待一个或多个子任务进入终态（类 waitpid / wait4）。"""
+
+    def __init__(self, core_pool: "CorePool") -> None:
+        self._core_pool = core_pool
+
+    @property
+    def name(self) -> str:
+        return "wait_subagent"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="wait_subagent",
+            description=(
+                "等待一个或多个子 Agent 进入终态（成功、失败或已取消），类似 waitpid。\n\n"
+                "**wait_mode**：`any` 任一子终态即返回（并行 join 里常用）；`all` 全部终态才返回。\n"
+                "**wnohang**：为 true 时不阻塞，相当于 **WNOHANG**——立即返回各子当前快照；"
+                "可用 `condition_met` 判断是否已满足 wait_mode（任意终态 / 全部终态）。\n\n"
+                "仅 **创建该子任务的父会话** 可调用。不代替 reap；终态后仍需按需 `get_subagent_status` / `reap_subagent`。"
+            ),
+            parameters=[
+                ToolParameter(
+                    name="subagent_id",
+                    type="string",
+                    description="单个 subagent_id；与 subagent_ids 二选一（若只等一个可只填此项）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="subagent_ids",
+                    type="array",
+                    description="多个 subagent_id（字符串数组）；与 subagent_id 二选一；可同时等待并行子任务",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="wait_mode",
+                    type="string",
+                    description='`any`（默认）| `all`：任一终态即返回，或全部终态才返回',
+                    required=False,
+                ),
+                ToolParameter(
+                    name="wnohang",
+                    type="boolean",
+                    description=(
+                        "默认 false。为 true 时不阻塞（WNOHANG）：立刻返回各子状态快照，"
+                        "不消耗主会话后续推理轮次用于空等"
+                    ),
+                    required=False,
+                ),
+                ToolParameter(
+                    name="timeout_seconds",
+                    type="number",
+                    description=(
+                        "最长等待秒数（仅 wnohang=false 时有效）；默认 agent.subagent_wait_timeout_seconds"
+                    ),
+                    required=False,
+                ),
+            ],
+            usage_notes=[
+                "多子并行时传 subagent_ids + wait_mode=any 可节省主会话上下文（一轮工具内 join）",
+                "wnohang=true 用于轮询式探活，不阻塞",
+                "若子任务已结束，阻塞模式会立即返回",
+            ],
+            tags=["multi-agent", "subagent", "sync"],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        from agent_core.config import get_config
+
+        id_list = _parse_subagent_id_list(kwargs)
+        if not id_list:
+            return ToolResult(
+                success=False,
+                message="请提供 subagent_id 或 subagent_ids",
+                error="MISSING_SUBAGENT_ID",
+            )
+
+        raw_mode = str(kwargs.get("wait_mode") or "any").strip().lower()
+        if raw_mode not in ("any", "all"):
+            return ToolResult(
+                success=False,
+                message="wait_mode 须为 any 或 all",
+                error="INVALID_WAIT_MODE",
+            )
+        wait_mode: str = raw_mode
+        wnohang = bool(kwargs.get("wnohang", False))
+
+        exec_ctx: Dict[str, Any] = kwargs.get("__execution_context__") or {}
+
+        sub_sessions: List[str] = []
+        for aid in id_list:
+            sub_session_id = f"sub:{aid}"
+            entry = self._core_pool.get_sub_info(sub_session_id)
+            if entry is None:
+                return ToolResult(
+                    success=False,
+                    message=f"未找到 subagent_id={aid}",
+                    error="SUBAGENT_NOT_FOUND",
+                )
+            denied = _guard_subagent_parent(
+                self._core_pool, exec_ctx=exec_ctx, entry=entry
+            )
+            if denied is not None:
+                return denied
+            sub_sessions.append(sub_session_id)
+
+        def _mark_wait_tool_delivered_terminal(aids: List[str]) -> None:
+            """父本会话已通过阻塞式 wait_subagent 收到终态；抑制迟到 [子任务 x 完成] inject。"""
+            for a in aids:
+                self._core_pool.mark_parent_got_terminal_via_wait_subagent_tool(f"sub:{a}")
+
+        sched = self._core_pool._scheduler
+        if sched is None:
+            return ToolResult(
+                success=False,
+                message="KernelScheduler 未绑定，无法等待",
+                error="SCHEDULER_UNAVAILABLE",
+            )
+
+        cfg = get_config()
+        agent_cfg = getattr(cfg, "agent", None)
+        default_to = float(
+            getattr(agent_cfg, "subagent_wait_timeout_seconds", 600) or 600
+        )
+        traw = kwargs.get("timeout_seconds")
+        try:
+            wait_to = float(traw) if traw is not None else default_to
+        except (TypeError, ValueError):
+            wait_to = default_to
+        if wait_to <= 0:
+            wait_to = default_to
+
+        # ---------- WNOHANG：不阻塞 ----------
+        if wnohang:
+            children: Dict[str, Any] = {}
+            for aid, sub_session_id in zip(id_list, sub_sessions):
+                children[aid] = sched.peek_subagent_terminal_status(sub_session_id)
+            stats = [c.get("status") for c in children.values()]
+            any_term = any(_is_subagent_terminal_status(s) for s in stats)
+            all_term = all(_is_subagent_terminal_status(s) for s in stats)
+            condition_met = any_term if wait_mode == "any" else all_term
+            return ToolResult(
+                success=True,
+                data={
+                    "wnohang": True,
+                    "wait_mode": wait_mode,
+                    "children": children,
+                    "condition_met": condition_met,
+                    "subagent_ids": id_list,
+                },
+                message=(
+                    f"WNOHANG 快照：condition_met={condition_met}（wait_mode={wait_mode}）"
+                ),
+            )
+
+        # 阻塞路径：父即将 wait —— 取消延后「[子任务 x 完成]」注入，终态仅由本工具返回
+        for sid in sub_sessions:
+            self._core_pool.cancel_deferred_subagent_lifecycle_inject(sid)
+
+        # ---------- 阻塞：注册 Future ----------
+        fut_to_aid: Dict[asyncio.Future[Any], str] = {}
+        for aid, sub_session_id in zip(id_list, sub_sessions):
+            fut = sched.register_subagent_terminal_waiter(sub_session_id)
+            fut_to_aid[fut] = aid
+
+        futures = list(fut_to_aid.keys())
+
+        try:
+            if wait_mode == "any":
+                if all(f.done() for f in futures):
+                    # 已全部终态，取列表顺序上第一个已终态的作为主结果
+                    first_aid: Optional[str] = None
+                    for a in id_list:
+                        st = sched.peek_subagent_terminal_status(f"sub:{a}").get("status")
+                        if _is_subagent_terminal_status(
+                            str(st) if st is not None else None
+                        ):
+                            first_aid = a
+                            break
+                    if first_aid is None:
+                        return ToolResult(
+                            success=False,
+                            message="内部状态异常：Future 已完成但无终态子任务",
+                            error="WAIT_SUBAGENT_INTERNAL",
+                        )
+                    payload = sched.peek_subagent_terminal_status(f"sub:{first_aid}")
+                    _mark_wait_tool_delivered_terminal(id_list)
+                    return ToolResult(
+                        success=True,
+                        data={
+                            "wait_mode": "any",
+                            "primary_subagent_id": first_aid,
+                            "primary": payload,
+                            "children": {
+                                a: sched.peek_subagent_terminal_status(f"sub:{a}")
+                                for a in id_list
+                            },
+                            "subagent_ids": id_list,
+                        },
+                        message=f"子任务 {first_aid} 已进入终态（any）",
+                    )
+
+                done, pending = await asyncio.wait(
+                    futures,
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=wait_to,
+                )
+                for p in pending:
+                    if not p.done():
+                        p.cancel()
+                if not done:
+                    for f in futures:
+                        if not f.done():
+                            f.cancel()
+                    return ToolResult(
+                        success=False,
+                        message=(
+                            f"等待任一子任务终态超时（{wait_to:.0f}s），"
+                            f"subagent_ids={id_list}"
+                        ),
+                        error="WAIT_SUBAGENT_TIMEOUT",
+                    )
+                # 至少一个完成
+                done_fut = next(iter(done))
+                first_aid = fut_to_aid[done_fut]
+                try:
+                    primary = done_fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    primary = {"subagent_id": first_aid, "error": str(exc)}
+                _mark_wait_tool_delivered_terminal([first_aid])
+                return ToolResult(
+                    success=True,
+                    data={
+                        "wait_mode": "any",
+                        "primary_subagent_id": first_aid,
+                        "primary": primary,
+                        "children": {
+                            a: sched.peek_subagent_terminal_status(f"sub:{a}")
+                            for a in id_list
+                        },
+                        "subagent_ids": id_list,
+                    },
+                    message=f"子任务 {first_aid} 已进入终态（any）",
+                )
+
+            # wait_mode == all
+            done, pending = await asyncio.wait(
+                futures,
+                return_when=asyncio.ALL_COMPLETED,
+                timeout=wait_to,
+            )
+            if pending:
+                for p in pending:
+                    if not p.done():
+                        p.cancel()
+                return ToolResult(
+                    success=False,
+                    message=(
+                        f"等待全部子任务终态超时（{wait_to:.0f}s），"
+                        f"subagent_ids={id_list}"
+                    ),
+                    error="WAIT_SUBAGENT_TIMEOUT",
+                )
+            children = {fut_to_aid[f]: f.result() for f in futures}
+            _mark_wait_tool_delivered_terminal(id_list)
+            return ToolResult(
+                success=True,
+                data={
+                    "wait_mode": "all",
+                    "children": children,
+                    "subagent_ids": id_list,
+                },
+                message=f"全部 {len(id_list)} 个子任务已进入终态",
+            )
+        except asyncio.CancelledError:
+            raise
+
+
+class WaitForAgentMessageTool(BaseTool):
+    """子 Agent 阻塞等待下一条发向本会话的 P2P 消息（inject_turn 投递前唤醒本工具）。"""
+
+    def __init__(self, core_pool: "CorePool") -> None:
+        self._core_pool = core_pool
+
+    @property
+    def name(self) -> str:
+        return "wait_for_agent_message"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="wait_for_agent_message",
+            description=(
+                "阻塞等待下一条通过 `send_message_to_agent` 发往 **当前 session** 的 P2P 消息。\n"
+                "消息到达后本工具返回摘要；同一轮调度仍会处理该消息以进入上下文。"
+            ),
+            parameters=[
+                ToolParameter(
+                    name="timeout_seconds",
+                    type="number",
+                    description="最长等待秒数；默认 agent.subagent_wait_timeout_seconds（600）",
+                    required=False,
+                ),
+            ],
+            usage_notes=[
+                "仅适用于子 Agent（mode=sub）协作场景",
+                "同一会话重复调用会取消上一个未完成的等待",
+            ],
+            tags=["multi-agent", "subagent", "sync"],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        from agent_core.config import get_config
+
+        exec_ctx: Dict[str, Any] = kwargs.get("__execution_context__") or {}
+        my_sid = str(exec_ctx.get("session_id") or "").strip()
+        if not my_sid:
+            return ToolResult(
+                success=False,
+                message="缺少 __execution_context__.session_id",
+                error="MISSING_SESSION",
+            )
+
+        sched = self._core_pool._scheduler
+        if sched is None:
+            return ToolResult(
+                success=False,
+                message="KernelScheduler 未绑定",
+                error="SCHEDULER_UNAVAILABLE",
+            )
+
+        cfg = get_config()
+        agent_cfg = getattr(cfg, "agent", None)
+        default_to = float(
+            getattr(agent_cfg, "subagent_wait_timeout_seconds", 600) or 600
+        )
+        traw = kwargs.get("timeout_seconds")
+        try:
+            wait_to = float(traw) if traw is not None else default_to
+        except (TypeError, ValueError):
+            wait_to = default_to
+        if wait_to <= 0:
+            wait_to = default_to
+
+        fut = sched.register_agent_inbox_waiter(my_sid)
+        try:
+            data = await asyncio.wait_for(fut, timeout=wait_to)
+        except asyncio.TimeoutError:
+            return ToolResult(
+                success=False,
+                message=f"等待 P2P 消息超时（{wait_to:.0f}s）",
+                error="WAIT_INBOX_TIMEOUT",
+            )
+        except asyncio.CancelledError:
+            raise
+
+        return ToolResult(
+            success=True,
+            data=data,
+            message="已收到一条 P2P 消息",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Tool 5: list_agents（系统级进程表）
 # ---------------------------------------------------------------------------
 
@@ -1208,6 +1667,16 @@ class GetSubagentStatusTool(BaseTool):
         sub_session_id = f"sub:{subagent_id}"
         entry = self._core_pool.get_sub_info(sub_session_id)
         if entry is None:
+            if self._core_pool.was_subagent_reaped_in_process(sub_session_id):
+                return ToolResult(
+                    success=True,
+                    data={
+                        "subagent_id": subagent_id,
+                        "status": "reaped",
+                        "note": "该子任务已在本次 Kernel 进程中 reap，无 zombie 记录",
+                    },
+                    message=f"subagent_id={subagent_id} 已在本 Kernel 进程中 reap",
+                )
             return ToolResult(
                 success=False,
                 message=f"未找到 subagent_id={subagent_id}",

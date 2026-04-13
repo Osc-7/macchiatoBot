@@ -66,6 +66,14 @@ def project_entry_row(
         "in_zombie_table": in_zombie_table,
         "has_loaded_agent": entry.agent is not None,
     }
+    if session_id.startswith("sub:"):
+        row["subagent_id"] = session_id[4:]
+        row["terminal"] = bool(
+            entry.sub_status in ("completed", "failed", "cancelled")
+        )
+    else:
+        row["subagent_id"] = None
+        row["terminal"] = False
     if entry.task_description:
         desc = entry.task_description
         row["task_preview"] = (desc[:120] + "…") if len(desc) > 120 else desc

@@ -106,6 +106,8 @@ flowchart LR
 | `send_message_to_agent` | 向任意 session 发送 P2P 消息；**子 Agent 仅用于向父询问**，不用于汇报完成 |
 | `reply_to_message` | 回复收到的 query 消息（correlation_id 关联） |
 | `cancel_subagent` | **终止**正在运行的子 Agent（不可逆；**不删盘**；释放目录与 completed 相同，需另调 `reap_subagent`）；**仅父会话**可调用 |
+| `wait_subagent` | 父会话等待子终态：**`subagent_ids` 一次多个**；`wait_mode` 为 any 或 all；`wnohang=true` 为 **WNOHANG** 快照不阻塞；不代替 reap |
+| `wait_for_agent_message` | 子 Agent **阻塞**等待下一条 P2P 消息发往本会话 |
 
 ### 收割义务（必做）
 
@@ -113,6 +115,10 @@ flowchart LR
 - **不要**依赖「系统会自动清理」：zombie 在内存中**不会**随会话 TTL 自动回收；不 reap 会长期占用 zombie 表与磁盘工作区。
 - 典型顺序：**按需** `get_subagent_status`（只读全文）→ **务必** `reap_subagent`（收尾）。并行多路：对**每一个**已结束的分支分别 reap（含已 `cancel_subagent` 的分支，若不再需要其目录）。
 - 若仍需从子工作区 `read_file` 拷贝文件，**先拷贝再 reap**；reap 后无法再查询该 id。
+- **已 reap 的子任务**：若完成/失败通知因调度排队晚于 reap，**系统不会再向父会话注入**该条生命周期通知（与「进程已回收不再投递信号」一致）；`get_subagent_status` 对仍记得的 id 会返回 `status=reaped` 以区别于从未创建。
+- **`wait_subagent`**：可传 **`subagent_ids` 并行等多子**；**`wait_mode=any`** 任一终态即返回（类似等到任意子进程结束），**`all`** 则全部终态；**`wnohang=true`** 不阻塞，立即返回各子快照并带 **`condition_met`**（类比 WNOHANG）。默认超时常与 `agent.subagent_wait_timeout_seconds` 一致。
+- **`wait_for_agent_message`**（子 Agent）：可阻塞等待下一条发往本会话的 P2P 消息。
+- **`create_subagent` 未传 `allowed_tools`**：子 Agent **默认继承父会话**的工具模板与白/黑名单；需最小权限时请显式传入 `allowed_tools` 收窄。
 
 ### 使用原则
 

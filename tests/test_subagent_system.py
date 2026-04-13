@@ -16,6 +16,7 @@ def _make_pool():
     scheduler = MagicMock()
     scheduler.inject_turn = MagicMock()
     scheduler.cancel_session_tasks = MagicMock(return_value=True)
+    scheduler.notify_subagent_terminal_waiter = MagicMock(return_value=False)
     pool.set_scheduler(scheduler)
     return pool, scheduler
 
@@ -31,6 +32,169 @@ def _seed_parent_session(pool, session_id: str = "cli:root") -> None:
 
     prof = CoreProfile.default_full(frontend_id="cli", dialog_window_id="root")
     pool._pool[session_id] = CoreEntry(agent=None, profile=prof)
+
+
+class TestWaitSubagentParseIds:
+    def test_parse_single_and_multi(self):
+        from system.tools.subagent_tools import _parse_subagent_id_list
+
+        assert _parse_subagent_id_list({"subagent_id": "abc"}) == ["abc"]
+        assert _parse_subagent_id_list({"subagent_ids": ["x", "y", "x"]}) == ["x", "y"]
+        assert _parse_subagent_id_list({}) is None
+
+
+class TestReapedSubagentNotifySuppress:
+    def test_inject_to_parent_skips_when_child_already_reaped(self):
+        import time
+
+        pool, scheduler = _make_pool()
+        pool.register_sub(
+            sub_session_id="sub:r1",
+            parent_session_id="cli:root",
+            task_description="t",
+        )
+        pool._reaped_subagent_at["sub:r1"] = time.time()
+        entry = pool.get_sub_info("sub:r1")
+        assert entry is not None
+        pool._inject_to_parent("sub:r1", entry, "body")
+        scheduler.inject_turn.assert_not_called()
+
+    def test_should_suppress_scheduler_request_when_reaped(self):
+        from agent_core.kernel_interface.action import AgentMessage
+        from agent_core.kernel_interface import KernelRequest
+        from system.kernel.scheduler import _should_suppress_reaped_subagent_parent_notify
+        from system.multi_agent.constants import METADATA_KEY_AGENT_MESSAGE
+
+        import time as _time
+
+        pool, _ = _make_pool()
+        pool._reaped_subagent_at["sub:x1"] = _time.time()
+        msg = AgentMessage(
+            message_id="m1",
+            sender_session="sub:x1",
+            receiver_session="cli:root",
+            message_type="task",
+            subagent_id="x1",
+        )
+        req = KernelRequest.create(
+            text="hi",
+            session_id="cli:root",
+            frontend_id="subagent",
+            metadata={METADATA_KEY_AGENT_MESSAGE: msg},
+        )
+        assert _should_suppress_reaped_subagent_parent_notify(req, pool) is True
+
+        pool2, _ = _make_pool()
+        req2 = KernelRequest.create(
+            text="hi",
+            session_id="cli:root",
+            frontend_id="agent_msg",
+            metadata={METADATA_KEY_AGENT_MESSAGE: msg},
+        )
+        assert _should_suppress_reaped_subagent_parent_notify(req2, pool2) is False
+
+    def test_should_suppress_accepts_dict_envelope_and_text_fallback(self):
+        """信封被序列化为 dict、或仅能从正文识别时，仍应对已 reap 子会话抑制注入。"""
+        from agent_core.kernel_interface import KernelRequest
+        from system.kernel.scheduler import _should_suppress_reaped_subagent_parent_notify
+        from system.multi_agent.constants import METADATA_KEY_AGENT_MESSAGE
+
+        import time as _time
+
+        pool, _ = _make_pool()
+        pool._reaped_subagent_at["sub:dead-beef"] = _time.time()
+        req_dict = KernelRequest.create(
+            text="x",
+            session_id="cli:root",
+            frontend_id="subagent",
+            metadata={
+                METADATA_KEY_AGENT_MESSAGE: {
+                    "sender_session": "sub:dead-beef",
+                    "receiver_session": "cli:root",
+                    "message_id": "m1",
+                    "message_type": "task",
+                    "subagent_id": "dead-beef",
+                }
+            },
+        )
+        assert _should_suppress_reaped_subagent_parent_notify(req_dict, pool) is True
+
+        pool2, _ = _make_pool()
+        pool2._reaped_subagent_at["sub:cafe-babe"] = _time.time()
+        req_text_only = KernelRequest.create(
+            text=(
+                "[子任务 cafe-babe 完成]\n任务：t\n结果预览：…\n\n"
+                "如需只读完整结果：get_subagent_status(subagent_id=\"cafe-babe\", include_full_result=True)。"
+            ),
+            session_id="cli:root",
+            frontend_id="subagent",
+            metadata={},
+        )
+        assert _should_suppress_reaped_subagent_parent_notify(req_text_only, pool2) is True
+
+    def test_should_suppress_when_subagent_id_missing_but_sender_session_set(self):
+        """仅 sender_session=sub:… 时也必须抑制（旧实现误要求 subagent_id 非空）。"""
+        from agent_core.kernel_interface.action import AgentMessage
+        from agent_core.kernel_interface import KernelRequest
+        from system.kernel.scheduler import _should_suppress_reaped_subagent_parent_notify
+        from system.multi_agent.constants import METADATA_KEY_AGENT_MESSAGE
+
+        import time as _time
+
+        pool, _ = _make_pool()
+        pool._reaped_subagent_at["sub:only-sender"] = _time.time()
+        msg = AgentMessage(
+            message_id="m1",
+            sender_session="sub:only-sender",
+            receiver_session="cli:root",
+            message_type="task",
+            subagent_id=None,
+        )
+        req = KernelRequest.create(
+            text="hi",
+            session_id="cli:root",
+            frontend_id="subagent",
+            metadata={METADATA_KEY_AGENT_MESSAGE: msg},
+        )
+        assert _should_suppress_reaped_subagent_parent_notify(req, pool) is True
+
+    def test_should_suppress_when_parent_marked_via_wait_tool(self):
+        """子先完成、父后调用 wait 瞬时返回时，父已标记，迟到 inject 应抑制。"""
+        from agent_core.kernel_interface.action import AgentMessage
+        from agent_core.kernel_interface import KernelRequest
+        from system.kernel.scheduler import _should_suppress_reaped_subagent_parent_notify
+        from system.multi_agent.constants import METADATA_KEY_AGENT_MESSAGE
+
+        pool, _ = _make_pool()
+        pool.mark_parent_got_terminal_via_wait_subagent_tool("sub:via-wait")
+        msg = AgentMessage(
+            message_id="m1",
+            sender_session="sub:via-wait",
+            receiver_session="cli:root",
+            message_type="task",
+            subagent_id="via-wait",
+        )
+        req = KernelRequest.create(
+            text="[子任务 via-wait 完成]\n",
+            session_id="cli:root",
+            frontend_id="subagent",
+            metadata={METADATA_KEY_AGENT_MESSAGE: msg},
+        )
+        assert _should_suppress_reaped_subagent_parent_notify(req, pool) is True
+
+    def test_on_complete_skips_inject_when_wait_subagent_waiter_woken(self):
+        """父已阻塞在 wait_subagent 时，终态只经工具返回，不再 inject [子任务 完成]。"""
+        pool, scheduler = _make_pool()
+        entry = pool.register_sub(
+            sub_session_id="sub:wait-001",
+            parent_session_id="cli:root",
+            task_description="t",
+        )
+        scheduler.notify_subagent_terminal_waiter = MagicMock(return_value=True)
+        pool.on_sub_complete("sub:wait-001", "done")
+        assert entry.sub_status == "completed"
+        scheduler.inject_turn.assert_not_called()
+        scheduler.notify_subagent_terminal_waiter.assert_called_once_with("sub:wait-001")
 
 
 class TestAgentMessage:
@@ -115,6 +279,35 @@ class TestCorePoolSubagentLifecycle:
         request = scheduler.inject_turn.call_args[0][0]
         assert request.session_id == "cli:root"
         assert "任务完成" in request.text
+
+    @pytest.mark.asyncio
+    async def test_on_complete_defers_inject_when_event_loop_and_grace_positive(self):
+        """有运行中的 loop 且 grace>0 时，生命周期注入应延后而非同步 enqueue。"""
+        pool, scheduler = _make_pool()
+        pool._config.agent.subagent_lifecycle_inject_grace_seconds = 0.06
+        pool.register_sub(
+            sub_session_id="sub:defer-1",
+            parent_session_id="cli:root",
+            task_description="t",
+        )
+        pool.on_sub_complete("sub:defer-1", "done")
+        scheduler.inject_turn.assert_not_called()
+        await asyncio.sleep(0.12)
+        scheduler.inject_turn.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cancel_deferred_lifecycle_inject_skips_later_fire(self):
+        pool, scheduler = _make_pool()
+        pool._config.agent.subagent_lifecycle_inject_grace_seconds = 0.08
+        pool.register_sub(
+            sub_session_id="sub:defer-2",
+            parent_session_id="cli:root",
+            task_description="t",
+        )
+        pool.on_sub_complete("sub:defer-2", "done")
+        pool.cancel_deferred_subagent_lifecycle_inject("sub:defer-2")
+        await asyncio.sleep(0.15)
+        scheduler.inject_turn.assert_not_called()
 
     def test_on_fail_updates_status_and_injects(self):
         pool, scheduler = _make_pool()

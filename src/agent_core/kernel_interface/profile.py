@@ -206,6 +206,7 @@ class CoreProfile:
         cls,
         allowed_tools: Optional[List[str]] = None,
         *,
+        deny_tools: Optional[List[str]] = None,
         frontend_id: str = "",
         dialog_window_id: str = "",
         max_iterations_override: Optional[int] = None,
@@ -226,9 +227,11 @@ class CoreProfile:
             tool_template=template_name,
             tools_config=tools_config,
         )
+        deny_list = list(deny_tools) if deny_tools is not None else []
         return cls(
             mode="sub",
             allowed_tools=allowed_tools,
+            deny_tools=deny_list,
             allow_dangerous_commands=allow_dangerous_commands,
             visible_memory_scopes=["working", "chat"],
             max_context_tokens=max_context_tokens,

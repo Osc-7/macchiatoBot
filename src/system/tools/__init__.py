@@ -35,6 +35,7 @@ from agent_core.tools import (
     SearchToolsTool,
     VersionedToolRegistry,
 )
+from agent_core.tools.base import ToolResult
 from agent_core.memory.chat_history_db import ChatHistoryDB
 
 from .parse_time import ParseTimeTool
@@ -98,6 +99,8 @@ from .subagent_tools import (
     ReapSubagentTool,
     ReplyToMessageTool,
     SendMessageToAgentTool,
+    WaitForAgentMessageTool,
+    WaitSubagentTool,
 )
 from .factory import get_default_tools
 
@@ -328,6 +331,7 @@ def _build_subagent_tools(
         tools.append(_LazySchedulerSendMessageTool(core_pool))
         tools.append(_LazySchedulerReplyToMessageTool(core_pool))
         tools.append(ListAgentsTool(core_pool=core_pool))
+        tools.append(WaitForAgentMessageTool(core_pool=core_pool))
     else:
         tools.append(
             CreateSubagentTool(
@@ -347,6 +351,7 @@ def _build_subagent_tools(
         tools.append(ReapSubagentTool(core_pool=core_pool))
         tools.append(CancelSubagentTool(core_pool=core_pool))
         tools.append(ListAgentsTool(core_pool=core_pool))
+        tools.append(WaitSubagentTool(core_pool=core_pool))
 
     return tools
 
@@ -385,12 +390,25 @@ class _LazySchedulerSendMessageTool(SendMessageToAgentTool):
             raise RuntimeError("KernelScheduler not yet bound to CorePool")
         return s
 
+    def _extra_target_validation(self, target_session_id: str):
+        if target_session_id.startswith("sub:") and self._core_pool.was_subagent_reaped_in_process(
+            target_session_id
+        ):
+            return ToolResult(
+                success=False,
+                message=(
+                    f"目标子会话 {target_session_id} 已在本次 Kernel 进程中 reap，"
+                    "无法再投递 P2P"
+                ),
+                error="TARGET_SUBAGENT_REAPED",
+            )
+        return None
+
     def _check_sender_cancelled(self, sender_session_id: str):
         if not sender_session_id.startswith("sub:"):
             return None
         entry = self._core_pool.get_sub_info(sender_session_id)
         if entry is not None and entry.sub_status == "cancelled":
-            from agent_core.tools.base import ToolResult
             return ToolResult(
                 success=False,
                 message="子 Agent 已被取消，无法发送消息",

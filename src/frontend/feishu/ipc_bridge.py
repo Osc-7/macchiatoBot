@@ -20,7 +20,7 @@ from .interactive_cards import (
     build_tool_call_pending_card,
     build_tool_trace_card,
 )
-from .reply_dispatch import send_feishu_agent_reply
+from .reply_dispatch import send_feishu_agent_final_reply, send_feishu_agent_reply
 from .slash_commands import try_handle_slash_command
 
 """
@@ -679,8 +679,12 @@ class FeishuPushForwarder:
                     if not text:
                         continue
                     try:
-                        await feishu_client.send_text_message(
-                            chat_id=chat_id, text=text
+                        # 与 send_message 主路径一致：按 reply_format 发 Markdown 卡片或纯文本，
+                        # 避免 poll_push 走 send_text_message 的 Markdown→纯文本过滤。
+                        await send_feishu_agent_final_reply(
+                            client=feishu_client,
+                            chat_id=chat_id,
+                            output_text=text,
                         )
                         sent_any = True
                     except Exception as exc:

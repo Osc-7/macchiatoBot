@@ -4,11 +4,13 @@
 
 ## 目录结构
 
-| 路径 | 说明 |
-|------|------|
-| `systemd/*.service.in` | 服务单元**模板**（含占位符，勿直接复制到 `/etc`） |
-| `systemd/macchiato.target` | 聚合目标：一键启动/停止三个服务 |
-| `systemd/install.sh` | 将模板展开为真实路径与用户，并安装到 `/etc/systemd/system/` |
+
+| 路径                         | 说明                                        |
+| -------------------------- | ----------------------------------------- |
+| `systemd/*.service.in`     | 服务单元**模板**（含占位符，勿直接复制到 `/etc`）            |
+| `systemd/macchiato.target` | 聚合目标：一键启动/停止三个服务                          |
+| `systemd/install.sh`       | 将模板展开为真实路径与用户，并安装到 `/etc/systemd/system/` |
+
 
 ## 版本库
 
@@ -28,15 +30,12 @@ git commit -m "Add systemd deploy units and install script"
 ## 前置条件
 
 1. 已克隆仓库，并在**项目根**完成依赖同步（保证存在 `.venv`）：
-
-   ```bash
+  ```bash
    cd /path/to/macchiatoBot
    uv sync --all-groups
    # 或: source init.sh
-   ```
-
+  ```
 2. 按 `config.example.yaml` 准备好本机的 `config.yaml`（及所需环境变量；应用按现有逻辑读取配置）。
-
 3. 运行用户（如 `ubuntu`）对项目目录、`data/`、`logs/` 等有读写权限。
 
 ## 安装 systemd 单元
@@ -67,6 +66,12 @@ sudo systemctl enable --now macchiato-shuiyuan-connector.service
 
 ```bash
 sudo systemctl start macchiato.target
+```
+
+更新代码后请**直接重启需要的服务**，例如三个一起：
+
+```bash
+sudo systemctl restart macchiato-automation.service macchiato-feishu-gateway.service macchiato-shuiyuan-connector.service
 ```
 
 ## 日志与排障

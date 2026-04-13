@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import sys
+
 from frontend.feishu.ws_client import run_ws_client
 
 # 必须在其他导入前配置 logging，避免 lark-oapi 等库先初始化

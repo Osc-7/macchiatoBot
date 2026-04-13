@@ -414,6 +414,7 @@ class NotifyOwnerTool(BaseTool):
 
         try:
             from frontend.feishu.client import FeishuClient
+            from frontend.feishu.reply_dispatch import send_feishu_agent_reply
         except ImportError as e:
             return ToolResult(
                 success=False,
@@ -422,8 +423,15 @@ class NotifyOwnerTool(BaseTool):
             )
 
         try:
-            client = FeishuClient()
-            await client.send_text_message(chat_id=chat_id, text=message)
+            feishu_to = float(getattr(feishu_cfg, "timeout_seconds", None) or 30.0)
+            client = FeishuClient(timeout_seconds=max(feishu_to, 120.0))
+            await send_feishu_agent_reply(
+                client=client,
+                chat_id=chat_id,
+                output_text=message,
+                markdown_card_header_title="通知",
+                reply_phase="final",
+            )
             return ToolResult(
                 success=True, message="已发送飞书通知", data={"sent": True}
             )

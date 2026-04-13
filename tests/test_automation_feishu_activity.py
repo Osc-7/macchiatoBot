@@ -30,15 +30,10 @@ async def test_maybe_notify_feishu_activity_disabled(
 
     called: Dict[str, Any] = {}
 
-    class DummyFeishuClient:
-        def __init__(self, *, timeout_seconds: float = 10.0) -> None:  # noqa: D401
-            called["init_timeout"] = timeout_seconds
+    async def _noop_send_feishu_agent_reply(**kwargs: Any) -> None:  # noqa: ANN401
+        called["would_send"] = True
 
-        async def send_text_message(self, *, chat_id: str, text: str) -> None:  # noqa: D401
-            called["chat_id"] = chat_id
-            called["text"] = text
-
-    monkeypatch.setattr(daemon, "FeishuClient", DummyFeishuClient)
+    monkeypatch.setattr(daemon, "send_feishu_agent_reply", _noop_send_feishu_agent_reply)
 
     record = {
         "timestamp": "2026-03-06T12:00:00",
@@ -48,9 +43,7 @@ async def test_maybe_notify_feishu_activity_disabled(
 
     await daemon._maybe_notify_feishu_activity(record)
 
-    # FeishuClient should never be instantiated when disabled
-    assert "chat_id" not in called
-    assert "text" not in called
+    assert "would_send" not in called
 
 
 @pytest.mark.asyncio
@@ -69,15 +62,12 @@ async def test_maybe_notify_feishu_activity_enabled(
 
     sent: Dict[str, Any] = {}
 
-    class DummyFeishuClient:
-        def __init__(self, *, timeout_seconds: float = 10.0) -> None:  # noqa: D401
-            sent["init_timeout"] = timeout_seconds
+    async def _capture_send_feishu_agent_reply(**kwargs: Any) -> None:  # noqa: ANN401
+        sent["chat_id"] = kwargs.get("chat_id")
+        sent["text"] = kwargs.get("output_text")
+        sent["header"] = kwargs.get("markdown_card_header_title")
 
-        async def send_text_message(self, *, chat_id: str, text: str) -> None:  # noqa: D401
-            sent["chat_id"] = chat_id
-            sent["text"] = text
-
-    monkeypatch.setattr(daemon, "FeishuClient", DummyFeishuClient)
+    monkeypatch.setattr(daemon, "send_feishu_agent_reply", _capture_send_feishu_agent_reply)
 
     record = {
         "timestamp": "2026-03-06T12:00:00",
@@ -92,6 +82,7 @@ async def test_maybe_notify_feishu_activity_enabled(
     await daemon._maybe_notify_feishu_activity(record)
 
     assert sent.get("chat_id") == "chat-automation-123"
+    assert sent.get("header") == "定时任务"
     text = sent.get("text", "")
     assert "cron:sync.course" in text
     assert "课程同步完成" in text

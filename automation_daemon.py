@@ -48,6 +48,7 @@ from system.tools import build_tool_registry
 
 from frontend.feishu.client import FeishuClient
 from frontend.feishu.permission_notify import install_feishu_permission_notify_hook
+from frontend.feishu.reply_dispatch import send_feishu_agent_reply
 
 from system.tools import get_default_tools
 
@@ -346,8 +347,15 @@ async def _maybe_notify_feishu_activity(record: dict[str, Any]) -> None:
     if not text_out.strip():
         return
 
-    client = FeishuClient(timeout_seconds=feishu_cfg.timeout_seconds)
-    await client.send_text_message(chat_id=chat_id, text=text_out)
+    http_timeout = max(float(feishu_cfg.timeout_seconds), 120.0)
+    client = FeishuClient(timeout_seconds=http_timeout)
+    await send_feishu_agent_reply(
+        client=client,
+        chat_id=chat_id,
+        output_text=text_out,
+        markdown_card_header_title="定时任务",
+        reply_phase="final",
+    )
 
 
 async def _main() -> None:

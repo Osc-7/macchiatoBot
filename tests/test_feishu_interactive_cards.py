@@ -124,3 +124,22 @@ def test_assistant_reply_card_summary() -> None:
     assert assistant_reply_card_summary("final", "hello") == "Complete · hello"
     assert assistant_reply_card_summary("segment", "x") == "Segment · x"
     assert assistant_reply_card_summary("streaming", "") == "Streaming"
+
+
+def test_resolve_feishu_chat_id_for_session() -> None:
+    from frontend.feishu.feishu_turn_hooks import resolve_feishu_chat_id_for_session
+
+    assert resolve_feishu_chat_id_for_session("feishu:chat:oc_abc") == "oc_abc"
+    assert resolve_feishu_chat_id_for_session("feishu:user:ou_x") is None
+
+    class _E:
+        feishu_chat_id = "oc_from_entry"
+
+    class _Pool:
+        def get_live_entry(self, sid: str):
+            return _E() if sid == "feishu:user:ou_x" else None
+
+    assert (
+        resolve_feishu_chat_id_for_session("feishu:user:ou_x", core_pool=_Pool())
+        == "oc_from_entry"
+    )

@@ -4,23 +4,15 @@ import asyncio
 import logging
 import threading
 import time
-from dataclasses import replace
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Optional
 
 from agent_core.config import get_config
-from agent_core.interfaces import AgentHooks, AgentRunInput, AgentRunResult
+from agent_core.interfaces import AgentRunInput, AgentRunResult
 from system.automation import AutomationIPCClient, default_socket_path
 
 from .client import FeishuClient
-from .interactive_cards import (
-    AGENT_REPLY_STREAM_ELEMENT_ID,
-    AssistantReplyPhase,
-    build_agent_reply_card_streaming_shell,
-    build_agent_reply_markdown_card,
-    build_tool_call_pending_card,
-    build_tool_trace_card,
-)
-from .reply_dispatch import send_feishu_agent_final_reply, send_feishu_agent_reply
+from .feishu_turn_hooks import FeishuTurnHooksController
+from .reply_dispatch import send_feishu_agent_final_reply
 from .slash_commands import try_handle_slash_command
 
 """
@@ -34,11 +26,6 @@ FeishuPushForwarder：后台轮询 [out] 队列，将 inject_turn 等推送结�
 
 
 logger = logging.getLogger(__name__)
-
-# 助手流式 PATCH：飞书单卡约 10 次/秒上限；过长的防抖会显得「一块一块」卡顿。
-# 缩短定时刷新 + 累积够字符时立即刷新，在限流内尽量顺滑。
-_FEISHU_STREAM_PATCH_DEBOUNCE_S = 0.12
-_FEISHU_STREAM_PATCH_MIN_CHARS = 48
 
 # 全局 push 转发器，供 ws_client 注册会话并启动
 _feishu_push_forwarder: Optional["FeishuPushForwarder"] = None
@@ -182,406 +169,22 @@ class FeishuIPCBridge:
         # 切换/创建对应会话
         await client.switch_session(session_id, create_if_missing=True)
 
-        meta_dict: Dict[str, Any] = metadata or {}
+        meta_dict: Dict[str, Any] = dict(metadata or {})
         chat_id = str(meta_dict.get("feishu_chat_id") or "").strip()
-        feishu_client: Optional[FeishuClient] = None
+        if not chat_id:
+            agent_input = AgentRunInput(text=text, metadata=meta_dict)
+            return await client.run_turn(agent_input, hooks=None)
+
         fei = get_config().feishu
-        if chat_id:
-            # Open API 超时用 feishu.timeout_seconds；长回复/卡片单独保底 120s，避免与 IPC 长超时混用
-            feishu_http_timeout = max(float(fei.timeout_seconds), 120.0)
-            feishu_client = FeishuClient(timeout_seconds=feishu_http_timeout)
-
-        tool_trace_cards_enabled = bool(chat_id and fei.tool_trace_cards_enabled)
-        _rf = (fei.reply_format or "markdown_card").strip().lower()
-        stream_reply = bool(
-            chat_id
-            and feishu_client
-            and _rf == "markdown_card"
-            and bool(getattr(fei, "assistant_reply_stream", True))
+        feishu_http_timeout = max(float(fei.timeout_seconds), 120.0)
+        ctrl = FeishuTurnHooksController(
+            chat_id=chat_id,
+            timeout_seconds=feishu_http_timeout,
+            markdown_header_title="回复",
         )
-        use_cardkit_stream = bool(
-            stream_reply and bool(getattr(fei, "assistant_cardkit_stream", True))
-        )
-        # tool_call_id -> {name, arguments}；tool_result 时弹出
-        pending_tool_args: Dict[str, Dict[str, Any]] = {}
-        # tool_call 发出的「running」卡片对应 message_id，tool_result 时 PATCH 为结果卡（同一条消息）
-        pending_tool_message_ids: Dict[str, str] = {}
-
-        # 累积当前 LLM 调用的可见回复内容；stream_reply 时同一条卡片 PATCH 更新（类流式）。
-        assistant_buffer: str = ""
-        assistant_stream_mid: str = ""
-        # 已成功 PATCH 到卡片上的 buffer 长度（用于按字符增量触发刷新）
-        assistant_stream_patched_len: int = 0
-        assistant_debounce_task: Optional[asyncio.Task] = None
-        # CardKit 官方流式：card_id + PUT content（sequence 递增）；失败则 ck_fallback 走消息 PATCH
-        ck_card_id: str = ""
-        ck_seq: int = 0
-        ck_fallback: bool = False
-
-        def _ck_next_seq() -> int:
-            nonlocal ck_seq
-            ck_seq += 1
-            return ck_seq
-
-        async def _cancel_assistant_debounce() -> None:
-            nonlocal assistant_debounce_task
-            t = assistant_debounce_task
-            assistant_debounce_task = None
-            if t is not None and not t.done():
-                t.cancel()
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
-
-        async def _apply_assistant_reply_stream_card(
-            *,
-            reply_phase: AssistantReplyPhase = "streaming",
-        ) -> None:
-            nonlocal assistant_stream_mid
-            if not feishu_client or not chat_id:
-                return
-            body = assistant_buffer
-            if not body:
-                return
-            card = build_agent_reply_markdown_card(
-                body, header_title="回复", reply_phase=reply_phase
-            )
-            try:
-                if assistant_stream_mid:
-                    await feishu_client.patch_interactive_card_message(
-                        message_id=assistant_stream_mid, card=card
-                    )
-                else:
-                    mid = await feishu_client.send_interactive_card(
-                        chat_id=chat_id, card=card
-                    )
-                    if mid:
-                        assistant_stream_mid = mid
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("feishu assistant stream card failed: %s", exc)
-
-        async def _apply_stream_patch_and_mark() -> None:
-            nonlocal assistant_stream_patched_len
-            await _apply_assistant_reply_stream_card(reply_phase="streaming")
-            assistant_stream_patched_len = len(assistant_buffer)
-
-        async def _ck_put_buffer() -> None:
-            nonlocal assistant_stream_patched_len
-            if not ck_card_id or not feishu_client:
-                return
-            text = assistant_buffer
-            if not text:
-                return
-            if len(text) > 100_000:
-                text = text[:100_000]
-            await feishu_client.cardkit_put_streaming_text_content(
-                card_id=ck_card_id,
-                element_id=AGENT_REPLY_STREAM_ELEMENT_ID,
-                content=text,
-                sequence=_ck_next_seq(),
-            )
-            assistant_stream_patched_len = len(assistant_buffer)
-
-        async def _ck_close_streaming_card(
-            last_plain: str,
-            *,
-            close_kind: Literal["segment", "final"],
-        ) -> None:
-            nonlocal ck_card_id, ck_seq, assistant_stream_patched_len
-            if not ck_card_id or not feishu_client:
-                return
-            text = last_plain or ""
-            if len(text) > 100_000:
-                text = text[:100_000]
-            phase: AssistantReplyPhase = (
-                "final" if close_kind == "final" else "segment"
-            )
-            # 仅 PATCH config 无法更新标题区 text_tag，流式壳会一直是 Streaming；需全量 PUT 卡片。
-            card = build_agent_reply_markdown_card(
-                text, header_title="回复", reply_phase=phase
-            )
-            cfg = card.setdefault("config", {})
-            cfg["streaming_mode"] = False
-            cfg.pop("streaming_config", None)
-            await feishu_client.cardkit_replace_card_entity(
-                card_id=ck_card_id,
-                card=card,
-                sequence=_ck_next_seq(),
-            )
-            ck_card_id = ""
-            ck_seq = 0
-            assistant_stream_patched_len = 0
-
-        async def _ck_bootstrap() -> None:
-            nonlocal ck_card_id, ck_fallback, ck_seq, assistant_stream_patched_len
-            fc = feishu_client
-            if not fc or not chat_id:
-                return
-            try:
-                shell = build_agent_reply_card_streaming_shell(reply_phase="streaming")
-                cid = await fc.create_cardkit_card_entity(card=shell)
-                await fc.send_message_with_card_id(chat_id=chat_id, card_id=cid)
-                ck_card_id = cid
-                ck_seq = 0
-                await _ck_put_buffer()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "feishu CardKit stream unavailable, fallback to message PATCH: %s",
-                    exc,
-                )
-                ck_fallback = True
-                ck_card_id = ""
-                ck_seq = 0
-                await _apply_stream_patch_and_mark()
-
-        async def _flush_assistant_buffer_legacy() -> None:
-            nonlocal assistant_buffer
-            if not feishu_client or not chat_id:
-                assistant_buffer = ""
-                return
-            text_out = assistant_buffer.strip()
-            if not text_out:
-                assistant_buffer = ""
-                return
-            try:
-                await send_feishu_agent_reply(
-                    client=feishu_client,
-                    chat_id=chat_id,
-                    output_text=text_out,
-                    markdown_card_header_title="回复",
-                    reply_phase="segment",
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "failed to send feishu intermediate assistant message: %s", exc
-                )
-            finally:
-                assistant_buffer = ""
-
-        async def _end_assistant_segment_before_tools() -> None:
-            """进入工具调用 / 下一轮 LLM 前，结束当前助手文本段在飞书侧的展示状态。"""
-            nonlocal assistant_buffer, assistant_stream_mid, assistant_stream_patched_len, ck_card_id, ck_seq
-            await _cancel_assistant_debounce()
-            if not assistant_buffer.strip():
-                assistant_buffer = ""
-                assistant_stream_mid = ""
-                assistant_stream_patched_len = 0
-                ck_card_id = ""
-                ck_seq = 0
-                return
-            if stream_reply:
-                if use_cardkit_stream and not ck_fallback and ck_card_id:
-                    await _ck_close_streaming_card(
-                        assistant_buffer, close_kind="segment"
-                    )
-                    assistant_buffer = ""
-                    assistant_stream_mid = ""
-                    return
-                if assistant_stream_mid:
-                    await _apply_assistant_reply_stream_card(reply_phase="segment")
-                else:
-                    await _flush_assistant_buffer_legacy()
-                    assistant_buffer = ""
-                    assistant_stream_mid = ""
-                    assistant_stream_patched_len = 0
-                    return
-                assistant_buffer = ""
-                assistant_stream_mid = ""
-                assistant_stream_patched_len = 0
-            else:
-                await _flush_assistant_buffer_legacy()
-
-        async def _on_assistant_delta(delta: str) -> None:
-            nonlocal assistant_buffer, assistant_debounce_task
-            if not delta:
-                return
-            assistant_buffer += delta
-            if not stream_reply or not feishu_client or not chat_id:
-                return
-
-            if use_cardkit_stream and not ck_fallback:
-                if not ck_card_id:
-                    await _ck_bootstrap()
-                    return
-                pending_chars = len(assistant_buffer) - assistant_stream_patched_len
-                if pending_chars >= _FEISHU_STREAM_PATCH_MIN_CHARS:
-                    await _cancel_assistant_debounce()
-                    await _ck_put_buffer()
-                    return
-
-                async def _debounced_ck() -> None:
-                    try:
-                        await asyncio.sleep(_FEISHU_STREAM_PATCH_DEBOUNCE_S)
-                        await _ck_put_buffer()
-                    except asyncio.CancelledError:
-                        pass
-
-                await _cancel_assistant_debounce()
-                assistant_debounce_task = asyncio.create_task(_debounced_ck())
-                return
-
-            if not assistant_stream_mid:
-                await _apply_stream_patch_and_mark()
-                return
-
-            pending_chars = len(assistant_buffer) - assistant_stream_patched_len
-            if pending_chars >= _FEISHU_STREAM_PATCH_MIN_CHARS:
-                await _cancel_assistant_debounce()
-                await _apply_stream_patch_and_mark()
-                return
-
-            async def _debounced() -> None:
-                try:
-                    await asyncio.sleep(_FEISHU_STREAM_PATCH_DEBOUNCE_S)
-                    await _apply_stream_patch_and_mark()
-                except asyncio.CancelledError:
-                    pass
-
-            await _cancel_assistant_debounce()
-            assistant_debounce_task = asyncio.create_task(_debounced())
-
-        async def _on_trace_event(evt: Dict[str, Any]) -> None:
-            # 仅在有 chat_id 时才在飞书侧展示中间输出
-            if not feishu_client or not chat_id:
-                return
-            evt_type = str(evt.get("type") or "")
-
-            if evt_type == "tool_call" and tool_trace_cards_enabled:
-                tcid = str(evt.get("tool_call_id") or "").strip()
-                if tcid:
-                    pending_tool_args[tcid] = {
-                        "name": str(evt.get("name") or ""),
-                        "arguments": evt.get("arguments"),
-                    }
-                    try:
-                        name_call = str(evt.get("name") or "").strip() or "unknown"
-                        card_pending = build_tool_call_pending_card(
-                            tool_name=name_call,
-                            arguments=evt.get("arguments"),
-                            tool_call_id=tcid,
-                        )
-                        mid = await feishu_client.send_interactive_card(
-                            chat_id=chat_id, card=card_pending
-                        )
-                        if mid:
-                            pending_tool_message_ids[tcid] = mid
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "failed to send feishu tool_call pending card (tool=%s): %s",
-                            evt.get("name"),
-                            exc,
-                        )
-                return
-
-            if evt_type == "tool_result" and tool_trace_cards_enabled:
-                tcid = str(evt.get("tool_call_id") or "").strip()
-                meta = pending_tool_args.pop(tcid, None) if tcid else None
-                msg_id = (
-                    pending_tool_message_ids.pop(tcid, "") if tcid else ""
-                ).strip()
-                name = str(
-                    evt.get("name") or (meta or {}).get("name") or ""
-                ).strip() or "unknown"
-                try:
-                    dp_raw = evt.get("data_preview")
-                    data_preview = (
-                        str(dp_raw).strip()
-                        if isinstance(dp_raw, str) and dp_raw.strip()
-                        else None
-                    )
-                    args_resolved = (meta or {}).get("arguments")
-                    if args_resolved is None:
-                        args_resolved = evt.get("arguments")
-                    card = build_tool_trace_card(
-                        tool_name=name,
-                        success=bool(evt.get("success")),
-                        message=str(evt.get("message") or ""),
-                        duration_ms=int(evt.get("duration_ms") or 0),
-                        error=evt.get("error"),
-                        data_preview=data_preview,
-                        arguments=args_resolved,
-                        tool_call_id=tcid or None,
-                    )
-                    if msg_id:
-                        try:
-                            await feishu_client.patch_interactive_card_message(
-                                message_id=msg_id, card=card
-                            )
-                        except Exception as patch_exc:  # noqa: BLE001
-                            logger.warning(
-                                "feishu patch tool card failed (tool=%s), send new: %s",
-                                name,
-                                patch_exc,
-                            )
-                            await feishu_client.send_interactive_card(
-                                chat_id=chat_id, card=card
-                            )
-                    else:
-                        await feishu_client.send_interactive_card(
-                            chat_id=chat_id, card=card
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "failed to send feishu tool trace card (tool=%s): %s",
-                        name,
-                        exc,
-                    )
-                return
-
-            # 当进入新一轮 LLM 调用时，若上一轮已经产生了可见回复内容，
-            # 则先将其作为「中间输出」发到飞书，再开始下一轮累积。
-            if evt_type == "llm_request":
-                if assistant_buffer.strip():
-                    await _end_assistant_segment_before_tools()
-                return
-            return
-
         agent_input = AgentRunInput(text=text, metadata=meta_dict)
-        hooks = AgentHooks(
-            on_assistant_delta=_on_assistant_delta,
-            on_trace_event=_on_trace_event,
-        )
-        result = await client.run_turn(agent_input, hooks=hooks)
-
-        await _cancel_assistant_debounce()
-        out_text = (result.output_text or "").strip()
-        if (
-            use_cardkit_stream
-            and not ck_fallback
-            and feishu_client
-            and chat_id
-            and ck_card_id
-            and out_text
-        ):
-            try:
-                await _ck_close_streaming_card(out_text, close_kind="final")
-                meta = dict(result.metadata)
-                meta["feishu_skip_final_reply"] = True
-                result = replace(result, metadata=meta)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("feishu CardKit final close failed: %s", exc)
-        elif (
-            stream_reply
-            and feishu_client
-            and chat_id
-            and assistant_stream_mid
-            and out_text
-        ):
-            try:
-                card = build_agent_reply_markdown_card(
-                    out_text, header_title="回复", reply_phase="final"
-                )
-                await feishu_client.patch_interactive_card_message(
-                    message_id=assistant_stream_mid, card=card
-                )
-                meta = dict(result.metadata)
-                meta["feishu_skip_final_reply"] = True
-                result = replace(result, metadata=meta)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("feishu final assistant stream patch failed: %s", exc)
-
-        return result
+        result = await client.run_turn(agent_input, hooks=ctrl.hooks)
+        return await ctrl.finalize_after_run(result)
 
 
 class FeishuPushForwarder:
@@ -675,6 +278,10 @@ class FeishuPushForwarder:
                 results = await client.poll_push()
                 sent_any = False
                 for pr in results or []:
+                    meta = pr.get("metadata")
+                    if isinstance(meta, dict) and meta.get("feishu_skip_final_reply"):
+                        sent_any = True
+                        continue
                     text = (pr.get("output_text") or "").strip()
                     if not text:
                         continue

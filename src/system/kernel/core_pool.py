@@ -51,6 +51,8 @@ class CoreEntry:
     sub_result: Optional[str] = None
     sub_error: Optional[str] = None
     sub_completed_at: Optional[float] = None
+    # 飞书私聊：首轮用户消息写入，供 inject_turn 解析 chat_id（群聊可从 session_id 解析）
+    feishu_chat_id: Optional[str] = None
 
     def is_expired(self) -> bool:
         """根据 profile.session_expired_seconds 判断是否超时。"""
@@ -1058,12 +1060,38 @@ class CorePool:
             message_type=msg_type,
             subagent_id=self._subagent_id(session_id),
         )
+        inject_md: Dict[str, Any] = {"_agent_message": agent_msg}
+        # 飞书父会话：inject_turn 侧流式卡片 + 工具 trace（与 FeishuIPCBridge 主路径一致）
+        if parent_session_id.startswith("feishu:"):
+            try:
+                from frontend.feishu.feishu_turn_hooks import (
+                    FeishuTurnHooksController,
+                    resolve_feishu_chat_id_for_session,
+                )
+
+                chat_id = resolve_feishu_chat_id_for_session(
+                    parent_session_id, core_pool=self
+                )
+                if chat_id:
+                    ctrl = FeishuTurnHooksController(
+                        chat_id=chat_id,
+                        markdown_header_title="回复",
+                    )
+                    inject_md["_hooks"] = ctrl.hooks
+                    inject_md["_feishu_hook_ctx"] = ctrl
+                    inject_md["feishu_chat_id"] = chat_id
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "CorePool: feishu inject hooks skipped parent=%s: %s",
+                    parent_session_id,
+                    exc,
+                )
         request = KernelRequest.create(
             text=content,
             session_id=parent_session_id,
             frontend_id="subagent",
             priority=-1,
-            metadata={"_agent_message": agent_msg},
+            metadata=inject_md,
         )
         logger.info(
             "CorePool: inject_to_parent message_id=%s session_id=%s parent_session_id=%s message_type=%s content_len=%s",

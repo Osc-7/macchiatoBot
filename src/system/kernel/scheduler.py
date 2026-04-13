@@ -394,13 +394,14 @@ class KernelScheduler:
             turn_id = 0
             run_result = None
             try:
-                # 准备钩子
+                # 准备钩子（inject_turn 可经 metadata 注入 Feishu 流式/trace，见 _feishu_hook_ctx finalize）
                 hooks = None
+                feishu_hook_ctx = None
                 if self._hooks_factory:
                     hooks = self._hooks_factory(request)
                 elif isinstance(request.metadata, dict):
-                    # 允许调用方通过 request.metadata["_hooks"] 直接透传运行时回调
-                    raw_hooks = request.metadata.get("_hooks")
+                    feishu_hook_ctx = request.metadata.pop("_feishu_hook_ctx", None)
+                    raw_hooks = request.metadata.pop("_hooks", None)
                     if isinstance(raw_hooks, AgentHooks):
                         hooks = raw_hooks
 
@@ -431,6 +432,11 @@ class KernelScheduler:
 
                 # Core 级生命周期日志接入（在 prepare_turn 之前注入，确保用户消息被记录）
                 entry = self._core_pool.get_live_entry(session_id)
+                # 飞书 chat_id：供私聊 inject_turn 与工具 execution_context
+                if isinstance(request.metadata, dict) and entry is not None:
+                    fcid = str(request.metadata.get("feishu_chat_id") or "").strip()
+                    if fcid:
+                        entry.feishu_chat_id = fcid
                 core_logger = getattr(entry, "logger", None) if entry is not None else None
                 if core_logger is not None and agent._session_logger is None:
                     agent._session_logger = core_logger  # type: ignore[assignment]
@@ -472,6 +478,8 @@ class KernelScheduler:
                     on_signal=_on_signal,
                     channel_metadata=md_ch or None,
                 )
+                if feishu_hook_ctx is not None:
+                    run_result = await feishu_hook_ctx.finalize_after_run(run_result)
 
                 # 后处理
                 await agent._finalize_turn(run_result)

@@ -1,4 +1,7 @@
-"""飞书交互卡片：权限申请（批准 / 拒绝 / 表单提交精确说明，回传 card.action.trigger）。"""
+"""飞书交互卡片：权限申请（回传 card.action.trigger）。
+
+UI 文案为英文，风格对齐常见 CLI（Codex/bash）：Once / Always / Deny；可选 Note 仅反馈、不授权。
+"""
 
 from __future__ import annotations
 
@@ -35,15 +38,23 @@ def _element_suffix(permission_id: str) -> str:
     return h.lower()
 
 
-def _header_for_resolved(resolved: ResolvedDecision) -> Tuple[str, str, str]:
-    """template, title, subtitle"""
+def _header_for_resolved(
+    resolved: ResolvedDecision,
+    *,
+    allow_persist: Optional[bool] = None,
+) -> Tuple[str, str, str]:
+    """template, title, subtitle（Codex-style: Once / Always / Deny）。"""
     if resolved == ALLOW:
-        return "green", "权限申请（已处理）", "已批准"
+        if allow_persist is True:
+            return "green", "Permission", "Always"
+        if allow_persist is False:
+            return "green", "Permission", "Once"
+        return "green", "Permission", "Approved"
     if resolved == DENY:
-        return "carmine", "权限申请（已处理）", "已拒绝"
+        return "carmine", "Permission", "Denied"
     if resolved == CLARIFY:
-        return "blue", "权限申请（已处理）", "已提交说明"
-    return "orange", "权限申请", "Policy · approval"
+        return "blue", "Permission", "Clarify"
+    return "orange", "Permission", "Pending"
 
 
 def merge_action_value_with_form(
@@ -69,17 +80,31 @@ def merge_action_value_with_form(
     return merged
 
 
+def _parse_bool(v: Any, default: bool = False) -> bool:
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off", ""):
+        return False
+    return default
+
+
 def parse_permission_card_callback(
     raw_val: Any,
     form_value: Optional[Dict[str, Any]] = None,
-) -> Tuple[str, str, Optional[str], str, str, Optional[float], str]:
+) -> Tuple[str, str, Optional[str], str, str, Optional[float], str, bool]:
     """
     解析权限卡片交互（含表单提交的 user_instruction）。
 
     返回：
-    (permission_id, decision, path_prefix, summary_echo, kind_echo, timeout_echo, user_instruction)
+    (permission_id, decision, path_prefix, summary_echo, kind_echo, timeout_echo,
+     user_instruction, persist_acl)
 
-    decision 为 allow | deny | clarify；未提交说明时 user_instruction 为空字符串。
+    persist_acl 仅在 decision==allow 时有意义：来自**人类点击**的按钮（「加白名单」为 True，「本次有效」为 False），非 Agent 生成。
     """
     data = merge_action_value_with_form(raw_val, form_value)
 
@@ -100,12 +125,15 @@ def parse_permission_card_callback(
             timeout_echo = None
     ui = data.get("user_instruction")
     user_instruction = str(ui).strip() if ui is not None else ""
-    return pid, dec, pfx, sum_e, kind_e, timeout_echo, user_instruction
+    persist_acl = _parse_bool(data.get("persist_acl"), default=False)
+    if dec != ALLOW:
+        persist_acl = False
+    return pid, dec, pfx, sum_e, kind_e, timeout_echo, user_instruction, persist_acl
 
 
 def parse_card_action_value(
     raw: Any,
-) -> Tuple[str, str, Optional[str], str, str, Optional[float], str]:
+) -> Tuple[str, str, Optional[str], str, str, Optional[float], str, bool]:
     """向后兼容：仅从 value 解析（无表单）。"""
     return parse_permission_card_callback(raw, None)
 
@@ -119,6 +147,7 @@ def build_permission_request_card(
     path_prefix: Optional[str] = None,
     resolved: ResolvedDecision = None,
     resolved_user_instruction: Optional[str] = None,
+    resolved_persist_acl: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     构建卡片 JSON 2.0（可直接作为 im/v1/messages interactive 的 content 对象）。
@@ -131,43 +160,46 @@ def build_permission_request_card(
     suf = _element_suffix(permission_id)
     summary_t = _truncate(summary, 900)
     kind_t = _truncate(kind, 80)
-    timeout_line = ""
+    timeout_s = ""
     if timeout_seconds is not None:
         try:
-            timeout_line = f"\n- 等待超时（秒）：{int(float(timeout_seconds))}"
+            timeout_s = f"{int(float(timeout_seconds))}s"
         except (TypeError, ValueError):
-            timeout_line = ""
+            timeout_s = ""
 
-    md_lines = [
-        "**权限申请**",
-        f"- 摘要：{summary_t}",
-    ]
+    md_lines = [f"**{summary_t}**"]
     if kind_t:
-        md_lines.append(f"- 类别：{kind_t}")
-    if timeout_line:
-        md_lines.append(timeout_line.strip())
-    md_lines.append(f"- `permission_id`：`{permission_id}`")
+        md_lines.append(f"`{kind_t}`")
+    if timeout_s:
+        md_lines.append(f"`{timeout_s}`")
     if path_prefix:
-        md_lines.append(f"- 批准后写入白名单前缀：`{path_prefix}`")
+        md_lines.append(f"`{path_prefix}`")
+    md_lines.append(f"`{permission_id}`")
 
     if resolved == ALLOW:
-        md_lines.append("**当前选择**：✅ 已批准")
+        if resolved_persist_acl is True:
+            md_lines.append("✅ **Always**")
+        elif resolved_persist_acl is False:
+            md_lines.append("✅ **Once**")
+        else:
+            md_lines.append("✅ Approved")
     elif resolved == DENY:
-        md_lines.append("**当前选择**：❌ 已拒绝")
+        md_lines.append("❌ **Denied**")
     elif resolved == CLARIFY:
-        md_lines.append("**当前选择**：💬 已通过表单提交说明（**本次未批准权限**）")
         ins = (resolved_user_instruction or "").strip()
         if ins:
-            # 避免破坏 markdown：缩进引用块
             safe = ins.replace("\n", "\n> ")
-            md_lines.append(f"\n**用户说明**：\n> {safe}")
+            md_lines.append(f"💬 **Clarify**\n> {safe}")
         else:
-            md_lines.append("\n**用户说明**：（未填写）")
+            md_lines.append("💬 **Clarify** (empty)")
 
     md_content = "\n".join(md_lines)
 
-    tpl, title, subtitle = _header_for_resolved(resolved)
-    summary_preview = _truncate(f"权限 · {summary_t}", 100)
+    tpl, title, subtitle = _header_for_resolved(
+        resolved,
+        allow_persist=resolved_persist_acl if resolved == ALLOW else None,
+    )
+    summary_preview = _truncate(summary_t, 100)
 
     elements: list[Dict[str, Any]] = [
         {
@@ -182,12 +214,27 @@ def build_permission_request_card(
     if resolved is None:
         echo_summary = summary_t
         echo_kind = kind_t
-        value_allow: Dict[str, Any] = {
-            VALUE_KEY: ALLOW,
-            "permission_id": permission_id,
-            "summary_echo": echo_summary,
-            "kind_echo": echo_kind,
-        }
+
+        def _base_allow(persist_acl: bool) -> Dict[str, Any]:
+            # persist_acl 仅嵌入卡片按钮 value，由人类点击回传；LLM 无法写入此 JSON。
+            d: Dict[str, Any] = {
+                VALUE_KEY: ALLOW,
+                "permission_id": permission_id,
+                "summary_echo": echo_summary,
+                "kind_echo": echo_kind,
+                "persist_acl": persist_acl,
+            }
+            if path_prefix:
+                d["path_prefix"] = path_prefix
+            if timeout_seconds is not None:
+                try:
+                    d["timeout_echo"] = float(timeout_seconds)
+                except (TypeError, ValueError):
+                    pass
+            return d
+
+        value_allow_once = _base_allow(False)
+        value_allow_acl = _base_allow(True)
         value_deny: Dict[str, Any] = {
             VALUE_KEY: DENY,
             "permission_id": permission_id,
@@ -199,51 +246,99 @@ def build_permission_request_card(
             "permission_id": permission_id,
             "summary_echo": echo_summary,
             "kind_echo": echo_kind,
+            "persist_acl": False,
         }
         if path_prefix:
-            value_allow["path_prefix"] = path_prefix
             value_deny["path_prefix"] = path_prefix
             value_clarify["path_prefix"] = path_prefix
         if timeout_seconds is not None:
             try:
                 te = float(timeout_seconds)
-                value_allow["timeout_echo"] = te
                 value_deny["timeout_echo"] = te
                 value_clarify["timeout_echo"] = te
             except (TypeError, ValueError):
                 pass
+
+        if path_prefix:
+            approve_columns = [
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "top",
+                    "elements": [
+                        {
+                            "tag": "button",
+                            "element_id": f"a1_{suf}",
+                            "type": "primary_filled",
+                            "size": "medium",
+                            "width": "fill",
+                            "text": {
+                                "tag": "plain_text",
+                                "content": "Once",
+                            },
+                            "behaviors": [
+                                {"type": "callback", "value": value_allow_once}
+                            ],
+                        }
+                    ],
+                },
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "top",
+                    "elements": [
+                        {
+                            "tag": "button",
+                            "element_id": f"a2_{suf}",
+                            "type": "primary_filled",
+                            "size": "medium",
+                            "width": "fill",
+                            "text": {
+                                "tag": "plain_text",
+                                "content": "Always",
+                            },
+                            "behaviors": [
+                                {"type": "callback", "value": value_allow_acl}
+                            ],
+                        }
+                    ],
+                },
+            ]
+        else:
+            approve_columns = [
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "top",
+                    "elements": [
+                        {
+                            "tag": "button",
+                            "element_id": f"a_{suf}",
+                            "type": "primary_filled",
+                            "size": "medium",
+                            "width": "fill",
+                            "text": {
+                                "tag": "plain_text",
+                                "content": "Allow",
+                            },
+                            "behaviors": [
+                                {"type": "callback", "value": value_allow_once}
+                            ],
+                        }
+                    ],
+                },
+            ]
 
         elements.append(
             {
                 "tag": "column_set",
                 "flex_mode": "flow",
                 "background_style": "default",
-                "columns": [
-                    {
-                        "tag": "column",
-                        "width": "weighted",
-                        "weight": 1,
-                        "vertical_align": "top",
-                        "elements": [
-                            {
-                                "tag": "button",
-                                "element_id": f"a_{suf}",
-                                "type": "primary_filled",
-                                "size": "medium",
-                                "width": "fill",
-                                "text": {
-                                    "tag": "plain_text",
-                                    "content": "批准",
-                                },
-                                "behaviors": [
-                                    {
-                                        "type": "callback",
-                                        "value": value_allow,
-                                    }
-                                ],
-                            }
-                        ],
-                    },
+                "columns": approve_columns
+                + [
                     {
                         "tag": "column",
                         "width": "weighted",
@@ -258,7 +353,7 @@ def build_permission_request_card(
                                 "width": "fill",
                                 "text": {
                                     "tag": "plain_text",
-                                    "content": "拒绝",
+                                    "content": "Deny",
                                 },
                                 "behaviors": [
                                     {
@@ -283,17 +378,6 @@ def build_permission_request_card(
                 "vertical_spacing": "medium",
                 "elements": [
                     {
-                        "tag": "markdown",
-                        "content": (
-                            "**给 Agent 更精确的指令**\n"
-                            "在下方填写说明后点击「提交精确说明」。"
-                            "**本次不会授予权限**；文本将回传给 Agent（未填写则仅视为未批准）。"
-                        ),
-                        "text_align": "left",
-                        "text_size": "normal_v2",
-                        "margin": "0px 0px 4px 0px",
-                    },
-                    {
                         "tag": "input",
                         "name": USER_INSTRUCTION_FIELD,
                         "input_type": "multiline_text",
@@ -303,18 +387,18 @@ def build_permission_request_card(
                         "required": False,
                         "placeholder": {
                             "tag": "plain_text",
-                            "content": "例如：允许写入的具体目录、希望执行的完整命令……",
+                            "content": "Optional note (does not grant)",
                         },
                         "label": {
                             "tag": "plain_text",
-                            "content": "你的说明",
+                            "content": "Note",
                         },
                         "label_position": "top",
                         "fallback": {
                             "tag": "fallback_text",
                             "text": {
                                 "tag": "plain_text",
-                                "content": "请升级至飞书 V6.8+ 以使用输入框",
+                                "content": "Feishu V6.8+ required for text input",
                             },
                         },
                     },
@@ -335,7 +419,7 @@ def build_permission_request_card(
                                         "size": "medium",
                                         "text": {
                                             "tag": "plain_text",
-                                            "content": "提交精确说明",
+                                            "content": "Submit",
                                         },
                                         "form_action_type": "submit",
                                         "behaviors": [

@@ -12,6 +12,7 @@ from agent_core.permissions.wait_registry import (
     notify_permission_pending,
     register_permission_wait,
 )
+from agent_core.agent.writable_ephemeral_grants import add_ephemeral_writable_prefix
 from agent_core.agent.writable_roots_store import append_user_writable_prefix
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from agent_core.tools.permission_path_infer import infer_writable_prefix_from_details
@@ -56,7 +57,8 @@ class RequestPermissionTool(BaseTool):
 - 危险 bash（rm -rf、sudo 等）：kind=bash_dangerous_command，details 为 JSON，必须含 command 字段（与将执行的命令完全一致）。人类批准后，用返回的 data.permission_id 与同一 command 再调 bash（一次性）
 
 调用后进程会等待人类在前端选择允许/拒绝；超时默认视为拒绝。
-批准后若提供 path_prefix，将把该绝对路径前缀写入当前用户的持久可写列表。""",
+
+**是否把路径加入持久白名单仅由人类决定**（飞书卡片上「本次有效」vs「加白名单」）。本工具**没有**「是否持久化」类参数；你只能在 summary/details 里说明需求，**不得**在对话里假装已获永久白名单。批准后请看返回的 data.persist_acl（人类选择结果）。""",
             parameters=[
                 ToolParameter(
                     name="summary",
@@ -73,7 +75,7 @@ class RequestPermissionTool(BaseTool):
                 ToolParameter(
                     name="details",
                     type="string",
-                    description='可选 JSON 字符串：如 path、path_prefix、reason；含 path 时批准后会把对应目录前缀写入可写白名单（如 path 为文件则取其父目录）',
+                    description='可选 JSON：path、path_prefix、reason 等；用于推断待审批路径前缀。**是否持久加入白名单不由本字段决定**，由人类在飞书卡片上选择（返回 data.persist_acl）',
                     required=False,
                 ),
                 ToolParameter(
@@ -87,7 +89,7 @@ class RequestPermissionTool(BaseTool):
             usage_notes=[
                 "仅在工具返回 WORKSPACE_WRITE_DENIED、CONFIRMATION_REQUIRED 等且需要人类决策时调用",
                 "bash_dangerous_command：details 必须含 command，与后续 bash 的 command 逐字一致",
-                "前端需调用 resolve_permission(permission_id, decision) 唤醒",
+                "持久白名单 / 仅本次放行：仅人类在飞书卡片上选；Agent 无 persist 参数，以工具返回 data.persist_acl 为准",
             ],
             tags=["权限", "审批"],
         )
@@ -189,20 +191,25 @@ class RequestPermissionTool(BaseTool):
                 register_bash_danger_grant(pid, bc)
 
         prefix_msg = ""
+        persist = bool(getattr(decision, "persist_acl", False))
         if decision.path_prefix and str(decision.path_prefix).strip():
             pfx = str(decision.path_prefix).strip()
             try:
                 src = str(exec_ctx.get("source") or "cli").strip() or "cli"
                 uid = str(exec_ctx.get("user_id") or "root").strip() or "root"
-                append_user_writable_prefix(
-                    cmd_cfg.acl_base_dir, src, uid, pfx, config=cfg
-                )
-                prefix_msg = f" 已持久化可写前缀: {pfx}"
+                if persist:
+                    append_user_writable_prefix(
+                        cmd_cfg.acl_base_dir, src, uid, pfx, config=cfg
+                    )
+                    prefix_msg = f" 已持久化可写前缀: {pfx}"
+                else:
+                    add_ephemeral_writable_prefix(src, uid, pfx, config=cfg)
+                    prefix_msg = f" 本次进程内允许该前缀写入（未写入永久白名单）: {pfx}"
             except Exception as exc:
                 return ToolResult(
                     success=False,
                     error="ACL_PERSIST_FAILED",
-                    message=f"批准但写入 ACL 失败: {exc}",
+                    message=f"批准但应用可写路径失败: {exc}",
                     data={"permission_id": pid},
                 )
 
@@ -213,5 +220,6 @@ class RequestPermissionTool(BaseTool):
                 "permission_id": pid,
                 "path_prefix": decision.path_prefix,
                 "note": decision.note,
+                "persist_acl": persist,
             },
         )

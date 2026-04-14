@@ -332,12 +332,14 @@ class AutomationIPCServer:
             ui_merged: Optional[str] = None
             if clarify_requested:
                 ui_merged = str(params.get("user_instruction") or "").strip()
+            persist_acl = bool(params.get("persist_acl"))
             decision = PermissionDecision(
                 allowed=allowed and not clarify_requested,
                 path_prefix=str(path_prefix).strip() if path_prefix else None,
                 note=None if note_raw is None else str(note_raw),
                 clarify_requested=clarify_requested,
                 user_instruction=ui_merged,
+                persist_acl=persist_acl if allowed and not clarify_requested else False,
             )
             ok = _resolve_permission_wait(pid, decision)
             return {"ok": bool(ok)}
@@ -612,14 +614,18 @@ class AutomationIPCClient:
         note: Optional[str] = None,
         clarify_requested: bool = False,
         user_instruction: Optional[str] = None,
+        persist_acl: bool = False,
     ) -> bool:
-        """在 daemon 进程内调用 resolve_permission（跨进程网关须用此接口）。"""
+        """在 daemon 进程内调用 resolve_permission（跨进程网关须用此接口）。
+
+        persist_acl 应仅由飞书卡片等人类交互回填；勿由自动化逻辑伪造。"""
         payload: Dict[str, Any] = {
             "permission_id": permission_id,
             "allowed": allowed,
             "path_prefix": path_prefix,
             "note": note,
             "clarify_requested": clarify_requested,
+            "persist_acl": persist_acl,
         }
         if user_instruction is not None:
             payload["user_instruction"] = user_instruction

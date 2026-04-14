@@ -38,6 +38,10 @@ class PermissionDecision:
     """用户暂不批准，希望先补充更精确说明后再决定（飞书卡片第三项）。"""
     user_instruction: Optional[str] = None
     """飞书表单「给 Agent 更精确的指令」中用户填写的文本（未填则为空字符串）。"""
+    persist_acl: bool = False
+    """path_prefix 存在时：人类是否选择「加入持久白名单」。
+    True=写入 writable_roots；False=仅进程内临时放行。
+    **须由人类在前端（如飞书卡片「本次有效 / 加白名单」）决定；Agent/模型不得自行设定此字段。**"""
 
 
 _futures: Dict[str, asyncio.Future[PermissionDecision]] = {}
@@ -53,7 +57,9 @@ def register_permission_wait() -> tuple[str, asyncio.Future[PermissionDecision]]
 
 
 def resolve_permission(permission_id: str, decision: PermissionDecision) -> bool:
-    """由前端在用户操作后调用，唤醒挂起的工具。"""
+    """由**人类操作前端**（或单测）在用户裁决后调用，唤醒挂起的工具。
+
+    ``persist_acl`` 仅应由飞书卡片等 UI 根据用户点击写入；勿由 Agent 逻辑伪造。"""
     pid = (permission_id or "").strip()
     fut = _futures.pop(pid, None)
     if fut is None:

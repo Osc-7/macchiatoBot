@@ -13,6 +13,9 @@ from agent_core.permissions.wait_registry import (
     resolve_permission,
     set_permission_notify_hook,
 )
+from agent_core.agent.writable_ephemeral_grants import (
+    clear_ephemeral_writable_grants_for_tests,
+)
 from agent_core.permissions.bash_danger_approvals import (
     clear_bash_danger_grant_for_tests,
     consume_bash_danger_grant,
@@ -65,7 +68,11 @@ async def test_request_permission_allow_with_prefix_persists_acl(
     pid = captured[0]
     ok = resolve_permission(
         pid,
-        PermissionDecision(allowed=True, path_prefix=str(tmp_path / "extra")),
+        PermissionDecision(
+            allowed=True,
+            path_prefix=str(tmp_path / "extra"),
+            persist_acl=True,
+        ),
     )
     assert ok
     result = await task
@@ -108,7 +115,10 @@ async def test_request_permission_bash_dangerous_registers_grant(
             break
     assert captured, "permission_id should be notified"
     pid = captured[0]
-    ok = resolve_permission(pid, PermissionDecision(allowed=True))
+    ok = resolve_permission(
+        pid,
+        PermissionDecision(allowed=True, persist_acl=False),
+    )
     assert ok
     result = await task
     assert result.success
@@ -180,6 +190,54 @@ async def test_request_permission_clarify(patched_get_config):
         assert result.data.get("user_instruction") == ""
     finally:
         set_permission_notify_hook(None)
+
+
+async def test_request_permission_ephemeral_skips_acl_file(patched_get_config):
+    """persist_acl=False 时不写 writable_roots.json，仅进程内临时前缀。"""
+    tmp_path, _c = patched_get_config
+    captured: list[str] = []
+
+    def _notify(pid: str, payload: object) -> None:
+        captured.append(pid)
+
+    set_permission_notify_hook(_notify)
+    tool = RequestPermissionTool()
+    exec_ctx = {"source": "cli", "user_id": "alice"}
+    outside = tmp_path / "outside"
+    outside.mkdir(parents=True, exist_ok=True)
+
+    async def _run():
+        return await tool.execute(
+            summary="write outside",
+            kind="file_write",
+            details=json.dumps({"path": str(outside / "f.txt")}),
+            timeout_seconds=5.0,
+            __execution_context__=exec_ctx,
+        )
+
+    task = asyncio.create_task(_run())
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if captured:
+            break
+    assert captured
+    pid = captured[0]
+    ok = resolve_permission(
+        pid,
+        PermissionDecision(
+            allowed=True,
+            path_prefix=str(outside),
+            persist_acl=False,
+        ),
+    )
+    assert ok
+    result = await task
+    assert result.success
+    assert result.data.get("persist_acl") is False
+    acl_file = tmp_path / "acl" / "cli" / "alice" / "writable_roots.json"
+    assert not acl_file.exists()
+    clear_ephemeral_writable_grants_for_tests()
+    set_permission_notify_hook(None)
 
 
 async def test_request_permission_clarify_includes_user_instruction_in_data(

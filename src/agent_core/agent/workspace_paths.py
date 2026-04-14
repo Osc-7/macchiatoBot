@@ -12,6 +12,7 @@ from agent_core.bash_user_env import render_terminal_like_bootstrap_bash
 from agent_core.config import CommandToolsConfig
 
 from .memory_paths import resolve_memory_owner_paths, validate_logic_namespace_segment
+from .writable_ephemeral_grants import list_ephemeral_writable_prefixes
 from .writable_roots_store import load_user_writable_prefixes
 
 if TYPE_CHECKING:
@@ -64,6 +65,8 @@ def merged_bash_write_root_paths(
         cmd_cfg.acl_base_dir, source, user_id, config=app_config
     )
     user_paths = [Path(p).resolve() for p in user_strs]
+    ephemeral_strs = list_ephemeral_writable_prefixes(source, user_id)
+    ephemeral_paths = [Path(p).resolve() for p in ephemeral_strs]
     mem_paths: List[Path] = []
     if include_canonical_memory_owner and app_config is not None:
         mem = getattr(app_config, "memory", None)
@@ -75,7 +78,7 @@ def merged_bash_write_root_paths(
                 pass
     seen: set[str] = set()
     merged: List[Path] = []
-    for p in from_cfg + user_paths + mem_paths:
+    for p in from_cfg + user_paths + ephemeral_paths + mem_paths:
         key = str(p)
         if key not in seen:
             seen.add(key)

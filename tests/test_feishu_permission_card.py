@@ -22,7 +22,7 @@ from frontend.feishu.permission_card import (
 )
 
 
-def test_build_permission_card_has_form_and_two_buttons() -> None:
+def test_build_permission_card_no_path_two_columns_plus_form() -> None:
     card = build_permission_request_card(
         permission_id="550e8400-e29b-41d4-a716-446655440000",
         summary="写 /tmp",
@@ -43,6 +43,20 @@ def test_build_permission_card_has_form_and_two_buttons() -> None:
     )
 
 
+def test_build_with_path_prefix_three_action_columns() -> None:
+    card = build_permission_request_card(
+        permission_id="550e8400-e29b-41d4-a716-446655440000",
+        summary="写外部",
+        path_prefix="/data/x",
+    )
+    cols = card["body"]["elements"][1]["columns"]
+    assert len(cols) == 3
+    labels = [cols[i]["elements"][0]["text"]["content"] for i in range(3)]
+    assert "Once" in labels
+    assert "Always" in labels
+    assert "Deny" in labels
+
+
 def test_build_resolved_clarify_shows_instruction() -> None:
     card = build_permission_request_card(
         permission_id="p1",
@@ -51,12 +65,12 @@ def test_build_resolved_clarify_shows_instruction() -> None:
         resolved_user_instruction="请只写入 /tmp/a",
     )
     md = card["body"]["elements"][0]["content"]
-    assert "当前选择" in md
+    assert "Clarify" in md
     assert "/tmp/a" in md
 
 
 def test_merge_form_value_into_instruction() -> None:
-    pid, dec, _pfx, _, _, _, ui = parse_permission_card_callback(
+    pid, dec, _pfx, _, _, _, ui, _pacl = parse_permission_card_callback(
         {"permission_id": "abc", "macchiato_permission": CLARIFY},
         {USER_INSTRUCTION_FIELD: "  hello  "},
     )
@@ -66,7 +80,7 @@ def test_merge_form_value_into_instruction() -> None:
 
 
 def test_parse_allow_without_form() -> None:
-    pid, dec, pfx, sum_e, kind_e, te, ui = parse_permission_card_callback(
+    pid, dec, pfx, sum_e, kind_e, te, ui, pacl = parse_permission_card_callback(
         {
             "permission_id": "abc",
             "macchiato_permission": "allow",
@@ -84,6 +98,7 @@ def test_parse_allow_without_form() -> None:
     assert kind_e == "k"
     assert te == 60.0
     assert ui == ""
+    assert pacl is False
 
 
 def test_parse_clarify() -> None:
@@ -127,12 +142,11 @@ async def test_card_callback_resolves_wait_registry(monkeypatch) -> None:
         payload = json.loads(resp.body.decode())
         assert "toast" in payload
         assert payload.get("card", {}).get("type") == "raw"
-        assert payload["card"]["data"]["body"]["elements"][0]["content"].find(
-            "当前选择"
-        ) >= 0
+        assert payload["card"]["data"]["body"]["elements"][0]["content"].find("✅") >= 0
 
         decision = await asyncio.wait_for(fut, timeout=2.0)
         assert decision.allowed is True
+        assert decision.persist_acl is False
     finally:
         set_permission_notify_hook(None)
 

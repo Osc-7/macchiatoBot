@@ -28,12 +28,20 @@ def _resolved_card_from_value(
     raw_val: Any,
     form_value: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    pid, dec, pfx, sum_e, kind_e, timeout_echo, ui = parse_permission_card_callback(
-        raw_val, form_value
-    )
+    (
+        pid,
+        dec,
+        pfx,
+        sum_e,
+        kind_e,
+        timeout_echo,
+        ui,
+        persist_acl,
+    ) = parse_permission_card_callback(raw_val, form_value)
     if not pid or dec not in (ALLOW, DENY, CLARIFY):
         return None
     summary = sum_e or "（无摘要存档）"
+    rp = persist_acl if dec == ALLOW else None
     return build_permission_request_card(
         permission_id=pid,
         summary=summary,
@@ -42,6 +50,7 @@ def _resolved_card_from_value(
         path_prefix=pfx,
         resolved=dec,  # type: ignore[arg-type]
         resolved_user_instruction=ui if dec == CLARIFY else None,
+        resolved_persist_acl=rp,
     )
 
 
@@ -54,9 +63,16 @@ def execute_card_permission_resolution(
 
     飞书网关进程须使用 :func:`resolve_card_via_daemon_ipc`。
     """
-    pid, dec, pfx, sum_e, kind_e, _timeout_echo, ui = parse_permission_card_callback(
-        raw_val, form_value
-    )
+    (
+        pid,
+        dec,
+        pfx,
+        sum_e,
+        kind_e,
+        _timeout_echo,
+        ui,
+        persist_acl,
+    ) = parse_permission_card_callback(raw_val, form_value)
     if not pid or dec not in (ALLOW, DENY, CLARIFY):
         logger.warning(
             "card.action.trigger: bad value pid=%r dec=%r raw=%r",
@@ -83,7 +99,8 @@ def execute_card_permission_resolution(
             PermissionDecision(
                 allowed=True,
                 path_prefix=pfx if pfx else None,
-                note="飞书卡片按钮批准",
+                note="飞书卡片批准",
+                persist_acl=persist_acl,
             ),
         )
     else:
@@ -115,14 +132,19 @@ async def resolve_card_via_daemon_ipc(
     """
     通过 Automation IPC 在 automation_daemon 进程内执行 resolve_permission。
 
-    request_permission 注册的 Future 仅存在于 daemon 内，网关进程不可直接 resolve_permission。
-
     form_value：表单提交时 event.action.form_value（输入框内容）。
     第三元组为成功时用于更新卡片的 JSON 2.0 对象；失败时为 None。
     """
-    pid, dec, pfx, _sum_e, _kind_e, _timeout_echo, ui = parse_permission_card_callback(
-        raw_val, form_value
-    )
+    (
+        pid,
+        dec,
+        pfx,
+        _sum_e,
+        _kind_e,
+        _timeout_echo,
+        ui,
+        persist_acl,
+    ) = parse_permission_card_callback(raw_val, form_value)
     if not pid or dec not in (ALLOW, DENY, CLARIFY):
         logger.warning(
             "card.action.trigger: bad value pid=%r dec=%r raw=%r",
@@ -137,7 +159,7 @@ async def resolve_card_via_daemon_ipc(
     note = (
         "飞书卡片：用户提交精确说明（未批准权限）"
         if clarify_requested
-        else ("飞书卡片按钮批准" if allowed else "飞书卡片按钮拒绝")
+        else ("飞书卡片批准" if allowed else "飞书卡片按钮拒绝")
     )
 
     cfg = get_config()
@@ -159,6 +181,7 @@ async def resolve_card_via_daemon_ipc(
         note=note,
         clarify_requested=clarify_requested,
         user_instruction=ui if clarify_requested else None,
+        persist_acl=persist_acl if allowed else False,
     )
     if not ok:
         logger.info(

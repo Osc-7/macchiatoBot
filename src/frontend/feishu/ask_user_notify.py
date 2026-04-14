@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from agent_core.config import get_config
 from agent_core.permissions.ask_user_registry import set_ask_user_notify_hook
 
-from .ask_user_card import build_ask_user_question_card
+from .ask_user_card import build_ask_user_card_from_registry_snapshot
 from .client import FeishuClient
 
 logger = logging.getLogger(__name__)
@@ -29,11 +29,15 @@ def _format_fallback_text(batch_id: str, payload: Dict[str, Any]) -> str:
             lines.append(f"- {pid}: {pr}")
             if ol:
                 lines.append(f"  选项：{ol}")
-    lines.append("（未收到交互卡片时请检查 automation_daemon 是否已注册 ask_user 通知）")
+    lines.append(
+        "（说明：本应发送可点选的交互卡片；若你只看到本段纯文本，表示卡片接口报错已降级，"
+        "常见原因是回调数据过长。请重启 automation_daemon 后重试，并查看日志中的「ask_user notify: card send failed」。）"
+    )
     return "\n".join(lines)
 
 
-def _on_ask_user_pending(batch_id: str, payload: Dict[str, Any]) -> None:
+async def send_ask_user_feishu_cards(batch_id: str, payload: Dict[str, Any]) -> None:
+    """发送 ask_user 提问卡；飞书网关经 IPC 顺序调用时可保证出现在 tool trace 之后。"""
     chat_id = str(payload.get("feishu_chat_id") or "").strip()
     if not chat_id:
         logger.debug(
@@ -50,45 +54,47 @@ def _on_ask_user_pending(batch_id: str, payload: Dict[str, Any]) -> None:
     custom_label = str(payload.get("custom_option_label") or "").strip() or "其他（请填写具体说明）"
 
     try:
+        cfg = get_config()
+        to = float(getattr(cfg.feishu, "timeout_seconds", 30.0) or 30.0)
+        client = FeishuClient(timeout_seconds=to)
+        qlist = [q for q in questions if isinstance(q, dict)]
+        init_snap: Dict[str, Any] = {
+            "batch_id": batch_id,
+            "questions": qlist,
+            "partial": {},
+            "custom_option_label": custom_label,
+            "done": False,
+        }
+        fallback = _format_fallback_text(batch_id, payload)
+        any_card_ok = False
+        for qi, q in enumerate(qlist):
+            qid = str(q.get("id") or "").strip() or f"q{qi + 1}"
+            card = build_ask_user_card_from_registry_snapshot(init_snap, qid)
+            try:
+                await client.send_interactive_card(chat_id=chat_id, card=card)
+                any_card_ok = True
+            except Exception as card_exc:  # noqa: BLE001
+                logger.warning(
+                    "ask_user notify: card send failed qid=%s: %s",
+                    qid,
+                    card_exc,
+                    exc_info=True,
+                )
+        if not any_card_ok:
+            await client.send_text_message(chat_id=chat_id, text=fallback)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ask_user notify: feishu send failed chat_id=%s: %s", chat_id, exc)
+
+
+def _on_ask_user_pending(batch_id: str, payload: Dict[str, Any]) -> None:
+    """无 IPC 顺序转发时由 daemon 直连飞书（如测试或旧路径）。"""
+    try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         logger.warning("ask_user notify: no running event loop")
         return
 
-    async def _send() -> None:
-        try:
-            cfg = get_config()
-            to = float(getattr(cfg.feishu, "timeout_seconds", 30.0) or 30.0)
-            client = FeishuClient(timeout_seconds=to)
-            total = len(questions)
-            cards: List[Dict[str, Any]] = []
-            for i, q in enumerate(questions):
-                if not isinstance(q, dict):
-                    continue
-                cards.append(
-                    build_ask_user_question_card(
-                        batch_id=batch_id,
-                        question=q,
-                        custom_option_label=custom_label,
-                        question_index=i,
-                        total_questions=total,
-                    )
-                )
-            fallback = _format_fallback_text(batch_id, payload)
-            for card in cards:
-                try:
-                    await client.send_interactive_card(chat_id=chat_id, card=card)
-                except Exception as card_exc:  # noqa: BLE001
-                    logger.warning(
-                        "ask_user notify: card send failed, fallback to text once: %s",
-                        card_exc,
-                    )
-                    await client.send_text_message(chat_id=chat_id, text=fallback)
-                    return
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("ask_user notify: feishu send failed chat_id=%s: %s", chat_id, exc)
-
-    loop.create_task(_send())
+    loop.create_task(send_ask_user_feishu_cards(batch_id, payload))
 
 
 def install_feishu_ask_user_notify_hook() -> None:

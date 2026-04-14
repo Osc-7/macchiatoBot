@@ -170,10 +170,11 @@ async def test_submit_ask_user_fragment_single_question():
     bid, fut, _ = register_ask_user_wait(
         [{"id": "only", "prompt": "?", "options": ["a", "b"]}]
     )
-    ok, detail = submit_ask_user_fragment(
+    ok, detail, snap = submit_ask_user_fragment(
         bid, AskUserAnswer(question_id="only", selected_option="a")
     )
     assert ok and detail == "completed"
+    assert snap is not None and snap.get("done") is True
     assert fut.done()
     decision = fut.result()
     assert len(decision.answers) == 1

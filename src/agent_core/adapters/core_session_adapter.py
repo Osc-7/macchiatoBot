@@ -196,11 +196,34 @@ class CoreSessionAdapter:
             if mapped is not None:
                 await adapter._emit_event(hooks, mapped)
 
+        feishu_fn = hooks.on_feishu_ask_user_notify
+        perm_fn = hooks.on_feishu_permission_notify
+
+        async def on_feishu_ask_user_notify(
+            batch_id: str, payload: Dict[str, Any]
+        ) -> None:
+            if feishu_fn:
+                maybe = feishu_fn(batch_id, payload)
+                if inspect.isawaitable(maybe):
+                    await maybe
+
+        async def on_feishu_permission_notify(
+            permission_id: str, payload: Dict[str, Any]
+        ) -> None:
+            if perm_fn:
+                maybe = perm_fn(permission_id, payload)
+                if inspect.isawaitable(maybe):
+                    await maybe
+
         return AgentHooks(
             on_assistant_delta=on_assistant_delta,
             on_reasoning_delta=on_reasoning_delta,
             on_trace_event=on_trace_event,
             on_event=hooks.on_event,
+            on_feishu_ask_user_notify=on_feishu_ask_user_notify if feishu_fn else None,
+            on_feishu_permission_notify=(
+                on_feishu_permission_notify if perm_fn else None
+            ),
         )
 
     async def finalize_session(self):

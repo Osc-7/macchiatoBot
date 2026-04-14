@@ -11,6 +11,8 @@ ASK_PICK = "pick"
 ASK_CUSTOM = "custom"
 # 表单内输入框 name（单卡内唯一）
 ASK_USER_CUSTOM_FIELD = "macchiato_ask_custom"
+# 多题同卡：每题独立「其他」输入框 name 前缀
+ASK_USER_CUSTOM_Q_PREFIX = "macchiato_custom__"
 
 
 def _truncate(s: str, max_len: int) -> str:
@@ -44,13 +46,21 @@ def merge_ask_user_action_value(
     else:
         merged = {}
     mode = str(merged.get(ASK_USER_VALUE_KEY) or "").strip().lower()
-    if (
-        form_value
-        and isinstance(form_value, dict)
-        and ASK_USER_CUSTOM_FIELD in form_value
-        and mode == ASK_CUSTOM
-    ):
-        merged["custom_text"] = form_value[ASK_USER_CUSTOM_FIELD]
+    if form_value and isinstance(form_value, dict) and mode == ASK_CUSTOM:
+        # 合并卡：回调 value 可能不含 question_id，从首个非空的 macchiato_custom__* 解析
+        for fk in sorted(form_value.keys()):
+            fv = form_value.get(fk)
+            if (
+                isinstance(fk, str)
+                and fk.startswith(ASK_USER_CUSTOM_Q_PREFIX)
+                and fv is not None
+                and str(fv).strip()
+            ):
+                merged["custom_text"] = str(fv).strip()
+                merged["question_id"] = fk[len(ASK_USER_CUSTOM_Q_PREFIX) :]
+                break
+        if not (merged.get("custom_text") or "").strip() and ASK_USER_CUSTOM_FIELD in form_value:
+            merged["custom_text"] = form_value[ASK_USER_CUSTOM_FIELD]
     return merged
 
 
@@ -80,11 +90,14 @@ def _option_button_columns(
     *,
     batch_id: str,
     question_id: str,
-    prompt_echo: str,
     options: List[str],
     suf: str,
 ) -> List[Dict[str, Any]]:
-    """将选项排成多行，每行最多 2 个按钮。"""
+    """将选项排成多行，每行最多 2 个按钮。
+
+    注意：飞书对按钮 behaviors.value 序列化后长度有限制，禁止塞入长题干；
+    仅保留 batch_id / question_id / selected_option。
+    """
     columns: List[Dict[str, Any]] = []
     pair: List[Dict[str, Any]] = []
     for i, opt in enumerate(options):
@@ -94,7 +107,6 @@ def _option_button_columns(
             "batch_id": batch_id,
             "question_id": question_id,
             "selected_option": opt,
-            "prompt_echo": prompt_echo,
         }
         btn = {
             "tag": "button",
@@ -157,11 +169,7 @@ def build_ask_user_question_card(
     prompt_t = _truncate(prompt, 900)
     idx_hint = f"（{question_index + 1}/{total_questions}）" if total_questions > 1 else ""
 
-    md_lines = [
-        f"**{prompt_t}**{idx_hint}",
-        f"`batch_id`: `{batch_id}`",
-        f"`question_id`: `{qid}`",
-    ]
+    md_lines = [f"**{prompt_t}**{idx_hint}"]
     if resolved:
         md_lines.append(f"✅ **{resolved}**")
 
@@ -183,7 +191,6 @@ def build_ask_user_question_card(
             _option_button_columns(
                 batch_id=batch_id,
                 question_id=qid,
-                prompt_echo=prompt_t,
                 options=opts,
                 suf=suf,
             )
@@ -192,7 +199,6 @@ def build_ask_user_question_card(
             ASK_USER_VALUE_KEY: ASK_CUSTOM,
             "batch_id": batch_id,
             "question_id": qid,
-            "prompt_echo": prompt_t,
         }
         elements.append(
             {
@@ -207,7 +213,7 @@ def build_ask_user_question_card(
                         "name": ASK_USER_CUSTOM_FIELD,
                         "input_type": "multiline_text",
                         "rows": 3,
-                        "max_length": 2000,
+                        "max_length": 1000,
                         "width": "fill",
                         "required": False,
                         "placeholder": {
@@ -270,11 +276,15 @@ def build_ask_user_question_card(
             "summary": {"content": summary_preview},
         },
         "header": {
-            "template": "blue",
-            "title": {"tag": "plain_text", "content": "Ask user"},
+            "template": "wathet",
+            "title": {"tag": "plain_text", "content": "请选择"},
             "subtitle": {
                 "tag": "plain_text",
-                "content": "Pending" if resolved is None else "Done",
+                "content": (
+                    f"第 {question_index + 1} / {total_questions} 题"
+                    if total_questions > 1
+                    else ("待选择" if resolved is None else "已完成")
+                ),
             },
             "padding": "12px 14px 12px 14px",
         },
@@ -285,3 +295,57 @@ def build_ask_user_question_card(
             "elements": elements,
         },
     }
+
+
+def _resolved_display_from_partial_row(row: Dict[str, Any]) -> Optional[str]:
+    ct = str(row.get("custom_text") or "").strip()
+    so = str(row.get("selected_option") or "").strip() if row.get("selected_option") else ""
+    if ct:
+        return _truncate(ct, 480)
+    if so:
+        return _truncate(so, 120)
+    return None
+
+
+def build_ask_user_card_from_registry_snapshot(
+    snap: Dict[str, Any], question_id: str
+) -> Dict[str, Any]:
+    """由 :func:`take_ask_user_snapshot` 生成**单题**飞书卡片（多题 batch 下每题一条消息）。"""
+    bid = str(snap.get("batch_id") or "")
+    qs_raw = snap.get("questions") or []
+    if not isinstance(qs_raw, list):
+        qs_raw = []
+    qs_list = [q for q in qs_raw if isinstance(q, dict)]
+    total = len(qs_list)
+    qid_target = str(question_id or "").strip()
+    custom_label = str(
+        snap.get("custom_option_label") or "其他（请填写具体说明）"
+    )
+
+    question: Optional[Dict[str, Any]] = None
+    q_index = 0
+    for i, q in enumerate(qs_list):
+        qidi = str(q.get("id") or "").strip() or f"q{i + 1}"
+        if qidi == qid_target:
+            question = q
+            q_index = i
+            break
+    if question is None:
+        raise ValueError(f"snapshot 中无题目 question_id={question_id!r}")
+
+    pr = snap.get("partial") or {}
+    if not isinstance(pr, dict):
+        pr = {}
+    row = pr.get(qid_target)
+    resolved: Optional[str] = None
+    if isinstance(row, dict):
+        resolved = _resolved_display_from_partial_row(row)
+
+    return build_ask_user_question_card(
+        batch_id=bid,
+        question=question,
+        custom_option_label=custom_label,
+        question_index=q_index,
+        total_questions=total,
+        resolved=resolved,
+    )

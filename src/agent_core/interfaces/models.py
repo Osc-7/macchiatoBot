@@ -43,3 +43,7 @@ class AgentHooks:
     on_reasoning_delta: Optional[Callable[[str], Any]] = None
     on_trace_event: Optional[Callable[[Dict[str, Any]], Any]] = None
     on_event: Optional[Callable[[CoreEvent], Any]] = None
+    # run_turn_stream：daemon 经 IPC 投递 ask_user 卡片，由网关在 trace 之后顺序发送
+    on_feishu_ask_user_notify: Optional[Callable[[str, Dict[str, Any]], Any]] = None
+    # 同上，request_permission 权限卡
+    on_feishu_permission_notify: Optional[Callable[[str, Dict[str, Any]], Any]] = None

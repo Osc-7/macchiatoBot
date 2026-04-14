@@ -91,7 +91,10 @@ class AskUserTool(BaseTool):
             timeout = 600.0
 
         try:
-            batch_id, fut, payload_items = register_ask_user_wait(questions_raw)
+            batch_id, fut, payload_items = register_ask_user_wait(
+                questions_raw,
+                custom_option_label=custom_label or "其他（请填写具体说明）",
+            )
         except ValueError as exc:
             return ToolResult(
                 success=False,

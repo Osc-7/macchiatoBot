@@ -32,7 +32,10 @@ def _format_permission_message(permission_id: str, payload: Dict[str, Any]) -> s
     return "\n".join(lines)
 
 
-def _on_permission_pending(permission_id: str, payload: Dict[str, Any]) -> None:
+async def send_permission_feishu_card(
+    permission_id: str, payload: Dict[str, Any]
+) -> None:
+    """发送权限申请卡；飞书网关经 IPC 顺序调用时可保证出现在 tool trace 之后。"""
     chat_id = str(payload.get("feishu_chat_id") or "").strip()
     if not chat_id:
         logger.debug(
@@ -42,38 +45,40 @@ def _on_permission_pending(permission_id: str, payload: Dict[str, Any]) -> None:
         return
     text = _format_permission_message(permission_id, payload)
     try:
+        cfg = get_config()
+        to = float(getattr(cfg.feishu, "timeout_seconds", 30.0) or 30.0)
+        client = FeishuClient(timeout_seconds=to)
+        pfx = str(payload.get("path_prefix") or "").strip() or None
+        card = build_permission_request_card(
+            permission_id=permission_id,
+            summary=str(payload.get("summary") or ""),
+            kind=str(payload.get("kind") or ""),
+            timeout_seconds=payload.get("timeout_seconds"),
+            path_prefix=pfx,
+        )
+        try:
+            await client.send_interactive_card(chat_id=chat_id, card=card)
+        except Exception as card_exc:  # noqa: BLE001
+            logger.warning(
+                "permission notify: card send failed, fallback to text: %s",
+                card_exc,
+            )
+            await client.send_text_message(chat_id=chat_id, text=text)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "permission notify: feishu send failed chat_id=%s: %s", chat_id, exc
+        )
+
+
+def _on_permission_pending(permission_id: str, payload: Dict[str, Any]) -> None:
+    """无 IPC 顺序转发时由 daemon 直连飞书（如测试或旧路径）。"""
+    try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         logger.warning("permission notify: no running event loop")
         return
 
-    async def _send() -> None:
-        try:
-            cfg = get_config()
-            to = float(getattr(cfg.feishu, "timeout_seconds", 30.0) or 30.0)
-            client = FeishuClient(timeout_seconds=to)
-            pfx = str(payload.get("path_prefix") or "").strip() or None
-            card = build_permission_request_card(
-                permission_id=permission_id,
-                summary=str(payload.get("summary") or ""),
-                kind=str(payload.get("kind") or ""),
-                timeout_seconds=payload.get("timeout_seconds"),
-                path_prefix=pfx,
-            )
-            try:
-                await client.send_interactive_card(chat_id=chat_id, card=card)
-            except Exception as card_exc:  # noqa: BLE001
-                logger.warning(
-                    "permission notify: card send failed, fallback to text: %s",
-                    card_exc,
-                )
-                await client.send_text_message(chat_id=chat_id, text=text)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "permission notify: feishu send failed chat_id=%s: %s", chat_id, exc
-            )
-
-    loop.create_task(_send())
+    loop.create_task(send_permission_feishu_card(permission_id, payload))
 
 
 def install_feishu_permission_notify_hook() -> None:

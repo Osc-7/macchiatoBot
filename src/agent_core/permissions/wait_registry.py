@@ -5,12 +5,30 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 _notify_hook: Optional[Callable[[str, Dict[str, Any]], None]] = None
+
+_permission_ipc_stream_notify: ContextVar[
+    Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]]
+] = ContextVar("permission_ipc_stream_notify", default=None)
+
+
+@asynccontextmanager
+async def permission_ipc_stream_notify_scope(
+    forward: Callable[[str, Dict[str, Any]], Awaitable[None]],
+):
+    """仅在 automation_daemon 处理 ``run_turn_stream`` → ``inject_message`` 时挂接。"""
+    token = _permission_ipc_stream_notify.set(forward)
+    try:
+        yield
+    finally:
+        _permission_ipc_stream_notify.reset(token)
 
 
 def set_permission_notify_hook(
@@ -81,6 +99,15 @@ def cancel_permission_wait(permission_id: str, *, reason: str = "cancelled") -> 
 
 
 def notify_permission_pending(permission_id: str, payload: Dict[str, Any]) -> None:
+    stream_fn = _permission_ipc_stream_notify.get()
+    if stream_fn is not None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("permission notify: ipc stream 需要运行中事件循环")
+            return
+        loop.create_task(stream_fn(permission_id, payload))
+        return
     if _notify_hook is not None:
         try:
             _notify_hook(permission_id, payload)

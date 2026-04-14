@@ -104,6 +104,8 @@ class FeishuTurnHooksController:
         self._hooks = AgentHooks(
             on_assistant_delta=self._on_assistant_delta,
             on_trace_event=self._on_trace_event,
+            on_feishu_ask_user_notify=self._on_feishu_ask_user_notify,
+            on_feishu_permission_notify=self._on_feishu_permission_notify,
         )
 
     @property
@@ -327,6 +329,21 @@ class FeishuTurnHooksController:
 
         await self._cancel_assistant_debounce()
         self._assistant_debounce_task = asyncio.create_task(_debounced())
+
+    async def _on_feishu_ask_user_notify(
+        self, batch_id: str, payload: Dict[str, Any]
+    ) -> None:
+        """由 IPC 流在 tool trace 之后顺序调用，与 daemon 直发飞书解耦。"""
+        from .ask_user_notify import send_ask_user_feishu_cards
+
+        await send_ask_user_feishu_cards(batch_id, payload)
+
+    async def _on_feishu_permission_notify(
+        self, permission_id: str, payload: Dict[str, Any]
+    ) -> None:
+        from .permission_notify import send_permission_feishu_card
+
+        await send_permission_feishu_card(permission_id, payload)
 
     async def _on_trace_event(self, evt: Dict[str, Any]) -> None:
         if not self._feishu_client or not self._chat_id:

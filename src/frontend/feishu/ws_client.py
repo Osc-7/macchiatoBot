@@ -48,8 +48,36 @@ from .ipc_bridge import (
 from .router import _is_duplicate_event  # 复用去重缓存
 from .reply_dispatch import send_feishu_agent_final_reply
 from .session_mapping import map_event_to_session
+from .ask_user_card import (
+    ASK_CUSTOM,
+    ASK_PICK,
+    ASK_USER_VALUE_KEY,
+    merge_ask_user_action_value,
+)
+from .card_callback import resolve_ask_user_via_daemon_ipc, resolve_card_via_daemon_ipc
 
 logger = logging.getLogger(__name__)
+
+
+def _card_action_value_to_plain(raw_val: Any) -> Any:
+    """SDK 可能把 value 解析为对象，merge_ask_user 需要 dict 或可 json.loads 的 str。"""
+    if raw_val is None:
+        return None
+    if isinstance(raw_val, (dict, str)):
+        return raw_val
+    md = getattr(raw_val, "model_dump", None)
+    if callable(md):
+        try:
+            return md()
+        except Exception:
+            pass
+    dget = getattr(raw_val, "dict", None)
+    if callable(dget):
+        try:
+            return dget()
+        except Exception:
+            pass
+    return raw_val
 
 
 def _handle_p2_card_action_trigger(data: Any) -> Any:
@@ -65,8 +93,6 @@ def _handle_p2_card_action_trigger(data: Any) -> Any:
         CallBackToast,
         P2CardActionTriggerResponse,
     )
-
-    from .card_callback import resolve_card_via_daemon_ipc
 
     cfg = get_config().feishu
     hdr = getattr(data, "header", None)
@@ -99,19 +125,28 @@ def _handle_p2_card_action_trigger(data: Any) -> Any:
     if form_value is not None and not isinstance(form_value, dict):
         form_value = None
 
+    raw_plain = _card_action_value_to_plain(raw_val)
+    merged_au = merge_ask_user_action_value(raw_plain, form_value)
+
+    async def _resolve_card() -> tuple[str, str, Any]:
+        if str(merged_au.get(ASK_USER_VALUE_KEY) or "").strip() in (
+            ASK_PICK,
+            ASK_CUSTOM,
+        ):
+            return await resolve_ask_user_via_daemon_ipc(
+                raw_plain, form_value=form_value
+            )
+        return await resolve_card_via_daemon_ipc(raw_plain, form_value=form_value)
+
     try:
-        kind, msg, card_dict = asyncio.run(
-            resolve_card_via_daemon_ipc(raw_val, form_value=form_value)
-        )
+        kind, msg, card_dict = asyncio.run(_resolve_card())
     except RuntimeError:
         # 极少数环境下当前线程已有运行中的 loop
         import concurrent.futures
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             kind, msg, card_dict = pool.submit(
-                lambda: asyncio.run(
-                    resolve_card_via_daemon_ipc(raw_val, form_value=form_value)
-                )
+                lambda: asyncio.run(_resolve_card())
             ).result(timeout=35.0)
 
     t = CallBackToast()

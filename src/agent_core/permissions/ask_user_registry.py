@@ -3,14 +3,34 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import uuid
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
 _notify_hook: Optional[Callable[[str, Dict[str, Any]], None]] = None
+
+# run_turn_stream 内：ask_user 经 IPC 发往飞书网关，与 tool_call trace 同一 TCP 序，避免抢顺序
+_ask_user_ipc_stream_notify: ContextVar[
+    Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]]
+] = ContextVar("ask_user_ipc_stream_notify", default=None)
+
+
+@asynccontextmanager
+async def ask_user_ipc_stream_notify_scope(
+    forward: Callable[[str, Dict[str, Any]], Awaitable[None]],
+):
+    """仅在 automation_daemon 处理 ``run_turn_stream`` → ``inject_message`` 时挂接。"""
+    token = _ask_user_ipc_stream_notify.set(forward)
+    try:
+        yield
+    finally:
+        _ask_user_ipc_stream_notify.reset(token)
 
 
 def set_ask_user_notify_hook(
@@ -46,6 +66,9 @@ _batch_option_sets: Dict[str, Dict[str, Set[str]]] = {}
 _batch_question_ids: Dict[str, List[str]] = {}
 # 飞书多题分卡：逐题点击合并为整批答案后再唤醒 Future
 _partial_answers: Dict[str, Dict[str, AskUserAnswer]] = {}
+# 单卡 UI：题目原文 + 自定义说明文案（与 payload 一致）
+_batch_question_payload: Dict[str, List[Dict[str, Any]]] = {}
+_batch_custom_label: Dict[str, str] = {}
 
 
 def _normalize_questions(raw: Any) -> Tuple[List[Dict[str, Any]], Dict[str, Set[str]], List[str]]:
@@ -125,6 +148,8 @@ def _validate_decision(
 
 def register_ask_user_wait(
     questions_raw: Any,
+    *,
+    custom_option_label: str = "",
 ) -> Tuple[str, asyncio.Future[AskUserBatchDecision], List[Dict[str, Any]]]:
     """创建 batch_id、Future，并登记题目选项集（供 resolve 校验）。"""
     payload_items, opt_map, qids = _normalize_questions(questions_raw)
@@ -135,7 +160,34 @@ def register_ask_user_wait(
     _batch_option_sets[batch_id] = opt_map
     _batch_question_ids[batch_id] = qids
     _partial_answers[batch_id] = {}
+    _batch_question_payload[batch_id] = copy.deepcopy(payload_items)
+    _batch_custom_label[batch_id] = (custom_option_label or "").strip() or "其他（请填写具体说明）"
     return batch_id, fut, payload_items
+
+
+def take_ask_user_snapshot(batch_id: str) -> Optional[Dict[str, Any]]:
+    """供飞书卡片刷新：在 batch 仍存在时调用，返回可 JSON 化的快照。"""
+    bid = (batch_id or "").strip()
+    qs = _batch_question_payload.get(bid)
+    if not qs:
+        return None
+    exp = _batch_question_ids.get(bid, [])
+    part = _partial_answers.get(bid, {})
+    done = len(exp) > 0 and all(x in part for x in exp)
+    partial_serial = {
+        k: {
+            "selected_option": v.selected_option,
+            "custom_text": v.custom_text,
+        }
+        for k, v in part.items()
+    }
+    return {
+        "batch_id": bid,
+        "questions": copy.deepcopy(qs),
+        "partial": partial_serial,
+        "custom_option_label": _batch_custom_label.get(bid, "其他（请填写具体说明）"),
+        "done": done,
+    }
 
 
 def resolve_ask_user(batch_id: str, decision: AskUserBatchDecision) -> bool:
@@ -159,6 +211,8 @@ def resolve_ask_user(batch_id: str, decision: AskUserBatchDecision) -> bool:
     _batch_question_ids.pop(bid, None)
     _batch_option_sets.pop(bid, None)
     _partial_answers.pop(bid, None)
+    _batch_question_payload.pop(bid, None)
+    _batch_custom_label.pop(bid, None)
     fut.set_result(decision)
     return True
 
@@ -181,24 +235,26 @@ def _validate_single_answer(
     return None
 
 
-def submit_ask_user_fragment(batch_id: str, answer: AskUserAnswer) -> Tuple[bool, str]:
+def submit_ask_user_fragment(
+    batch_id: str, answer: AskUserAnswer
+) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     """飞书分题提交：合并 partial，集齐后唤醒 Future。
 
-    返回 (accepted, detail)。accepted 表示已记录或已完成；detail 含 partial/ completed / 错误原因。
+    返回 (accepted, detail, snapshot|None)。snapshot 供网关刷新单张卡片（与 request_permission 一致）。
     """
     bid = (batch_id or "").strip()
     fut = _futures.get(bid)
     if fut is None:
-        return False, "unknown_batch"
+        return False, "unknown_batch", None
     if fut.done():
-        return False, "already_resolved"
+        return False, "already_resolved", None
 
     expected_ids = _batch_question_ids.get(bid, [])
     opt_map = _batch_option_sets.get(bid, {})
     qid = str(answer.question_id or "").strip()
     err = _validate_single_answer(qid, opt_map, answer)
     if err:
-        return False, err
+        return False, err, None
 
     partial = _partial_answers.setdefault(bid, {})
     ct = str(answer.custom_text or "").strip()
@@ -210,20 +266,24 @@ def submit_ask_user_fragment(batch_id: str, answer: AskUserAnswer) -> Tuple[bool
 
     missing = [x for x in expected_ids if x not in partial]
     if missing:
-        return True, f"partial:{','.join(missing)}"
+        snap = take_ask_user_snapshot(bid)
+        return True, f"partial:{','.join(missing)}", snap
 
     decision = AskUserBatchDecision(answers=[partial[i] for i in expected_ids])
     verr = _validate_decision(expected_ids, opt_map, decision)
     if verr:
         partial.pop(qid, None)
-        return False, verr
+        return False, verr, None
 
+    snap_done = take_ask_user_snapshot(bid)
     _futures.pop(bid, None)
     _batch_question_ids.pop(bid, None)
     _batch_option_sets.pop(bid, None)
     _partial_answers.pop(bid, None)
+    _batch_question_payload.pop(bid, None)
+    _batch_custom_label.pop(bid, None)
     fut.set_result(decision)
-    return True, "completed"
+    return True, "completed", snap_done
 
 
 def cancel_ask_user_wait(batch_id: str, *, reason: str = "cancelled") -> bool:
@@ -232,6 +292,8 @@ def cancel_ask_user_wait(batch_id: str, *, reason: str = "cancelled") -> bool:
     _batch_question_ids.pop(batch_id, None)
     _batch_option_sets.pop(batch_id, None)
     _partial_answers.pop(batch_id, None)
+    _batch_question_payload.pop(batch_id, None)
+    _batch_custom_label.pop(batch_id, None)
     if fut is None or fut.done():
         return False
     fut.set_exception(asyncio.CancelledError(reason))
@@ -239,6 +301,15 @@ def cancel_ask_user_wait(batch_id: str, *, reason: str = "cancelled") -> bool:
 
 
 def notify_ask_user_pending(batch_id: str, payload: Dict[str, Any]) -> None:
+    stream_fn = _ask_user_ipc_stream_notify.get()
+    if stream_fn is not None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("ask_user notify: ipc stream 需要运行中事件循环")
+            return
+        loop.create_task(stream_fn(batch_id, payload))
+        return
     if _notify_hook is not None:
         try:
             _notify_hook(batch_id, payload)

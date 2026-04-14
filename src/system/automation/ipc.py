@@ -20,6 +20,8 @@ from agent_core.interfaces import (
     AgentRunResult,
     InjectMessageCommand,
 )
+from agent_core.permissions.ask_user_registry import ask_user_ipc_stream_notify_scope
+from agent_core.permissions.wait_registry import permission_ipc_stream_notify_scope
 
 from .core_gateway import AutomationCoreGateway
 # base64 图片可能数 MB，默认 64KB readline limit 远远不够
@@ -194,6 +196,22 @@ class AutomationIPCServer:
             on_assistant_delta=_on_assistant_delta,
             on_reasoning_delta=_on_reasoning_delta,
         )
+        async def _forward_ask_user_stream(
+            batch_id: str, payload: Dict[str, Any]
+        ) -> None:
+            await _send_event(
+                "feishu_ask_user_notify",
+                {"batch_id": batch_id, "payload": payload},
+            )
+
+        async def _forward_permission_stream(
+            permission_id: str, payload: Dict[str, Any]
+        ) -> None:
+            await _send_event(
+                "feishu_permission_notify",
+                {"permission_id": permission_id, "payload": payload},
+            )
+
         try:
             meta_dict: Dict[str, Any] = metadata if isinstance(metadata, dict) else {}
             _ci = meta_dict.get("content_items")
@@ -203,13 +221,15 @@ class AutomationIPCServer:
                     len(_ci),
                     [str(i.get("type")) for i in _ci[:3]],
                 )
-            result = await self._gateway.inject_message(
-                InjectMessageCommand(
-                    session_id=active_session,
-                    input=AgentRunInput(text=text, metadata=meta_dict),
-                ),
-                hooks=hooks,
-            )
+            async with ask_user_ipc_stream_notify_scope(_forward_ask_user_stream):
+                async with permission_ipc_stream_notify_scope(_forward_permission_stream):
+                    result = await self._gateway.inject_message(
+                        InjectMessageCommand(
+                            session_id=active_session,
+                            input=AgentRunInput(text=text, metadata=meta_dict),
+                        ),
+                        hooks=hooks,
+                    )
             usage = self._gateway.get_token_usage(session_id=active_session)
             turn_count = self._gateway.get_turn_count(session_id=active_session)
             await _send_event(
@@ -382,8 +402,15 @@ class AutomationIPCServer:
                     else None
                 ),
             )
-            ok, detail = _submit_au_fragment(bid, answer)
-            return {"ok": bool(ok), "detail": detail}
+            ok, detail, snap = _submit_au_fragment(bid, answer)
+            card = None
+            if ok and snap:
+                from frontend.feishu.ask_user_card import (
+                    build_ask_user_card_from_registry_snapshot,
+                )
+
+                card = build_ask_user_card_from_registry_snapshot(snap, qid)
+            return {"ok": bool(ok), "detail": detail, "card": card}
 
         if method == "poll_push":
             # 非阻塞轮询：批量取出该 session 所有 [out] 队列结果（统一出口）
@@ -697,8 +724,11 @@ class AutomationIPCClient:
         question_id: str,
         selected_option: Optional[str] = None,
         custom_text: Optional[str] = None,
-    ) -> tuple[bool, str]:
-        """飞书分题提交：在 daemon 内合并 partial，集齐后唤醒 ask_user Future。"""
+    ) -> tuple[bool, str, Optional[Dict[str, Any]]]:
+        """飞书分题提交：在 daemon 内合并 partial，集齐后唤醒 ask_user Future。
+
+        第三项为刷新后的卡片 JSON（与 request_permission 回调更新卡片一致）；失败或无刷新时为 None。
+        """
         payload: Dict[str, Any] = {
             "batch_id": batch_id,
             "question_id": question_id,
@@ -708,7 +738,12 @@ class AutomationIPCClient:
         if custom_text is not None:
             payload["custom_text"] = custom_text
         data = await self._request("submit_ask_user_fragment", payload)
-        return bool(data.get("ok")), str(data.get("detail") or "")
+        card = data.get("card")
+        return (
+            bool(data.get("ok")),
+            str(data.get("detail") or ""),
+            card if isinstance(card, dict) else None,
+        )
 
     async def poll_push(self) -> list:
         """非阻塞轮询当前 session 的 inject_turn 推送结果列表（空则返回 []）。
@@ -769,6 +804,28 @@ class AutomationIPCClient:
                     evt = payload.get("data")
                     if isinstance(evt, dict) and hooks and hooks.on_trace_event:
                         maybe = hooks.on_trace_event(evt)
+                        if inspect.isawaitable(maybe):
+                            await maybe
+                    continue
+                if event_type == "feishu_ask_user_notify":
+                    bid = str(payload.get("batch_id") or "").strip()
+                    pl = payload.get("payload")
+                    fn = getattr(hooks, "on_feishu_ask_user_notify", None) if hooks else None
+                    if fn and bid and isinstance(pl, dict):
+                        maybe = fn(bid, pl)
+                        if inspect.isawaitable(maybe):
+                            await maybe
+                    continue
+                if event_type == "feishu_permission_notify":
+                    pid = str(payload.get("permission_id") or "").strip()
+                    pl = payload.get("payload")
+                    fn = (
+                        getattr(hooks, "on_feishu_permission_notify", None)
+                        if hooks
+                        else None
+                    )
+                    if fn and pid and isinstance(pl, dict):
+                        maybe = fn(pid, pl)
                         if inspect.isawaitable(maybe):
                             await maybe
                     continue

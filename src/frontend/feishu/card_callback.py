@@ -172,7 +172,7 @@ async def resolve_ask_user_via_daemon_ipc(
         logger.error("card ask_user: automation_daemon IPC unreachable")
         return "error", "无法连接 automation_daemon，请确认已启动", None
 
-    ok, detail = await ipc.submit_ask_user_fragment(
+    ok, detail, card_dict = await ipc.submit_ask_user_fragment(
         batch_id=bid,
         question_id=qid,
         selected_option=selected_opt,
@@ -184,10 +184,10 @@ async def resolve_ask_user_via_daemon_ipc(
         return "warning", detail or "提交失败", None
 
     if detail == "completed":
-        return "success", "已提交，Agent 将继续处理", None
+        return "success", "已提交，Agent 将继续处理", card_dict
     if detail.startswith("partial:"):
-        return "success", "已记录本题，请继续完成其余题目", None
-    return "success", "已记录", None
+        return "success", "已记录，请继续选择其余题目", card_dict
+    return "success", "已记录", card_dict
 
 
 async def resolve_card_via_daemon_ipc(

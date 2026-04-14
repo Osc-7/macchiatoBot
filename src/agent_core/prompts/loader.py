@@ -2,24 +2,28 @@
 Prompt 加载与组合
 
 参考 [OpenClaw 系统提示词](https://docs.openclaw.ai/zh-CN/concepts/system-prompt) 架构：
-- 设计紧凑：人设与时间、Safety、Tooling、Workspace 引导、条件 Runtime 扩展分段组合
-- 工作区引导文件在「Workspace Files (injected)」下按顺序注入（不含已上文的 identity / soul）
+- 设计紧凑：人设与时间、Safety、Tooling、渠道 overlay、Workspace 引导、条件 Runtime 扩展分段组合
+- 渠道配方见 ``PromptRecipe`` / ``get_recipe``；工作区段按 ``workspace_sections`` 顺序注入
 
-组装顺序（``mode=full``：主会话与子 Agent）：
-1. Identity / Soul — 人设与基调（先于大段工具说明，便于「是谁」定调）
-2. Runtime: time — 当前时间上下文（尽早锚定「何时」）
-3. Safety — 简短防护（在读长工具说明前建立边界）
-4. Tooling — tools_kernel 工具列表与使用说明
-5. Workspace Files (injected) — agents → schedule → user → skills 索引（行为规范与日程等，默认已了解工具能力）
-6. Runtime 扩展 — 联网搜索、抓取、文件工具、记忆等（按配置条件注入）
+组装顺序（``mode=full``，默认配方）：
+1. Identity / Soul — 人设与基调（可按渠道省略）
+2. Runtime: time — 当前时间上下文
+3. Safety — runtime_safety
+4. Tooling — tools_kernel
+5. Channel overlay — 可选（如 ``shuiyuan/system``）
+6. Workspace — 按配方注入 ``agents`` / ``multi_agent`` / ``schedule`` / ``user`` 等；可选 Skills 索引
+7. Runtime 扩展 — 联网、抓取、文件、记忆（按配置）
 
-minimal（后台 Core / background）：与 full 同步前段骨架（time → safety → tools），不含 Workspace 引导块与 identity/soul；仍带条件 runtime 扩展。
+minimal（后台 Core / background）：time → safety → tools → runtime 扩展；无人设、无 overlay、无 Workspace。
 
 Skills 采用渐进式披露：system prompt 仅注入 metadata（name + description），
 完整内容需通过 load_skill 工具按需加载。
 """
 
+from __future__ import annotations
+
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Optional, Tuple
 
@@ -40,6 +44,35 @@ DEFAULT_MAX_SECTION_CHARS = 8000
 
 TRUNCATION_MARKER = "\n\n<!-- 内容过长，已截断 -->"
 """大文件截断后的标记"""
+
+
+@dataclass(frozen=True)
+class PromptRecipe:
+    """按来源组装的 system prompt 配方（声明式，避免散落 if source==）。"""
+
+    identity: str | None = "system/identity"
+    soul: str | None = "system/soul"
+    channel_overlay: str | None = None
+    workspace_sections: tuple[str, ...] = ("agents", "multi_agent", "schedule", "user")
+    include_skills: bool = True
+    include_digest: bool = True
+
+
+_RECIPES: dict[str, PromptRecipe] = {
+    "shuiyuan": PromptRecipe(
+        identity=None,
+        soul=None,
+        channel_overlay="shuiyuan/system",
+        workspace_sections=("multi_agent",),
+        include_skills=True,
+        include_digest=False,
+    ),
+}
+
+
+def get_recipe(source: str) -> PromptRecipe:
+    """按 ``AgentCore._source`` 解析配方；未知来源使用默认（飞书/cli 等价）。"""
+    return _RECIPES.get((source or "").strip(), PromptRecipe())
 
 
 def _get_prompts_dir() -> Path:
@@ -121,6 +154,24 @@ def _load_section(
     空文件或仅空白内容返回空字符串。超出 max_chars 时截断并追加 TRUNCATION_MARKER。
     """
     path = _get_prompts_dir() / "system" / f"{name}.md"
+    if not path.exists():
+        return ""
+    content = path.read_text(encoding="utf-8").strip()
+    if not content:
+        return ""
+    if len(content) > max_chars:
+        content = content[:max_chars].rstrip() + TRUNCATION_MARKER
+    return content
+
+
+def _load_relative_md(
+    relative_stem: str,
+    max_chars: int = DEFAULT_MAX_SECTION_CHARS,
+) -> str:
+    """
+    加载 prompts 目录下任意 ``{relative_stem}.md``（如 ``system/identity``、``shuiyuan/system``）。
+    """
+    path = _get_prompts_dir() / f"{relative_stem}.md"
     if not path.exists():
         return ""
     content = path.read_text(encoding="utf-8").strip()
@@ -257,12 +308,13 @@ def build_system_prompt(
     has_file_tools: bool = False,
     mode: PromptMode = "full",
     max_section_chars: int = DEFAULT_MAX_SECTION_CHARS,
-    sub_content_path: str | None = None,
+    recipe: Optional[PromptRecipe] = None,
     skills_cli_path: Optional[Path] = None,
 ) -> str:
     """
-    构建 Agent 系统提示。先人设与时间、安全边界，再工具长文，最后行为规范与条件能力段。
+    构建 Agent 系统提示。先人设与时间、安全边界，再工具长文，渠道 overlay 与 Workspace 由 ``recipe`` 决定。
     """
+    rec = recipe if recipe is not None else PromptRecipe()
     parts: list[str] = []
 
     def load(name: str) -> str:
@@ -270,13 +322,16 @@ def build_system_prompt(
         return _load_section(name, max_section_chars)
 
     if mode == "none":
-        _maybe_append(parts, load("identity"))
+        stem = rec.identity or "identity"
+        _maybe_append(parts, _load_relative_md(stem, max_section_chars))
         return "\n\n".join(parts)
 
     # ---------- 1. Identity / Soul（仅 full；minimal 从时间段起）----------
     if mode == "full":
-        _maybe_append(parts, load("identity"))
-        _maybe_append(parts, load("soul"))
+        if rec.identity:
+            _maybe_append(parts, _load_relative_md(rec.identity, max_section_chars))
+        if rec.soul:
+            _maybe_append(parts, _load_relative_md(rec.soul, max_section_chars))
 
     # ---------- 2. Runtime: 当前时间（full / minimal 均尽早注入）----------
     if mode in ("full", "minimal"):
@@ -292,27 +347,41 @@ def build_system_prompt(
     if mode in ("full", "minimal"):
         _maybe_append(parts, load("tools_kernel"))
 
-    # ---------- 5. Workspace：agents → schedule → user → skills（仅 full）----------
-    if mode == "full":
-        parts.append(
-            "---\n# Workspace Files (injected)\n"
-            "以下为行为规范、日程与用户偏好等引导文件（identity / soul 已置于上文），已注入。\n---"
-        )
-        _maybe_append(parts, load("agents"))
-        _maybe_append(parts, load("schedule"))
-        user_content = _load_user_section(max_section_chars)
-        if user_content:
-            parts.append(user_content)
-        cli_path = (
-            skills_cli_path
-            if skills_cli_path is not None
-            else _resolve_cli_dir(getattr(config.skills, "cli_dir", None))
-        )
-        skills_index = _format_skills_index(config.skills.enabled or [], cli_path)
-        if skills_index:
-            _maybe_append(parts, skills_index)
+    # ---------- 5. 渠道 overlay（仅 full）----------
+    if mode == "full" and rec.channel_overlay:
+        _maybe_append(parts, _load_relative_md(rec.channel_overlay, max_section_chars))
 
-    # ---------- 6. Runtime 扩展（联网 / 抓取 / 文件 / 记忆）；不含 runtime_time ----------
+    # ---------- 6. Workspace + Skills（仅 full）----------
+    if mode == "full":
+        need_workspace_block = bool(rec.workspace_sections) or rec.include_skills
+        if need_workspace_block:
+            parts.append(
+                "---\n# Workspace Files (injected)\n"
+                "以下为行为规范、日程与用户偏好等引导文件（identity / soul 已置于上文），已注入。\n---"
+            )
+            for section in rec.workspace_sections:
+                if section == "user":
+                    user_content = _load_user_section(max_section_chars)
+                    if user_content:
+                        parts.append(user_content)
+                else:
+                    _maybe_append(parts, load(section))
+        if rec.include_skills:
+            cli_path = (
+                skills_cli_path
+                if skills_cli_path is not None
+                else _resolve_cli_dir(getattr(config.skills, "cli_dir", None))
+            )
+            skills_index = _format_skills_index(config.skills.enabled or [], cli_path)
+            if skills_index:
+                if not need_workspace_block:
+                    parts.append(
+                        "---\n# Workspace Files (injected)\n"
+                        "以下为技能索引等引导内容，已注入。\n---"
+                    )
+                _maybe_append(parts, skills_index)
+
+    # ---------- 7. Runtime 扩展（联网 / 抓取 / 文件 / 记忆）；不含 runtime_time ----------
     if mode in ("full", "minimal"):
         if config.mcp.enabled:
             web_capabilities = [
@@ -333,44 +402,5 @@ def build_system_prompt(
             _maybe_append(parts, load("runtime_file_tools"))
         if config.memory.enabled:
             _maybe_append(parts, load("runtime_memory"))
-
-    return "\n\n".join(parts)
-
-
-def build_shuiyuan_system_prompt(
-    time_context: str,
-    config: Config,
-    memory_dir: str = "./data/memory/long_term/shuiyuan",
-    recent_topics: Optional[list] = None,
-) -> str:
-    """
-    构建水源社区 Agent 的系统提示。
-
-    使用 prompts/shuiyuan/system.md + 水源 MEMORY.md + 最近话题 + 时间上下文，
-    与主 Agent 隔离。
-    """
-    parts: list[str] = []
-    shuiyuan_prompt_dir = _get_prompts_dir() / "shuiyuan"
-    shuiyuan_system = (
-        (shuiyuan_prompt_dir / "system.md").read_text(encoding="utf-8").strip()
-    )
-    parts.append(shuiyuan_system)
-
-    memory_path = Path(memory_dir) / "MEMORY.md"
-    if memory_path.exists():
-        memory_content = memory_path.read_text(encoding="utf-8").strip()
-        if memory_content:
-            parts.append("---\n## 水源社区长期记忆 (MEMORY.md)\n\n" + memory_content)
-
-    if recent_topics:
-        topic_lines = []
-        for t in recent_topics:
-            ts = (getattr(t, "created_at", "") or "")[:10]
-            content = getattr(t, "content", "") or ""
-            prefix = f"[{ts}] " if ts else ""
-            topic_lines.append(f"- {prefix}{content}")
-        parts.append("---\n## 与该用户的最近话题\n\n" + "\n".join(topic_lines))
-
-    parts.append("---\n## 当前时间\n\n" + time_context)
 
     return "\n\n".join(parts)

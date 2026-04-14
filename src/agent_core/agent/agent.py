@@ -899,7 +899,8 @@ class AgentCore:
         """
         构建系统提示。
 
-        当 source=="shuiyuan" 时使用水源专用 prompt，否则使用主 Agent prompt。
+        由 ``build_agent_system_prompt`` 组装：``get_recipe(_source)`` 决定 identity/overlay/Workspace 段；
+        记忆上下文与可选自动化摘要见 ``prompt_builder``。
         """
         return build_agent_system_prompt(self)
 

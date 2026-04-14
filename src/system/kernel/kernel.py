@@ -93,6 +93,7 @@ class AgentKernel:
         """
         gen = agent.run_loop(turn_id=turn_id, hooks=hooks)
         action: KernelAction = await gen.__anext__()
+        tool_names_called: set[str] = set()
 
         def _maybe_touch() -> None:
             if on_signal:
@@ -104,9 +105,13 @@ class AgentKernel:
         while True:
             if isinstance(action, ReturnAction):
                 _maybe_touch()
+                meta: Dict[str, Any] = {}
+                if tool_names_called:
+                    meta["_tool_names_called"] = sorted(tool_names_called)
                 return AgentRunResult(
                     output_text=action.message,
                     attachments=action.attachments,
+                    metadata=meta,
                 )
 
             elif isinstance(action, ToolCallAction):
@@ -196,6 +201,7 @@ class AgentKernel:
                     result = await agent_registry.execute(
                         action.tool_name, **parsed_args
                     )
+                    tool_names_called.add(action.tool_name)
                 action = await gen.asend(
                     ToolResultEvent(
                         tool_call_id=action.tool_call_id,

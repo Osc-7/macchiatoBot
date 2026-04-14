@@ -15,9 +15,28 @@ from frontend.shuiyuan_integration.session import (
 )
 
 
-def test_should_poll_when_subagent_running_cn():
-    assert _should_poll_inject_followup(
+def test_should_not_poll_cn_hallucination_without_tool_names_metadata():
+    """仅正文「子任务/运行中」而无真实工具名时不再触发 poll（防幻觉长等）。"""
+    assert not _should_poll_inject_followup(
         AgentRunResult(output_text="创建了 subagent，运行中喵！")
+    )
+
+
+def test_should_poll_when_metadata_lists_subagent_creator():
+    assert _should_poll_inject_followup(
+        AgentRunResult(
+            output_text="任意正文",
+            metadata={"_tool_names_called": ["search_tools", "create_parallel_subagents"]},
+        )
+    )
+
+
+def test_should_not_poll_when_metadata_only_other_tools():
+    assert not _should_poll_inject_followup(
+        AgentRunResult(
+            output_text="子任务 运行中",
+            metadata={"_tool_names_called": ["bash", "search_tools"]},
+        )
     )
 
 

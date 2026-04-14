@@ -454,3 +454,57 @@ async def test_summarize_messages_passes_transcript_and_appends_summarize() -> N
     sys_msg = call_kw[1]["system_message"]
     assert "主系统提示" in sys_msg
     assert "上下文压缩" in sys_msg
+
+
+@pytest.mark.asyncio
+async def test_kernel_run_records_tool_names_called_in_metadata() -> None:
+    """AgentKernel.run 在本轮实际 execute 过的工具名写入 metadata["_tool_names_called]。"""
+    from agent_core.kernel_interface import ReturnAction, ToolCallAction
+    from agent_core.tools.base import ToolResult
+
+    async def fake_run_loop(turn_id: int = 0, hooks=None):
+        await asyncio.sleep(0)
+        yield ToolCallAction(
+            tool_call_id="t1",
+            tool_name="create_subagent",
+            arguments="{}",
+        )
+        yield ReturnAction(message="完成")
+
+    agent = MagicMock(spec=["run_loop", "_session_id", "_tool_registry", "_core_profile"])
+    agent.run_loop = fake_run_loop
+    agent._session_id = "cli:test"
+    agent._tool_registry = None
+    agent._core_profile = None
+
+    registry = MagicMock()
+    registry.execute = AsyncMock(
+        return_value=ToolResult(success=True, data={"subagent_id": "x"}, message="ok")
+    )
+    kernel = AgentKernel(tool_registry=registry)
+
+    result = await kernel.run(agent, turn_id=1)
+    assert result.output_text == "完成"
+    assert result.metadata.get("_tool_names_called") == ["create_subagent"]
+    registry.execute.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_kernel_run_no_metadata_when_no_tools_executed() -> None:
+    from agent_core.kernel_interface import ReturnAction
+
+    async def fake_run_loop(turn_id: int = 0, hooks=None):
+        await asyncio.sleep(0)
+        yield ReturnAction(message="仅文本")
+
+    agent = MagicMock(spec=["run_loop", "_tool_registry", "_core_profile"])
+    agent.run_loop = fake_run_loop
+    agent._tool_registry = None
+    agent._core_profile = None
+
+    registry = MagicMock()
+    kernel = AgentKernel(tool_registry=registry)
+
+    result = await kernel.run(agent, turn_id=1)
+    assert result.output_text == "仅文本"
+    assert result.metadata == {}

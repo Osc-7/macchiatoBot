@@ -9,6 +9,7 @@ from agent_core.memory import RecallResult
 from agent_core.prompts.loader import (
     PromptMode,
     build_system_prompt as build_prompt,
+    get_recipe,
     resolve_skills_cli_path,
 )
 
@@ -50,7 +51,7 @@ def build_agent_system_prompt(agent: Any) -> str:
     time_str = time_ctx.to_prompt_string()
     scopes = _visible_scopes(agent)
 
-    sub_content_path = "shuiyuan/system" if agent._source == "shuiyuan" else None
+    recipe = get_recipe(getattr(agent, "_source", "cli") or "cli")
     skills_cli = resolve_skills_cli_path(
         agent._config,
         source=getattr(agent, "_source", "cli") or "cli",
@@ -63,7 +64,7 @@ def build_agent_system_prompt(agent: Any) -> str:
         has_web_extractor=agent._tool_registry.has("extract_web_content"),
         has_file_tools=agent._tool_registry.has("read_file"),
         mode=_loader_prompt_mode(agent),
-        sub_content_path=sub_content_path,
+        recipe=recipe,
         skills_cli_path=skills_cli,
     )
 
@@ -103,9 +104,11 @@ def build_agent_system_prompt(agent: Any) -> str:
         if parts:
             prompt += "\n\n# 记忆上下文\n\n" + "\n".join(parts)
 
-    # automation 摘要：仅在可见 long_term 时注入（作为辅助上下文）
+    # automation 摘要：由 PromptRecipe.include_digest 与 long_term scope 共同控制
     digest_sections: List[str] = []
-    if "long_term" in scopes:
+    daily_digest = None
+    weekly_digest = None
+    if recipe.include_digest and "long_term" in scopes:
         try:
             from system.automation.repositories import DigestRepository  # type: ignore[import]
 
@@ -115,9 +118,6 @@ def build_agent_system_prompt(agent: Any) -> str:
         except Exception:
             daily_digest = None
             weekly_digest = None
-    else:
-        daily_digest = None
-        weekly_digest = None
 
     if daily_digest is not None:
         digest_sections.append("## 最近日摘要")
@@ -147,7 +147,7 @@ def build_agent_system_prompt(agent: Any) -> str:
             digest_sections.append("")
             digest_sections.append(excerpt)
 
-    if digest_sections:
+    if recipe.include_digest and digest_sections:
         prompt += "\n\n# 自动化摘要\n\n" + "\n".join(digest_sections)
 
     return prompt

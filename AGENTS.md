@@ -1,7 +1,7 @@
 ---
-description: 
+
+## description: 
 alwaysApply: true
----
 
 # 开发规范
 
@@ -20,7 +20,6 @@ macchiatoBot 是一个基于大语言模型的ai助手，采用**工具驱动（
 - 提供智能规划建议
 - 可扩展的插件系统
 
-
 ## MANDATORY: Agent 工作流程
 
 **每次会话必须遵循以下流程：**
@@ -32,6 +31,7 @@ source init.sh
 ```
 
 这会：
+
 - 安装必要依赖
 - 验证 Python 环境
 
@@ -55,23 +55,17 @@ source init.sh
 **强制测试要求：**
 
 1. **核心功能修改**：
-   - 分批运行测试（主要为保证测试不超时）
-   - 确保所有测试通过
-
+  - 分批运行测试（主要为保证测试不超时）
+  - 确保所有测试通过
 2. **新增功能**：
-   - 编写对应的测试用例
-   - 运行测试确保通过
-
+  - 编写对应的测试用例
+  - 运行测试确保通过
 3. **所有修改必须**：
-   - 代码可以正常 import
-   - 没有语法错误
-   - 测试全部通过
+  - 代码可以正常 import
+  - 没有语法错误
+  - 测试全部通过
 4. **不需要保留老代码兼容性**
-   - 项目WIP，更新旧功能的时候直接将项目中的依赖改为新版实现，不需要为了兼容性保留旧代码。
-
-
-
-
+  - 项目WIP，更新旧功能的时候直接将项目中的依赖改为新版实现，不需要为了兼容性保留旧代码。
 
 ## Agent 设计规范
 
@@ -153,7 +147,9 @@ class ToolDefinition:
 3. **参数详细说明** - 每个参数的类型、格式、默认值
 4. **示例用法** - 至少 2-3 个真实场景示例
 5. **注意事项** - 重要的使用提示
+
 示例：
+
 ```python
 ToolDefinition(
     name="create_schedule",
@@ -210,6 +206,7 @@ class ToolResult:
 ### 4. 错误处理
 
 工具应该：
+
 - 验证输入参数
 - 提供有意义的错误信息
 - 尽可能提供替代方案
@@ -258,3 +255,4 @@ async def execute(self, **kwargs) -> ToolResult:
 - Tool-driven Architecture
 - Repository Pattern
 - Strategy Pattern (for LLM providers)
+

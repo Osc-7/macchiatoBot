@@ -42,33 +42,6 @@ from system.automation import AutomationIPCClient, default_socket_path
 
 logger = logging.getLogger("shuiyuan_session")
 
-# #region agent log
-def _debug_ndjson(
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: Dict[str, Any],
-) -> None:
-    try:
-        import json as _json
-
-        _path = "/home/ubuntu/macchiatoBot/.cursor/debug-10f3a3.log"
-        _line: Dict[str, Any] = {
-            "sessionId": "10f3a3",
-            "timestamp": int(time.time() * 1000),
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-        }
-        with open(_path, "a", encoding="utf-8") as _f:
-            _f.write(_json.dumps(_line, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-
-
-# #endregion
-
 # 与飞书 FeishuPushForwarder / CLI poll_push 一致：收 subagent inject_turn 等推送
 _SHUIYUAN_INJECT_POLL_INTERVAL_SEC = 2.0
 _SHUIYUAN_INJECT_MAX_WALL_SEC = 900.0
@@ -79,6 +52,9 @@ _SHUIYUAN_INJECT_CHUNK_SEP = "\n\n---\n\n"
 # 同一水源用户名：每次进入 inject 轮询时认领更高世代；旧轮询发现已不是最新则停止编辑该帖，
 # 避免新对话的 inject 被写入旧 post_id。FIFO 中遗留的旧 inject 可由新轮询消费编进新帖（可接受 trade-off）。
 _SHUIYUAN_INJECT_REPLY_GEN: Dict[str, int] = {}
+
+# 内核 AgentKernel.run 在 metadata["_tool_names_called"] 中记录的本轮实际执行工具名
+_SUBAGENT_CREATOR_TOOLS = frozenset({"create_subagent", "create_parallel_subagents"})
 
 
 def _claim_shuiyuan_inject_poll_generation(username: str) -> int:
@@ -97,19 +73,17 @@ def _should_poll_inject_followup(result: AgentRunResult) -> bool:
     """
     是否可能在首轮之后还有 inject_turn（如 create_subagent 已完成但子任务仍在跑）。
 
-    若为 False，跳过 poll_push，避免普通单轮回复占用 connector 直至 MAX_WALL_SEC。
+    优先使用内核写入的 ``metadata["_tool_names_called"]``（真实工具执行记录），
+    避免模型正文幻觉触发长时间 poll。无该字段时（旧 daemon）仅匹配英文工具名子串。
     """
-    t = result.output_text or ""
-    tl = t.lower()
-    if "create_subagent" in tl or "create_parallel_subagents" in tl:
-        return True
-    if "subagent_id" in tl:
-        return True
-    if "subagent" in tl and ("运行中" in t or "running" in tl or "后台" in t):
-        return True
-    if "子任务" in t and ("运行中" in t or "后台" in t):
-        return True
-    return False
+    raw = result.metadata.get("_tool_names_called")
+    if isinstance(raw, list):
+        names = {str(x) for x in raw}
+        return bool(_SUBAGENT_CREATOR_TOOLS & names)
+    tl = (result.output_text or "").lower()
+    return (
+        "create_subagent" in tl or "create_parallel_subagents" in tl
+    )
 
 
 async def _poll_shuiyuan_inject_edits(
@@ -142,36 +116,10 @@ async def _poll_shuiyuan_inject_edits(
     last_nonempty_mono: Optional[float] = None
     while time.monotonic() - start < _SHUIYUAN_INJECT_MAX_WALL_SEC:
         if _is_shuiyuan_inject_poll_generation_stale(username, my_gen):
-            _debug_ndjson(
-                "H4",
-                "session._poll_shuiyuan_inject_edits",
-                "loop_exit",
-                {
-                    "exit_reason": "superseded_by_newer_inject_poll",
-                    "username": (username or "")[:32],
-                    "post_id": post_id,
-                    "my_gen": my_gen,
-                    "poll_rounds": poll_rounds,
-                    "inject_chunks_n": inject_chunks_n,
-                    "edit_calls": edit_calls,
-                },
-            )
             return merged
         poll_rounds += 1
         batch = await ipc.poll_push()
         if _is_shuiyuan_inject_poll_generation_stale(username, my_gen):
-            _debug_ndjson(
-                "H4",
-                "session._poll_shuiyuan_inject_edits",
-                "loop_exit",
-                {
-                    "exit_reason": "superseded_by_newer_inject_poll",
-                    "username": (username or "")[:32],
-                    "post_id": post_id,
-                    "my_gen": my_gen,
-                    "after": "poll_push",
-                },
-            )
             return merged
         if batch:
             nonempty_batches += 1
@@ -180,18 +128,6 @@ async def _poll_shuiyuan_inject_edits(
             if not t:
                 continue
             if _is_shuiyuan_inject_poll_generation_stale(username, my_gen):
-                _debug_ndjson(
-                    "H4",
-                    "session._poll_shuiyuan_inject_edits",
-                    "loop_exit",
-                    {
-                        "exit_reason": "superseded_by_newer_inject_poll",
-                        "username": (username or "")[:32],
-                        "post_id": post_id,
-                        "my_gen": my_gen,
-                        "after": "before_inject_edit",
-                    },
-                )
                 return merged
             inject_chunks_n += 1
             merged = merged + _SHUIYUAN_INJECT_CHUNK_SEP + t
@@ -199,18 +135,6 @@ async def _poll_shuiyuan_inject_edits(
                 post_id=post_id, raw=merged, client=client
             )
             edit_calls += 1
-            _debug_ndjson(
-                "H5",
-                "session._poll_shuiyuan_inject_edits",
-                "inject_edit",
-                {
-                    "post_id": post_id,
-                    "edit_idx": edit_calls,
-                    "ok": ok_u,
-                    "umsg_snip": (umsg or "")[:120],
-                    "merged_len": len(merged),
-                },
-            )
             if not ok_u:
                 logger.warning("inject 段更新帖子失败 post_id=%s: %s", post_id, umsg)
             last_nonempty_mono = time.monotonic()
@@ -220,35 +144,8 @@ async def _poll_shuiyuan_inject_edits(
             and time.monotonic() - last_nonempty_mono
             >= _SHUIYUAN_INJECT_IDLE_AFTER_LAST_CHUNK_SEC
         ):
-            _debug_ndjson(
-                "H4",
-                "session._poll_shuiyuan_inject_edits",
-                "loop_exit",
-                {
-                    "exit_reason": "idle_after_last_chunk",
-                    "poll_rounds": poll_rounds,
-                    "nonempty_batch_count": nonempty_batches,
-                    "inject_chunks_n": inject_chunks_n,
-                    "edit_calls": edit_calls,
-                    "elapsed_sec": round(time.monotonic() - start, 2),
-                    "idle_sec": _SHUIYUAN_INJECT_IDLE_AFTER_LAST_CHUNK_SEC,
-                },
-            )
             return merged
         await asyncio.sleep(_SHUIYUAN_INJECT_POLL_INTERVAL_SEC)
-    _debug_ndjson(
-        "H4",
-        "session._poll_shuiyuan_inject_edits",
-        "loop_exit",
-        {
-            "exit_reason": "max_wall",
-            "poll_rounds": poll_rounds,
-            "nonempty_batch_count": nonempty_batches,
-            "inject_chunks_n": inject_chunks_n,
-            "edit_calls": edit_calls,
-            "elapsed_sec": round(time.monotonic() - start, 2),
-        },
-    )
     return merged
 
 _MIME_BY_EXT: Dict[str, str] = {
@@ -410,28 +307,9 @@ async def _run_via_daemon(
             owner_id=username, source="shuiyuan", socket_path=default_socket_path()
         )
         if not await ipc.ping():
-            _debug_ndjson(
-                "H2",
-                "session._run_via_daemon",
-                "ipc_ping_failed",
-                {"username": username, "topic_id": topic_id},
-            )
             return None
-    except Exception as e:
-        _debug_ndjson(
-            "H2",
-            "session._run_via_daemon",
-            "ipc_connect_exception",
-            {"username": username, "topic_id": topic_id, "err": str(e)[:200]},
-        )
+    except Exception:
         return None
-
-    _debug_ndjson(
-        "H2",
-        "session._run_via_daemon",
-        "ipc_ok_before_switch",
-        {"username": username, "topic_id": topic_id},
-    )
 
     await ipc.switch_session(f"shuiyuan:{username}", create_if_missing=True)
 
@@ -478,19 +356,6 @@ async def _run_via_daemon(
     final_text = reply_text + attach_md
 
     _should = _should_poll_inject_followup(result)
-    _out = result.output_text or ""
-    _debug_ndjson(
-        "H1",
-        "session._run_via_daemon",
-        "after_run_turn",
-        {
-            "username": username,
-            "topic_id": topic_id,
-            "should_poll_inject_followup": _should,
-            "output_len": len(_out),
-            "output_snip": (_out[:120].replace("\n", " ") if _out else ""),
-        },
-    )
 
     if final_text:
         from .reply import post_reply
@@ -503,16 +368,6 @@ async def _run_via_daemon(
             db=db,
             client=client,
         )
-        _debug_ndjson(
-            "H3",
-            "session._run_via_daemon",
-            "post_reply_done",
-            {
-                "success": success,
-                "post_id": created_post_id,
-                "msg_snip": (msg or "")[:80],
-            },
-        )
         if not success:
             logger.warning("发帖失败: %s", msg)
         elif created_post_id and _should:
@@ -523,26 +378,7 @@ async def _run_via_daemon(
                 client=client,
                 base_text=final_text,
             )
-            _debug_ndjson(
-                "H4",
-                "session._run_via_daemon",
-                "inject_poll_done",
-                {
-                    "merged_len": len(merged),
-                    "had_inject": merged != final_text,
-                },
-            )
             return merged
-        else:
-            _debug_ndjson(
-                "H1",
-                "session._run_via_daemon",
-                "skip_poll_branch",
-                {
-                    "had_post_id": bool(created_post_id),
-                    "should_poll": _should,
-                },
-            )
     return final_text
 
 

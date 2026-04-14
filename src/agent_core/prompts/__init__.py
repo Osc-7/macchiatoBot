@@ -7,14 +7,16 @@ Prompt 管理模块
 
 from .loader import (
     PromptMode,
-    build_shuiyuan_system_prompt,
+    PromptRecipe,
     build_system_prompt,
+    get_recipe,
     resolve_skills_cli_path,
 )
 
 __all__ = [
+    "PromptRecipe",
     "build_system_prompt",
-    "build_shuiyuan_system_prompt",
+    "get_recipe",
     "PromptMode",
     "resolve_skills_cli_path",
 ]

@@ -171,8 +171,11 @@ class AgentCore:
             if req not in deduped_pinned:
                 deduped_pinned.append(req)
         _mode = getattr(core_profile, "mode", None) if core_profile is not None else None
-        if _mode != "background" and "request_permission" not in deduped_pinned:
-            deduped_pinned.append("request_permission")
+        if _mode != "background":
+            if "request_permission" not in deduped_pinned:
+                deduped_pinned.append("request_permission")
+            if "ask_user" not in deduped_pinned:
+                deduped_pinned.append("ask_user")
         self._working_set = ToolWorkingSetManager(
             pinned_tools=deduped_pinned,
             working_set_size=self._config.agent.working_set_size,
@@ -299,6 +302,10 @@ class AgentCore:
             from agent_core.tools.request_permission_tool import RequestPermissionTool
 
             self._tool_registry.register(RequestPermissionTool())
+        if not self._tool_registry.has("ask_user"):
+            from agent_core.tools.ask_user_tool import AskUserTool
+
+            self._tool_registry.register(AskUserTool())
 
         # MCP 客户端（在 __aenter__ 中连接，或 defer 时由 ensure_mcp_connected 连接）
         self._mcp_manager: Optional[MCPClientManager] = None

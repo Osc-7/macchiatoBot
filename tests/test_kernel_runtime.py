@@ -309,7 +309,13 @@ async def test_agent_prepare_turn_populates_recall_result(tmp_path) -> None:
     config.agent.working_set_size = 6
     config.agent.max_iterations = 10
     config.tools = MagicMock()
-    config.tools.core_tools = ["search_tools", "call_tool", "bash", "request_permission"]
+    config.tools.core_tools = [
+        "search_tools",
+        "call_tool",
+        "bash",
+        "request_permission",
+        "ask_user",
+    ]
     config.tools.pinned_tools = []
     config.tools.get_template.return_value = SimpleNamespace(exposure="pinned", extra=[])
     config.memory = MagicMock()
@@ -487,6 +493,45 @@ async def test_kernel_run_records_tool_names_called_in_metadata() -> None:
     assert result.output_text == "完成"
     assert result.metadata.get("_tool_names_called") == ["create_subagent"]
     registry.execute.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_kernel_run_propagates_delegated_tool_name_from_call_tool() -> None:
+    """call_tool 返回的 _delegated_tool_name 应被 kernel 追加到 _tool_names_called。"""
+    from agent_core.kernel_interface import ReturnAction, ToolCallAction
+    from agent_core.tools.base import ToolResult
+
+    async def fake_run_loop(turn_id: int = 0, hooks=None):
+        await asyncio.sleep(0)
+        yield ToolCallAction(
+            tool_call_id="t1",
+            tool_name="call_tool",
+            arguments='{"name": "create_parallel_subagents", "arguments": {}}',
+        )
+        yield ReturnAction(message="子任务已创建")
+
+    agent = MagicMock(spec=["run_loop", "_session_id", "_tool_registry", "_core_profile"])
+    agent.run_loop = fake_run_loop
+    agent._session_id = "shuiyuan:Osc7"
+    agent._tool_registry = None
+    agent._core_profile = None
+
+    registry = MagicMock()
+    registry.execute = AsyncMock(
+        return_value=ToolResult(
+            success=True,
+            data={"ids": ["sub1", "sub2"]},
+            message="ok",
+            metadata={"_delegated_tool_name": "create_parallel_subagents"},
+        )
+    )
+    kernel = AgentKernel(tool_registry=registry)
+
+    result = await kernel.run(agent, turn_id=1)
+    assert result.output_text == "子任务已创建"
+    names = result.metadata.get("_tool_names_called")
+    assert "call_tool" in names
+    assert "create_parallel_subagents" in names
 
 
 @pytest.mark.asyncio

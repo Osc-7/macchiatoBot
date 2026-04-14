@@ -45,9 +45,10 @@ class TestConfigModels:
     def test_llm_config_defaults(self):
         """测试 LLM 配置默认值"""
         config = LLMConfig(api_key="test-key", model="test-model")
-        assert config.provider == "doubao"
+        assert config.provider == "openai_compatible"
         assert config.api_key == "test-key"
         assert config.model == "test-model"
+        assert config.base_url == "https://api.openai.com/v1"
         assert config.temperature == 0.7
         assert config.max_tokens == 4096
         assert config.request_timeout_seconds == 120.0
@@ -107,7 +108,13 @@ class TestConfigModels:
     def test_tools_config_defaults(self):
         """测试工具模板配置默认值"""
         config = ToolsConfig()
-        assert config.core_tools == ["search_tools", "call_tool", "bash", "request_permission"]
+        assert config.core_tools == [
+            "search_tools",
+            "call_tool",
+            "bash",
+            "request_permission",
+            "ask_user",
+        ]
         assert "read_file" in config.pinned_tools
         assert "list_scheduled_jobs" in config.pinned_tools
         assert "delete_scheduled_job" in config.pinned_tools
@@ -292,7 +299,8 @@ llm:
         assert config.llm.api_key == "minimal-key"
         assert config.llm.model == "minimal-model"
         # 验证默认值
-        assert config.llm.provider == "doubao"
+        assert config.llm.provider == "openai_compatible"
+        assert config.llm.base_url == "https://api.openai.com/v1"
         assert config.llm.temperature == 0.7
         assert config.time.timezone == "Asia/Shanghai"
         assert config.storage.type == "json"
@@ -343,6 +351,7 @@ class TestEnvOverride:
 
         config_content = """
 llm:
+  provider: "doubao"
   api_key: "file-api-key"
   model: "test-model"
 """
@@ -359,6 +368,7 @@ llm:
 
         config_content = """
 llm:
+  provider: "doubao"
   api_key: "test-key"
   model: "file-model"
 """
@@ -368,6 +378,31 @@ llm:
         config = load_config(config_file)
 
         assert config.llm.model == "env-model"
+
+    def test_openai_compatible_env_override(self, tmp_path, monkeypatch):
+        """OPENAI_* 环境变量覆盖通用 OpenAI 兼容端点"""
+        monkeypatch.setenv("OPENAI_API_KEY", "oai-key")
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("OPENAI_MODEL", "gpt-4o")
+        monkeypatch.setenv("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
+
+        config_content = """
+llm:
+  api_key: "file-key"
+  model: "file-model"
+  summary_model: null
+  base_url: "https://api.openai.com/v1"
+"""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+
+        config = load_config(config_file)
+
+        assert config.llm.provider == "openai_compatible"
+        assert config.llm.api_key == "oai-key"
+        assert config.llm.base_url == "https://example.com/v1"
+        assert config.llm.model == "gpt-4o"
+        assert config.llm.summary_model == "gpt-4o-mini"
 
     def test_canvas_api_key_override(self, tmp_path, monkeypatch):
         """测试环境变量覆盖 Canvas API Key"""

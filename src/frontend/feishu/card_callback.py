@@ -13,6 +13,12 @@ from agent_core.config import get_config
 from system.automation.ipc import AutomationIPCClient, default_socket_path
 
 from .config import get_feishu_config
+from .ask_user_card import (
+    ASK_CUSTOM,
+    ASK_PICK,
+    ASK_USER_VALUE_KEY,
+    merge_ask_user_action_value,
+)
 from .permission_card import (
     ALLOW,
     CLARIFY,
@@ -122,6 +128,66 @@ def execute_card_permission_resolution(
     if dec == CLARIFY:
         return "success", "已提交说明并回传给 Agent", card_dict
     return "success", "已批准" if dec == ALLOW else "已拒绝", card_dict
+
+
+async def resolve_ask_user_via_daemon_ipc(
+    raw_val: Any,
+    *,
+    form_value: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, str, Optional[Dict[str, Any]]]:
+    """通过 Automation IPC 在 daemon 内执行 submit_ask_user_fragment。"""
+    merged = merge_ask_user_action_value(raw_val, form_value)
+    mode = str(merged.get(ASK_USER_VALUE_KEY) or "").strip().lower()
+    if mode not in (ASK_PICK, ASK_CUSTOM):
+        return "warning", "无法识别的 ask_user 操作", None
+
+    bid = str(merged.get("batch_id") or merged.get("ask_user_id") or "").strip()
+    qid = str(merged.get("question_id") or "").strip()
+    if not bid or not qid:
+        logger.warning("ask_user card: missing batch_id/question_id raw=%r", raw_val)
+        return "warning", "无法识别本题", None
+
+    selected_opt: Optional[str] = None
+    custom_txt: Optional[str] = None
+    if mode == ASK_PICK:
+        so = merged.get("selected_option")
+        selected_opt = str(so).strip() if so is not None and str(so).strip() else None
+        if not selected_opt:
+            return "warning", "请点选选项", None
+    else:
+        ct = merged.get("custom_text")
+        custom_txt = str(ct).strip() if ct is not None and str(ct).strip() else None
+        if not custom_txt:
+            return "warning", "请填写说明后再提交", None
+
+    cfg = get_config()
+    timeout = min(float(cfg.llm.request_timeout_seconds or 120.0), 60.0)
+    ipc = AutomationIPCClient(
+        owner_id="root",
+        source="feishu",
+        socket_path=default_socket_path(),
+        timeout_seconds=timeout,
+    )
+    if not await ipc.ping():
+        logger.error("card ask_user: automation_daemon IPC unreachable")
+        return "error", "无法连接 automation_daemon，请确认已启动", None
+
+    ok, detail = await ipc.submit_ask_user_fragment(
+        batch_id=bid,
+        question_id=qid,
+        selected_option=selected_opt,
+        custom_text=custom_txt,
+    )
+    if not ok:
+        if detail in ("unknown_batch", "already_resolved"):
+            return "warning", "该提问已处理或已超时", None
+        return "warning", detail or "提交失败", None
+
+    if detail == "completed":
+        return "success", "已提交，Agent 将继续处理", None
+    if detail.startswith("partial:"):
+        return "success", "已记录本题，请继续完成其余题目", None
+    return "success", "已记录", None
 
 
 async def resolve_card_via_daemon_ipc(
@@ -244,6 +310,13 @@ async def handle_feishu_card_action(body: Dict[str, Any]) -> JSONResponse:
     form_value = action.get("form_value")
     if form_value is not None and not isinstance(form_value, dict):
         form_value = None
+
+    merged_au = merge_ask_user_action_value(raw_val, form_value)
+    if str(merged_au.get(ASK_USER_VALUE_KEY) or "").strip() in (ASK_PICK, ASK_CUSTOM):
+        kind, msg, card_dict = await resolve_ask_user_via_daemon_ipc(
+            raw_val, form_value=form_value
+        )
+        return _toast_response(msg=msg, kind=kind, card=card_dict)
 
     kind, msg, card_dict = await resolve_card_via_daemon_ipc(
         raw_val, form_value=form_value

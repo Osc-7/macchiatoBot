@@ -381,14 +381,21 @@ class TestLLMClient:
             assert "extra_body" not in call_args.kwargs
 
     @pytest.mark.asyncio
-    async def test_chat_with_web_search_non_qwen_provider(self):
-        """测试非 Qwen 提供商不启用联网搜索"""
+    @pytest.mark.parametrize("provider", ["doubao", "openai_compatible"])
+    async def test_chat_with_web_search_non_qwen_provider(self, provider):
+        """测试非 Qwen 提供商不启用联网搜索（含通用 OpenAI 兼容）"""
+        base_url = (
+            "https://api.openai.com/v1"
+            if provider == "openai_compatible"
+            else "https://ark.cn-beijing.volces.com/api/v3"
+        )
+        model_id = "gpt-4o-mini" if provider == "openai_compatible" else "ep-test-model"
         config = Config(
             llm=LLMConfig(
-                provider="doubao",  # 非 qwen 提供商
+                provider=provider,
                 api_key="test-api-key",
-                base_url="https://ark.cn-beijing.volces.com/api/v3",
-                model="ep-test-model",
+                base_url=base_url,
+                model=model_id,
                 temperature=0.7,
                 max_tokens=4096,
                 enable_search=True,  # 即使启用，非 qwen 也不应该传递

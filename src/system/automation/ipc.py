@@ -9,7 +9,7 @@ import logging
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     from system.kernel.terminal import KernelTerminal
@@ -344,6 +344,47 @@ class AutomationIPCServer:
             ok = _resolve_permission_wait(pid, decision)
             return {"ok": bool(ok)}
 
+        if method == "resolve_ask_user":
+            from agent_core.permissions.ask_user_registry import (
+                parse_answers_from_ipc_params,
+                resolve_ask_user as _resolve_ask_user_wait,
+            )
+
+            bid = str(params.get("batch_id") or params.get("ask_user_id") or "").strip()
+            if not bid:
+                raise ValueError("batch_id 不能为空")
+            decision = parse_answers_from_ipc_params(params if isinstance(params, dict) else {})
+            ok = _resolve_ask_user_wait(bid, decision)
+            return {"ok": bool(ok)}
+
+        if method == "submit_ask_user_fragment":
+            from agent_core.permissions.ask_user_registry import (
+                AskUserAnswer,
+                submit_ask_user_fragment as _submit_au_fragment,
+            )
+
+            bid = str(params.get("batch_id") or "").strip()
+            qid = str(params.get("question_id") or "").strip()
+            if not bid or not qid:
+                raise ValueError("batch_id / question_id 不能为空")
+            so_raw = params.get("selected_option")
+            ct_raw = params.get("custom_text")
+            answer = AskUserAnswer(
+                question_id=qid,
+                selected_option=(
+                    str(so_raw).strip()
+                    if so_raw is not None and str(so_raw).strip()
+                    else None
+                ),
+                custom_text=(
+                    str(ct_raw).strip()
+                    if ct_raw is not None and str(ct_raw).strip()
+                    else None
+                ),
+            )
+            ok, detail = _submit_au_fragment(bid, answer)
+            return {"ok": bool(ok), "detail": detail}
+
         if method == "poll_push":
             # 非阻塞轮询：批量取出该 session 所有 [out] 队列结果（统一出口）
             results = []
@@ -631,6 +672,43 @@ class AutomationIPCClient:
             payload["user_instruction"] = user_instruction
         data = await self._request("resolve_permission", payload)
         return bool(data.get("ok"))
+
+    async def resolve_ask_user(
+        self,
+        *,
+        batch_id: str,
+        answers: List[Dict[str, Any]],
+    ) -> bool:
+        """在 daemon 进程内调用 resolve_ask_user（跨进程网关须用此接口）。
+
+        answers 每项建议包含 question_id、selected_option 与/或 custom_text。
+        """
+        payload: Dict[str, Any] = {
+            "batch_id": batch_id,
+            "answers": answers,
+        }
+        data = await self._request("resolve_ask_user", payload)
+        return bool(data.get("ok"))
+
+    async def submit_ask_user_fragment(
+        self,
+        *,
+        batch_id: str,
+        question_id: str,
+        selected_option: Optional[str] = None,
+        custom_text: Optional[str] = None,
+    ) -> tuple[bool, str]:
+        """飞书分题提交：在 daemon 内合并 partial，集齐后唤醒 ask_user Future。"""
+        payload: Dict[str, Any] = {
+            "batch_id": batch_id,
+            "question_id": question_id,
+        }
+        if selected_option is not None:
+            payload["selected_option"] = selected_option
+        if custom_text is not None:
+            payload["custom_text"] = custom_text
+        data = await self._request("submit_ask_user_fragment", payload)
+        return bool(data.get("ok")), str(data.get("detail") or "")
 
     async def poll_push(self) -> list:
         """非阻塞轮询当前 session 的 inject_turn 推送结果列表（空则返回 []）。

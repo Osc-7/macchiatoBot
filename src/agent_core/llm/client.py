@@ -1,8 +1,10 @@
 """
 LLM 客户端封装
 
-封装豆包/阿里云百炼 Qwen/OpenAI 兼容 API 调用，支持多轮工具调用（Function Calling）。
-百炼说明：https://bailian.console.aliyun.com/ 支持 qwen-3.5-plus 等多轮工具调用。
+使用 OpenAI 官方 Python SDK（AsyncOpenAI）连接任意 **OpenAI 兼容 Chat Completions** 端点：
+官方 OpenAI、Azure OpenAI、本地 vLLM、OpenRouter、阿里云百炼兼容模式等。
+
+config.llm.provider=qwen 时额外通过 extra_body 支持百炼 DashScope 扩展（联网搜索、思考模式等）。
 """
 
 import inspect
@@ -214,7 +216,7 @@ class LLMClient:
     """
     LLM 客户端。
 
-    封装豆包/阿里云百炼 Qwen（OpenAI 兼容）/OpenAI API 调用，支持：
+    封装 OpenAI 兼容 Chat Completions（含豆包、百炼、官方 OpenAI 等），支持：
     - 基础对话
     - 多轮工具调用（Function Calling）
     - 流式响应（可选）

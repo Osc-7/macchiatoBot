@@ -501,9 +501,9 @@ def build_tool_registry(
     tools_cfg = getattr(cfg, "tools", None)
     pinned = list(
         getattr(tools_cfg, "core_tools", None)
-        or ["search_tools", "call_tool", "bash", "request_permission"]
+        or ["search_tools", "call_tool", "bash", "request_permission", "ask_user"]
     )
-    for core in ["search_tools", "call_tool", "bash", "request_permission"]:
+    for core in ["search_tools", "call_tool", "bash", "request_permission", "ask_user"]:
         if core not in pinned:
             pinned.append(core)
     if profile is not None:
@@ -528,6 +528,11 @@ def build_tool_registry(
 
         if profile is None or profile.is_tool_allowed("request_permission"):
             registry.register(RequestPermissionTool())
+    if not registry.has("ask_user"):
+        from agent_core.tools.ask_user_tool import AskUserTool
+
+        if profile is None or profile.is_tool_allowed("ask_user"):
+            registry.register(AskUserTool())
     if not registry.has("search_tools"):
         registry.register(
             SearchToolsTool(

@@ -1,61 +1,35 @@
-# Schedule Agent 配置示例
+# Schedule Agent 配置示例（复制为 config.yaml 后按需填写）
 #
-# === 豆包 (Doubao) ===
-# 1. 需要在火山引擎控制台创建推理接口获取 endpoint_id
-# 2. API Key 从火山引擎控制台获取
-# 3. model 参数填写推理端点 ID (如 ep-20250117123456)
-# 环境变量：DOUBAO_API_KEY, DOUBAO_MODEL
-#
-# === 阿里云百炼 Qwen ===
-# 1. API Key 从百炼控制台获取：https://bailian.console.aliyun.com/
-# 2. 使用 OpenAI 兼容端点，支持多轮工具调用 (Function Calling)
-# 3. 推荐模型：qwen-3.5-plus
-# 环境变量：QWEN_API_KEY 或 DASHSCOPE_API_KEY, QWEN_MODEL
-#
-# 使用方式：
-# 方式1（推荐）：设置环境变量后运行
-#   export QWEN_API_KEY="your-api-key"   # 或 DOUBAO_API_KEY
-#   export QWEN_MODEL="qwen-3.5-plus"   # 或 DOUBAO_MODEL
-#   python -m agent.main
-# 方式2：在下方 llm 中直接填写（不推荐，容易泄露）
+# LLM 使用 OpenAI 官方 SDK 调 Chat Completions：任意兼容端点均可（官方 OpenAI、Azure、本地 vLLM、OpenRouter、百炼兼容模式等）。
+# - provider: openai_compatible — 通用（默认 base_url https://api.openai.com/v1）
+# - provider: qwen — 阿里云百炼，可启用下方 enable_search / enable_thinking 等 DashScope 扩展（extra_body）
+# - provider: doubao — 火山豆包（model 填推理端点 ID）
+# 换模型：改 llm.model；总结/子任务轻量模型：summary_model。
+# 环境变量（按 provider）：OPENAI_* | QWEN_API_KEY/DASHSCOPE_API_KEY + QWEN_MODEL | DOUBAO_API_KEY + DOUBAO_MODEL
 
-# 豆包 LLM 配置示例
-# llm:
-#   provider: "doubao"
-#   api_key: "your-doubao-api-key-here"
-#   base_url: "https://ark.cn-beijing.volces.com/api/v3"
-#   model: "ep-20250117123456"  # 推理端点 ID
-#   temperature: 0.7
-#   max_tokens: 4096
-
-# 阿里云百炼 Qwen 配置示例（推荐，支持多轮工具调用）
 llm:
-  provider: "qwen"
-  api_key: "your-qwen-api-key-here"
-  # base_url 可不填，默认使用百炼 OpenAI 兼容端点
-  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  model: "qwen3.5-plus"
-  summary_model: "qwen-flash"  # 用于总结/提炼的轻量模型（可选）
+  provider: "openai_compatible"
+  api_key: "your-api-key"
+  # base_url 可省略，按 provider 使用默认；OpenRouter 等填其 OpenAI 兼容地址
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4o-mini"
+  summary_model: null
   temperature: 0.7
   max_tokens: 4096
-  request_timeout_seconds: 120  # LLM 请求超时（秒）
-  stream: true  # 启用流式输出（推荐）
-  # 联网搜索配置（仅支持阿里云百炼 Qwen）
-  # 参见 https://help.aliyun.com/zh/model-studio/web-search
-  enable_search: false  # 是否启用模型内建联网搜索（推荐保持 false，改用 Tavily MCP 工具）
-  enable_thinking: false  # 是否启用思考模式（通过 extra_body 传递）
-  thinking_budget: null  # 思考长度上限（可选；仅部分模型支持）
-  enable_web_extractor: false  # 是否启用模型内建网页抓取（推荐保持 false，改用 extract_web_content + Tavily）
-  # 参见 https://help.aliyun.com/zh/model-studio/web-extractor
+  request_timeout_seconds: 120
+  stream: true
+  # 仅 provider=qwen 时生效（百炼文档）
+  enable_search: false
+  enable_thinking: false
+  thinking_budget: null
+  enable_web_extractor: false
   search_options:
-    forced_search: false  # 是否强制联网搜索（默认模型自动判断）
-    search_strategy: "turbo"  # 搜索策略: turbo(默认) | max | agent | agent_max（网页抓取需设为 agent_max）
-    enable_source: false  # 是否返回搜索来源（仅 DashScope 协议支持）
-    enable_citation: false  # 是否开启角标标注（需 enable_source=true）
-    citation_format: "[<number>]"  # 角标格式: [<number>] | [ref_<number>]
-    enable_search_extension: false  # 是否开启垂域搜索（天气、股票等）
-    # freshness: 7  # 搜索时效性（天数）: 7 | 30 | 180 | 365
-    # assigned_site_list: []  # 限定搜索来源站点列表（最多25个）
+    forced_search: false
+    search_strategy: "turbo"
+    enable_source: false
+    enable_citation: false
+    citation_format: "[<number>]"
+    enable_search_extension: false
 
 # 多模态识图配置（调用多模态大模型，不依赖本地 OCR 模型）
 # 推荐使用 attach_media 工具声明需要在下一轮附带的图片/视频，

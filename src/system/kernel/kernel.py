@@ -82,7 +82,7 @@ class AgentKernel:
         驱动 AgentCore 的 run_loop()。
 
         channel_metadata: 来自 KernelRequest.metadata 的渠道字段（如 feishu_chat_id），
-        会并入工具 __execution_context__，供 request_permission 等推送到对应前端。
+        会并入工具 __execution_context__，供 request_permission、ask_user 等推送到对应前端。
 
         响应的系统调用：
         - ToolCallAction        → 执行工具，结果 asend 回 Core
@@ -202,6 +202,9 @@ class AgentKernel:
                         action.tool_name, **parsed_args
                     )
                     tool_names_called.add(action.tool_name)
+                    delegated = result.metadata.get("_delegated_tool_name")
+                    if isinstance(delegated, str) and delegated:
+                        tool_names_called.add(delegated)
                 action = await gen.asend(
                     ToolResultEvent(
                         tool_call_id=action.tool_call_id,

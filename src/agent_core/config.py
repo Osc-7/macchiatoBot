@@ -5,12 +5,15 @@
 支持环境变量覆盖敏感配置。
 """
 
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
+
+logger = logging.getLogger(__name__)
 
 
 class SearchOptionsConfig(BaseModel):
@@ -54,18 +57,21 @@ class LLMConfig(BaseModel):
     """LLM 配置"""
 
     provider: str = Field(
-        default="doubao",
-        description="LLM 提供商: doubao(豆包) | qwen(阿里云百炼)",
+        default="openai_compatible",
+        description=(
+            "LLM 提供商: openai_compatible(通用 OpenAI 兼容 HTTP API) | "
+            "qwen(阿里云百炼，支持 DashScope extra_body 扩展) | doubao(火山豆包)"
+        ),
     )
     api_key: str = Field(..., description="API 密钥")
     base_url: str = Field(
-        default="https://ark.cn-beijing.volces.com/api/v3",
-        description="API 基础 URL",
+        default="https://api.openai.com/v1",
+        description="Chat Completions 的 base URL；可在 YAML 中省略，由 load_config 按 provider 填默认端点",
     )
-    model: str = Field(..., description="模型名称或推理端点 ID")
+    model: str = Field(..., description="模型名称（或豆包推理端点 ID）")
     summary_model: Optional[str] = Field(
         default=None,
-        description="用于总结/提炼的轻量模型（如 qwen-flash），为空则用主模型",
+        description="用于总结/提炼的轻量模型；为空则用主模型",
     )
     temperature: float = Field(default=0.7, ge=0, le=2, description="生成温度")
     max_tokens: int = Field(default=4096, ge=1, description="最大 token 数")
@@ -80,7 +86,7 @@ class LLMConfig(BaseModel):
     )
     enable_search: bool = Field(
         default=False,
-        description="是否启用联网搜索功能（仅支持阿里云百炼 Qwen）",
+        description="是否启用联网搜索（仅 provider=qwen 时通过 extra_body 生效）",
     )
     search_options: Optional[SearchOptionsConfig] = Field(
         default=None,
@@ -88,7 +94,7 @@ class LLMConfig(BaseModel):
     )
     enable_thinking: bool = Field(
         default=False,
-        description="是否启用思考模式（用于网页抓取等功能，仅支持阿里云百炼 Qwen）",
+        description="是否启用思考模式（仅 provider=qwen 时通过 extra_body 生效）",
     )
     thinking_budget: Optional[int] = Field(
         default=None,
@@ -97,7 +103,7 @@ class LLMConfig(BaseModel):
     )
     enable_web_extractor: bool = Field(
         default=False,
-        description="是否启用网页抓取功能（需 enable_search=true 和 enable_thinking=true，仅支持阿里云百炼 Qwen）",
+        description="是否启用网页抓取（仅 provider=qwen 时参与 extra_body；多数场景请用工具）",
     )
 
 
@@ -685,7 +691,13 @@ class ToolsConfig(BaseModel):
     """工具模板与初始暴露配置。"""
 
     core_tools: List[str] = Field(
-        default_factory=lambda: ["search_tools", "call_tool", "bash", "request_permission"],
+        default_factory=lambda: [
+            "search_tools",
+            "call_tool",
+            "bash",
+            "request_permission",
+            "ask_user",
+        ],
         description="所有 Core 固定携带的核心工具",
     )
     pinned_tools: List[str] = Field(
@@ -1070,6 +1082,30 @@ class Config(BaseModel):
     )
 
 
+def _normalize_llm_config_dict(llm: Any) -> None:
+    """规范化 YAML 中的 llm 段：provider 别名、未知值回退、补全默认 base_url。"""
+    if not isinstance(llm, dict):
+        return
+    raw_p = str(llm.get("provider") or "openai_compatible").strip().lower()
+    aliases = {"openai": "openai_compatible", "compatible": "openai_compatible"}
+    provider = aliases.get(raw_p, raw_p)
+    if provider not in ("openai_compatible", "qwen", "doubao"):
+        logger.warning(
+            "未知 llm.provider=%s，将使用 openai_compatible（任意 OpenAI 兼容 Chat Completions）",
+            llm.get("provider"),
+        )
+        provider = "openai_compatible"
+    llm["provider"] = provider
+    bu = llm.get("base_url")
+    if bu is None or (isinstance(bu, str) and not bu.strip()):
+        if provider == "qwen":
+            llm["base_url"] = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        elif provider == "doubao":
+            llm["base_url"] = "https://ark.cn-beijing.volces.com/api/v3"
+        else:
+            llm["base_url"] = "https://api.openai.com/v1"
+
+
 def find_config_file() -> Path:
     """
     查找配置文件。
@@ -1139,6 +1175,8 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     if raw_config is None:
         raise ValueError(f"配置文件为空: {config_path}")
 
+    _normalize_llm_config_dict(raw_config.get("llm"))
+
     # 兼容旧工具配置：agent.tool_mode/source_overrides/pinned_tools -> tools
     agent_raw = raw_config.get("agent")
     if not isinstance(agent_raw, dict):
@@ -1177,33 +1215,46 @@ def load_config(config_path: Optional[Path] = None) -> Config:
                     "pinned" if raw_mode in ("kernel", "full") else "empty"
                 )
 
-    # 支持环境变量覆盖敏感配置
-    if "llm" in raw_config:
-        provider = raw_config["llm"].get("provider", "doubao")
+    # 支持环境变量覆盖敏感配置（按 provider 分支；通用 OpenAI 兼容见 OPENAI_*）
+    if "llm" in raw_config and isinstance(raw_config["llm"], dict):
+        llm = raw_config["llm"]
+        provider = str(llm.get("provider", "openai_compatible")).strip().lower()
         if provider == "qwen":
-            # 阿里云百炼 Qwen：默认 base_url 为 OpenAI 兼容端点，支持多轮工具调用
-            raw_config["llm"].setdefault(
-                "base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"
-            )
             env_api_key = os.environ.get("QWEN_API_KEY") or os.environ.get(
                 "DASHSCOPE_API_KEY"
             )
             if env_api_key:
-                raw_config["llm"]["api_key"] = env_api_key
+                llm["api_key"] = env_api_key
             env_model = os.environ.get("QWEN_MODEL")
             if env_model:
-                raw_config["llm"]["model"] = env_model
+                llm["model"] = env_model
             env_summary = os.environ.get("QWEN_SUMMARY_MODEL")
             if env_summary:
-                raw_config["llm"]["summary_model"] = env_summary
-        else:
-            # 豆包
+                llm["summary_model"] = env_summary
+        elif provider == "doubao":
             env_api_key = os.environ.get("DOUBAO_API_KEY")
             if env_api_key:
-                raw_config["llm"]["api_key"] = env_api_key
+                llm["api_key"] = env_api_key
             env_model = os.environ.get("DOUBAO_MODEL")
             if env_model:
-                raw_config["llm"]["model"] = env_model
+                llm["model"] = env_model
+            env_summary = os.environ.get("DOUBAO_SUMMARY_MODEL")
+            if env_summary:
+                llm["summary_model"] = env_summary
+        else:
+            # openai_compatible：OpenAI / Azure OpenAI / 本地 vLLM / OpenRouter 等
+            env_api_key = os.environ.get("OPENAI_API_KEY")
+            if env_api_key:
+                llm["api_key"] = env_api_key
+            env_base = os.environ.get("OPENAI_BASE_URL")
+            if env_base:
+                llm["base_url"] = env_base
+            env_model = os.environ.get("OPENAI_MODEL")
+            if env_model:
+                llm["model"] = env_model
+            env_summary = os.environ.get("OPENAI_SUMMARY_MODEL")
+            if env_summary:
+                llm["summary_model"] = env_summary
 
     # Canvas 配置支持环境变量覆盖
     if "canvas" not in raw_config:

@@ -103,4 +103,6 @@ class CallToolTool(BaseTool):
         if exec_ctx is not None and "__execution_context__" not in arguments:
             arguments = {**arguments, "__execution_context__": exec_ctx}
 
-        return await self._registry.execute(name, **arguments)
+        result = await self._registry.execute(name, **arguments)
+        result.metadata["_delegated_tool_name"] = name
+        return result

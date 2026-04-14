@@ -76,6 +76,8 @@ from .automation_tools import (
     ConfigureAutomationPolicyTool,
     GetAutomationActivityTool,
     CreateScheduledJobTool,
+    ListScheduledJobsTool,
+    DeleteScheduledJobTool,
     NotifyOwnerTool,
 )
 from .sjtu_jw_tools import FetchSjtuUndergradScheduleTool
@@ -311,6 +313,8 @@ def _build_automation_tools(
             default_core_mode=default_core_mode,
             default_tool_template=default_tool_template,
         ),
+        ListScheduledJobsTool(),
+        DeleteScheduledJobTool(),
         NotifyOwnerTool(config=config),
     ]
     return tools
@@ -331,7 +335,6 @@ def _build_subagent_tools(
         tools.append(_LazySchedulerSendMessageTool(core_pool))
         tools.append(_LazySchedulerReplyToMessageTool(core_pool))
         tools.append(ListAgentsTool(core_pool=core_pool))
-        tools.append(WaitForAgentMessageTool(core_pool=core_pool))
     else:
         tools.append(
             CreateSubagentTool(
@@ -352,6 +355,9 @@ def _build_subagent_tools(
         tools.append(CancelSubagentTool(core_pool=core_pool))
         tools.append(ListAgentsTool(core_pool=core_pool))
         tools.append(WaitSubagentTool(core_pool=core_pool))
+
+    # wait_for_agent_message: 所有模式（full/sub）都能用
+    tools.append(WaitForAgentMessageTool(core_pool=core_pool))
 
     return tools
 

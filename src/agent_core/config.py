@@ -673,6 +673,8 @@ def _default_tool_templates() -> Dict[str, "ToolTemplateConfig"]:
                 "configure_automation_policy",
                 "get_automation_activity",
                 "create_scheduled_job",
+                "list_scheduled_jobs",
+                "delete_scheduled_job",
                 "notify_owner",
             ],
         ),
@@ -699,6 +701,8 @@ class ToolsConfig(BaseModel):
             "memory_search_content",
             "memory_store",
             "memory_ingest",
+            "list_scheduled_jobs",
+            "delete_scheduled_job",
         ],
         description="默认模板在 exposure=pinned 时额外始终暴露给 LLM 的工具名列表",
     )

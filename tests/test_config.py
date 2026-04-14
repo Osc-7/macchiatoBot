@@ -109,6 +109,8 @@ class TestConfigModels:
         config = ToolsConfig()
         assert config.core_tools == ["search_tools", "call_tool", "bash", "request_permission"]
         assert "read_file" in config.pinned_tools
+        assert "list_scheduled_jobs" in config.pinned_tools
+        assert "delete_scheduled_job" in config.pinned_tools
         assert config.templates["default"].exposure == "pinned"
         assert "shuiyuan_browse_topic" in config.templates["shuiyuan"].extra
 

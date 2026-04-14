@@ -12,10 +12,12 @@ from system.tools.automation_tools import (
     AckNotificationTool,
     ConfigureAutomationPolicyTool,
     CreateScheduledJobTool,
+    DeleteScheduledJobTool,
     GetAutomationActivityTool,
     GetDigestTool,
     GetSyncStatusTool,
     ListNotificationsTool,
+    ListScheduledJobsTool,
     SyncSourcesTool,
 )
 
@@ -208,3 +210,33 @@ async def test_create_scheduled_job_rejects_mixed_one_shot_and_interval(tmp_path
     )
     assert result.success is False
     assert result.error == "MIXED_SCHEDULE_MODE"
+
+
+@pytest.mark.asyncio
+async def test_list_and_delete_scheduled_jobs(tmp_path):
+    base = str(tmp_path / "automation")
+    create = CreateScheduledJobTool(base_dir=base)
+    await create.execute(
+        instruction="每 5 分钟 ping",
+        interval_minutes=5,
+        job_name="ping-test",
+    )
+
+    list_tool = ListScheduledJobsTool(base_dir=base)
+    listed = await list_tool.execute()
+    assert listed.success is True
+    assert len(listed.data["jobs"]) == 1
+    assert listed.data["jobs"][0]["job_name"] == "ping-test"
+
+    delete_tool = DeleteScheduledJobTool(base_dir=base)
+    missing = await delete_tool.execute(job_name="nope")
+    assert missing.success is False
+    assert missing.error == "NOT_FOUND"
+
+    ok = await delete_tool.execute(job_name="ping-test")
+    assert ok.success is True
+    assert ok.data["deleted"] is True
+
+    after = await list_tool.execute()
+    assert after.success is True
+    assert after.data["jobs"] == []

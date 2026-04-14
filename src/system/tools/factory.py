@@ -47,6 +47,8 @@ from .automation_tools import (
     ConfigureAutomationPolicyTool,
     GetAutomationActivityTool,
     CreateScheduledJobTool,
+    ListScheduledJobsTool,
+    DeleteScheduledJobTool,
     NotifyOwnerTool,
 )
 from .sjtu_jw_tools import FetchSjtuUndergradScheduleTool
@@ -171,5 +173,7 @@ def get_default_tools(
     tools.append(ConfigureAutomationPolicyTool())
     tools.append(GetAutomationActivityTool())
     tools.append(CreateScheduledJobTool())
+    tools.append(ListScheduledJobsTool())
+    tools.append(DeleteScheduledJobTool())
 
     return tools

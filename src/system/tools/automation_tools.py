@@ -728,3 +728,124 @@ class CreateScheduledJobTool(BaseTool):
             message="定时任务已创建。",
             data={"job": job.model_dump(mode="json")},
         )
+
+
+class ListScheduledJobsTool(BaseTool):
+    """列出已注册的自动化定时任务（含 config 同步与 Agent 创建的 job）。"""
+
+    def __init__(self, base_dir: Optional[str] = None):
+        self._repo = JobDefinitionRepository(base_dir=base_dir)
+
+    @property
+    def name(self) -> str:
+        return "list_scheduled_jobs"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self.name,
+            description=(
+                "列出当前 JobDefinition 仓库中的定时任务（主键为 job_name）。\n\n"
+                "用于回答“有哪些定时任务”“查看后台任务配置”等；"
+                "删除请用 delete_scheduled_job。"
+            ),
+            parameters=[
+                ToolParameter(
+                    name="enabled_only",
+                    type="boolean",
+                    description="为 true 时仅返回 enabled=true 的任务",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="limit",
+                    type="integer",
+                    description="最多返回条数，默认 100",
+                    required=False,
+                ),
+            ],
+            tags=["自动化", "定时任务", "调度"],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        kwargs.pop("__execution_context__", None)
+        enabled_only = bool(kwargs.get("enabled_only", False))
+        limit_raw = kwargs.get("limit")
+        limit = 100
+        if limit_raw is not None:
+            try:
+                limit = max(1, int(limit_raw))
+            except (TypeError, ValueError):
+                return ToolResult(
+                    success=False,
+                    error="INVALID_LIMIT",
+                    message="limit 必须是正整数。",
+                )
+
+        items = self._repo.get_all()
+        if enabled_only:
+            items = [j for j in items if j.enabled]
+        items.sort(key=lambda j: j.updated_at, reverse=True)
+        items = items[:limit]
+
+        return ToolResult(
+            success=True,
+            message=f"共 {len(items)} 条定时任务（已按更新时间倒序）。",
+            data={
+                "jobs": [j.model_dump(mode="json") for j in items],
+                "total_returned": len(items),
+            },
+        )
+
+
+class DeleteScheduledJobTool(BaseTool):
+    """按 job_name 从仓库删除定时任务；automation_daemon 会通过 watcher 取消调度。"""
+
+    def __init__(self, base_dir: Optional[str] = None):
+        self._repo = JobDefinitionRepository(base_dir=base_dir)
+
+    @property
+    def name(self) -> str:
+        return "delete_scheduled_job"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self.name,
+            description=(
+                "按 job_name 删除一条定时任务记录（从 job_definitions 持久化中移除）。\n\n"
+                "若只想暂停而不删记录，可对同名任务调用 create_scheduled_job 并设 enabled=false。\n\n"
+                "删除后 automation_daemon 侧会停止对该 job 的调度。"
+            ),
+            parameters=[
+                ToolParameter(
+                    name="job_name",
+                    type="string",
+                    description="要删除的任务唯一名（与 create_scheduled_job 的 job_name 一致）",
+                    required=True,
+                ),
+            ],
+            tags=["自动化", "定时任务", "调度"],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        kwargs.pop("__execution_context__", None)
+        job_name = str(kwargs.get("job_name") or "").strip()
+        if not job_name:
+            return ToolResult(
+                success=False,
+                error="MISSING_JOB_NAME",
+                message="缺少 job_name。",
+            )
+
+        ok = self._repo.delete(job_name)
+        if not ok:
+            return ToolResult(
+                success=False,
+                error="NOT_FOUND",
+                message=f"未找到名为 {job_name!r} 的定时任务。",
+                data={"job_name": job_name, "deleted": False},
+            )
+
+        return ToolResult(
+            success=True,
+            message=f"已删除定时任务 {job_name!r}。",
+            data={"job_name": job_name, "deleted": True},
+        )

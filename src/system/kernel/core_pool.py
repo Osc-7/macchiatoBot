@@ -356,8 +356,9 @@ class CorePool:
         entry = self._pool.pop(session_id, None)
         if entry is None:
             return
-        if session_id.startswith("sub:"):
-            self.discard_pending_subagent_lifecycle_inject(session_id)
+        # 不在此丢弃 _pending_subagent_lifecycle：子任务线程里 on_sub_complete 可能已将通知
+        # 暂存（父会话仍有 inflight），随后本方法在 finally 中 evict 子会话。若此处 pop 暂存，
+        # 父侧永远不会再收到 inject_turn。显式丢弃仍由 wait_subagent / reap_zombie 负责。
         agent = entry.agent
         is_subagent = bool(entry.parent_session_id) or session_id.startswith("sub:")
 

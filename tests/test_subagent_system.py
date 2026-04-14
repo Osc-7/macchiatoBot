@@ -296,6 +296,31 @@ class TestCorePoolSubagentLifecycle:
         pool.flush_pending_subagent_lifecycle_for_parent("cli:root")
         scheduler.inject_turn.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_evict_after_staged_lifecycle_keeps_pending_for_parent_flush(self):
+        """子任务线程 on_sub_complete 后 finally evict：不得清掉父仍有 inflight 时暂存的完成通知。"""
+        pool, scheduler = _make_pool()
+        scheduler.session_inflight_request_count = MagicMock(return_value=1)
+        pool.register_sub(
+            sub_session_id="sub:evict-stage",
+            parent_session_id="cli:root",
+            task_description="t",
+        )
+        pool.on_sub_complete("sub:evict-stage", "done")
+        scheduler.inject_turn.assert_not_called()
+        assert "sub:evict-stage" in pool._pending_subagent_lifecycle
+
+        pool._kernel = MagicMock()
+        pool._kernel.kill = AsyncMock(return_value=None)
+        await pool.evict("sub:evict-stage")
+
+        assert "sub:evict-stage" in pool._pending_subagent_lifecycle
+        scheduler.session_inflight_request_count = MagicMock(return_value=0)
+        pool.flush_pending_subagent_lifecycle_for_parent("cli:root")
+        scheduler.inject_turn.assert_called_once()
+        request = scheduler.inject_turn.call_args[0][0]
+        assert request.session_id == "cli:root"
+
     def test_discard_pending_skips_flush(self):
         pool, scheduler = _make_pool()
         scheduler.session_inflight_request_count = MagicMock(return_value=1)

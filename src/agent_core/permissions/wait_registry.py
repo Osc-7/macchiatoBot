@@ -34,6 +34,10 @@ class PermissionDecision:
     path_prefix: Optional[str] = None
     """若允许持久写某前缀，规范化绝对路径；仅当 allowed 为 True 时有效。"""
     note: Optional[str] = None
+    clarify_requested: bool = False
+    """用户暂不批准，希望先补充更精确说明后再决定（飞书卡片第三项）。"""
+    user_instruction: Optional[str] = None
+    """飞书表单「给 Agent 更精确的指令」中用户填写的文本（未填则为空字符串）。"""
 
 
 _futures: Dict[str, asyncio.Future[PermissionDecision]] = {}

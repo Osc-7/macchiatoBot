@@ -326,12 +326,18 @@ class AutomationIPCServer:
             if not pid:
                 raise ValueError("permission_id 不能为空")
             allowed = bool(params.get("allowed"))
+            clarify_requested = bool(params.get("clarify_requested"))
             path_prefix = params.get("path_prefix")
             note_raw = params.get("note")
+            ui_merged: Optional[str] = None
+            if clarify_requested:
+                ui_merged = str(params.get("user_instruction") or "").strip()
             decision = PermissionDecision(
-                allowed=allowed,
+                allowed=allowed and not clarify_requested,
                 path_prefix=str(path_prefix).strip() if path_prefix else None,
                 note=None if note_raw is None else str(note_raw),
+                clarify_requested=clarify_requested,
+                user_instruction=ui_merged,
             )
             ok = _resolve_permission_wait(pid, decision)
             return {"ok": bool(ok)}
@@ -604,17 +610,20 @@ class AutomationIPCClient:
         allowed: bool,
         path_prefix: Optional[str] = None,
         note: Optional[str] = None,
+        clarify_requested: bool = False,
+        user_instruction: Optional[str] = None,
     ) -> bool:
         """在 daemon 进程内调用 resolve_permission（跨进程网关须用此接口）。"""
-        data = await self._request(
-            "resolve_permission",
-            {
-                "permission_id": permission_id,
-                "allowed": allowed,
-                "path_prefix": path_prefix,
-                "note": note,
-            },
-        )
+        payload: Dict[str, Any] = {
+            "permission_id": permission_id,
+            "allowed": allowed,
+            "path_prefix": path_prefix,
+            "note": note,
+            "clarify_requested": clarify_requested,
+        }
+        if user_instruction is not None:
+            payload["user_instruction"] = user_instruction
+        data = await self._request("resolve_permission", payload)
         return bool(data.get("ok"))
 
     async def poll_push(self) -> list:

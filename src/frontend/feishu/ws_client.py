@@ -95,16 +95,23 @@ def _handle_p2_card_action_trigger(data: Any) -> Any:
     ev = getattr(data, "event", None)
     action = getattr(ev, "action", None) if ev else None
     raw_val = getattr(action, "value", None) if action else None
+    form_value = getattr(action, "form_value", None) if action else None
+    if form_value is not None and not isinstance(form_value, dict):
+        form_value = None
 
     try:
-        kind, msg = asyncio.run(resolve_card_via_daemon_ipc(raw_val))
+        kind, msg, card_dict = asyncio.run(
+            resolve_card_via_daemon_ipc(raw_val, form_value=form_value)
+        )
     except RuntimeError:
         # 极少数环境下当前线程已有运行中的 loop
         import concurrent.futures
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            kind, msg = pool.submit(
-                lambda: asyncio.run(resolve_card_via_daemon_ipc(raw_val))
+            kind, msg, card_dict = pool.submit(
+                lambda: asyncio.run(
+                    resolve_card_via_daemon_ipc(raw_val, form_value=form_value)
+                )
             ).result(timeout=35.0)
 
     t = CallBackToast()
@@ -112,6 +119,13 @@ def _handle_p2_card_action_trigger(data: Any) -> Any:
     t.content = msg
     r = P2CardActionTriggerResponse()
     r.toast = t
+    if card_dict is not None:
+        from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackCard
+
+        c = CallBackCard()
+        c.type = "raw"
+        c.data = card_dict
+        r.card = c
     return r
 
 

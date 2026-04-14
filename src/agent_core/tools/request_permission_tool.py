@@ -150,6 +150,26 @@ class RequestPermissionTool(BaseTool):
                 data={"permission_id": pid},
             )
 
+        if getattr(decision, "clarify_requested", False):
+            ui = str(getattr(decision, "user_instruction", None) or "").strip()
+            if ui:
+                msg = (
+                    "用户未批准本次权限。飞书卡片补充说明：\n"
+                    + ui
+                    + "\n请据此澄清后再次调用 request_permission。"
+                )
+            else:
+                msg = (
+                    "用户未批准本次权限（飞书卡片未填写说明）。"
+                    "请结合对话澄清后再次调用 request_permission。"
+                )
+            return ToolResult(
+                success=False,
+                error="PERMISSION_CLARIFY",
+                message=msg,
+                data={"permission_id": pid, "user_instruction": ui},
+            )
+
         if not decision.allowed:
             return ToolResult(
                 success=False,

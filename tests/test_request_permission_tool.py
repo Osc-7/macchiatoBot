@@ -135,3 +135,92 @@ async def test_request_permission_timeout(monkeypatch, tmp_path):
     )
     assert not r.success
     assert r.error == "PERMISSION_TIMEOUT"
+
+
+async def test_request_permission_clarify(patched_get_config):
+    """飞书「精确指令」：clarify_requested 时返回 PERMISSION_CLARIFY。"""
+    tool = RequestPermissionTool()
+    exec_ctx = {"source": "cli", "user_id": "alice"}
+    captured: list[str] = []
+
+    def _notify(pid: str, payload: object) -> None:
+        captured.append(pid)
+
+    set_permission_notify_hook(_notify)
+    try:
+
+        async def _run():
+            return await tool.execute(
+                summary="need path",
+                kind="file_write",
+                timeout_seconds=5.0,
+                __execution_context__=exec_ctx,
+            )
+
+        task = asyncio.create_task(_run())
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if captured:
+                break
+        assert captured
+        pid = captured[0]
+        ok = resolve_permission(
+            pid,
+            PermissionDecision(
+                allowed=False,
+                clarify_requested=True,
+                note="用户要更精确说明",
+            ),
+        )
+        assert ok
+        result = await task
+        assert not result.success
+        assert result.error == "PERMISSION_CLARIFY"
+        assert "澄清" in (result.message or "")
+        assert result.data.get("user_instruction") == ""
+    finally:
+        set_permission_notify_hook(None)
+
+
+async def test_request_permission_clarify_includes_user_instruction_in_data(
+    patched_get_config,
+):
+    set_permission_notify_hook(lambda *_: None)
+    tool = RequestPermissionTool()
+    exec_ctx = {"source": "cli", "user_id": "alice"}
+    captured: list[str] = []
+
+    def _notify(pid: str, payload: object) -> None:
+        captured.append(pid)
+
+    set_permission_notify_hook(_notify)
+    try:
+
+        async def _run():
+            return await tool.execute(
+                summary="x",
+                timeout_seconds=5.0,
+                __execution_context__=exec_ctx,
+            )
+
+        task = asyncio.create_task(_run())
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if captured:
+                break
+        pid = captured[0]
+        ok = resolve_permission(
+            pid,
+            PermissionDecision(
+                allowed=False,
+                clarify_requested=True,
+                user_instruction="仅允许 /tmp/proj",
+            ),
+        )
+        assert ok
+        result = await task
+        assert result.error == "PERMISSION_CLARIFY"
+        assert result.data.get("user_instruction") == "仅允许 /tmp/proj"
+        assert "/tmp/proj" in (result.message or "")
+    finally:
+        set_permission_notify_hook(None)

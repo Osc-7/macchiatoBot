@@ -24,7 +24,7 @@ def _load_config() -> Config:
         return get_config()
     except FileNotFoundError as e:
         print(f"错误: {str(e)}")
-        print("请确保 config.yaml 文件存在并正确配置。")
+        print("请确保 config/config.yaml 存在并正确配置（或仓库根目录保留旧版 config.yaml）。")
         sys.exit(1)
     except Exception as e:
         print(f"加载配置失败: {str(e)}")

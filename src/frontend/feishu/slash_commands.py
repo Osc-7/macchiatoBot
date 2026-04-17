@@ -48,6 +48,8 @@ def _help_text() -> str:
     return """可用指令：
 /clear - 清空对话历史
 /usage 或 /stats - 本会话 token 用量
+/model 或 /model list - 列出可用 LLM（* 为当前主对话）
+/model <备注名或配置名> - 切换主对话模型（与配置里 label 一致即可，可含空格）
 /session - 显示当前会话
 /session list - 列出已加载会话
 /session switch <id> - 切换到指定会话
@@ -104,6 +106,57 @@ async def try_handle_slash_command(
                 "call_count": 0,
             }
         return True, "本会话 Token 用量：\n" + _format_token_usage(u)
+
+    # /model — 与 CLI 一致：list 或按 label/配置名切换（走 IPC model_list / model_switch）
+    if cmd_lower == "model":
+        rest = cmd_text.split(maxsplit=1)
+        sub = rest[1].strip() if len(rest) > 1 else ""
+        sub_tokens = sub.split()
+        if sub_tokens and sub_tokens[0].lower() == "switch":
+            sub = " ".join(sub_tokens[1:]).strip()
+        sub_l = sub.lower()
+        if not sub or sub_l in ("list", "ls"):
+            try:
+                models = await client.list_models()
+            except Exception as exc:
+                return True, f"列出模型失败: {exc}"
+            if not models:
+                return True, "当前没有可用的 LLM provider 配置。"
+            lines = [
+                "Available models ( * = current active model, V = vision provider ); switch: /model <model name>",
+                "Example: /model Qwen3.5 Plus",
+            ]
+            for m in models:
+                mark = "*" if m.get("is_active") else " "
+                vp = "V" if m.get("is_vision_provider") else " "
+                raw_label = m.get("label")
+                display = (
+                    str(raw_label).strip()
+                    if raw_label not in (None, "")
+                    else str(m.get("name") or "—")
+                )
+                caps_bits = []
+                if m.get("vision"):
+                    caps_bits.append("vision")
+                if m.get("function_calling"):
+                    caps_bits.append("tools")
+                cap_s = ",".join(caps_bits) if caps_bits else "—"
+                lines.append(f"  {mark}{vp}  {display:<40}  {cap_s}")
+            lines.append("示例: /model Kimi K2.5")
+            return True, "\n".join(lines)
+        try:
+            info = await client.switch_model(sub)
+        except Exception as exc:
+            return True, f"切换模型失败: {exc}"
+        if isinstance(info, dict) and info.get("name"):
+            api_id = info.get("api_model") or info.get("model")
+            vf = "支持视觉" if info.get("vision") else "无视觉"
+            vp = info.get("vision_provider") or "—"
+            return True, (
+                f"已切换主对话 provider: {info.get('name')}\n"
+                f"API 模型 ID: {api_id}\n{vf}  |  vision_provider={vp}"
+            )
+        return True, f"已请求切换: {sub}"
 
     # /session 系列
     if cmd_lower != "session":

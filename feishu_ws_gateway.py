@@ -11,7 +11,7 @@ Feishu long-connection gateway.
     python feishu_ws_gateway.py
 
 前置条件:
-- config.yaml 中正确配置 llm 与 feishu 段:
+- config/config.yaml 中正确配置 llm 与 feishu 段:
   - feishu.enabled = true
   - feishu.app_id / feishu.app_secret 已填写或通过环境变量覆盖
 - automation_daemon.py 已启动，IPC 监听正常

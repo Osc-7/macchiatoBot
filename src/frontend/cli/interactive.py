@@ -103,6 +103,9 @@ def print_help():
 - `/session switch <id>` &nbsp;切换到指定会话（已存在）
 - `/session new [id]` &nbsp;创建并切换到新会话
 - `/session delete <id>` &nbsp;删除会话记录（仅从会话列表移除，不删历史）
+- `/model` / `/model list` &nbsp;列出各模型的 **备注 label（切换用）** 与能力；当前主对话标 `*`，vision 回落标 `V`
+- `/model <model name>` &nbsp;切换：与列表中的展示名一致（一般为 label；无 label 时为配置名）
+- `/model switch <model name>` &nbsp;与上一行相同（多写 `switch` 亦可）
 
 ## 示例对话
 
@@ -551,6 +554,92 @@ async def run_interactive_loop(agent: Any) -> str:
                 continue
 
             if await _handle_session_command(cmd_text):
+                continue
+
+            if cmd_lower.startswith("model"):
+                parts = cmd_text.strip().split(maxsplit=1)
+                sub = parts[1].strip() if len(parts) > 1 else ""
+                sub_tokens = sub.split()
+                if sub_tokens and sub_tokens[0].lower() == "switch":
+                    sub = " ".join(sub_tokens[1:]).strip()
+                sub_lower = sub.lower()
+                list_fn = getattr(agent, "list_models", None)
+                switch_fn = getattr(agent, "switch_model", None)
+                if not callable(list_fn) or not callable(switch_fn):
+                    print(hint("  当前 agent 不支持 /model 指令。"))
+                    print(thin_separator())
+                    continue
+                if not sub or sub_lower in ("list", "ls"):
+                    try:
+                        models = await _maybe_await(list_fn())
+                    except Exception as exc:
+                        print(accent("  列出模型失败: ") + str(exc))
+                        print(thin_separator())
+                        continue
+                    print()
+                    if not models:
+                        print(hint("  未找到可用 provider。"))
+                    else:
+                        print(
+                            hint(
+                                    "* = Current active model  |  V = vision_provider"
+                                )
+                        )
+                        print(
+                            hint(
+                                "Usage: /model <model name> (e.g., /model Qwen3.5 Plus)"
+                            )
+                        )
+                        print()
+                        h_show = "Model Name"
+                        h_cap = "Capabilities"
+                        print(
+                            hint(
+                                f"    {'':2}{'':2}  {h_show:<42} {h_cap}"
+                            )
+                        )
+                        for m in models:
+                            mark = " *" if m.get("is_active") else "  "
+                            vp = " V" if m.get("is_vision_provider") else "  "
+                            raw_label = m.get("label")
+                            display = (
+                                str(raw_label).strip()
+                                if raw_label not in (None, "")
+                                else str(m.get("name") or "—")
+                            )
+                            caps_bits = []
+                            if m.get("vision"):
+                                caps_bits.append("vision")
+                            if m.get("function_calling"):
+                                caps_bits.append("tools")
+                            cap_s = ",".join(caps_bits) if caps_bits else "—"
+                            print(
+                                hint(
+                                    f"   {mark}{vp}  {display:<42} {cap_s}"
+                                )
+                            )
+                    print(thin_separator())
+                    continue
+                target = sub
+                try:
+                    info = await _maybe_await(switch_fn(target))
+                except Exception as exc:
+                    print(accent(f"  切换模型失败: ") + str(exc))
+                    print(thin_separator())
+                    continue
+                if isinstance(info, dict) and info.get("name"):
+                    vision_flag = "支持视觉" if info.get("vision") else "无视觉"
+                    vp = info.get("vision_provider") or "-"
+                    api_id = info.get("api_model") or info.get("model")
+                    print(
+                        hint(
+                            "  已切换主对话 provider: "
+                            f"{info.get('name')}  |  API 模型 ID: {api_id}  |  {vision_flag}  |  vision_provider={vp}"
+                        )
+                    )
+                else:
+                    print(hint(f"  已请求切换至: {target}"))
+                print(thin_separator())
                 continue
 
             # ── 处理用户输入 ──

@@ -51,6 +51,7 @@ automation-logs/
 
 # Env / Config
 .env
+config/config.yaml
 config.yaml
 
 # Project-specific private or generated data

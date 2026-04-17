@@ -1,35 +1,39 @@
-# Schedule Agent 配置示例（复制为 config.yaml 后按需填写）
+# Schedule Agent 配置示例（复制为同目录下 config.yaml 后按需填写）
 #
-# LLM 使用 OpenAI 官方 SDK 调 Chat Completions：任意兼容端点均可（官方 OpenAI、Azure、本地 vLLM、OpenRouter、百炼兼容模式等）。
-# - provider: openai_compatible — 通用（默认 base_url https://api.openai.com/v1）
-# - provider: qwen — 阿里云百炼，可启用下方 enable_search / enable_thinking 等 DashScope 扩展（extra_body）
-# - provider: doubao — 火山豆包（model 填推理端点 ID）
-# 换模型：改 llm.model；总结/子任务轻量模型：summary_model。
-# 环境变量（按 provider）：OPENAI_* | QWEN_API_KEY/DASHSCOPE_API_KEY + QWEN_MODEL | DOUBAO_API_KEY + DOUBAO_MODEL
+# LLM：每个 provider 独立声明连接参数与能力（Capabilities）。
+# 运行时 `/model <name>` 里的 name 是 **配置名**（providers 的 key）；`/model` 列表会列出 **API 模型 ID（标准名）**（即 model 字段）。
+# recognize_image 工具固定走 vision_provider。
+# vendor_params 会原样作为 extra_body 传给 OpenAI SDK（百炼 / 智谱 / MiniMax / Kimi 等各家扩展不同，见各厂文档）。
+# 支持 ${ENV_VAR} 语法从环境变量展开；LLM 密钥请写在仓库根 .env（参考 .env.example），勿写入仓库。
+# 推荐：全部 LLM provider 放在本文件同目录下 llm/providers.d/*.yaml（与主配置分离）。
+# 亦可使用 provider_include 按文件顺序合并；路径相对主配置目录，且若主配置在仓库根，
+# 会再尝试 ./config/<路径>（便于使用 config/llm/providers.d/）。
+# 内联 llm.providers 可与目录合并，同名以后加载的为准。
 
 llm:
-  provider: "openai_compatible"
-  api_key: "your-api-key"
-  # base_url 可省略，按 provider 使用默认；OpenRouter 等填其 OpenAI 兼容地址
-  base_url: "https://api.openai.com/v1"
-  model: "gpt-4o-mini"
-  summary_model: null
+  active: "default"            # 默认主对话 provider 名（须与某 provider 片段名一致）
+  vision_provider: null        # 识图 provider；null 时自动挑首个 capabilities.vision=true
+  summary_model: null          # 轻量总结；null 时复用主模型
   temperature: 0.7
   max_tokens: 4096
   request_timeout_seconds: 120
   stream: true
-  # 仅 provider=qwen 时生效（百炼文档）
-  enable_search: false
-  enable_thinking: false
-  thinking_budget: null
-  enable_web_extractor: false
-  search_options:
-    forced_search: false
-    search_strategy: "turbo"
-    enable_source: false
-    enable_citation: false
-    citation_format: "[<number>]"
-    enable_search_extension: false
+  providers_dir: llm/providers.d
+  # 可选：额外按文件合并（在 providers_dir 之后执行则覆盖同名）
+  # provider_include: []
+
+  # 若尚未创建 llm/providers.d，至少保留一个内联 provider，否则无法加载。
+  # 目录中存在同名 key 时会覆盖下列条目。
+  providers:
+    default:
+      base_url: "https://api.openai.com/v1"
+      api_key: "${OPENAI_API_KEY}"
+      model: "gpt-4o-mini"
+      vendor_params: {}
+      capabilities:
+        vision: true
+        function_calling: true
+        parallel_tool_calls: true
 
 # 多模态识图配置（调用多模态大模型，不依赖本地 OCR 模型）
 # 推荐使用 attach_media 工具声明需要在下一轮附带的图片/视频，
@@ -62,11 +66,14 @@ sjtu_jw:
 shuiyuan:
   owner_username: null  # 主人水源用户名，必须 @ 此用户且消息含 invocation_trigger 才触发
   invocation_trigger: ""  # 消息中必须包含此字符串才触发回复
-  allowed_topic_ids: []  # 非空时用 topic 监控（轮询指定话题新帖，解析正文 @owner+trigger，含自 @）；为空时用 user_actions+notifications
+  # 为空：通知模式 — connector 轮询 user_actions（filter=7 他人 @、filter=5 自发帖/自 @）与 notifications.json
+  # 非空：topic 监控 — 轮询指定话题的 get_topic_recent_posts（流量大，易 429）
+  allowed_topic_ids: []
   # 需同时运行 connector 轮询通知：python -m shuiyuan_integration.connector
   enabled: false
   user_api_key: null
   site_url: "https://shuiyuan.sjtu.edu.cn"
+  # 通知模式 connector 会写入 {db_base_dir}/connector_notify_stream.json（已见 post_id 水位，避免重启后把旧帖当新帖）
   db_base_dir: "./data/shuiyuan"  # 每用户 DB: {base}/users/{username}/shuiyuan.db
   memory:
     chat_limit_per_user: 100

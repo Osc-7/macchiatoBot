@@ -53,7 +53,9 @@ class TestConfigModels:
         assert config.max_tokens == 4096
         assert config.request_timeout_seconds == 120.0
         assert config.stream is False
-        assert config.thinking_budget is None
+        assert config.vendor_params == {}
+        assert config.parallel_tool_calls is True
+        assert config.context_window is None
 
     def test_time_config_defaults(self):
         """测试时间配置默认值"""
@@ -342,6 +344,34 @@ agent:
             load_config(config_file)
 
 
+class TestLegacyLlmMigration:
+    """旧版 llm 段字段迁入 vendor_params"""
+
+    def test_legacy_fields_migrate_to_vendor_params(self, tmp_path):
+        config_content = """
+llm:
+  api_key: "k"
+  model: "m"
+  enable_thinking: true
+  thinking_budget: 128
+  enable_search: false
+  search_options:
+    forced_search: true
+    search_strategy: "max"
+"""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+
+        config = load_config(config_file)
+
+        vp = config.llm.vendor_params
+        assert vp.get("enable_thinking") is True
+        assert vp.get("thinking_budget") == 128
+        assert vp.get("enable_search") is False
+        assert isinstance(vp.get("search_options"), dict)
+        assert vp["search_options"]["forced_search"] is True
+
+
 class TestEnvOverride:
     """测试环境变量覆盖"""
 
@@ -423,6 +453,233 @@ canvas:
         assert config.canvas.api_key == "env-canvas-key"
 
 
+class TestProvidersMapMigration:
+    """LLMConfig 旧字段 → providers map 的迁移"""
+
+    def test_legacy_top_level_llm_migrates_to_default_provider(self, tmp_path):
+        """老 config（仅有顶层 api_key / model）应被迁移到 providers['default']。"""
+        config_content = """
+llm:
+  api_key: "legacy-k"
+  base_url: "https://legacy.example/v1"
+  model: "legacy-model"
+"""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+
+        config = load_config(config_file)
+
+        assert "default" in config.llm.providers
+        default = config.llm.providers["default"]
+        assert default.api_key == "legacy-k"
+        assert default.base_url == "https://legacy.example/v1"
+        assert default.model == "legacy-model"
+        # active 未显式指定时应指向 default
+        assert config.llm.active == "default"
+
+    def test_new_providers_map_and_active(self, tmp_path):
+        """新风格 providers map 应原样解析，active 指向期望的 provider。"""
+        config_content = """
+llm:
+  api_key: "k"
+  model: "m"
+  active: "deepseek"
+  vision_provider: "qwen3vl"
+  providers:
+    deepseek:
+      base_url: "https://example.com/v1"
+      api_key: "a"
+      model: "deepseek-chat"
+      capabilities:
+        vision: false
+    qwen3vl:
+      base_url: "https://example.com/v1"
+      api_key: "b"
+      model: "qwen3-vl"
+      capabilities:
+        vision: true
+"""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+
+        config = load_config(config_file)
+
+        assert set(config.llm.providers.keys()) == {"deepseek", "qwen3vl"}
+        assert config.llm.providers["qwen3vl"].capabilities.vision is True
+        assert config.llm.providers["deepseek"].capabilities.vision is False
+        assert config.llm.active == "deepseek"
+        assert config.llm.vision_provider == "qwen3vl"
+
+    def test_provider_env_var_expansion(self, tmp_path, monkeypatch):
+        """providers 下 ${ENV_VAR} 语法应由加载器就地展开。"""
+        monkeypatch.setenv("SJTU_API_KEY", "env-sjtu-key")
+        config_content = """
+llm:
+  api_key: "k"
+  model: "m"
+  providers:
+    sjtu:
+      base_url: "https://models.sjtu.edu.cn/v1"
+      api_key: "${SJTU_API_KEY}"
+      model: "deepseek-chat"
+"""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        config = load_config(config_file)
+        assert config.llm.providers["sjtu"].api_key == "env-sjtu-key"
+
+    def test_provider_include_merges_fragments(self, tmp_path):
+        """llm.provider_include 应将 YAML 片段合并进 providers。"""
+        frag = tmp_path / "extra.yaml"
+        frag.write_text(
+            """
+moonshot_a:
+  label: "Kimi A"
+  base_url: "https://api.moonshot.cn/v1"
+  api_key: "k-a"
+  model: "kimi-k2.5"
+  capabilities:
+    vision: true
+""",
+            encoding="utf-8",
+        )
+        main = tmp_path / "config.yaml"
+        main.write_text(
+            f"""
+llm:
+  api_key: "k"
+  model: "m"
+  provider_include:
+    - extra.yaml
+  providers:
+    local:
+      base_url: "https://example.com/v1"
+      api_key: "k-local"
+      model: "local-m"
+      capabilities:
+        vision: false
+""",
+            encoding="utf-8",
+        )
+        config = load_config(main)
+        assert set(config.llm.providers.keys()) == {"local", "moonshot_a"}
+        assert config.llm.providers["moonshot_a"].label == "Kimi A"
+        assert config.llm.providers["moonshot_a"].model == "kimi-k2.5"
+
+    def test_provider_include_override_order(self, tmp_path):
+        """同名 provider：后加载的 provider_include 覆盖前者。"""
+        (tmp_path / "first.yaml").write_text(
+            """
+dup:
+  base_url: "https://a/v1"
+  api_key: "a"
+  model: "m1"
+""",
+            encoding="utf-8",
+        )
+        (tmp_path / "second.yaml").write_text(
+            """
+dup:
+  base_url: "https://b/v1"
+  api_key: "b"
+  model: "m2"
+""",
+            encoding="utf-8",
+        )
+        main = tmp_path / "config.yaml"
+        main.write_text(
+            """
+llm:
+  api_key: "k"
+  model: "m"
+  provider_include:
+    - first.yaml
+    - second.yaml
+  providers: {}
+""",
+            encoding="utf-8",
+        )
+        config = load_config(main)
+        assert config.llm.providers["dup"].model == "m2"
+        assert config.llm.providers["dup"].base_url == "https://b/v1"
+
+    def test_providers_dir_merges_yaml_files(self, tmp_path):
+        """llm.providers_dir 合并目录内全部 *.yaml。"""
+        d = tmp_path / "prov.d"
+        d.mkdir()
+        (d / "01_x.yaml").write_text(
+            """
+from_dir:
+  base_url: "https://x/v1"
+  api_key: "x"
+  model: "mx"
+""",
+            encoding="utf-8",
+        )
+        main = tmp_path / "config.yaml"
+        main.write_text(
+            """
+llm:
+  api_key: "k"
+  model: "m"
+  providers_dir: prov.d
+  providers: {}
+""",
+            encoding="utf-8",
+        )
+        config = load_config(main)
+        assert "from_dir" in config.llm.providers
+        assert config.llm.providers["from_dir"].model == "mx"
+
+    def test_providers_dir_resolves_from_repo_root_config(self, tmp_path):
+        """主配置在仓库根 config.yaml 时，providers_dir: llm/providers.d 可落到 config/llm/providers.d。"""
+        repo = tmp_path / "repo"
+        nested = repo / "config" / "llm" / "providers.d"
+        nested.mkdir(parents=True)
+        (nested / "z.yaml").write_text(
+            "remote:\n"
+            "  base_url: https://example.com/v1\n"
+            "  api_key: rk\n"
+            "  model: rm\n",
+            encoding="utf-8",
+        )
+        main = repo / "config.yaml"
+        main.write_text(
+            "llm:\n  api_key: k\n  model: m\n  providers_dir: llm/providers.d\n",
+            encoding="utf-8",
+        )
+        config = load_config(main)
+        assert "remote" in config.llm.providers
+        assert config.llm.providers["remote"].model == "rm"
+
+    def test_provider_fragment_with_top_level_providers_key(self, tmp_path):
+        """片段文件可写 providers: {{ ... }} 包裹。"""
+        (tmp_path / "wrap.yaml").write_text(
+            """
+providers:
+  wrapped:
+    base_url: "https://w/v1"
+    api_key: "w"
+    model: "mw"
+""",
+            encoding="utf-8",
+        )
+        main = tmp_path / "config.yaml"
+        main.write_text(
+            """
+llm:
+  api_key: "k"
+  model: "m"
+  provider_include:
+    - wrap.yaml
+  providers: {}
+""",
+            encoding="utf-8",
+        )
+        config = load_config(main)
+        assert config.llm.providers["wrapped"].model == "mw"
+
+
 class TestGlobalConfig:
     """测试全局配置"""
 
@@ -471,8 +728,10 @@ class TestFindConfigFile:
     """测试配置文件查找"""
 
     def test_find_in_cwd(self, tmp_path, monkeypatch):
-        """测试在当前目录查找"""
-        config_file = tmp_path / "config.yaml"
+        """测试在当前工作目录下查找 config/config.yaml"""
+        nested = tmp_path / "config"
+        nested.mkdir()
+        config_file = nested / "config.yaml"
         config_file.write_text("llm:\n  api_key: key\n  model: model", encoding="utf-8")
 
         monkeypatch.chdir(tmp_path)
@@ -489,8 +748,8 @@ class TestFindConfigFile:
         # 修改工作目录
         monkeypatch.chdir(isolated_dir)
 
-        # 由于 find_config_file 会检查项目根目录（src 的父目录），
-        # 而项目根目录有 config.yaml，所以这个测试验证的是
+        # 由于 find_config_file 会回退到项目根目录下的 config/config.yaml，
+        # 而真实仓库可能带有该文件，所以这个测试验证的是
         # 当配置文件不在当前目录时能正确回退到项目根目录
         # 我们需要 mock 一个场景让两个位置都没有配置文件
         import agent_core.config as config_module
@@ -499,5 +758,5 @@ class TestFindConfigFile:
         fake_file = str(tmp_path / "fake_location" / "config.py")
         monkeypatch.setattr(config_module, "__file__", fake_file)
 
-        with pytest.raises(FileNotFoundError, match="未找到配置文件"):
+        with pytest.raises(FileNotFoundError, match="未找到主配置文件"):
             find_config_file()

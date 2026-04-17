@@ -1,0 +1,20 @@
+# Moonshot Kimi 通用对话（OpenAI 兼容 Chat Completions）
+# https://platform.kimi.com/docs/api/overview · api_key: ${MOONSHOT_API_KEY}
+# 与下方 Kimi Code（api.kimi.com/coding）不是同一套 endpoint/计费
+
+kimi_k25:
+  label: "Kimi K2.5"
+  base_url: "https://api.moonshot.cn/v1"
+  api_key: "${MOONSHOT_API_KEY}"
+  model: "kimi-k2.5"
+  temperature: 1.0
+  vendor_params:
+    thinking:
+      type: "enabled"
+  capabilities:
+    vision: true
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: true
+    thinking_tag_inline: false
+    context_window: 262144

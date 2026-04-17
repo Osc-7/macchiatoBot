@@ -1,4 +1,4 @@
-"""Sync automation job definitions from config.yaml to job_definitions.json.
+"""Sync automation job definitions from config/config.yaml to job_definitions.json.
 
 Daemon 启动时（或周期性）将 config.automation.jobs 同步到 JobDefinitionRepository，
 这样在 config 里增删改任务后无需手动改 job_definitions.json，scheduler 的

@@ -1,0 +1,16 @@
+# 上海交大 SJTU — Qwen3-Coder-30B
+# 调用名 qwen3coder
+
+sjtu_qwen3coder:
+  label: "Qwen3-Coder-30B (SJTU)"
+  base_url: "https://models.sjtu.edu.cn/api/v1"
+  api_key: "${SJTU_MODELS_API_KEY}"
+  model: "qwen3coder"
+  vendor_params: {}
+  capabilities:
+    vision: false
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: false
+    thinking_tag_inline: false
+    context_window: null

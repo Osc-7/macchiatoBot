@@ -1,7 +1,7 @@
 """
 配置管理模块
 
-负责加载和验证 config.yaml 配置文件。
+负责加载和验证主配置文件（默认 `config/config.yaml`）。
 支持环境变量覆盖敏感配置。
 """
 
@@ -16,62 +16,109 @@ from pydantic import BaseModel, Field, model_validator
 logger = logging.getLogger(__name__)
 
 
-class SearchOptionsConfig(BaseModel):
-    """联网搜索配置选项"""
+class CapabilitiesModel(BaseModel):
+    """单个 LLM provider 的能力矩阵（Pydantic 版；运行期对应 llm.capabilities.Capabilities）。"""
 
-    forced_search: bool = Field(
+    vision: bool = Field(
         default=False,
-        description="是否强制联网搜索（默认模型自动判断）",
+        description="是否支持 image_url / video_url 内容项（直接识图）",
     )
-    search_strategy: str = Field(
-        default="turbo",
-        description="搜索策略: turbo(默认) | max | agent | agent_max",
+    function_calling: bool = Field(
+        default=True,
+        description="是否支持 OpenAI function calling（tools + tool_choice）",
     )
-    enable_source: bool = Field(
+    parallel_tool_calls: bool = Field(
+        default=True,
+        description="是否支持单次响应返回多个 tool_calls",
+    )
+    reasoning_content: bool = Field(
         default=False,
-        description="是否返回搜索来源（仅 DashScope 协议支持）",
+        description="是否在 message 上独立返回 reasoning_content（GLM/Kimi 等）",
     )
-    enable_citation: bool = Field(
+    thinking_tag_inline: bool = Field(
         default=False,
-        description="是否开启角标标注（需 enable_source=True）",
+        description="模型是否会在 content 中输出 <think>...</think>（Qwen 深度思考等）",
     )
-    citation_format: str = Field(
-        default="[<number>]",
-        description="角标格式: [<number>] | [ref_<number>]",
-    )
-    enable_search_extension: bool = Field(
-        default=False,
-        description="是否开启垂域搜索（天气、股票等）",
-    )
-    freshness: Optional[int] = Field(
+    context_window: Optional[int] = Field(
         default=None,
-        description="搜索时效性（天数）: 7 | 30 | 180 | 365",
+        ge=1,
+        description="模型上下文窗口（token）；未设置则按模型名启发式推断",
     )
-    assigned_site_list: List[str] = Field(
-        default_factory=list,
-        description="限定搜索来源站点列表（最多25个）",
+
+
+class ProviderEntry(BaseModel):
+    """
+    一个 LLM provider 的完整连接与能力声明。
+
+    对应 config.yaml 里 llm.providers.<name> 的一段。运行期由
+    agent_core.llm.client.LLMClient 构造为 OpenAICompatProvider 或 AnthropicCompatProvider。
+    """
+
+    base_url: str = Field(..., description="API base URL")
+    api_key: str = Field(..., description="API 密钥（可用 ${ENV} 形式引用环境变量）")
+    model: str = Field(
+        ...,
+        description="厂商 API 请求的模型 ID（标准名，如 kimi-k2.5、gpt-4o）",
+    )
+    protocol: Optional[str] = Field(
+        default=None,
+        description="API 协议类型：'openai'（默认）或 'anthropic'。Kimi Code 需设为 'anthropic'",
+    )
+    label: Optional[str] = Field(
+        default=None,
+        description="可选展示名；/model 切换时可按 label 输入（见 resolve_llm_provider_key），不参与 API 请求",
+    )
+    vendor_params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="厂商扩展参数，原样作为 SDK 的 extra_body 下发",
+    )
+    headers: Dict[str, str] = Field(
+        default_factory=dict,
+        description="自定义 HTTP headers（如 User-Agent 等）",
+    )
+    capabilities: CapabilitiesModel = Field(
+        default_factory=CapabilitiesModel,
+        description="provider 能力声明；agent 会据此决定是否暴露 recognize_image、是否塞图片等",
+    )
+    temperature: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=2,
+        description="覆盖全局 llm.temperature；未设置时使用 llm.temperature（部分厂商模型仅允许固定值如 1）",
     )
 
 
 class LLMConfig(BaseModel):
-    """LLM 配置"""
+    """LLM 配置。
+
+    支持两种写法：
+    1. 新版（推荐）：`providers` map + `active` / `vision_provider`。
+    2. 旧版：顶层 `base_url / api_key / model / vendor_params / ...`。
+       load_config 会在 validator 里自动迁移为 `providers['default']`，并将 `active='default'`。
+    """
 
     provider: str = Field(
         default="openai_compatible",
         description=(
-            "LLM 提供商: openai_compatible(通用 OpenAI 兼容 HTTP API) | "
-            "qwen(阿里云百炼，支持 DashScope extra_body 扩展) | doubao(火山豆包)"
+            "[兼容字段] LLM 提供商名（openai_compatible / qwen / doubao）。"
+            "新版推荐直接在 providers.<name> 下配置，不再使用该字段。"
         ),
     )
-    api_key: str = Field(..., description="API 密钥")
+    api_key: Optional[str] = Field(
+        default=None,
+        description="[兼容字段] 顶层 API 密钥；load_config 会迁移至 providers['default'].api_key",
+    )
     base_url: str = Field(
         default="https://api.openai.com/v1",
-        description="Chat Completions 的 base URL；可在 YAML 中省略，由 load_config 按 provider 填默认端点",
+        description="[兼容字段] 顶层 base URL；load_config 会迁移至 providers['default'].base_url",
     )
-    model: str = Field(..., description="模型名称（或豆包推理端点 ID）")
+    model: Optional[str] = Field(
+        default=None,
+        description="[兼容字段] 顶层模型名；load_config 会迁移至 providers['default'].model",
+    )
     summary_model: Optional[str] = Field(
         default=None,
-        description="用于总结/提炼的轻量模型；为空则用主模型",
+        description="用于总结/提炼的轻量模型；为空则复用当前 active provider 的模型",
     )
     temperature: float = Field(default=0.7, ge=0, le=2, description="生成温度")
     max_tokens: int = Field(default=4096, ge=1, description="最大 token 数")
@@ -84,27 +131,81 @@ class LLMConfig(BaseModel):
         default=False,
         description="是否使用流式输出（推荐在思考模式下开启）",
     )
-    enable_search: bool = Field(
-        default=False,
-        description="是否启用联网搜索（仅 provider=qwen 时通过 extra_body 生效）",
+    vendor_params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="[兼容字段] 顶层 vendor_params；load_config 会迁移至 providers['default'].vendor_params",
     )
-    search_options: Optional[SearchOptionsConfig] = Field(
-        default=None,
-        description="联网搜索配置选项",
+    parallel_tool_calls: bool = Field(
+        default=True,
+        description="[兼容字段] 旧版 parallel_tool_calls；新版请通过 capabilities.parallel_tool_calls 声明",
     )
-    enable_thinking: bool = Field(
-        default=False,
-        description="是否启用思考模式（仅 provider=qwen 时通过 extra_body 生效）",
-    )
-    thinking_budget: Optional[int] = Field(
+    context_window: Optional[int] = Field(
         default=None,
         ge=1,
-        description="思考预算 token 上限（仅部分模型支持）",
+        description="[兼容字段] 旧版 context_window；新版请通过 capabilities.context_window 声明",
     )
-    enable_web_extractor: bool = Field(
-        default=False,
-        description="是否启用网页抓取（仅 provider=qwen 时参与 extra_body；多数场景请用工具）",
+
+    providers: Dict[str, ProviderEntry] = Field(
+        default_factory=dict,
+        description=(
+            "LLM provider 映射表（name -> ProviderEntry）。支持同时声明多家/多模型，"
+            "运行时通过 /model <name> 切换主对话 provider。"
+        ),
     )
+    active: Optional[str] = Field(
+        default=None,
+        description="默认主对话 provider 名；未指定时取 providers 的第一个 key",
+    )
+    vision_provider: Optional[str] = Field(
+        default=None,
+        description=(
+            "recognize_image 工具使用的 vision provider 名；未指定时自动挑第一个 "
+            "capabilities.vision=True 的 provider。"
+        ),
+    )
+    provider_include: List[str] = Field(
+        default_factory=list,
+        description=(
+            "YAML 路径列表（相对主配置文件目录；若不存在则再尝试 "
+            "`<主配置目录>/config/<路径>`，便于仓库根目录放 config.yaml 时仍指向 "
+            "`config/llm/...`）。每个文件为 `provider 名 -> ProviderEntry` 或顶层 "
+            "`providers:`。按顺序合并进 llm.providers，同名以后者为准。"
+        ),
+    )
+    providers_dir: Optional[str] = Field(
+        default=None,
+        description=(
+            "目录路径（解析规则同 provider_include）；合并目录内全部 *.yaml / *.yml"
+            "（按文件名排序），同名 provider 以后加载的文件为准。"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _migrate_legacy_to_providers(self) -> "LLMConfig":
+        """老版单 provider 写法自动折叠为 providers['default']，方便 LLMClient 统一处理。"""
+        if self.providers:
+            return self
+
+        if not self.api_key or not self.model:
+            raise ValueError(
+                "LLMConfig 必须提供 providers 映射，或顶层的 api_key + model（旧版写法）。"
+            )
+
+        entry = ProviderEntry(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            model=self.model,
+            vendor_params=dict(self.vendor_params or {}),
+            capabilities=CapabilitiesModel(
+                parallel_tool_calls=self.parallel_tool_calls,
+                context_window=self.context_window,
+            ),
+        )
+        # 直接赋值（绕过不可变约束：BaseModel 默认允许属性赋值）
+        self.providers = {"default": entry}
+        if not self.active:
+            self.active = "default"
+        return self
 
 
 class MultimodalConfig(BaseModel):
@@ -1082,8 +1183,123 @@ class Config(BaseModel):
     )
 
 
+def _llm_rel_path_candidates(rel: str, config_path: Path) -> List[Path]:
+    """
+    相对主配置文件解析路径时的候选列表（按优先级）。
+
+    1. ``<主配置所在目录>/<rel>`` — 例如主文件为 ``config/config.yaml`` 时即 ``config/llm/...``
+    2. ``<主配置所在目录>/config/<rel>`` — 主文件为仓库根 ``config.yaml`` 时，等价于 ``./config/llm/...``
+
+    绝对路径仅返回自身。
+    """
+    rel = str(rel).strip()
+    while rel.startswith("./"):
+        rel = rel[2:]
+    if not rel:
+        return []
+    p = Path(rel)
+    if p.is_absolute():
+        return [p]
+    base = config_path.resolve().parent
+    return [base / rel, base / "config" / rel]
+
+
+def _resolve_llm_provider_file(rel: str, config_path: Path) -> Optional[Path]:
+    """解析 provider_include 中的文件路径，返回第一个存在的文件。"""
+    for cand in _llm_rel_path_candidates(rel, config_path):
+        try:
+            r = cand.resolve()
+        except OSError:
+            continue
+        if r.is_file():
+            return r
+    return None
+
+
+def _resolve_llm_providers_dir(rel: str, config_path: Path) -> Optional[Path]:
+    """解析 providers_dir，返回第一个存在的目录。"""
+    for cand in _llm_rel_path_candidates(rel, config_path):
+        try:
+            r = cand.resolve()
+        except OSError:
+            continue
+        if r.is_dir():
+            return r
+    return None
+
+
+def _merge_llm_provider_files(raw_config: dict, config_path: Path) -> None:
+    """将 provider_include / providers_dir 中的片段合并进 llm.providers。"""
+    llm = raw_config.get("llm")
+    if not isinstance(llm, dict):
+        return
+
+    merged: Dict[str, Any] = {}
+    existing = llm.get("providers")
+    if isinstance(existing, dict):
+        merged.update(existing)
+
+    def _load_fragment(path: Path) -> Optional[Dict[str, Any]]:
+        if not path.is_file():
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                frag = yaml.safe_load(f)
+        except Exception as exc:
+            logger.warning("读取 provider 片段失败 %s: %s", path, exc)
+            return None
+        if frag is None:
+            return {}
+        if isinstance(frag, dict) and "providers" in frag and isinstance(
+            frag["providers"], dict
+        ):
+            return dict(frag["providers"])
+        if isinstance(frag, dict):
+            return dict(frag)
+        logger.warning("provider 片段顶层应为 dict 或含 providers: %s", path)
+        return None
+
+    for rel in llm.get("provider_include") or []:
+        rel_s = str(rel).strip()
+        if not rel_s:
+            continue
+        path = _resolve_llm_provider_file(rel_s, config_path)
+        if path is None:
+            logger.warning(
+                "llm.provider_include 未找到文件（已尝试相对主配置的若干路径）: %s",
+                rel_s,
+            )
+            continue
+        frag = _load_fragment(path)
+        if frag:
+            merged.update(frag)
+
+    providers_dir = llm.get("providers_dir")
+    if providers_dir:
+        dir_s = str(providers_dir).strip()
+        if dir_s:
+            dir_path = _resolve_llm_providers_dir(dir_s, config_path)
+            if dir_path is not None:
+                paths = sorted(dir_path.glob("*.yaml")) + sorted(dir_path.glob("*.yml"))
+                for path in paths:
+                    frag = _load_fragment(path)
+                    if frag:
+                        merged.update(frag)
+            else:
+                logger.warning(
+                    "llm.providers_dir 未找到目录（已尝试相对主配置的若干路径）: %s",
+                    dir_s,
+                )
+
+    llm["providers"] = merged
+
+
 def _normalize_llm_config_dict(llm: Any) -> None:
-    """规范化 YAML 中的 llm 段：provider 别名、未知值回退、补全默认 base_url。"""
+    """规范化 YAML 中的 llm 段：provider 别名、未知值回退、补全默认 base_url。
+
+    新版写法（llm.providers map）下，仅处理全局的 vendor_params 迁移；
+    provider 专属字段仍各自独立。
+    """
     if not isinstance(llm, dict):
         return
     raw_p = str(llm.get("provider") or "openai_compatible").strip().lower()
@@ -1096,23 +1312,83 @@ def _normalize_llm_config_dict(llm: Any) -> None:
         )
         provider = "openai_compatible"
     llm["provider"] = provider
-    bu = llm.get("base_url")
-    if bu is None or (isinstance(bu, str) and not bu.strip()):
-        if provider == "qwen":
-            llm["base_url"] = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        elif provider == "doubao":
-            llm["base_url"] = "https://ark.cn-beijing.volces.com/api/v3"
-        else:
-            llm["base_url"] = "https://api.openai.com/v1"
+
+    # 仅对旧版（无 providers map）自动补齐顶层 base_url
+    has_providers_map = isinstance(llm.get("providers"), dict) and llm.get("providers")
+    if not has_providers_map:
+        bu = llm.get("base_url")
+        if bu is None or (isinstance(bu, str) and not bu.strip()):
+            if provider == "qwen":
+                llm["base_url"] = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            elif provider == "doubao":
+                llm["base_url"] = "https://ark.cn-beijing.volces.com/api/v3"
+            else:
+                llm["base_url"] = "https://api.openai.com/v1"
+
+    _migrate_legacy_llm_to_vendor_params(llm)
+
+    # 新版 providers map：支持在 api_key / base_url / model 中使用 ${ENV_VAR} 展开
+    if has_providers_map:
+        _expand_env_vars_in_providers(llm["providers"])
+
+
+def _expand_env_vars_in_providers(providers_map: Any) -> None:
+    """递归把 providers map 中的 ${ENV_VAR} 替换为环境变量值。"""
+    import re
+
+    if not isinstance(providers_map, dict):
+        return
+
+    pattern = re.compile(r"\$\{([^}]+)\}")
+
+    def _replace(value: Any) -> Any:
+        if isinstance(value, str):
+            return pattern.sub(
+                lambda m: os.environ.get(m.group(1), m.group(0)), value
+            )
+        if isinstance(value, dict):
+            return {k: _replace(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_replace(v) for v in value]
+        return value
+
+    for name, entry in list(providers_map.items()):
+        if isinstance(entry, dict):
+            providers_map[name] = _replace(entry)
+
+
+def _migrate_legacy_llm_to_vendor_params(llm: dict) -> None:
+    """将旧版 llm 段中的百炼专用键迁入 vendor_params，便于无感升级。"""
+    legacy_keys = (
+        "enable_search",
+        "enable_thinking",
+        "thinking_budget",
+        "enable_web_extractor",
+        "search_options",
+    )
+    vp = llm.get("vendor_params")
+    if not isinstance(vp, dict):
+        vp = {}
+        llm["vendor_params"] = vp
+    for key in legacy_keys:
+        if key not in llm:
+            continue
+        val = llm.pop(key)
+        if val is None:
+            continue
+        if key not in vp:
+            vp[key] = val
 
 
 def find_config_file() -> Path:
     """
-    查找配置文件。
+    查找主配置文件。
 
-    查找顺序：
-    1. 当前工作目录下的 config.yaml
-    2. 项目根目录下的 config.yaml
+    查找顺序（后者兼容旧仓库布局）：
+    1. 当前工作目录下 ``config/config.yaml``
+    2. 当前工作目录下 ``config.yaml``（旧路径）
+    3. 项目根目录（本文件上溯三级）下 ``config/config.yaml``
+    4. 项目根目录下 ``config.yaml``（旧路径）
 
     Returns:
         配置文件路径
@@ -1120,20 +1396,21 @@ def find_config_file() -> Path:
     Raises:
         FileNotFoundError: 未找到配置文件
     """
-    # 当前工作目录
-    cwd_config = Path.cwd() / "config.yaml"
-    if cwd_config.exists():
-        return cwd_config
+    project_root = Path(__file__).resolve().parent.parent.parent
 
-    # 项目根目录（src 的父目录）
-    project_root = Path(__file__).parent.parent.parent
-    project_config = project_root / "config.yaml"
-    if project_config.exists():
-        return project_config
+    candidates = [
+        Path.cwd() / "config" / "config.yaml",
+        Path.cwd() / "config.yaml",
+        project_root / "config" / "config.yaml",
+        project_root / "config.yaml",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
 
     raise FileNotFoundError(
-        "未找到配置文件 config.yaml。"
-        "请复制 config.example.yaml 为 config.yaml 并填写配置。"
+        "未找到主配置文件。请在项目目录创建 config/config.yaml，"
+        "或复制 config/config.example.yaml 为 config/config.yaml 后填写。"
     )
 
 
@@ -1169,12 +1446,15 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     if not config_path.exists():
         raise FileNotFoundError(f"配置文件不存在: {config_path}")
 
+    config_path = Path(config_path)
+
     with open(config_path, "r", encoding="utf-8") as f:
         raw_config = yaml.safe_load(f)
 
     if raw_config is None:
         raise ValueError(f"配置文件为空: {config_path}")
 
+    _merge_llm_provider_files(raw_config, config_path)
     _normalize_llm_config_dict(raw_config.get("llm"))
 
     # 兼容旧工具配置：agent.tool_mode/source_overrides/pinned_tools -> tools

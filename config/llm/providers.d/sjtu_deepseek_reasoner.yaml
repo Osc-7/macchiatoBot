@@ -1,0 +1,16 @@
+# 上海交大 SJTU — DeepSeek V3.2（reasoner）
+# 调用名 deepseek-reasoner；与 sjtu_deepseek（deepseek-chat）二选一作为主对话
+
+sjtu_deepseek_reasoner:
+  label: "DeepSeek V3.2 Reasoner (SJTU)"
+  base_url: "https://models.sjtu.edu.cn/api/v1"
+  api_key: "${SJTU_MODELS_API_KEY}"
+  model: "deepseek-reasoner"
+  vendor_params: {}
+  capabilities:
+    vision: false
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: true
+    thinking_tag_inline: false
+    context_window: null

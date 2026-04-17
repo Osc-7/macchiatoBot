@@ -1,0 +1,16 @@
+# 上海交大 SJTU — MiniMax M2.5（调用名 minimax）
+# 与 sjtu_minimax_m25（minimax-m2.5）为同一产品线的不同 endpoint，按需选用
+
+sjtu_minimax:
+  label: "MiniMax M2.5 · minimax (SJTU)"
+  base_url: "https://models.sjtu.edu.cn/api/v1"
+  api_key: "${SJTU_MODELS_API_KEY}"
+  model: "minimax"
+  vendor_params: {}
+  capabilities:
+    vision: false
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: false
+    thinking_tag_inline: false
+    context_window: null

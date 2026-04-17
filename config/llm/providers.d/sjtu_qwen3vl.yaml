@@ -1,0 +1,16 @@
+# 上海交大 SJTU 模型网关 — Qwen3-VL-32B（可作 vision_provider）
+# 文档: https://chat.sjtu.edu.cn/docs
+
+sjtu_qwen3vl:
+  label: "Qwen3-VL-32B (SJTU)"
+  base_url: "https://models.sjtu.edu.cn/api/v1"
+  api_key: "${SJTU_MODELS_API_KEY}"
+  model: "qwen3vl"
+  vendor_params: {}
+  capabilities:
+    vision: true
+    function_calling: false
+    parallel_tool_calls: true
+    reasoning_content: false
+    thinking_tag_inline: false
+    context_window: null

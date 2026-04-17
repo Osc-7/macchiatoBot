@@ -1,0 +1,28 @@
+# Kimi Code（编程会员 · OpenAI 兼容，与通用 api.moonshot.cn 不同）
+# 文档: https://www.kimi.com/code/docs/more/third-party-agents.html
+# Entrypoint: https://api.kimi.com/coding/v1 · Model: kimi-for-coding
+# API Key 在 Kimi Code 会员页生成（与 MOONSHOT_API_KEY 可能不同）
+# 注意：Kimi Code API 需要特定的 User-Agent header 才能通过认证
+
+kimi_code:
+  label: "Kimi Code"
+  base_url: "https://api.kimi.com/coding/v1"
+  api_key: "${KIMI_CODE_API_KEY}"
+  model: "kimi-for-coding"
+  temperature: 1.0
+  protocol: "anthropic"
+  # Anthropic 扩展思考要求 budget_tokens；见
+  # https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking
+  vendor_params:
+    thinking:
+      type: "enabled"
+      budget_tokens: 16000
+  # headers:
+  #   User-Agent: "claude-code/0.1.0"
+  capabilities:
+    vision: true
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: true
+    thinking_tag_inline: false
+    context_window: 262144

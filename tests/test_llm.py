@@ -7,7 +7,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from agent_core.llm import LLMClient, LLMResponse, ToolCall
 from agent_core.llm.client import _strip_thinking_content
-from agent_core.config import Config, LLMConfig, SearchOptionsConfig
+from agent_core.config import Config, LLMConfig
+
+
+def _install_mock_openai_client(client: LLMClient, mock_client) -> None:
+    """把 LLMClient 路由到的每个 provider 底层 AsyncOpenAI 换成 mock。
+
+    兼容旧测试直接操作 ``client._client`` 的风格。
+    """
+    for provider in client._providers.values():
+        provider._client = mock_client
 
 
 class TestStripThinkingContent:
@@ -132,6 +141,11 @@ class TestLLMResponse:
         assert response.tool_calls[0].name == "create_event"
 
 
+# 所有 LLMClient 测试都应当通过 openai_compat provider 层调用底层 AsyncOpenAI，
+# 测试通过 patch `agent_core.llm.providers.openai_compat.AsyncOpenAI` 替换 SDK。
+_OPENAI_PATCH = "agent_core.llm.providers.openai_compat.AsyncOpenAI"
+
+
 class TestLLMClient:
     """测试 LLMClient"""
 
@@ -146,7 +160,7 @@ class TestLLMClient:
     @pytest.mark.asyncio
     async def test_chat_basic(self, mock_config, mock_openai_response):
         """测试基础对话"""
-        with patch("agent_core.llm.client.AsyncOpenAI") as mock_openai:
+        with patch(_OPENAI_PATCH) as mock_openai:
             mock_client = AsyncMock()
             mock_client.chat.completions.create = AsyncMock(
                 return_value=mock_openai_response
@@ -155,7 +169,7 @@ class TestLLMClient:
             mock_openai.return_value = mock_client
 
             client = LLMClient(config=mock_config)
-            client._client = mock_client
+            _install_mock_openai_client(client, mock_client)
 
             response = await client.chat(
                 messages=[{"role": "user", "content": "你好"}],
@@ -166,15 +180,14 @@ class TestLLMClient:
             assert response.tool_calls == []
             assert response.finish_reason == "stop"
 
-            # 验证调用参数
             call_args = mock_client.chat.completions.create.call_args
             assert call_args.kwargs["model"] == "ep-test-model"
-            assert len(call_args.kwargs["messages"]) == 2  # system + user
+            assert len(call_args.kwargs["messages"]) == 2
 
     @pytest.mark.asyncio
     async def test_chat_with_tools(self, mock_config, mock_openai_response_with_tools):
         """测试带工具的对话"""
-        with patch("agent_core.llm.client.AsyncOpenAI") as mock_openai:
+        with patch(_OPENAI_PATCH) as mock_openai:
             mock_client = AsyncMock()
             mock_client.chat.completions.create = AsyncMock(
                 return_value=mock_openai_response_with_tools
@@ -183,7 +196,7 @@ class TestLLMClient:
             mock_openai.return_value = mock_client
 
             client = LLMClient(config=mock_config)
-            client._client = mock_client
+            _install_mock_openai_client(client, mock_client)
 
             tools = [
                 {
@@ -212,7 +225,6 @@ class TestLLMClient:
             assert response.tool_calls[0].name == "create_event"
             assert response.tool_calls[0].id == "call_123"
 
-            # 验证调用参数
             call_args = mock_client.chat.completions.create.call_args
             assert "tools" in call_args.kwargs
             assert call_args.kwargs["tool_choice"] == "auto"
@@ -220,7 +232,7 @@ class TestLLMClient:
     @pytest.mark.asyncio
     async def test_chat_with_image(self, mock_config):
         """测试多模态识图请求参数构造"""
-        with patch("agent_core.llm.client.AsyncOpenAI") as mock_openai:
+        with patch(_OPENAI_PATCH) as mock_openai:
             mock_client = AsyncMock()
             mock_response = MagicMock()
             mock_response.choices = [MagicMock()]
@@ -232,7 +244,7 @@ class TestLLMClient:
             mock_openai.return_value = mock_client
 
             client = LLMClient(config=mock_config)
-            client._client = mock_client
+            _install_mock_openai_client(client, mock_client)
 
             response = await client.chat_with_image(
                 prompt="提取错误信息",
@@ -252,7 +264,7 @@ class TestLLMClient:
     @pytest.mark.asyncio
     async def test_chat_without_tools(self, mock_config, mock_openai_response):
         """测试不带工具的 chat_with_tools"""
-        with patch("agent_core.llm.client.AsyncOpenAI") as mock_openai:
+        with patch(_OPENAI_PATCH) as mock_openai:
             mock_client = AsyncMock()
             mock_client.chat.completions.create = AsyncMock(
                 return_value=mock_openai_response
@@ -261,7 +273,7 @@ class TestLLMClient:
             mock_openai.return_value = mock_client
 
             client = LLMClient(config=mock_config)
-            client._client = mock_client
+            _install_mock_openai_client(client, mock_client)
 
             response = await client.chat_with_tools(
                 messages=[{"role": "user", "content": "你好"}],
@@ -270,26 +282,34 @@ class TestLLMClient:
 
             assert response.content == "这是助手的回复"
 
-            # 验证调用参数不包含 tools
             call_args = mock_client.chat.completions.create.call_args
             assert "tools" not in call_args.kwargs
 
     @pytest.mark.asyncio
     async def test_close(self, mock_config):
         """测试关闭客户端"""
-        with patch("agent_core.llm.client.AsyncOpenAI") as mock_openai:
+        with patch(_OPENAI_PATCH) as mock_openai:
             mock_client = AsyncMock()
             mock_client.close = AsyncMock()
             mock_openai.return_value = mock_client
 
             client = LLMClient(config=mock_config)
+            _install_mock_openai_client(client, mock_client)
             await client.close()
 
-            mock_client.close.assert_called_once()
+            mock_client.close.assert_called()
 
     @pytest.mark.asyncio
-    async def test_chat_with_web_search_enabled(self):
-        """测试启用联网搜索功能"""
+    async def test_vendor_params_passed_as_extra_body(self):
+        """vendor_params 原样作为 extra_body 发送"""
+        vp = {
+            "enable_search": True,
+            "search_options": {
+                "forced_search": True,
+                "search_strategy": "max",
+                "enable_source": True,
+            },
+        }
         config = Config(
             llm=LLMConfig(
                 provider="qwen",
@@ -298,16 +318,11 @@ class TestLLMClient:
                 model="qwen-plus",
                 temperature=0.7,
                 max_tokens=4096,
-                enable_search=True,
-                search_options=SearchOptionsConfig(
-                    forced_search=True,
-                    search_strategy="max",
-                    enable_source=True,
-                ),
+                vendor_params=vp,
             )
         )
 
-        with patch("agent_core.llm.client.AsyncOpenAI") as mock_openai:
+        with patch(_OPENAI_PATCH) as mock_openai:
             mock_client = AsyncMock()
             mock_response = MagicMock()
             mock_response.choices = [MagicMock()]
@@ -320,7 +335,7 @@ class TestLLMClient:
             mock_openai.return_value = mock_client
 
             client = LLMClient(config=config)
-            client._client = mock_client
+            _install_mock_openai_client(client, mock_client)
 
             response = await client.chat_with_tools(
                 messages=[{"role": "user", "content": "杭州天气如何"}],
@@ -329,19 +344,12 @@ class TestLLMClient:
 
             assert response.content == "这是回复"
 
-            # 验证 extra_body 中包含 enable_search
             call_args = mock_client.chat.completions.create.call_args
-            assert "extra_body" in call_args.kwargs
-            extra_body = call_args.kwargs["extra_body"]
-            assert extra_body["enable_search"] is True
-            assert "search_options" in extra_body
-            assert extra_body["search_options"]["forced_search"] is True
-            assert extra_body["search_options"]["search_strategy"] == "max"
-            assert extra_body["search_options"]["enable_source"] is True
+            assert call_args.kwargs["extra_body"] == vp
 
     @pytest.mark.asyncio
-    async def test_chat_with_web_search_disabled(self):
-        """测试禁用联网搜索功能"""
+    async def test_vendor_params_empty_no_extra_body(self):
+        """vendor_params 为空时不传 extra_body"""
         config = Config(
             llm=LLMConfig(
                 provider="qwen",
@@ -350,11 +358,11 @@ class TestLLMClient:
                 model="qwen-plus",
                 temperature=0.7,
                 max_tokens=4096,
-                enable_search=False,  # 禁用联网搜索
+                vendor_params={},
             )
         )
 
-        with patch("agent_core.llm.client.AsyncOpenAI") as mock_openai:
+        with patch(_OPENAI_PATCH) as mock_openai:
             mock_client = AsyncMock()
             mock_response = MagicMock()
             mock_response.choices = [MagicMock()]
@@ -367,7 +375,7 @@ class TestLLMClient:
             mock_openai.return_value = mock_client
 
             client = LLMClient(config=config)
-            client._client = mock_client
+            _install_mock_openai_client(client, mock_client)
 
             response = await client.chat_with_tools(
                 messages=[{"role": "user", "content": "你好"}],
@@ -376,37 +384,26 @@ class TestLLMClient:
 
             assert response.content == "这是回复"
 
-            # 验证 extra_body 不存在
             call_args = mock_client.chat.completions.create.call_args
             assert "extra_body" not in call_args.kwargs
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("provider", ["doubao", "openai_compatible"])
-    async def test_chat_with_web_search_non_qwen_provider(self, provider):
-        """测试非 Qwen 提供商不启用联网搜索（含通用 OpenAI 兼容）"""
-        base_url = (
-            "https://api.openai.com/v1"
-            if provider == "openai_compatible"
-            else "https://ark.cn-beijing.volces.com/api/v3"
-        )
-        model_id = "gpt-4o-mini" if provider == "openai_compatible" else "ep-test-model"
+    async def test_parallel_tool_calls_respects_config(self):
+        """parallel_tool_calls=false 时不传该参数"""
         config = Config(
             llm=LLMConfig(
-                provider=provider,
-                api_key="test-api-key",
-                base_url=base_url,
-                model=model_id,
-                temperature=0.7,
-                max_tokens=4096,
-                enable_search=True,  # 即使启用，非 qwen 也不应该传递
+                api_key="k",
+                model="m",
+                parallel_tool_calls=False,
             )
         )
+        tools = [{"type": "function", "function": {"name": "x", "parameters": {}}}]
 
-        with patch("agent_core.llm.client.AsyncOpenAI") as mock_openai:
+        with patch(_OPENAI_PATCH) as mock_openai:
             mock_client = AsyncMock()
             mock_response = MagicMock()
             mock_response.choices = [MagicMock()]
-            mock_response.choices[0].message.content = "这是回复"
+            mock_response.choices[0].message.content = None
             mock_response.choices[0].message.tool_calls = None
             mock_response.choices[0].finish_reason = "stop"
             mock_response.usage = None
@@ -415,24 +412,97 @@ class TestLLMClient:
             mock_openai.return_value = mock_client
 
             client = LLMClient(config=config)
-            client._client = mock_client
+            _install_mock_openai_client(client, mock_client)
 
-            response = await client.chat_with_tools(
-                messages=[{"role": "user", "content": "你好"}],
-                tools=None,
+            await client.chat_with_tools(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=tools,
             )
 
-            assert response.content == "这是回复"
-
-            # 验证 extra_body 不存在（因为 provider 不是 qwen）
             call_args = mock_client.chat.completions.create.call_args
-            assert "extra_body" not in call_args.kwargs
+            assert "parallel_tool_calls" not in call_args.kwargs
+
+    def test_context_window_property(self):
+        """context_window 配置优先于模型名推断"""
+        c1 = Config(
+            llm=LLMConfig(api_key="k", model="gpt-4o-mini", context_window=50000)
+        )
+        assert LLMClient(config=c1).context_window == 50000
+        c2 = Config(llm=LLMConfig(api_key="k", model="qwen3.5-plus"))
+        assert LLMClient(config=c2).context_window == 1_000_000
 
     @pytest.mark.asyncio
-    async def test_chat_with_web_extractor_enabled(self):
-        """测试：网页抓取功能已通过工具实现，全局不再启用"""
-        # 注意：此测试已过时，网页抓取现在通过 WebExtractorTool 工具实现
-        # 全局启用 enable_web_extractor 不再有效，应使用工具
+    async def test_reasoning_content_stream(self):
+        """流式响应汇总 reasoning_content"""
+
+        async def fake_stream():
+            chunk1 = MagicMock()
+            chunk1.choices = [MagicMock()]
+            chunk1.choices[0].delta = MagicMock()
+            chunk1.choices[0].delta.content = None
+            chunk1.choices[0].delta.reasoning_content = "思"
+            chunk1.choices[0].finish_reason = None
+
+            chunk2 = MagicMock()
+            chunk2.choices = [MagicMock()]
+            chunk2.choices[0].delta = MagicMock()
+            chunk2.choices[0].delta.content = "答"
+            chunk2.choices[0].delta.reasoning_content = "考"
+            chunk2.choices[0].finish_reason = "stop"
+
+            yield chunk1
+            yield chunk2
+
+        config = Config(llm=LLMConfig(api_key="k", model="m", stream=True))
+        with patch(_OPENAI_PATCH) as mock_openai:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create = AsyncMock(return_value=fake_stream())
+            mock_client.close = AsyncMock()
+            mock_openai.return_value = mock_client
+
+            client = LLMClient(config=config)
+            _install_mock_openai_client(client, mock_client)
+
+            response = await client.chat_with_tools(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=None,
+            )
+            assert response.reasoning_content == "思考"
+            assert response.content == "答"
+
+    @pytest.mark.asyncio
+    async def test_reasoning_content_non_stream(self):
+        """非流式响应解析 reasoning_content"""
+        config = Config(
+            llm=LLMConfig(api_key="k", model="m", stream=False),
+        )
+        with patch(_OPENAI_PATCH) as mock_openai:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            msg = mock_response.choices[0].message
+            msg.content = "最终"
+            msg.tool_calls = None
+            msg.reasoning_content = "推理过程"
+            mock_response.choices[0].finish_reason = "stop"
+            mock_response.usage = None
+            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+            mock_client.close = AsyncMock()
+            mock_openai.return_value = mock_client
+
+            client = LLMClient(config=config)
+            _install_mock_openai_client(client, mock_client)
+
+            response = await client.chat_with_tools(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=None,
+            )
+            assert response.reasoning_content == "推理过程"
+            assert response.content == "最终"
+
+    @pytest.mark.asyncio
+    async def test_web_extractor_search_strategy_not_agent_max_in_vendor_params(self):
+        """vendor_params 中若含 search_options，不应默认写成 agent_max（与工具冲突）"""
         config = Config(
             llm=LLMConfig(
                 provider="qwen",
@@ -441,12 +511,15 @@ class TestLLMClient:
                 model="qwen-plus",
                 temperature=0.7,
                 max_tokens=4096,
-                enable_search=True,
-                enable_web_extractor=True,  # 此配置不再在全局生效
+                vendor_params={
+                    "enable_search": True,
+                    "enable_web_extractor": True,
+                    "search_options": {"search_strategy": "turbo"},
+                },
             )
         )
 
-        with patch("agent_core.llm.client.AsyncOpenAI") as mock_openai:
+        with patch(_OPENAI_PATCH) as mock_openai:
             mock_client = AsyncMock()
             mock_response = MagicMock()
             mock_response.choices = [MagicMock()]
@@ -459,124 +532,15 @@ class TestLLMClient:
             mock_openai.return_value = mock_client
 
             client = LLMClient(config=config)
-            client._client = mock_client
+            _install_mock_openai_client(client, mock_client)
 
-            response = await client.chat_with_tools(
+            await client.chat_with_tools(
                 messages=[{"role": "user", "content": "你好"}],
                 tools=None,
             )
 
-            assert response.content == "这是回复"
-
-            # 验证：即使 enable_web_extractor=true，也不会在全局启用（避免与工具冲突）
-            call_args = mock_client.chat.completions.create.call_args
-            if "extra_body" in call_args.kwargs:
-                extra_body = call_args.kwargs["extra_body"]
-                # 不应该有 search_strategy: agent_max（因为会与工具冲突）
-                if "search_options" in extra_body:
-                    assert (
-                        extra_body["search_options"].get("search_strategy")
-                        != "agent_max"
-                    )
-
-    @pytest.mark.asyncio
-    async def test_chat_with_thinking_enabled(self):
-        """测试启用思考模式（不启用网页抓取）"""
-        config = Config(
-            llm=LLMConfig(
-                provider="qwen",
-                api_key="test-api-key",
-                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-                model="qwen-plus",
-                temperature=0.7,
-                max_tokens=4096,
-                enable_search=True,
-                enable_thinking=True,  # 仅启用思考模式
-                enable_web_extractor=False,
-            )
-        )
-
-        with patch("agent_core.llm.client.AsyncOpenAI") as mock_openai:
-            mock_client = AsyncMock()
-            mock_response = MagicMock()
-            mock_response.choices = [MagicMock()]
-            mock_response.choices[0].message.content = "这是回复"
-            mock_response.choices[0].message.tool_calls = None
-            mock_response.choices[0].finish_reason = "stop"
-            mock_response.usage = None
-            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
-            mock_client.close = AsyncMock()
-            mock_openai.return_value = mock_client
-
-            client = LLMClient(config=config)
-            client._client = mock_client
-
-            response = await client.chat_with_tools(
-                messages=[{"role": "user", "content": "你好"}],
-                tools=None,
-            )
-
-            assert response.content == "这是回复"
-
-            # 验证 extra_body 中包含 enable_thinking，但不强制 search_strategy
-            call_args = mock_client.chat.completions.create.call_args
-            assert "extra_body" in call_args.kwargs
-            extra_body = call_args.kwargs["extra_body"]
-            assert extra_body["enable_search"] is True
-            assert extra_body["enable_thinking"] is True
-            # 如果没有设置 search_options，search_strategy 应该保持默认或配置值
-            if "search_options" in extra_body:
-                assert (
-                    "search_strategy" not in extra_body["search_options"]
-                    or extra_body["search_options"].get("search_strategy")
-                    != "agent_max"
-                )
-
-    @pytest.mark.asyncio
-    async def test_chat_with_thinking_enabled_without_search(self):
-        """测试仅开启思考模式时，仍通过 extra_body 传 enable_thinking"""
-        config = Config(
-            llm=LLMConfig(
-                provider="qwen",
-                api_key="test-api-key",
-                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-                model="qwen-plus",
-                temperature=0.7,
-                max_tokens=4096,
-                enable_search=False,
-                enable_thinking=True,
-                thinking_budget=128,
-            )
-        )
-
-        with patch("agent_core.llm.client.AsyncOpenAI") as mock_openai:
-            mock_client = AsyncMock()
-            mock_response = MagicMock()
-            mock_response.choices = [MagicMock()]
-            mock_response.choices[0].message.content = "这是回复"
-            mock_response.choices[0].message.tool_calls = None
-            mock_response.choices[0].finish_reason = "stop"
-            mock_response.usage = None
-            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
-            mock_client.close = AsyncMock()
-            mock_openai.return_value = mock_client
-
-            client = LLMClient(config=config)
-            client._client = mock_client
-
-            response = await client.chat_with_tools(
-                messages=[{"role": "user", "content": "你好"}],
-                tools=None,
-            )
-
-            assert response.content == "这是回复"
-
-            call_args = mock_client.chat.completions.create.call_args
-            assert "extra_body" in call_args.kwargs
-            extra_body = call_args.kwargs["extra_body"]
-            assert "enable_search" not in extra_body
-            assert extra_body["enable_thinking"] is True
-            assert extra_body["thinking_budget"] == 128
+            extra_body = mock_client.chat.completions.create.call_args.kwargs["extra_body"]
+            assert extra_body["search_options"].get("search_strategy") != "agent_max"
 
 
 class TestLLMClientIntegration:
@@ -586,8 +550,6 @@ class TestLLMClientIntegration:
     @pytest.mark.asyncio
     async def test_real_chat(self):
         """测试真实 API 调用（跳过）"""
-        # 此测试需要真实的 API Key 和端点
-        # 这里为真实 API 集成测试示例，需填写有效 KEY 后启用
         from agent_core.config import get_config
         from agent_core.llm import LLMClient
 

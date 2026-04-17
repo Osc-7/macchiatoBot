@@ -1,365 +1,246 @@
 """
-LLM 客户端封装
+LLM 客户端：多 provider 持有者 + 路由器。
 
-使用 OpenAI 官方 Python SDK（AsyncOpenAI）连接任意 **OpenAI 兼容 Chat Completions** 端点：
-官方 OpenAI、Azure OpenAI、本地 vLLM、OpenRouter、阿里云百炼兼容模式等。
+LLMClient 不再直接调用厂商 SDK，而是持有一张 name -> BaseProvider 的表，
+由 active_name 指向当前主对话 provider。运行时 `/model <name>` 命令切换时，
+只修改 active_name，底层连接池常驻，避免重建。
 
-config.llm.provider=qwen 时额外通过 extra_body 支持百炼 DashScope 扩展（联网搜索、思考模式等）。
+多模态识图固定走 vision_provider（由 config.llm.vision_provider 指定；未指定时
+自动挑第一个 capabilities.vision=True 的 provider）。
 """
 
-import inspect
-import json
-import logging
-import re
-import uuid
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Union
+from __future__ import annotations
 
-from openai import AsyncOpenAI  # type: ignore
+import logging
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent_core.config import Config, get_config
+from agent_core.llm.capabilities import Capabilities
+from agent_core.llm.provider_resolve import resolve_llm_provider_key
+from agent_core.llm.providers import (
+    AnthropicCompatProvider,
+    BaseProvider,
+    OpenAICompatProvider,
+)
+from agent_core.llm.providers.openai_compat import (
+    _strip_thinking_content,
+    get_context_window_tokens_for_model,
+)
+from agent_core.llm.response import LLMResponse, ToolCall, TokenUsage
 
 logger = logging.getLogger(__name__)
 
-# Qwen 深度思考模式会将推理内容放在 content 中（有时与回复混合），用 ` <think>...</think>` 包裹。
-# 参见 https://www.alibabacloud.com/help/zh/model-studio/deep-thinking
-THINKING_END_TAG = "</think>"
 
-
-def _strip_thinking_content(content: Optional[str]) -> Optional[str]:
+def _build_provider_from_entry(
+    name: str,
+    entry: Any,
+    *,
+    llm_config: Any,
+) -> BaseProvider:
+    """从 LLMConfig.ProviderEntry 构造 provider 实例。
+    
+    根据 entry.protocol 字段选择 provider 类型：
+    - "openai" 或未指定：OpenAICompatProvider
+    - "anthropic": AnthropicCompatProvider
     """
-    剥离 Qwen 等模型的思考内容（` <think>...</think>` 块），只保留 `</think>` 之后的正式回复。
+    caps_src = getattr(entry, "capabilities", None)
+    caps = Capabilities(
+        vision=getattr(caps_src, "vision", False) if caps_src is not None else False,
+        function_calling=(
+            getattr(caps_src, "function_calling", True) if caps_src is not None else True
+        ),
+        parallel_tool_calls=(
+            getattr(caps_src, "parallel_tool_calls", True)
+            if caps_src is not None
+            else True
+        ),
+        reasoning_content=(
+            getattr(caps_src, "reasoning_content", False)
+            if caps_src is not None
+            else False
+        ),
+        thinking_tag_inline=(
+            getattr(caps_src, "thinking_tag_inline", False)
+            if caps_src is not None
+            else False
+        ),
+        context_window=(
+            getattr(caps_src, "context_window", None) if caps_src is not None else None
+        ),
+    )
 
-    Args:
-        content: 原始 content，可能包含思考内容
+    vendor_params = dict(getattr(entry, "vendor_params", {}) or {})
+    headers = dict(getattr(entry, "headers", {}) or {})
 
-    Returns:
-        剥离后的 content，无 ` <think>` 块则原样返回
-    """
-    if not content or not isinstance(content, str):
-        return content
-    idx = content.find(THINKING_END_TAG)
-    if idx == -1:
-        return content
-    return content[idx + len(THINKING_END_TAG) :].strip()
-
-
-def _normalize_text_content(content: Any) -> Optional[str]:
-    """将模型返回的 content 统一为纯文本。"""
-    if content is None:
-        return None
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        texts: List[str] = []
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                text = item.get("text")
-                if isinstance(text, str):
-                    texts.append(text)
-        if texts:
-            return "\n".join(texts).strip()
-    return str(content)
-
-
-_TOOL_CODE_RE = re.compile(
-    r"<tool_code>\s*(\w+)\((.*?)\)\s*</tool_code>",
-    re.DOTALL,
-)
-
-
-def _extract_tool_code_calls(
-    content: Optional[str],
-    existing_tool_calls: List["ToolCall"],
-) -> tuple[Optional[str], List["ToolCall"]]:
-    """
-    部分模型（如 Qwen thinking mode）偶尔会把工具调用写成文本
-    ``<tool_code>func_name(arg=val)</tool_code>`` 而不走正规 function calling。
-    如果已有真正的 tool_calls 则不处理；否则尝试从 content 中提取并转换。
-    返回 (cleaned_content, merged_tool_calls)。
-    """
-    if existing_tool_calls or not content:
-        return content, existing_tool_calls
-
-    matches = list(_TOOL_CODE_RE.finditer(content))
-    if not matches:
-        return content, existing_tool_calls
-
-    calls: List["ToolCall"] = []
-    for m in matches:
-        func_name = m.group(1)
-        raw_args = m.group(2).strip()
-        args: dict = {}
-        if raw_args:
-            try:
-                args = json.loads("{" + raw_args + "}")
-            except (json.JSONDecodeError, ValueError):
-                for part in raw_args.split(","):
-                    part = part.strip()
-                    if "=" in part:
-                        k, v = part.split("=", 1)
-                        k = k.strip()
-                        v = v.strip().strip("\"'")
-                        args[k] = v
-        calls.append(
-            ToolCall(
-                id=f"toolcode-{uuid.uuid4().hex[:8]}",
-                name=func_name,
-                arguments=args,
-            )
+    entry_temp = getattr(entry, "temperature", None)
+    if entry_temp is not None:
+        temperature = float(entry_temp)
+    else:
+        temperature = float(getattr(llm_config, "temperature", 0.7))
+    max_tokens = int(getattr(llm_config, "max_tokens", 4096))
+    request_timeout_seconds = float(getattr(llm_config, "request_timeout_seconds", 120.0))
+    stream = bool(getattr(llm_config, "stream", False))
+    
+    # 根据 protocol 字段选择 provider 类型
+    protocol = getattr(entry, "protocol", None)
+    if protocol == "anthropic":
+        return AnthropicCompatProvider(
+            name=name,
+            base_url=str(entry.base_url),
+            api_key=str(entry.api_key),
+            model=str(entry.model),
+            capabilities=caps,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            request_timeout_seconds=request_timeout_seconds,
+            stream=stream,
+            vendor_params=vendor_params,
+            headers=headers,
         )
-
-    cleaned = _TOOL_CODE_RE.sub("", content).strip()
-    return cleaned or None, calls
-
-
-@dataclass
-class TokenUsage:
-    """单次调用的 token 用量"""
-
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-
-    @classmethod
-    def from_response(cls, response: Any) -> "TokenUsage":
-        """从 API 响应中解析 usage，无则返回全 0"""
-        if response is None:
-            return cls()
-        usage = getattr(response, "usage", None)
-        if usage is None:
-            return cls()
-        return cls(
-            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-            total_tokens=getattr(usage, "total_tokens", 0) or 0,
+    else:
+        # 默认使用 OpenAI 兼容协议
+        return OpenAICompatProvider(
+            name=name,
+            base_url=str(entry.base_url),
+            api_key=str(entry.api_key),
+            model=str(entry.model),
+            capabilities=caps,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            request_timeout_seconds=request_timeout_seconds,
+            stream=stream,
+            vendor_params=vendor_params,
+            headers=headers,
         )
-
-    @classmethod
-    def from_usage(cls, usage: Any) -> "TokenUsage":
-        """从 usage 对象直接解析 token 用量，无则返回全 0"""
-        if usage is None:
-            return cls()
-        return cls(
-            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-            total_tokens=getattr(usage, "total_tokens", 0) or 0,
-        )
-
-
-def get_context_window_tokens_for_model(model: str) -> int:
-    """
-    根据模型名称返回大致的上下文窗口大小（单位：token）。
-
-    说明：
-    - 仅对常见模型做显式映射，其余返回一个保守的默认值，避免过度依赖不确定信息。
-    - 当前主要关注 Qwen 系列（尤其是 qwen3.5-plus），其它模型可按需扩展。
-    """
-    if not model:
-        # 默认保守值：20 万 token
-        return 200_000
-
-    m = model.lower()
-
-    # Qwen 3.5 系列：
-    # - 官方文档：qwen3.5-plus 支持约 1M context window
-    # - 基础 qwen3.5 模型通常为 256K 级别
-    if "qwen" in m and "3.5" in m:
-        if "plus" in m or "1m" in m:
-            return 1_000_000
-        # 基础 qwen3.5
-        return 256_000
-
-    # Qwen 2.5 1M 变体（如 qwen2.5-1m 等）
-    if "qwen" in m and "2.5" in m and "1m" in m:
-        return 1_000_000
-
-    # 其它未显式列出的模型，使用保守默认值。
-    return 200_000
-
-
-@dataclass
-class ToolCall:
-    """工具调用"""
-
-    id: str
-    """工具调用 ID"""
-
-    name: str
-    """工具名称"""
-
-    arguments: Union[Dict[str, Any], str]
-    """工具参数。通常为 dict；流式解析失败时可能为原始 JSON 字符串，由执行层尝试解析或返回错误。"""
-
-
-@dataclass
-class LLMResponse:
-    """LLM 响应"""
-
-    content: Optional[str]
-    """文本内容"""
-
-    tool_calls: List[ToolCall] = field(default_factory=list)
-    """工具调用列表"""
-
-    finish_reason: str = "stop"
-    """结束原因"""
-
-    raw_response: Any = None
-    """原始响应对象"""
-
-    usage: Optional[TokenUsage] = None
-    """本次调用的 token 用量（API 返回时才有）"""
 
 
 class LLMClient:
     """
-    LLM 客户端。
+    LLM 客户端路由器。
 
-    封装 OpenAI 兼容 Chat Completions（含豆包、百炼、官方 OpenAI 等），支持：
-    - 基础对话
-    - 多轮工具调用（Function Calling）
-    - 流式响应（可选）
+    用法：
+        client = LLMClient(config=cfg)
+        await client.chat_with_tools(messages, tools=tools)   # 主 provider
+        client.switch_model("qwen3vl")
+        await client.chat_with_image(prompt, image_url)       # 走 vision_provider
     """
 
     def __init__(
-        self, config: Optional[Config] = None, model_override: Optional[str] = None
-    ):
-        """
-        初始化 LLM 客户端。
-
-        Args:
-            config: 配置对象，如果为 None 则使用全局配置
-            model_override: 模型覆盖，若设置则替代 config.llm.model（用于总结等轻量任务）
-        """
+        self,
+        config: Optional[Config] = None,
+        model_override: Optional[str] = None,
+    ) -> None:
         self._config = config or get_config()
         self._model_override = model_override
-        self._client = AsyncOpenAI(
-            api_key=self._config.llm.api_key,
-            base_url=self._config.llm.base_url,
-            timeout=self._config.llm.request_timeout_seconds,
+        self._providers: Dict[str, BaseProvider] = {}
+
+        llm_cfg = self._config.llm
+        providers_map = getattr(llm_cfg, "providers", {}) or {}
+        if not providers_map:
+            raise RuntimeError(
+                "LLMConfig.providers 为空：请在 config.yaml 中配置至少一个 provider，"
+                "或使用老字段 (model/base_url/api_key)，config.py 会自动迁移到 "
+                "providers['default']。"
+            )
+
+        for name, entry in providers_map.items():
+            self._providers[str(name)] = _build_provider_from_entry(
+                str(name), entry, llm_config=llm_cfg
+            )
+
+        active_name = getattr(llm_cfg, "active", None)
+        if active_name and active_name in self._providers:
+            self._active: str = str(active_name)
+        else:
+            self._active = next(iter(self._providers.keys()))
+
+        self._vision_provider_name: Optional[str] = self._resolve_vision_provider(
+            getattr(llm_cfg, "vision_provider", None)
         )
+
+    def _resolve_vision_provider(self, configured: Optional[str]) -> Optional[str]:
+        """返回用作 chat_with_image 的 provider 名；未显式配置时自动挑首个 vision=True。"""
+        if configured and configured in self._providers:
+            return str(configured)
+        if configured:
+            logger.warning(
+                "vision_provider=%s 未在 providers 中找到，忽略", configured
+            )
+        for name, provider in self._providers.items():
+            if provider.capabilities.vision:
+                return name
+        return None
+
+    def _active_provider(self) -> BaseProvider:
+        return self._providers[self._active]
+
+    @property
+    def active_provider_name(self) -> str:
+        return self._active
+
+    @property
+    def vision_provider_name(self) -> Optional[str]:
+        return self._vision_provider_name
+
+    @property
+    def providers(self) -> Dict[str, BaseProvider]:
+        return dict(self._providers)
+
+    @property
+    def capabilities(self) -> Capabilities:
+        """当前 active provider 的能力矩阵。"""
+        return self._active_provider().capabilities
 
     @property
     def model(self) -> str:
-        """获取模型名称"""
-        return self._model_override or self._config.llm.model
+        """model_override 优先（用于总结等轻量任务），否则取 active provider 的 model。"""
+        return self._model_override or self._active_provider().model
 
     @property
     def temperature(self) -> float:
-        """获取温度参数"""
-        return self._config.llm.temperature
+        return self._active_provider().temperature
 
     @property
     def max_tokens(self) -> int:
-        """获取最大 token 数"""
-        return self._config.llm.max_tokens
+        return self._active_provider().max_tokens
+
+    @property
+    def context_window(self) -> int:
+        """上下文窗口 token 数：优先看 active provider 的显式声明，再按模型名启发式。"""
+        provider = self._active_provider()
+        cw = provider.capabilities.context_window
+        if cw is not None:
+            return cw
+        return get_context_window_tokens_for_model(self.model)
+
+    def switch_model(self, name: str) -> None:
+        """
+        在会话内切换主对话 provider。不重建底层 HTTP 客户端。
+
+        Args:
+            name: provider 注册名、YAML ``label`` 或 ``model``（API ID），见
+                ``resolve_llm_provider_key``。
+        """
+        key = resolve_llm_provider_key(self._config.llm, name)
+        if key not in self._providers:
+            raise ValueError(
+                f"未知 provider: {name}；已注册：{list(self._providers.keys())}"
+            )
+        self._active = key
+        logger.info("LLMClient 主 provider 切换到: %s", name)
+
+    def list_models(self) -> List[Tuple[str, Capabilities]]:
+        """列出所有已注册 provider 的 (name, capabilities)，按注册顺序。"""
+        return [(name, p.capabilities) for name, p in self._providers.items()]
 
     async def chat(
         self,
         messages: List[Dict[str, Any]],
         system_message: Optional[str] = None,
     ) -> LLMResponse:
-        """
-        发送基础对话请求（无工具）。
-
-        Args:
-            messages: 消息列表
-            system_message: 系统消息（可选）
-
-        Returns:
-            LLM 响应
-        """
-        full_messages = []
-
-        if system_message:
-            full_messages.append({"role": "system", "content": system_message})
-
-        full_messages.extend(messages)
-
-        request_params = {
-            "model": self.model,
-            "messages": full_messages,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-        }
-        extra_body = self._build_qwen_extra_body()
-        if extra_body:
-            request_params["extra_body"] = extra_body
-
-        if self._config.llm.stream:
-            return await self._chat_with_tools_stream(request_params)
-
-        response = await self._client.chat.completions.create(**request_params)
-
-        choice = response.choices[0]
-        usage = TokenUsage.from_response(response)
-        content = _strip_thinking_content(
-            _normalize_text_content(choice.message.content)
-        )
-
-        return LLMResponse(
-            content=content,
-            tool_calls=[],
-            finish_reason=choice.finish_reason,
-            raw_response=response,
-            usage=usage,
-        )
-
-    async def chat_with_image(
-        self,
-        prompt: str,
-        image_url: str,
-        system_message: Optional[str] = None,
-        model_override: Optional[str] = None,
-    ) -> LLMResponse:
-        """
-        发送多模态识图请求（文本 + 图片）。
-
-        Args:
-            prompt: 图片分析提示词
-            image_url: 图片地址，支持 http(s) URL 或 data URL
-            system_message: 可选系统提示词
-            model_override: 可选模型覆盖
-
-        Returns:
-            LLM 响应
-        """
-        full_messages: List[Dict[str, Any]] = []
-
-        if system_message:
-            full_messages.append({"role": "system", "content": system_message})
-
-        full_messages.append(
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                ],
-            }
-        )
-
-        request_params: Dict[str, Any] = {
-            "model": model_override or self.model,
-            "messages": full_messages,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-        }
-
-        response = await self._client.chat.completions.create(**request_params)
-        choice = response.choices[0]
-        usage = TokenUsage.from_response(response)
-        content = _strip_thinking_content(
-            _normalize_text_content(choice.message.content)
-        )
-
-        return LLMResponse(
-            content=content,
-            tool_calls=[],
-            finish_reason=choice.finish_reason,
-            raw_response=response,
-            usage=usage,
+        """不带工具的基础对话，走当前 active provider。"""
+        return await self._active_provider().chat(
+            messages=messages, system_message=system_message
         )
 
     async def chat_with_tools(
@@ -371,313 +252,57 @@ class LLMClient:
         on_content_delta: Optional[Callable[[str], Any]] = None,
         on_reasoning_delta: Optional[Callable[[str], Any]] = None,
     ) -> LLMResponse:
-        """
-        发送支持工具调用的对话请求。
-
-        Args:
-            messages: 消息列表
-            tools: 工具定义列表（OpenAI Function Calling 格式）
-            system_message: 系统消息
-            tool_choice: 工具选择策略 ("auto", "none", "required", 或具体工具名)
-
-        Returns:
-            LLM 响应
-        """
-        full_messages = []
-
-        if system_message:
-            full_messages.append({"role": "system", "content": system_message})
-
-        full_messages.extend(messages)
-
-        request_params = {
-            "model": self.model,
-            "messages": full_messages,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-        }
-
-        if tools:
-            request_params["tools"] = tools
-            request_params["tool_choice"] = tool_choice
-            # 百炼/OpenAI 兼容：parallel_tool_calls 让模型单次返回多个工具调用，减少往返
-            # 参见 https://help.aliyun.com/zh/model-studio/qwen-function-calling
-            request_params["parallel_tool_calls"] = True
-
-        # 百炼扩展参数（通过 extra_body 传递）
-        # 参见 https://help.aliyun.com/zh/model-studio/deep-thinking
-        extra_body = self._build_qwen_extra_body()
-        if extra_body:
-            request_params["extra_body"] = extra_body
-
-        if self._config.llm.stream:
-            return await self._chat_with_tools_stream(
-                request_params,
-                on_content_delta=on_content_delta,
-                on_reasoning_delta=on_reasoning_delta,
-            )
-
-        response = await self._client.chat.completions.create(**request_params)
-
-        choice = response.choices[0]
-
-        # 解析工具调用
-        tool_calls = []
-        if choice.message.tool_calls:
-            for tc in choice.message.tool_calls:
-                tool_calls.append(
-                    ToolCall(
-                        id=tc.id,
-                        name=tc.function.name,
-                        arguments=tc.function.arguments,
-                    )
-                )
-
-        usage = TokenUsage.from_response(response)
-        content = _strip_thinking_content(
-            _normalize_text_content(choice.message.content)
+        """支持工具调用的对话，走当前 active provider。"""
+        return await self._active_provider().chat_with_tools(
+            messages=messages,
+            tools=tools,
+            system_message=system_message,
+            tool_choice=tool_choice,
+            on_content_delta=on_content_delta,
+            on_reasoning_delta=on_reasoning_delta,
         )
 
-        content, tool_calls = _extract_tool_code_calls(content, tool_calls)
-
-        return LLMResponse(
-            content=content,
-            tool_calls=tool_calls,
-            finish_reason=choice.finish_reason,
-            raw_response=response,
-            usage=usage,
-        )
-
-    async def _chat_with_tools_stream(
+    async def chat_with_image(
         self,
-        request_params: Dict[str, Any],
-        on_content_delta: Optional[Callable[[str], Any]] = None,
-        on_reasoning_delta: Optional[Callable[[str], Any]] = None,
+        prompt: str,
+        image_url: str,
+        system_message: Optional[str] = None,
+        model_override: Optional[str] = None,
+        provider_name: Optional[str] = None,
     ) -> LLMResponse:
         """
-        流式调用（网页抓取必须使用流式模式）。
-        汇总流式响应后返回完整的 LLMResponse。
+        多模态识图：默认走 vision_provider；可通过 provider_name 显式指定。
+
+        Args:
+            provider_name: 若指定则强制使用该 provider；否则用 vision_provider；
+                           若都缺省，退回 active provider。
         """
-        params = {
-            **request_params,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-        stream = await self._client.chat.completions.create(**params)
-
-        content_parts: List[str] = []
-        tool_calls_map: Dict[int, Dict[str, Any]] = {}
-        finish_reason = "stop"
-        last_usage = None
-        filter_state = {"mode": "normal", "pending": ""}
-
-        async for chunk in stream:
-            if not chunk.choices:
-                if hasattr(chunk, "usage") and chunk.usage:
-                    last_usage = chunk.usage
-                continue
-
-            delta = chunk.choices[0].delta
-            if (
-                hasattr(chunk.choices[0], "finish_reason")
-                and chunk.choices[0].finish_reason
-            ):
-                finish_reason = chunk.choices[0].finish_reason
-
-            if delta.content:
-                content_parts.append(delta.content)
-                if on_content_delta:
-                    filtered = self._filter_thinking_delta(delta.content, filter_state)
-                    if filtered:
-                        maybe_awaitable = on_content_delta(filtered)
-                        if inspect.isawaitable(maybe_awaitable):
-                            await maybe_awaitable
-            if (
-                on_reasoning_delta
-                and hasattr(delta, "reasoning_content")
-                and delta.reasoning_content
-            ):
-                maybe_awaitable = on_reasoning_delta(delta.reasoning_content)
-                if inspect.isawaitable(maybe_awaitable):
-                    await maybe_awaitable
-
-            if hasattr(delta, "tool_calls") and delta.tool_calls:
-                for tc in delta.tool_calls:
-                    idx = getattr(tc, "index", 0)
-                    if idx not in tool_calls_map:
-                        tool_calls_map[idx] = {
-                            "id": getattr(tc, "id", "") or "",
-                            "name": getattr(tc.function, "name", "") or "",
-                            "arguments": getattr(tc.function, "arguments", "") or "",
-                        }
-                    else:
-                        if getattr(tc, "id", None):
-                            tool_calls_map[idx]["id"] = tc.id
-                        if hasattr(tc, "function") and tc.function:
-                            if getattr(tc.function, "name", None):
-                                tool_calls_map[idx]["name"] = tc.function.name
-                            if getattr(tc.function, "arguments", None):
-                                tool_calls_map[idx]["arguments"] += (
-                                    tc.function.arguments or ""
-                                )
-
-            if hasattr(chunk, "usage") and chunk.usage:
-                last_usage = chunk.usage
-
-        raw_content = "".join(content_parts) if content_parts else None
-        content = _strip_thinking_content(raw_content)
-
-        tool_calls_list: List[ToolCall] = []
-        for idx in sorted(tool_calls_map.keys()):
-            tc = tool_calls_map[idx]
-            if tc["id"] and tc["name"]:
-                raw = tc["arguments"] or ""
-                if not raw:
-                    logger.warning(
-                        "流式 tool_call 的 arguments 为空 name=%s id=%s",
-                        tc["name"],
-                        tc["id"],
-                    )
-                    tool_calls_list.append(
-                        ToolCall(id=tc["id"], name=tc["name"], arguments={})
-                    )
-                    continue
-                try:
-                    args = json.loads(raw)
-                except json.JSONDecodeError as e:
-                    # 不静默吞掉：传原始字符串给执行层，由其返回明确错误，避免工具以空参数执行
-                    logger.warning(
-                        "流式 tool_call arguments JSON 解析失败 name=%s id=%s len=%s err=%s preview=%s",
-                        tc["name"],
-                        tc["id"],
-                        len(raw),
-                        e,
-                        raw[:300] if len(raw) > 300 else raw,
-                    )
-                    tool_calls_list.append(
-                        ToolCall(id=tc["id"], name=tc["name"], arguments=raw)
-                    )
-                else:
-                    tool_calls_list.append(
-                        ToolCall(id=tc["id"], name=tc["name"], arguments=args)
-                    )
-
-        usage = TokenUsage.from_usage(last_usage) if last_usage else None
-
-        content, tool_calls_list = _extract_tool_code_calls(content, tool_calls_list)
-
-        return LLMResponse(
-            content=content,
-            tool_calls=tool_calls_list,
-            finish_reason=finish_reason,
-            raw_response=None,
-            usage=usage,
+        chosen = provider_name or self._vision_provider_name or self._active
+        if chosen not in self._providers:
+            raise ValueError(f"未知 provider: {chosen}")
+        provider = self._providers[chosen]
+        return await provider.chat_with_image(
+            prompt=prompt,
+            image_url=image_url,
+            system_message=system_message,
+            model_override=model_override,
         )
 
-    @staticmethod
-    def _filter_thinking_delta(chunk: str, state: Dict[str, str]) -> str:
-        """
-        流式输出时剔除 <think>...</think> 段，仅返回可展示文本。
-        """
-        start_tag = "<think>"
-        end_tag = "</think>"
-        text = state.get("pending", "") + chunk
-        mode = state.get("mode", "normal")
-        out_parts: List[str] = []
-
-        def _max_prefix_suffix_len(s: str, token: str) -> int:
-            max_len = min(len(s), len(token) - 1)
-            for n in range(max_len, 0, -1):
-                if s.endswith(token[:n]):
-                    return n
-            return 0
-
-        while text:
-            if mode == "normal":
-                idx = text.find(start_tag)
-                if idx == -1:
-                    keep = _max_prefix_suffix_len(text, start_tag)
-                    if keep:
-                        out_parts.append(text[:-keep])
-                        text = text[-keep:]
-                    else:
-                        out_parts.append(text)
-                        text = ""
-                    break
-                out_parts.append(text[:idx])
-                text = text[idx + len(start_tag) :]
-                mode = "in_think"
-                continue
-
-            idx = text.find(end_tag)
-            if idx == -1:
-                keep = _max_prefix_suffix_len(text, end_tag)
-                text = text[-keep:] if keep else ""
-                break
-            text = text[idx + len(end_tag) :]
-            mode = "normal"
-
-        state["mode"] = mode
-        state["pending"] = text
-        return "".join(out_parts)
-
-    def _build_qwen_extra_body(self) -> Optional[Dict[str, Any]]:
-        """
-        构建阿里云百炼 Qwen 的 extra_body 扩展参数。
-        - enable_thinking 必须通过 extra_body 传递（OpenAI Python SDK）
-        - thinking_budget 仅部分模型支持
-        """
-        if self._config.llm.provider != "qwen":
-            return None
-
-        extra_body: Dict[str, Any] = {}
-
-        if self._config.llm.enable_search:
-            extra_body["enable_search"] = True
-
-        if self._config.llm.enable_thinking:
-            extra_body["enable_thinking"] = True
-
-        if self._config.llm.thinking_budget is not None:
-            extra_body["thinking_budget"] = self._config.llm.thinking_budget
-
-        # 搜索选项仅在 enable_search=true 时生效
-        if self._config.llm.enable_search and self._config.llm.search_options:
-            search_opts = self._config.llm.search_options
-            search_options: Dict[str, Any] = {}
-
-            if search_opts.forced_search:
-                search_options["forced_search"] = True
-
-            # 注意：search_strategy: agent/agent_max 会与工具冲突，工具内部单独处理
-            if (
-                search_opts.search_strategy not in ("agent_max", "agent")
-                and search_opts.search_strategy != "turbo"
-            ):
-                search_options["search_strategy"] = search_opts.search_strategy
-
-            if search_opts.enable_source:
-                search_options["enable_source"] = True
-
-            if search_opts.enable_citation and search_opts.enable_source:
-                search_options["enable_citation"] = True
-                if search_opts.citation_format != "[<number>]":
-                    search_options["citation_format"] = search_opts.citation_format
-
-            if search_opts.enable_search_extension:
-                search_options["enable_search_extension"] = True
-
-            if search_opts.freshness is not None:
-                search_options["freshness"] = search_opts.freshness
-
-            if search_opts.assigned_site_list:
-                search_options["assigned_site_list"] = search_opts.assigned_site_list
-
-            if search_options:
-                extra_body["search_options"] = search_options
-
-        return extra_body or None
-
     async def close(self) -> None:
-        """关闭客户端连接"""
-        await self._client.close()
+        """关闭所有 provider 的底层连接。"""
+        for provider in self._providers.values():
+            try:
+                await provider.close()
+            except Exception:
+                logger.exception("关闭 provider %s 失败", provider.name)
+
+
+__all__ = [
+    "LLMClient",
+    "LLMResponse",
+    "ToolCall",
+    "TokenUsage",
+    "Capabilities",
+    "get_context_window_tokens_for_model",
+    "_strip_thinking_content",
+]

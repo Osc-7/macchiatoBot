@@ -331,6 +331,17 @@ class AutomationIPCServer:
             usage = self._gateway.get_token_usage(session_id=active_session)
             return {"usage": usage}
 
+        if method == "model_list":
+            models = self._gateway.list_models(session_id=active_session)
+            return {"models": models}
+
+        if method == "model_switch":
+            name = str(params.get("name") or "").strip()
+            if not name:
+                raise ValueError("name 不能为空")
+            info = self._gateway.switch_model(name, session_id=active_session)
+            return {"ok": True, "info": info}
+
         if method == "get_turn_count":
             turn_count = self._gateway.get_turn_count(session_id=active_session)
             return {"turn_count": turn_count}
@@ -657,6 +668,20 @@ class AutomationIPCClient:
 
     async def clear_context(self) -> None:
         await self._request("clear_context", {})
+
+    async def list_models(self) -> List[Dict[str, Any]]:
+        """列出 daemon 侧当前 session 可用的 LLM provider。"""
+        data = await self._request("model_list", {})
+        models = data.get("models")
+        if not isinstance(models, list):
+            return []
+        return [dict(m) for m in models if isinstance(m, dict)]
+
+    async def switch_model(self, name: str) -> Dict[str, Any]:
+        """请求 daemon 侧切换当前 session 的 LLM provider。"""
+        data = await self._request("model_switch", {"name": name})
+        info = data.get("info")
+        return dict(info) if isinstance(info, dict) else {}
 
     async def get_token_usage(self) -> dict:
         data = await self._request("get_token_usage", {})

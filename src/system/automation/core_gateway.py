@@ -7,7 +7,7 @@ import logging
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Awaitable, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 from .session_registry import SessionRegistry
 from agent_core.interfaces import (
@@ -467,6 +467,141 @@ class AutomationCoreGateway:
                     return {**self._DEFAULT_USAGE, **result}
         return dict(self._DEFAULT_USAGE)
 
+    @staticmethod
+    def _resolve_vision_provider_name_static(
+        llm: Any, prov_map: Dict[str, Any]
+    ) -> Optional[str]:
+        vision_raw = getattr(llm, "vision_provider", None)
+        vision_name: Optional[str] = (
+            str(vision_raw) if vision_raw and str(vision_raw) in prov_map else None
+        )
+        if not vision_name:
+            for n, ent in prov_map.items():
+                caps_m = getattr(ent, "capabilities", None)
+                if caps_m is not None and bool(getattr(caps_m, "vision", False)):
+                    vision_name = str(n)
+                    break
+        return vision_name
+
+    def _list_models_from_global_llm_config(
+        self, session_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        尚无 live Core 时从配置构造列表（与 AgentCore.list_models 字段对齐）。
+        ``CorePool`` 中若已有该 session 的预选主模型，则 ``is_active`` 以预选为准。
+        """
+        from agent_core.config import get_config
+
+        cfg = get_config()
+        llm = cfg.llm
+        prov_map = getattr(llm, "providers", None) or {}
+        if not prov_map:
+            return []
+        names = list(prov_map.keys())
+        active_name = getattr(llm, "active", None)
+        if not active_name or str(active_name) not in prov_map:
+            active_name = names[0]
+        sid = (session_id or self._active_session_id or "").strip()
+        if sid:
+            override = self._kernel_scheduler.core_pool.get_session_preferred_llm_provider(
+                sid
+            )
+            if override and str(override) in prov_map:
+                active_name = str(override)
+        vision_name = self._resolve_vision_provider_name_static(llm, prov_map)
+
+        out: List[Dict[str, Any]] = []
+        for name, ent in prov_map.items():
+            caps_m = getattr(ent, "capabilities", None)
+            if caps_m is None:
+                continue
+            api_model = str(getattr(ent, "model", "") or "")
+            out.append(
+                {
+                    "name": name,
+                    "model": api_model,
+                    "api_model": api_model,
+                    "label": getattr(ent, "label", None),
+                    "base_url": getattr(ent, "base_url", None),
+                    "vision": bool(getattr(caps_m, "vision", False)),
+                    "function_calling": bool(getattr(caps_m, "function_calling", True)),
+                    "reasoning_content": bool(
+                        getattr(caps_m, "reasoning_content", False)
+                    ),
+                    "context_window": getattr(caps_m, "context_window", None),
+                    "is_active": name == active_name,
+                    "is_vision_provider": vision_name is not None and name == vision_name,
+                }
+            )
+        return out
+
+    def list_models(self, session_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """列出 session 所在 agent 的可用 LLM provider。"""
+        sid = session_id or self._active_session_id
+        live = self._kernel_scheduler.core_pool.get_live_entry(sid)
+        if live is not None and getattr(live, "agent", None) is not None:
+            fn = getattr(live.agent, "list_models", None)
+            if callable(fn):
+                try:
+                    result = fn()
+                    if isinstance(result, list) and result:
+                        return list(result)
+                except Exception:
+                    logger.debug(
+                        "agent.list_models failed for session_id=%s", sid, exc_info=True
+                    )
+        return self._list_models_from_global_llm_config(session_id=sid)
+
+    def _switch_result_from_config_provider(self, query: str) -> Dict[str, Any]:
+        """无 live AgentCore 时根据配置构造与 ``AgentCore.switch_model`` 一致的结果字段。"""
+        from agent_core.config import get_config
+        from agent_core.llm.provider_resolve import resolve_llm_provider_key
+
+        cfg = get_config()
+        name = resolve_llm_provider_key(cfg.llm, query)
+        prov_map = getattr(cfg.llm, "providers", {}) or {}
+        prov = prov_map.get(name)
+        if prov is None:
+            raise ValueError(
+                f"未知 provider: {query}；已注册：{list(prov_map.keys())}"
+            )
+        caps_m = getattr(prov, "capabilities", None)
+        vision_vp = self._resolve_vision_provider_name_static(cfg.llm, prov_map)
+        return {
+            "name": name,
+            "model": prov.model,
+            "api_model": prov.model,
+            "vision": bool(getattr(caps_m, "vision", False)) if caps_m else False,
+            "vision_provider": vision_vp,
+        }
+
+    def switch_model(
+        self, name: str, session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """切换 session 的主对话 LLM provider。
+
+        首选存在 ``CorePool`` 中：无 Core 时只更新池内记录，首轮 ``acquire`` 创建
+        AgentCore 后在 ``_load`` 里应用；已有 Core 时同时更新 ``LLMClient``。
+        """
+        sid = session_id or self._active_session_id
+        name = str(name).strip()
+        if not name:
+            raise ValueError("name 不能为空")
+
+        pool = self._kernel_scheduler.core_pool
+        pool.set_session_preferred_llm_provider(sid, name)
+
+        live = pool.get_live_entry(sid)
+        if live is not None and getattr(live, "agent", None) is not None:
+            fn = getattr(live.agent, "switch_model", None)
+            if not callable(fn):
+                raise RuntimeError("当前 agent 不支持运行时 switch_model")
+            result = fn(name)
+            if not isinstance(result, dict):
+                return {"name": str(name)}
+            return result
+        return self._switch_result_from_config_provider(name)
+
     def get_turn_count(self, session_id: Optional[str] = None) -> int:
         sid = session_id or self._active_session_id
         entry = self._kernel_scheduler.core_pool.get_entry(sid)
@@ -589,6 +724,7 @@ class AutomationCoreGateway:
             await _close_session_if_needed(session, temp=True)
 
         self._session_registry.delete_session(self._owner_id, self._source, sid)
+        self._kernel_scheduler.core_pool.clear_session_preferred_llm_provider(sid)
         return True
 
     async def close(self) -> None:

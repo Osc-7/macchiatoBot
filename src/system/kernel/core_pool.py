@@ -115,10 +115,34 @@ class CorePool:
         # per-session 锁，防止并发创建
         self._locks: Dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
+        # session_id -> 用户为该会话选择的主对话 LLM provider 名；首次 _load 创建 AgentCore 后会 apply。
+        self._session_preferred_llm_provider: Dict[str, str] = {}
 
     def set_scheduler(self, scheduler: "KernelScheduler") -> None:
         """后绑定 KernelScheduler，供子进程完成时 inject_turn。"""
         self._scheduler = scheduler
+
+    def get_session_preferred_llm_provider(self, session_id: str) -> Optional[str]:
+        """该会话在尚未物化 Core 时预选的主模型 provider 名（与 config.llm.providers 的 key 一致）。"""
+        sid = (session_id or "").strip()
+        return self._session_preferred_llm_provider.get(sid)
+
+    def set_session_preferred_llm_provider(self, session_id: str, name: str) -> None:
+        """记录会话级主模型选择；首次 acquire/_load 时会 ``switch_model`` 到该 provider。"""
+        from agent_core.llm.provider_resolve import resolve_llm_provider_key
+
+        sid = (session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id 不能为空")
+        raw = (name or "").strip()
+        if not raw:
+            raise ValueError("provider 名不能为空")
+        key = resolve_llm_provider_key(self._config.llm, raw)
+        self._session_preferred_llm_provider[sid] = key
+
+    def clear_session_preferred_llm_provider(self, session_id: str) -> None:
+        """删除会话的预选主模型（如会话已从注册表删除时由 gateway 调用）。"""
+        self._session_preferred_llm_provider.pop((session_id or "").strip(), None)
 
     def mark_parent_got_terminal_via_wait_subagent_tool(self, sub_session_id: str) -> None:
         """父会话 wait_subagent 已成功返回终态快照后调用，用于抑制重复的 [子任务 x 完成] inject。"""
@@ -1114,6 +1138,21 @@ class CorePool:
                     result = activate(session_id)
                     if inspect.isawaitable(result):
                         await result
+
+            preferred = self.get_session_preferred_llm_provider(session_id)
+            if preferred:
+                sw = getattr(agent, "switch_model", None)
+                if callable(sw):
+                    try:
+                        sw(preferred)
+                    except Exception as exc:
+                        logger.warning(
+                            "CorePool._load: apply session preferred LLM %r failed "
+                            "for session=%s: %s",
+                            preferred,
+                            session_id,
+                            exc,
+                        )
 
             # 将 TTL 偏移量附到返回值，供 CorePool.acquire() 修正 CoreEntry 时间戳
             agent._checkpoint_ttl_offset = initial_ttl_offset  # type: ignore[attr-defined]

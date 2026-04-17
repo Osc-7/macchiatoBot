@@ -29,6 +29,16 @@ def _make_mock_scheduler(
     default_result = default_result or AgentRunResult(output_text="ok")
     pool_sessions = pool_sessions or []
     pool_entries = pool_entries or {}
+    preferred_llm_by_session: dict[str, str] = {}
+
+    def _get_pref(sid: str):
+        return preferred_llm_by_session.get((sid or "").strip())
+
+    def _set_pref(session_id: str, name: str) -> None:
+        preferred_llm_by_session[(session_id or "").strip()] = (name or "").strip()
+
+    def _clear_pref(session_id: str) -> None:
+        preferred_llm_by_session.pop((session_id or "").strip(), None)
 
     async def _submit(request):
         sid = getattr(request, "session_id", "cli:root")
@@ -53,6 +63,9 @@ def _make_mock_scheduler(
     mock_pool.get_entry = MagicMock(
         side_effect=lambda sid: pool_entries.get(sid)
     )
+    mock_pool.get_session_preferred_llm_provider = MagicMock(side_effect=_get_pref)
+    mock_pool.set_session_preferred_llm_provider = MagicMock(side_effect=_set_pref)
+    mock_pool.clear_session_preferred_llm_provider = MagicMock(side_effect=_clear_pref)
 
     mock_scheduler = MagicMock()
     mock_scheduler.submit = AsyncMock(side_effect=_submit)
@@ -60,6 +73,7 @@ def _make_mock_scheduler(
     mock_scheduler.core_pool = mock_pool
     mock_scheduler.subscribe_out = MagicMock(return_value="mock-sub-id")
     mock_scheduler.unsubscribe_out = MagicMock()
+    mock_scheduler._preferred_llm_by_session = preferred_llm_by_session
 
     return mock_scheduler
 
@@ -445,3 +459,118 @@ async def test_gateway_delete_session_returns_false_without_core_session_for_col
     assert ok is False
     assert registry.session_exists("root", "cli", "cli:cold") is True
     await gateway.close()
+
+
+def test_switch_model_without_live_core_stores_preference_in_pool(tmp_path, monkeypatch):
+    """无 live Core 时 switch_model 写入 CorePool，并返回与配置一致的信息。"""
+    from agent_core.config import CapabilitiesModel, Config, LLMConfig, ProviderEntry
+
+    minimal = Config(
+        llm=LLMConfig(
+            api_key="k",
+            model="m",
+            providers={
+                "p_a": ProviderEntry(
+                    base_url="https://a/v1",
+                    api_key="k",
+                    model="ma",
+                    capabilities=CapabilitiesModel(vision=False),
+                ),
+                "p_b": ProviderEntry(
+                    base_url="https://b/v1",
+                    api_key="k",
+                    model="mb",
+                    capabilities=CapabilitiesModel(vision=True),
+                ),
+            },
+            active="p_a",
+            vision_provider="p_b",
+        ),
+    )
+    monkeypatch.setattr("agent_core.config.get_config", lambda: minimal)
+
+    scheduler = _make_mock_scheduler(pool_entries={})
+    scheduler.core_pool.get_live_entry = MagicMock(return_value=None)
+
+    gateway = _make_gateway(tmp_path, kernel_scheduler=scheduler)
+    info = gateway.switch_model("p_b", session_id="cli:root")
+    assert scheduler._preferred_llm_by_session.get("cli:root") == "p_b"
+    assert info.get("name") == "p_b"
+    assert info.get("api_model") == "mb"
+
+
+def test_list_models_fallback_reflects_pool_preferred_without_live_core(
+    tmp_path, monkeypatch
+):
+    """未物化 Core 时，list_models 的 is_active 应跟随池内预选主模型。"""
+    from agent_core.config import CapabilitiesModel, Config, LLMConfig, ProviderEntry
+
+    minimal = Config(
+        llm=LLMConfig(
+            api_key="k",
+            model="m",
+            providers={
+                "p_a": ProviderEntry(
+                    base_url="https://a/v1",
+                    api_key="k",
+                    model="ma",
+                    capabilities=CapabilitiesModel(vision=False),
+                ),
+                "p_b": ProviderEntry(
+                    base_url="https://b/v1",
+                    api_key="k",
+                    model="mb",
+                    capabilities=CapabilitiesModel(vision=True),
+                ),
+            },
+            active="p_a",
+            vision_provider="p_b",
+        ),
+    )
+    monkeypatch.setattr("agent_core.config.get_config", lambda: minimal)
+
+    scheduler = _make_mock_scheduler(pool_entries={})
+    scheduler.core_pool.get_live_entry = MagicMock(return_value=None)
+    gateway = _make_gateway(tmp_path, kernel_scheduler=scheduler)
+    gateway.switch_model("p_b", session_id="cli:root")
+    models = gateway.list_models(session_id="cli:root")
+    by_name = {m["name"]: m for m in models}
+    assert by_name["p_b"]["is_active"] is True
+    assert by_name["p_a"]["is_active"] is False
+
+
+def test_list_models_fallback_when_core_not_in_pool(tmp_path, monkeypatch):
+    """首次对话前 core_pool 可能尚无 entry，/model 仍应列出全局 llm.providers。"""
+    from agent_core.config import CapabilitiesModel, Config, LLMConfig, ProviderEntry
+
+    minimal = Config(
+        llm=LLMConfig(
+            api_key="k",
+            model="m",
+            providers={
+                "only_p": ProviderEntry(
+                    base_url="https://example.com/v1",
+                    api_key="k",
+                    model="m-id",
+                    label="L",
+                    capabilities=CapabilitiesModel(
+                        vision=True,
+                        function_calling=True,
+                        reasoning_content=False,
+                    ),
+                )
+            },
+            active="only_p",
+            vision_provider="only_p",
+        ),
+    )
+    monkeypatch.setattr("agent_core.config.get_config", lambda: minimal)
+
+    scheduler = _make_mock_scheduler(pool_entries={})
+    gateway = _make_gateway(tmp_path, kernel_scheduler=scheduler)
+    models = gateway.list_models(session_id="cli:root")
+    assert len(models) == 1
+    assert models[0]["name"] == "only_p"
+    assert models[0]["api_model"] == "m-id"
+    assert models[0]["is_active"] is True
+    assert models[0]["is_vision_provider"] is True

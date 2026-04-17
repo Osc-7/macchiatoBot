@@ -15,7 +15,7 @@ npx skills add <owner/repo@skill> -g -y   # 安装到 ~/.agents/skills
 
 1. 在 `~/.agents/skills/` 下新建 `{skill-name}/SKILL.md`
 2. 符合 [AgentSkills](https://agentskills.io/) 规范（YAML frontmatter + Markdown 正文）
-3. 若需仅展示部分技能，在 `config.yaml` 中设置 `skills.enabled: [skill-name]`；为空则展示全部
+3. 若需仅展示部分技能，在 `config/config.yaml` 中设置 `skills.enabled: [skill-name]`；为空则展示全部
 
 ## 渐进式披露
 

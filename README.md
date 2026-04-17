@@ -27,7 +27,7 @@ It adopts a **kernel-style architecture** that unifies scheduling, permissions, 
 source init.sh
 
 # 2) Configure
-cp config.example.yaml config.yaml
+cp config/config.example.yaml config/config.yaml
 # Fill llm.api_key / llm.model (or override via env vars)
 
 # 3) Start automation daemon (recommended)
@@ -60,7 +60,7 @@ python main.py
 
 The daemon will:
 
-- Sync automation job definitions from `config.yaml`
+- Sync automation job definitions from `config/config.yaml`
 - Enqueue jobs and execute them via the task queue
 - Expose local IPC (Unix Socket) for CLI / other frontends
 - Perform session expiration checks and rotation (idle + 4am)
@@ -92,7 +92,7 @@ Notes:
 
 ## Configuration
 
-Main config: `config.yaml` (see `config.example.yaml`).
+Main config: `config/config.yaml` (see `config/config.example.yaml`).
 
 Common fields:
 
@@ -147,7 +147,7 @@ pytest tests/ -v
 python mcp_server.py
 ```
 
-To enable local MCP tools, configure `mcp.servers` in `config.yaml` (stdio).
+To enable local MCP tools, configure `mcp.servers` in `config/config.yaml` (stdio).
 
 ---
 

@@ -16,7 +16,7 @@
 
 **建议将 `deploy/` 整目录提交到 Git。**
 
-- 提交的是**模板与脚本**，不包含机器上的 `config.yaml`、`.env` 或密钥。
+- 提交的是**模板与脚本**，不包含机器上的 `config/config.yaml`、`.env` 或密钥。
 - 安装后生成的文件在 `/etc/systemd/system/`，由本机 `install.sh` 写入，**不要**把 `/etc` 里的内容提交进仓库。
 
 首次纳入版本控制示例：
@@ -35,7 +35,7 @@ git commit -m "Add systemd deploy units and install script"
    uv sync --all-groups
    # 或: source init.sh
   ```
-2. 按 `config.example.yaml` 准备好本机的 `config.yaml`（及所需环境变量；应用按现有逻辑读取配置）。
+2. 按 `config/config.example.yaml` 准备好本机的 `config/config.yaml`（及所需环境变量；应用按现有逻辑读取配置）。
 3. 运行用户（如 `ubuntu`）对项目目录、`data/`、`logs/` 等有读写权限。
 
 ## 安装 systemd 单元

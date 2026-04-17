@@ -1,0 +1,29 @@
+# gemini_3_flash:
+#   label: "Gemini 3 Flash"
+#   base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+#   api_key: "${GEMINI_API_KEY}"
+#   model: "gemini-3-flash-preview"
+#   temperature: 1.0
+#   vendor_params: {}
+#   capabilities:
+#     vision: true
+#     function_calling: true
+#     parallel_tool_calls: true
+#     reasoning_content: true
+#     thinking_tag_inline: false
+#     context_window: 1000000
+
+gemini_31_flash_lite:
+  label: "Gemini 3.1 Flash-Lite"
+  base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+  api_key: "${GEMINI_API_KEY}"
+  model: "gemini-3.1-flash-lite-preview"
+  temperature: 1.0
+  vendor_params: {}
+  capabilities:
+    vision: true
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: true
+    thinking_tag_inline: false
+    context_window: 1000000

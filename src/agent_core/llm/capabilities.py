@@ -30,7 +30,7 @@ class Capabilities:
     """支持在一次响应里返回多个 tool_calls。"""
 
     reasoning_content: bool = False
-    """在 choices[0].message 上有独立的 reasoning_content 字段（GLM / Kimi 等）。"""
+    """在 choices[0].message 上有独立的 reasoning_content 字段（DeepSeek 思考模式、GLM、Kimi 等）。"""
 
     thinking_tag_inline: bool = False
     """模型可能在 content 中输出 <think>...</think>（Qwen 深度思考等）。"""

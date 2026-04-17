@@ -3,7 +3,7 @@
 # LLM：每个 provider 独立声明连接参数与能力（Capabilities）。
 # 运行时 `/model <name>` 里的 name 是 **配置名**（providers 的 key）；`/model` 列表会列出 **API 模型 ID（标准名）**（即 model 字段）。
 # recognize_image 工具固定走 vision_provider。
-# vendor_params 会原样作为 extra_body 传给 OpenAI SDK（百炼 / 智谱 / MiniMax / Kimi 等各家扩展不同，见各厂文档）。
+# vendor_params 会原样作为 extra_body 传给 OpenAI SDK（DeepSeek thinking、百炼 / 智谱 / MiniMax / Kimi 等各家扩展不同，见各厂文档）。
 # 支持 ${ENV_VAR} 语法从环境变量展开；LLM 密钥请写在仓库根 .env（参考 .env.example），勿写入仓库。
 # 推荐：全部 LLM provider 放在本文件同目录下 llm/providers.d/*.yaml（与主配置分离）。
 # 亦可使用 provider_include 按文件顺序合并；路径相对主配置目录，且若主配置在仓库根，

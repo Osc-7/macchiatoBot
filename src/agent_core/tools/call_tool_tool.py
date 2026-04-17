@@ -8,6 +8,11 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
+from agent_core.agent.tool_path_resolution import (
+    apply_workspace_path_resolution_to_tool_args,
+)
+from agent_core.config import get_config
+
 from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from .versioned_registry import VersionedToolRegistry
 
@@ -102,6 +107,10 @@ class CallToolTool(BaseTool):
         exec_ctx = kwargs.get("__execution_context__")
         if exec_ctx is not None and "__execution_context__" not in arguments:
             arguments = {**arguments, "__execution_context__": exec_ctx}
+
+        arguments = apply_workspace_path_resolution_to_tool_args(
+            name, arguments, get_config()
+        )
 
         result = await self._registry.execute(name, **arguments)
         result.metadata["_delegated_tool_name"] = name

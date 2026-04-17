@@ -23,6 +23,9 @@ import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from agent_core.interfaces import AgentHooks, AgentRunResult
+from agent_core.agent.tool_path_resolution import (
+    apply_workspace_path_resolution_to_tool_args,
+)
 from agent_core.kernel_interface import (
     ContextOverflowAction,
     CoreStatsAction,
@@ -198,6 +201,11 @@ class AgentKernel:
                             if _v is not None and str(_v).strip():
                                 _ctx[_k] = str(_v).strip()
                     parsed_args["__execution_context__"] = _ctx
+                    cfg = getattr(agent, "_config", None)
+                    if cfg is not None:
+                        parsed_args = apply_workspace_path_resolution_to_tool_args(
+                            action.tool_name, parsed_args, cfg
+                        )
                     result = await agent_registry.execute(
                         action.tool_name, **parsed_args
                     )

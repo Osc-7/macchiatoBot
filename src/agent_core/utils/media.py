@@ -32,8 +32,8 @@ def _resolve_media_path(
     解析策略：
     1) ``~`` / ``~/``：若传入 ``config``，与会话工作区对齐（见 ``session_paths``）
     2) 绝对路径：直接使用
-    3) 相对路径（如 user_file/a.png）：相对于项目根目录
-    4) 仅文件名（如 a.png）：默认在项目根目录的 user_file/ 下查找
+    3) 相对路径：与 file_tools 一致，优先相对当前会话工作区（隔离开启时）或
+       file_tools.base_dir；若不存在再尝试项目根与 ``user_file/``（兼容旧行为）
     """
     raw = (media_path or "").strip()
     if config is not None:
@@ -47,6 +47,16 @@ def _resolve_media_path(
         return p.resolve()
 
     root = _project_root()
+
+    if config is not None:
+        from agent_core.agent.tool_path_resolution import resolve_path_string_for_tool
+
+        session_path, _err = resolve_path_string_for_tool(
+            raw, config, exec_ctx or {}
+        )
+        if session_path is not None and session_path.exists():
+            return session_path.resolve()
+
     direct = (root / p).resolve()
     if direct.exists():
         return direct

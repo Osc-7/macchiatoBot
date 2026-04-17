@@ -1,0 +1,15 @@
+deepseek_chat_thinking:
+  label: "DeepSeek V3.2"
+  base_url: "https://api.deepseek.com/v1"
+  api_key: "${DEEPSEEK_API_KEY}"
+  model: "deepseek-chat"
+  vendor_params:
+    thinking:
+      type: enabled
+  capabilities:
+    vision: false
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: true
+    thinking_tag_inline: false
+    context_window: 131072

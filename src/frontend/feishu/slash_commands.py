@@ -48,7 +48,7 @@ def _help_text() -> str:
     return """可用指令：
 /clear - 清空对话历史
 /usage 或 /stats - 本会话 token 用量
-/model 或 /model list - 列出可用 LLM（* 为当前主对话）
+/model 或 /model list - 列出可用 LLM（★ 为当前主对话）
 /model <备注名或配置名> - 切换主对话模型（与配置里 label 一致即可，可含空格）
 /session - 显示当前会话
 /session list - 列出已加载会话
@@ -122,12 +122,13 @@ async def try_handle_slash_command(
                 return True, f"列出模型失败: {exc}"
             if not models:
                 return True, "当前没有可用的 LLM provider 配置。"
+            # 勿用 ASCII * 作行首标记：飞书会把 * 解析成 Markdown 列表，当前行前会多出空行。
             lines = [
-                "Available models ( * = current active model, V = vision provider ); switch: /model <model name>",
+                "Available models ( ★ = current active model, V = vision provider ); switch: /model <model name>",
                 "Example: /model Qwen3.5 Plus",
             ]
             for m in models:
-                mark = "*" if m.get("is_active") else " "
+                mark = "★" if m.get("is_active") else " "
                 vp = "V" if m.get("is_vision_provider") else " "
                 raw_label = m.get("label")
                 display = (
@@ -135,6 +136,7 @@ async def try_handle_slash_command(
                     if raw_label not in (None, "")
                     else str(m.get("name") or "—")
                 )
+                display = " ".join(display.split())
                 caps_bits = []
                 if m.get("vision"):
                     caps_bits.append("vision")

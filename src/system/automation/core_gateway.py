@@ -483,6 +483,87 @@ class AutomationCoreGateway:
                     break
         return vision_name
 
+    @staticmethod
+    def _normalize_provider_key(key: str) -> str:
+        """将 provider 名对齐到 ``config.llm.providers`` 的实际键（区分大小写不一致）。"""
+        from agent_core.config import get_config
+
+        raw = (key or "").strip()
+        if not raw:
+            return ""
+        prov = getattr(get_config().llm, "providers", None) or {}
+        if raw in prov:
+            return raw
+        rl = raw.lower()
+        for k in prov:
+            if k.lower() == rl:
+                return k
+        return raw
+
+    def _canonical_active_provider_key(self, session_id: str) -> str:
+        """
+        当前会话「主对话」对应的 providers 键：预选 > live Agent 的 LLMClient > 全局 llm.active > 首个 provider。
+        飞书与 CLI 共用；与仅依赖 AgentCore.list_models 内比较相比，可避免键名不一致导致全无 *。
+        """
+        from agent_core.config import get_config
+
+        sid = (session_id or "").strip()
+        pool = self._kernel_scheduler.core_pool
+        if sid:
+            pref = pool.get_session_preferred_llm_provider(sid)
+            if pref:
+                return self._normalize_provider_key(str(pref))
+            live = pool.get_live_entry(sid)
+            if live is not None and getattr(live, "agent", None) is not None:
+                llm_c = getattr(live.agent, "_llm_client", None)
+                if llm_c is not None:
+                    an = getattr(llm_c, "active_provider_name", None)
+                    # 仅采纳真实 str；单测里 CorePool 为 MagicMock 时 getattr 会得到 MagicMock，
+                    # str(MagicMock) 不是合法 provider 名，会误伤 is_active。
+                    if isinstance(an, str) and an.strip():
+                        cand = self._normalize_provider_key(an)
+                        prov_check = getattr(get_config().llm, "providers", None) or {}
+                        if cand in prov_check or any(
+                            k.lower() == cand.lower() for k in prov_check
+                        ):
+                            return cand
+        llm = get_config().llm
+        prov_map = getattr(llm, "providers", None) or {}
+        if not prov_map:
+            return ""
+        a = getattr(llm, "active", None)
+        if a:
+            na = self._normalize_provider_key(str(a))
+            if na in prov_map:
+                return na
+        return next(iter(prov_map.keys()))
+
+    def _apply_model_list_active_flags(
+        self, models: List[Dict[str, Any]], session_id: str
+    ) -> None:
+        """统一写入 is_active / is_vision_provider，避免各路径比较不一致。"""
+        if not models:
+            return
+        from agent_core.config import get_config
+
+        sid = (session_id or "").strip()
+        active_key = self._canonical_active_provider_key(sid)
+        llm = get_config().llm
+        prov_map = getattr(llm, "providers", None) or {}
+        vision_name = self._resolve_vision_provider_name_static(llm, prov_map)
+        vision_key = (
+            self._normalize_provider_key(str(vision_name))
+            if vision_name
+            else ""
+        )
+
+        for m in models:
+            if not isinstance(m, dict):
+                continue
+            row_key = self._normalize_provider_key(str(m.get("name") or ""))
+            m["is_active"] = bool(active_key) and row_key == active_key
+            m["is_vision_provider"] = bool(vision_key) and row_key == vision_key
+
     def _list_models_from_global_llm_config(
         self, session_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
@@ -490,31 +571,21 @@ class AutomationCoreGateway:
         尚无 live Core 时从配置构造列表（与 AgentCore.list_models 字段对齐）。
         ``CorePool`` 中若已有该 session 的预选主模型，则 ``is_active`` 以预选为准。
         """
-        from agent_core.config import get_config
+        from agent_core.config import CapabilitiesModel, get_config
 
         cfg = get_config()
         llm = cfg.llm
         prov_map = getattr(llm, "providers", None) or {}
         if not prov_map:
             return []
-        names = list(prov_map.keys())
-        active_name = getattr(llm, "active", None)
-        if not active_name or str(active_name) not in prov_map:
-            active_name = names[0]
-        sid = (session_id or self._active_session_id or "").strip()
-        if sid:
-            override = self._kernel_scheduler.core_pool.get_session_preferred_llm_provider(
-                sid
-            )
-            if override and str(override) in prov_map:
-                active_name = str(override)
         vision_name = self._resolve_vision_provider_name_static(llm, prov_map)
 
         out: List[Dict[str, Any]] = []
         for name, ent in prov_map.items():
             caps_m = getattr(ent, "capabilities", None)
+            # 缺 capabilities 时仍要列出该行；否则当前 active 若恰被 skip，列表里会没有任何 *。
             if caps_m is None:
-                continue
+                caps_m = CapabilitiesModel()
             api_model = str(getattr(ent, "model", "") or "")
             out.append(
                 {
@@ -529,15 +600,18 @@ class AutomationCoreGateway:
                         getattr(caps_m, "reasoning_content", False)
                     ),
                     "context_window": getattr(caps_m, "context_window", None),
-                    "is_active": name == active_name,
+                    "is_active": False,
                     "is_vision_provider": vision_name is not None and name == vision_name,
                 }
             )
+        sid = (session_id or self._active_session_id or "").strip()
+        self._apply_model_list_active_flags(out, sid)
         return out
 
     def list_models(self, session_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """列出 session 所在 agent 的可用 LLM provider。"""
         sid = session_id or self._active_session_id
+        sid = (sid or "").strip()
         live = self._kernel_scheduler.core_pool.get_live_entry(sid)
         if live is not None and getattr(live, "agent", None) is not None:
             fn = getattr(live.agent, "list_models", None)
@@ -545,7 +619,9 @@ class AutomationCoreGateway:
                 try:
                     result = fn()
                     if isinstance(result, list) and result:
-                        return list(result)
+                        out = list(result)
+                        self._apply_model_list_active_flags(out, sid)
+                        return out
                 except Exception:
                     logger.debug(
                         "agent.list_models failed for session_id=%s", sid, exc_info=True

@@ -1,0 +1,40 @@
+sjtu_minimax_m25:
+  label: "MiniMax M2.5 SJTU"
+  base_url: "https://models.sjtu.edu.cn/api/v1"
+  api_key: "${SJTU_MODELS_API_KEY}"
+  model: "minimax-m2.5"
+  vendor_params: {}
+  capabilities:
+    vision: false
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: false
+    thinking_tag_inline: false
+    context_window: null
+
+sjtu_glm5:
+  label: "GLM 5.0 SJTU"
+  base_url: "https://models.sjtu.edu.cn/api/v1"
+  api_key: "${SJTU_MODELS_API_KEY}"
+  model: "glm-5"
+  vendor_params: {}
+  capabilities:
+    vision: false
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: false
+    thinking_tag_inline: false
+    context_window: null
+sjtu_qwen3vl:
+  label: "Qwen3-VL-32B SJTU"
+  base_url: "https://models.sjtu.edu.cn/api/v1"
+  api_key: "${SJTU_MODELS_API_KEY}"
+  model: "qwen3vl"
+  vendor_params: {}
+  capabilities:
+    vision: true
+    function_calling: false
+    parallel_tool_calls: true
+    reasoning_content: false
+    thinking_tag_inline: false
+    context_window: null

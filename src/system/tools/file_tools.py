@@ -16,6 +16,10 @@ from typing import Awaitable, Callable, Optional, Tuple
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from agent_core.config import Config, FileToolsConfig, get_config
 from agent_core.agent.session_paths import expand_user_path_str_for_session
+from agent_core.agent.tool_path_resolution import (
+    resolve_path_string_for_tool,
+    resolve_workspace_root_for_exec_ctx,
+)
 
 # 工作区隔离下 ``data/memory`` 已嫁接至当前用户的 canonical owner（见 workspace_paths），
 # 相对工作区应使用此路径，勿再写 ``data/memory/{frontend}/{user}/...`` 以免路径重复一层。
@@ -55,19 +59,6 @@ def _sub_mode_forbids_file_mutation(exec_ctx: dict) -> bool:
     return (exec_ctx.get("profile_mode") or "full").lower() == "sub"
 
 
-def _resolve_workspace_root_for_exec_ctx(exec_ctx: dict, config: Config) -> Path:
-    """当前 frontend/user 的工作区根目录。"""
-    from agent_core.agent.memory_paths import (
-        effective_memory_namespace_from_execution_context,
-    )
-    from agent_core.agent.workspace_paths import resolve_workspace_owner_dir
-
-    src, uid = effective_memory_namespace_from_execution_context(exec_ctx)
-    return Path(
-        resolve_workspace_owner_dir(config.command_tools, uid, source=src)
-    ).expanduser().resolve()
-
-
 def _resolve_workspace_tmp_root_for_exec_ctx(exec_ctx: dict, config: Config) -> Path:
     """当前 frontend/user 的临时目录根。"""
     from agent_core.agent.memory_paths import (
@@ -89,33 +80,6 @@ def _is_path_within_root(candidate: Path, root: Path) -> bool:
         return False
 
 
-def _resolve_path_for_file_tool(
-    path_str: str,
-    exec_ctx: dict,
-    ft_cfg: FileToolsConfig,
-    config: Config,
-) -> tuple[Optional[Path], Optional[str]]:
-    """解析读取路径。开启工作区隔离时，相对路径相对当前工作区；绝对路径可读任意位置。"""
-    path_str = expand_user_path_str_for_session(path_str, config, exec_ctx=exec_ctx)
-    if getattr(config.command_tools, "workspace_isolation_enabled", False):
-        workspace_root = _resolve_workspace_root_for_exec_ctx(exec_ctx, config)
-        try:
-            raw = Path(path_str).expanduser()
-            candidate = (
-                raw.resolve() if raw.is_absolute() else (workspace_root / raw).resolve()
-            )
-            return candidate, None
-        except (OSError, ValueError) as e:
-            return None, f"无效路径: {e}"
-    base = Path(ft_cfg.base_dir).resolve()
-    try:
-        raw = Path(path_str).expanduser()
-        resolved = raw.resolve() if raw.is_absolute() else (base / raw).resolve()
-        return resolved, None
-    except (OSError, ValueError) as e:
-        return None, f"无效路径: {e}"
-
-
 def _resolve_mutation_path_for_file_tool(
     path_str: str,
     exec_ctx: dict,
@@ -125,11 +89,13 @@ def _resolve_mutation_path_for_file_tool(
     """
     解析写入/修改路径。开启工作区隔离时，仅允许当前 frontend/user 的工作区内路径。
     """
-    resolved, err = _resolve_path_for_file_tool(path_str, exec_ctx, ft_cfg, config)
+    resolved, err = resolve_path_string_for_tool(
+        path_str, config, exec_ctx, file_tools_config=ft_cfg
+    )
     if err or resolved is None:
         return resolved, err
     if getattr(config.command_tools, "workspace_isolation_enabled", False):
-        workspace_root = _resolve_workspace_root_for_exec_ctx(exec_ctx, config)
+        workspace_root = resolve_workspace_root_for_exec_ctx(exec_ctx, config)
         tmp_root = _resolve_workspace_tmp_root_for_exec_ctx(exec_ctx, config)
         from agent_core.agent.memory_paths import (
             effective_memory_namespace_from_execution_context,
@@ -256,8 +222,8 @@ class ReadFileTool(BaseTool):
                 message="文件读取功能未启用，请在配置中设置 file_tools.allow_read: true",
             )
 
-        resolved, err = _resolve_path_for_file_tool(
-            path_str, exec_ctx, self._ft_config, self._config
+        resolved, err = resolve_path_string_for_tool(
+            path_str, self._config, exec_ctx, file_tools_config=self._ft_config
         )
         if err:
             return ToolResult(

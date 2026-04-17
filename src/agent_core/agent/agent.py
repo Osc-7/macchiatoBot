@@ -8,6 +8,7 @@
 import asyncio
 import inspect
 import json
+import logging
 import os
 import sys
 import time
@@ -25,7 +26,6 @@ from agent_core.llm import (
     LLMClient,
     LLMResponse,
     ToolCall,
-    get_context_window_tokens_for_model,
 )
 from agent_core.utils.media import resolve_media_to_content_item
 from agent_core.tools import (
@@ -85,6 +85,9 @@ def _format_subagent_limit_msg(
         f"**建议主 Agent**: 使用 bash 执行 `tail -n 100 <日志路径>` 读取日志尾部，"
         f"检查子任务进展后决定是否调整 config 中的 {limit_type} 限额并重启子任务。"
     )
+
+
+logger = logging.getLogger(__name__)
 
 
 class AgentCore:
@@ -183,6 +186,9 @@ class AgentCore:
         self._last_snapshot = ToolSnapshot(version=-1, tool_names=[], openai_tools=[])
         self._current_visible_tools: set[str] = set()
         self._pending_multimodal_items: List[Dict[str, Any]] = []
+        # 当主模型不具备 vision 时，对图片做文字占位降级（见 media_helpers.append_pending_multimodal_messages），
+        # 同时把原始媒体登记到这里供 recognize_image 工具按 name/path 回查。
+        self._last_unseen_media: List[Dict[str, Any]] = []
         # 本轮回复要附带发给用户的图片等附件（由 attach_image_to_reply 等工具登记）
         self._outgoing_attachments: List[Dict[str, Any]] = []
         # 本会话 token 用量累计
@@ -329,6 +335,23 @@ class AgentCore:
                     WebExtractorTool(registry=self._tool_registry)
                 )
 
+        # 识图回落工具：仅当配置了 vision_provider（即存在可落地的视觉能力）时才注册；
+        # 未配置时即便主模型没有 vision 也无处回落，避免向 LLM 暴露一个会报错的工具。
+        # pin/unpin 由 _refresh_recognize_image_visibility 控制，运行时 /model 切换后立即生效。
+        if self._llm_client.vision_provider_name and not self._tool_registry.has(
+            "recognize_image"
+        ):
+            from system.tools.recognize_image_tool import RecognizeImageTool
+
+            self._tool_registry.register(
+                RecognizeImageTool(
+                    llm_client=self._llm_client,
+                    config=self._config,
+                    unseen_media=self._last_unseen_media,
+                )
+            )
+        self._refresh_recognize_image_visibility()
+
     @property
     def config(self) -> Config:
         """获取当前配置"""
@@ -352,6 +375,81 @@ class AgentCore:
             tool: 工具实例
         """
         self._tool_registry.register(tool)
+
+    def list_models(self) -> List[Dict[str, Any]]:
+        """列出当前 LLMClient 可用的 provider 及其能力，给 CLI / IPC 用。"""
+        out: List[Dict[str, Any]] = []
+        try:
+            prov_cfg = getattr(self._config.llm, "providers", {}) or {}
+            for name, caps in self._llm_client.list_models():
+                api_model = self._llm_client.providers[name].model
+                entry = prov_cfg.get(name)
+                label = getattr(entry, "label", None) if entry is not None else None
+                base_url = getattr(entry, "base_url", None) if entry is not None else None
+                out.append(
+                    {
+                        # 配置名：传给 /model <name> 的标识
+                        "name": name,
+                        # 厂商 API 请求的模型 ID（标准名），与 ProviderEntry.model 一致
+                        "model": api_model,
+                        "api_model": api_model,
+                        "label": label,
+                        "base_url": base_url,
+                        "vision": bool(getattr(caps, "vision", False)),
+                        "function_calling": bool(getattr(caps, "function_calling", True)),
+                        "reasoning_content": bool(
+                            getattr(caps, "reasoning_content", False)
+                        ),
+                        "context_window": getattr(caps, "context_window", None),
+                        "is_active": name == self._llm_client.active_provider_name,
+                        "is_vision_provider": name == self._llm_client.vision_provider_name,
+                    }
+                )
+        except Exception as exc:
+            logger.warning("list_models failed: %s", exc)
+        return out
+
+    def switch_model(self, name: str) -> Dict[str, Any]:
+        """
+        运行时切换主对话 LLM provider。
+
+        切换后会立即刷新 recognize_image 工具的可见性，确保下一轮对话使用新的能力集。
+
+        Returns:
+            dict: 包含 ``name`` / ``model`` / 切换后主模型 ``vision`` 能力等信息。
+        """
+        self._llm_client.switch_model(name)
+        self._refresh_recognize_image_visibility()
+        caps = self._llm_client.capabilities
+        api_model = self._llm_client.model
+        return {
+            "name": self._llm_client.active_provider_name,
+            "model": api_model,
+            "api_model": api_model,
+            "vision": bool(getattr(caps, "vision", False)),
+            "vision_provider": self._llm_client.vision_provider_name,
+        }
+
+    def _refresh_recognize_image_visibility(self) -> None:
+        """
+        根据当前活跃 provider 的 vision 能力和可用 vision_provider，
+        动态 pin/unpin `recognize_image` 工具。
+
+        - 主模型具备 vision：工具无用，移出 pinned（不进工作集）。
+        - 主模型无 vision 且配置了 vision_provider：加入 pinned，保证每轮都对 LLM 可见。
+        - 主模型无 vision 且没有 vision_provider：移出 pinned（回落也不可用，避免误导）。
+        """
+        try:
+            caps = self._llm_client.capabilities
+            main_has_vision = bool(getattr(caps, "vision", False))
+            vp = self._llm_client.vision_provider_name
+        except Exception:
+            return
+
+        if not main_has_vision and vp:
+            self._working_set.pin("recognize_image")
+        else:
+            self._working_set.unpin("recognize_image")
 
     def unregister_tool(self, name: str) -> bool:
         """
@@ -393,12 +491,7 @@ class AgentCore:
         out: dict[str, int | float] = dict(self._token_usage)
 
         # 上下文窗口（context window）相关信息
-        try:
-            model_name = self._llm_client.model
-        except Exception:
-            model_name = self._config.llm.model
-
-        max_ctx_tokens = get_context_window_tokens_for_model(model_name)
+        max_ctx_tokens = self._llm_client.context_window
         if max_ctx_tokens and max_ctx_tokens > 0:
             # 当前上下文 token 数：
             # 优先使用上一轮真实的 prompt_tokens（包含 system + messages），
@@ -418,7 +511,7 @@ class AgentCore:
 
         cost = compute_cost_from_calls(
             self._usage_calls,
-            self._config.llm.model,
+            self._llm_client.model,
         )
         if cost is not None:
             out["cost_yuan"] = cost
@@ -456,6 +549,10 @@ class AgentCore:
         self._current_turn_id += 1
         turn_id = self._current_turn_id
 
+        # 运行时 /model 切换后，活跃 provider 的 vision 能力可能变化，
+        # 这里每轮都刷新 recognize_image 的可见性。
+        self._refresh_recognize_image_visibility()
+
         if self._memory_enabled and self._recall_policy.should_recall(text):
             recall_result = await asyncio.to_thread(
                 self._recall_policy.recall,
@@ -467,7 +564,31 @@ class AgentCore:
         else:
             self._last_recall_result = RecallResult()
 
-        self._context.add_user_message(text, media_items=content_items or None)
+        # 主模型无 vision 且配置了 vision_provider 时，把本轮 image/video 折叠成文字占位；
+        # 原始条目登记到 _last_unseen_media，供 recognize_image 工具按 name 回查。
+        effective_text = text
+        effective_media_items: Optional[List[Dict[str, Any]]] = content_items or None
+        try:
+            caps_vision = bool(self._llm_client.capabilities.vision)
+            has_vision_provider = bool(self._llm_client.vision_provider_name)
+            should_downgrade = (not caps_vision) and has_vision_provider
+        except Exception:
+            should_downgrade = False
+        if should_downgrade and content_items:
+            from agent_core.agent.media_helpers import downgrade_user_media_to_text
+
+            placeholder_text, kept_items = downgrade_user_media_to_text(
+                content_items, unseen_media=self._last_unseen_media
+            )
+            if placeholder_text:
+                effective_text = (
+                    f"{text}\n\n{placeholder_text}" if text else placeholder_text
+                )
+            effective_media_items = kept_items or None
+
+        self._context.add_user_message(
+            effective_text, media_items=effective_media_items
+        )
         self._outgoing_attachments.clear()
         if self._session_logger:
             self._session_logger.on_user_message(turn_id, text)
@@ -764,7 +885,13 @@ class AgentCore:
 
                 # ── 最终响应，先检查上下文溢出再 ReturnAction ─────────────
                 if response.content:
-                    self._context.add_assistant_message(content=response.content)
+                    self._context.add_assistant_message(
+                        content=response.content,
+                        reasoning_content=response.reasoning_content,
+                        anthropic_message_content=getattr(
+                            response, "anthropic_message_content", None
+                        ),
+                    )
                     if self._session_logger:
                         self._session_logger.on_assistant_message(
                             turn_id, response.content
@@ -941,7 +1068,12 @@ class AgentCore:
             )
 
         self._context.add_assistant_message(
-            content=response.content, tool_calls=tool_calls
+            content=response.content,
+            tool_calls=tool_calls,
+            reasoning_content=response.reasoning_content,
+            anthropic_message_content=getattr(
+                response, "anthropic_message_content", None
+            ),
         )
 
     async def _execute_tool_call(self, tool_call: ToolCall) -> ToolResult:
@@ -1048,8 +1180,20 @@ class AgentCore:
 
         注意：这是一次性注入，不写入长期对话上下文，避免 data URL 污染历史消息。
         """
+        vision_supported = True
+        try:
+            caps_vision = bool(self._llm_client.capabilities.vision)
+            has_vision_provider = bool(self._llm_client.vision_provider_name)
+            # 只有当主模型无 vision 且我们能降级到 recognize_image 工具时，才启用文字占位；
+            # 否则保留原始多模态挂载（历史行为），让上游按实际能力报错或正常处理。
+            vision_supported = caps_vision or not has_vision_provider
+        except Exception:
+            vision_supported = True
         return append_pending_multimodal_messages(
-            messages, self._pending_multimodal_items
+            messages,
+            self._pending_multimodal_items,
+            vision_supported=vision_supported,
+            unseen_media=self._last_unseen_media,
         )
 
     async def finalize_session(self) -> Optional[SessionSummary]:

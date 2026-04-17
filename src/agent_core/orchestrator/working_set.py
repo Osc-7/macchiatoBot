@@ -40,6 +40,26 @@ class ToolWorkingSetManager:
         with self._lock:
             return set(self._pinned_tools)
 
+    def pin(self, name: str) -> None:
+        """动态将工具加入 pinned 集合（幂等）。"""
+        name = (name or "").strip()
+        if not name:
+            return
+        with self._lock:
+            if name in self._pinned_tools:
+                return
+            self._pinned_tools.add(name)
+            # 从 LRU 中移除，避免重复
+            self._active_tools.pop(name, None)
+
+    def unpin(self, name: str) -> None:
+        """动态将工具从 pinned 集合中移除（幂等）。"""
+        name = (name or "").strip()
+        if not name:
+            return
+        with self._lock:
+            self._pinned_tools.discard(name)
+
     def add_to_working_set(self, tool_names: List[str]) -> None:
         """将工具加入 LRU 工作集。"""
         if not tool_names:

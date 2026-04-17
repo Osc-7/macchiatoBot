@@ -50,6 +50,8 @@ class ConversationContext:
         self,
         content: Optional[str] = None,
         tool_calls: Optional[List[Dict[str, Any]]] = None,
+        reasoning_content: Optional[str] = None,
+        anthropic_message_content: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """
         添加助手消息。
@@ -57,6 +59,9 @@ class ConversationContext:
         Args:
             content: 文本内容（可选）
             tool_calls: 工具调用列表（可选）
+            reasoning_content: 模型推理/思考文本（部分厂商多轮工具调用需原样回传）
+            anthropic_message_content: Anthropic Messages 的 content 块（thinking/tool_use 等），
+                扩展思考多轮工具时由 provider 填充并原样回传。
         """
         message: Dict[str, Any] = {"role": "assistant"}
 
@@ -65,6 +70,12 @@ class ConversationContext:
 
         if tool_calls is not None:
             message["tool_calls"] = tool_calls
+
+        if reasoning_content is not None:
+            message["reasoning_content"] = reasoning_content
+
+        if anthropic_message_content is not None:
+            message["anthropic_message_content"] = anthropic_message_content
 
         self._add_message(message)
 

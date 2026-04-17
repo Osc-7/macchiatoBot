@@ -27,7 +27,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 
 def resolve_project_root() -> Path:
-    """仓库根目录（含 config.yaml、src/ 的目录）。"""
+    """仓库根目录（含 config/、src/ 的目录）。"""
     return _PROJECT_ROOT
 
 

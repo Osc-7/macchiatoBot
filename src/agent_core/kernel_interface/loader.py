@@ -22,14 +22,18 @@ if TYPE_CHECKING:
 def _strip_orphan_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     移除孤立的 tool 消息。
-    API 要求：tool 消息必须紧接在 assistant+tool_calls 之后。
+    API 要求：tool 消息必须跟在「带 tool_calls 的 assistant」之后。同一轮并行多个
+    tool_call 时会有多条连续的 role=tool；第二条起相邻上一条也是 tool，不得丢弃。
     """
     out: List[Dict[str, Any]] = []
     for m in messages:
         role = m.get("role", "")
         if role == "tool":
             prev = out[-1] if out else {}
-            if prev.get("role") == "assistant" and prev.get("tool_calls"):
+            pr = prev.get("role", "")
+            if pr == "assistant" and prev.get("tool_calls"):
+                out.append(m)
+            elif pr == "tool":
                 out.append(m)
             # 否则跳过该 tool（孤立）
         else:

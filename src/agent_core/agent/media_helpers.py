@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent_core.tools import ToolResult
 from agent_core.utils.media import resolve_media_to_content_item
@@ -69,18 +69,142 @@ def collect_outgoing_attachment(
 def append_pending_multimodal_messages(
     messages: List[Dict[str, Any]],
     pending_multimodal_items: List[Dict[str, Any]],
+    *,
+    vision_supported: bool = True,
+    unseen_media: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Append pending media as one extra user multimodal message for this request only.
+
+    当 ``vision_supported=False`` 时，不再挂载 image/video 数据，而是把它们折叠成
+    纯文字占位提示，同时将原始条目登记到 ``unseen_media`` 里，供 ``recognize_image``
+    工具按 name/url 回查。
     """
     if not pending_multimodal_items:
         return messages
 
-    content: List[Dict[str, Any]] = [
-        {
-            "type": "text",
-            "text": "以下是你在上一轮工具调用中请求附加的媒体，请结合当前任务继续分析。",
-        }
-    ]
-    content.extend(pending_multimodal_items)
-    return [*messages, {"role": "user", "content": content}]
+    if vision_supported:
+        content: List[Dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": "以下是你在上一轮工具调用中请求附加的媒体，请结合当前任务继续分析。",
+            }
+        ]
+        content.extend(pending_multimodal_items)
+        return [*messages, {"role": "user", "content": content}]
+
+    placeholder_text, kept_items = _downgrade_media_items_to_text(
+        pending_multimodal_items,
+        unseen_media=unseen_media,
+        name_prefix="pending_media",
+    )
+    header = (
+        "上一轮工具调用请求附加了以下媒体，但当前主模型不具备视觉能力，"
+        "所以只给你文字占位。如需了解内容，请调用 recognize_image 工具："
+    )
+    text = header + "\n" + placeholder_text if placeholder_text else header
+    new_msg: Dict[str, Any]
+    if kept_items:
+        parts: List[Dict[str, Any]] = [{"type": "text", "text": text}]
+        parts.extend(kept_items)
+        new_msg = {"role": "user", "content": parts}
+    else:
+        new_msg = {"role": "user", "content": text}
+    return [*messages, new_msg]
+
+
+def _downgrade_media_items_to_text(
+    content_items: List[Dict[str, Any]],
+    *,
+    unseen_media: Optional[List[Dict[str, Any]]] = None,
+    name_prefix: str = "image",
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    把 image_url/video_url content items 折叠为文字占位，并登记到 unseen_media。
+
+    Returns:
+        (placeholder_text, kept_items)
+
+        - ``placeholder_text``：形如 ``[用户附上图片 name=image_1 ...]，如需理解调用
+          recognize_image 工具`` 的多行文本，用来拼到 user 文本里。
+        - ``kept_items``：保留的非 image/video items（一般为空）。
+    """
+    lines: List[str] = []
+    kept: List[Dict[str, Any]] = []
+    seq_image = 0
+    seq_video = 0
+    for raw in content_items or []:
+        if not isinstance(raw, dict):
+            continue
+        t = raw.get("type")
+        if t == "image_url":
+            seq_image += 1
+            url = ""
+            inner = raw.get("image_url")
+            if isinstance(inner, dict):
+                url = str(inner.get("url") or "").strip()
+            name = str(raw.get("name") or "").strip() or f"{name_prefix}_{seq_image}"
+            path = str(raw.get("path") or "").strip()
+            if unseen_media is not None:
+                unseen_media.append(
+                    {
+                        "name": name,
+                        "path": path,
+                        "url": url,
+                        "media_type": "image",
+                    }
+                )
+            segs = [f"name={name}"]
+            if path:
+                segs.append(f"path={path}")
+            lines.append(
+                f"[用户附上图片 {' '.join(segs)}]，如需理解调用 recognize_image 工具"
+            )
+        elif t == "video_url":
+            seq_video += 1
+            url = ""
+            inner = raw.get("video_url")
+            if isinstance(inner, dict):
+                url = str(inner.get("url") or "").strip()
+            name = str(raw.get("name") or "").strip() or f"video_{seq_video}"
+            path = str(raw.get("path") or "").strip()
+            if unseen_media is not None:
+                unseen_media.append(
+                    {
+                        "name": name,
+                        "path": path,
+                        "url": url,
+                        "media_type": "video",
+                    }
+                )
+            segs = [f"name={name}"]
+            if path:
+                segs.append(f"path={path}")
+            lines.append(
+                f"[用户附上视频 {' '.join(segs)}]，当前模型不具备视频能力，请据此文字提示进行说明"
+            )
+        else:
+            kept.append(raw)
+    return "\n".join(lines), kept
+
+
+def downgrade_user_media_to_text(
+    content_items: Optional[List[Dict[str, Any]]],
+    *,
+    unseen_media: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    对用户本轮输入的多模态 content_items 做视觉降级。
+
+    当主模型不具备 vision 时由 ``AgentCore.prepare_turn`` 调用：
+    图像/视频被转成文字占位拼到 user text 里，原始 data url/路径登记到
+    ``unseen_media`` 供 ``recognize_image`` 工具按 name 回查。
+
+    Returns:
+        (placeholder_text, kept_items) — 占位文字 + 非图像/视频的剩余 items
+    """
+    if not content_items:
+        return "", []
+    return _downgrade_media_items_to_text(
+        content_items, unseen_media=unseen_media, name_prefix="image"
+    )

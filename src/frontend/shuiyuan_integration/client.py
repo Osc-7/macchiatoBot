@@ -7,8 +7,10 @@
 
 from __future__ import annotations
 
+import html as html_module
 import json
 import logging
+import re
 import threading
 import time
 from pathlib import Path
@@ -20,6 +22,16 @@ import requests
 logger = logging.getLogger(__name__)
 
 SITE_URL_BASE = "https://shuiyuan.sjtu.edu.cn"
+
+
+def _plain_from_discourse_cooked(cooked: str) -> str:
+    """将 Discourse cooked HTML 压成近似纯文本，供无 raw 时校验触发语 / 喂给 Agent。"""
+    if not cooked:
+        return ""
+    t = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", cooked)
+    t = re.sub(r"<[^>]+>", " ", t)
+    t = html_module.unescape(t)
+    return " ".join(t.split())
 
 # 类级请求节流：所有 ShuiyuanClient 实例共享，避免多路复用造成 429
 _request_lock: threading.Lock = threading.Lock()
@@ -107,6 +119,12 @@ def _wait_seconds_from_rate_limit_exc(exc: Exception) -> int:
 # 本地冷却上限：避免异常响应导致超大数值
 _MAX_LOCAL_BLOCK_SECONDS = 86400 * 7
 
+# 多 Key 在线探测时，两次探测之间的额外间隔（秒）。
+# user_actions.json 等对同一用户往往有突发限流：若在短时间内连续探测 6 把 Key，
+# 前几把可能占满配额，导致后几把「本应可用」的 Key 也返回 429，与单独跑
+# check_shuiyuan_api_limit.rb（请求稀疏）的结果不一致。
+_DEFAULT_STALE_PROBE_EXTRA_GAP_SECONDS = 12.0
+
 
 class ShuiyuanRateLimitError(RuntimeError):
     """水源 API 限流异常，包含路径和头信息摘要，便于在 connector 中详细记录。"""
@@ -160,6 +178,7 @@ class ShuiyuanClientPool:
         extras.wait_seconds 更新本地 blocked_until，避免与站点提示脱节。
       - 未配置时回退为 GET /session/current.json。
     - 若探测后仍无可用的 Key，抛出 RuntimeError 由上层处理
+    - get_post_with_read_fallback：单独实现多 Key 依次尝试（见该方法文档）；其它方法仍是一次 _call 只用一把 Key。
     """
 
     def __init__(
@@ -172,6 +191,7 @@ class ShuiyuanClientPool:
         cooldown_hours: int = 5,
         stale_lockout_probe_interval_seconds: float = 120.0,
         probe_username: Optional[str] = None,
+        stale_probe_extra_gap_seconds: float = _DEFAULT_STALE_PROBE_EXTRA_GAP_SECONDS,
     ) -> None:
         if not user_api_keys:
             raise ValueError("user_api_keys 不能为空")
@@ -195,6 +215,7 @@ class ShuiyuanClientPool:
         self._last_stale_probe_at: float = 0.0
         pu = (probe_username or "").strip()
         self._probe_username: Optional[str] = pu if pu else None
+        self._stale_probe_extra_gap_seconds = max(0.0, float(stale_probe_extra_gap_seconds))
 
         self._load_state()
 
@@ -248,9 +269,10 @@ class ShuiyuanClientPool:
 
         cleared: list[str] = []
         updated_wait: list[tuple[str, int]] = []
-        for key in self._keys:
-            if self._blocked_until.get(key, 0.0) <= now:
-                continue
+        blocked_keys = [k for k in self._keys if self._blocked_until.get(k, 0.0) > now]
+        for i, key in enumerate(blocked_keys):
+            if i > 0 and self._stale_probe_extra_gap_seconds > 0:
+                time.sleep(self._stale_probe_extra_gap_seconds)
             client = self._get_client_for_key(key)
             try:
                 if self._probe_username:
@@ -260,13 +282,15 @@ class ShuiyuanClientPool:
                         cleared.append(key)
                     elif pr.get("status_code") == 429:
                         ws = int(pr.get("wait_seconds") or 0)
-                        if ws > 0:
-                            until = now + min(max(ws, 1), _MAX_LOCAL_BLOCK_SECONDS)
-                            # 用服务端等待时间收紧本地冷却（避免 max 保留「假长」锁）
-                            self._blocked_until[key] = min(
-                                self._blocked_until.get(key, 0.0), until
-                            )
-                            updated_wait.append((key, ws))
+                        if ws <= 0:
+                            # 响应未带 wait 时仍收紧本地冷却，避免长期保留「假长」锁
+                            ws = 90
+                        until = now + min(max(ws, 1), _MAX_LOCAL_BLOCK_SECONDS)
+                        # 用服务端等待时间收紧本地冷却（避免 max 保留「假长」锁）
+                        self._blocked_until[key] = min(
+                            self._blocked_until.get(key, 0.0), until
+                        )
+                        updated_wait.append((key, ws))
                     # 其它非 200：不改变本地冷却
                 elif client.check_user_api_key_session():
                     self._blocked_until[key] = 0.0
@@ -376,6 +400,32 @@ class ShuiyuanClientPool:
             raise last_error
         raise RuntimeError("未能使用任何 User-Api-Key 完成请求")
 
+    def get_post_with_read_fallback(
+        self, topic_id: int, post_id: int
+    ) -> Optional[dict[str, Any]]:
+        """
+        多 Key 下依次尝试，直到某一 Key 能读到帖子或全部失败。
+
+        通用 ``_call`` 对每次**方法调用**只选一把 Key；若该 Key 对 ``/posts``、
+        ``/t/.../posts`` 均返回无正文（含 403 invalid_access），方法会返回 None，
+        **不会**自动换 Key。本方法在「上一把返回 None」时会再选下一把重试，
+        适配「部分 Key 无读权限、部分 Key 正常」的配置。
+
+        说明：全局 HTTP 节流（_ensure_rate_limit）仍作用于每一次底层请求；
+        「每换一次 Key」不等于绕过站点限流。
+        """
+        tried: set[str] = set()
+        while len(tried) < len(self._keys):
+            key = self._select_key()
+            if key in tried:
+                break
+            tried.add(key)
+            client = self._get_client_for_key(key)
+            post = client.get_post_with_read_fallback(topic_id, post_id)
+            if post:
+                return post
+        return None
+
     def __getattr__(self, name: str) -> Any:
         # 动态代理未知属性为方法调用包装
         def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -398,7 +448,11 @@ class ShuiyuanClient:
         timeout: float = 10.0,
     ):
         self._base = site_url.rstrip("/")
-        self._headers = {"User-Api-Key": user_api_key}
+        self._headers = {
+            "User-Api-Key": user_api_key,
+            # Discourse JSON API 惯例；少数站点无 Accept 时行为不一致
+            "Accept": "application/json",
+        }
         self._timeout = timeout
 
     def probe_user_api_key_health(self, username: str) -> dict[str, Any]:
@@ -631,6 +685,7 @@ class ShuiyuanClient:
         注意：
             - /t/{topic_id}/posts.json 返回的通常是 cooked 正文，不含 raw 字段；
             - 要获取带 raw 的完整帖子，需要调用 /posts/{post_id}.json。
+            - 若浏览器能打开帖子但本接口 403：鉴权路径不同（见下方）。
 
         Args:
             topic_id: 话题 ID（目前仅用于接口保持一致，不参与请求路径）
@@ -647,10 +702,94 @@ class ShuiyuanClient:
         )
         if r.status_code == 404:
             return None
+        # 403/401：无权限读该帖。浏览器能看但 API 403 的常见原因：
+        # - 浏览器用 Cookie 会话，API 仅用 User-Api-Key（不同鉴权链/插件对 API 额外限制）；
+        # - 多 Key 轮询时某一 Key 对应账号与当前浏览器登录不一致；
+        # - 站点或前置 WAF 对机房 IP、无浏览器特征请求返回 403。
+        if r.status_code in (401, 403):
+            body_preview = ((r.text or "")[:400]).replace("\n", " ").strip()
+            logger.info(
+                "GET /posts/%s.json -> %s。%s",
+                post_id,
+                r.status_code,
+                (
+                    f"响应摘要: {body_preview}"
+                    if body_preview
+                    else "（无响应体；若网页能读请核对 User-Api-Key 是否对应该账号、并尝试 curl 复现）"
+                ),
+            )
+            return None
         if r.status_code == 429:
             _raise_rate_limit(f"/posts/{post_id}.json", r)
         r.raise_for_status()
         return r.json()
+
+    def _get_post_via_topic_posts_json(
+        self, topic_id: int, post_id: int
+    ) -> Optional[dict[str, Any]]:
+        """
+        通过 /t/{topic}/posts.json?post_ids[]= 取单帖。部分站点对 /posts/{id}.json 返回 invalid_access
+        时，话题内批量接口仍可能返回同一帖（Guardian 判定路径不同）。
+        """
+        _ensure_rate_limit()
+        url = f"{self._base}/t/{int(topic_id)}/posts.json"
+        r = requests.get(
+            url,
+            params=[("post_ids[]", int(post_id))],
+            headers=self._headers,
+            timeout=self._timeout,
+        )
+        if r.status_code == 404:
+            return None
+        if r.status_code in (401, 403):
+            logger.info(
+                "GET /t/%s/posts.json?post_ids[]=%s -> %s（单帖 /posts 不可用时的回退仍无权限）",
+                topic_id,
+                post_id,
+                r.status_code,
+            )
+            return None
+        if r.status_code == 429:
+            _raise_rate_limit(f"/t/{topic_id}/posts.json", r)
+        if r.status_code != 200:
+            return None
+        try:
+            data = r.json()
+        except Exception:
+            return None
+        posts = (data.get("post_stream") or {}).get("posts") or []
+        for p in posts:
+            try:
+                if int(p.get("id", -1)) == int(post_id):
+                    return p
+            except Exception:
+                continue
+        return None
+
+    def get_post_with_read_fallback(self, topic_id: int, post_id: int) -> Optional[dict[str, Any]]:
+        """
+        读取帖子 JSON，供 connector 使用。
+
+        为何需要拉帖：user_actions / notifications 只给 topic_id、post_id，必须再取正文才能做
+        @+触发语校验并交给 Agent；仅靠列表接口无法得到完整 raw。
+
+        顺序：先 ``GET /posts/{id}.json``；403/无则再试 ``/t/{topic}/posts.json?post_ids[]=``。
+        若仅有 cooked、无 raw，则将 cooked 转成纯文本写入返回 dict 的 ``raw`` 字段。
+        """
+        post = self.get_post_by_id(topic_id, post_id)
+        if not post:
+            post = self._get_post_via_topic_posts_json(topic_id, post_id)
+        if not post:
+            return None
+        raw = (post.get("raw") or "").strip()
+        if raw:
+            return post
+        cooked = post.get("cooked")
+        if cooked:
+            out = dict(post)
+            out["raw"] = _plain_from_discourse_cooked(str(cooked))
+            return out
+        return post
 
     def get_post_by_number(
         self, topic_id: int, post_number: int

@@ -5,6 +5,7 @@ import pytest
 from frontend.shuiyuan_integration.client import (
     ShuiyuanClient,
     ShuiyuanClientPool,
+    _plain_from_discourse_cooked,
     extract_rate_limit_wait_seconds,
 )
 
@@ -38,6 +39,93 @@ def test_update_post_put_json_body(monkeypatch):
     assert calls[0][1] == {
         "post": {"raw": "新正文", "edit_reason": "fix"},
     }
+
+
+def test_get_post_by_id_403_returns_none(monkeypatch):
+    class _Forbidden:
+        status_code = 403
+        text = ""
+
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client._ensure_rate_limit", lambda: None
+    )
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client.requests.get",
+        lambda *a, **k: _Forbidden(),
+    )
+    assert ShuiyuanClient(user_api_key="k").get_post_by_id(1, 99999) is None
+
+
+def test_get_post_with_read_fallback_topic_posts_when_posts_json_403(monkeypatch):
+    class R403:
+        status_code = 403
+        text = "{}"
+
+    class R200:
+        status_code = 200
+
+        def json(self):
+            return {
+                "post_stream": {
+                    "posts": [
+                        {
+                            "id": 42,
+                            "raw": "hi",
+                            "username": "Osc7",
+                            "post_number": 2,
+                        }
+                    ]
+                }
+            }
+
+    def fake_get(url, **kwargs):
+        u = str(url)
+        if "/posts/42.json" in u or u.endswith("/posts/42.json"):
+            return R403()
+        if "/t/100/posts.json" in u:
+            return R200()
+        return R403()
+
+    monkeypatch.setattr(
+        "frontend.shuiyuan_integration.client._ensure_rate_limit", lambda: None
+    )
+    monkeypatch.setattr("frontend.shuiyuan_integration.client.requests.get", fake_get)
+    post = ShuiyuanClient(user_api_key="k").get_post_with_read_fallback(100, 42)
+    assert post is not None
+    assert post.get("raw") == "hi"
+
+
+def test_plain_from_discourse_cooked_strips_tags():
+    html = '<p><a class="mention">@Osc7</a> 【玛奇朵】</p>'
+    t = _plain_from_discourse_cooked(html)
+    assert "Osc7" in t
+    assert "【玛奇朵】" in t
+
+
+def test_pool_get_post_with_read_fallback_tries_next_key_on_none(monkeypatch, tmp_path):
+    """第一把 Key 读帖返回 None 时换下一 Key（不依赖通用 _call 单次选 Key）。"""
+
+    def fake_gprf(self: ShuiyuanClient, tid: int, pid: int):
+        k = (self._headers or {}).get("User-Api-Key") or ""
+        if k == "bad":
+            return None
+        if k == "good":
+            return {"id": pid, "raw": "ok", "username": "u"}
+        return None
+
+    monkeypatch.setattr(
+        ShuiyuanClient,
+        "get_post_with_read_fallback",
+        fake_gprf,
+    )
+    pool = ShuiyuanClientPool(
+        ["bad", "good"],
+        state_path=tmp_path / "s.json",
+        stale_probe_extra_gap_seconds=0.0,
+    )
+    post = pool.get_post_with_read_fallback(100, 42)
+    assert post is not None
+    assert post.get("raw") == "ok"
 
 
 class _Resp:
@@ -408,7 +496,11 @@ def test_pool_clears_stale_lockout_when_session_probe_ok(monkeypatch, tmp_path):
         lambda self: True,
     )
     state = tmp_path / "st.json"
-    pool = ShuiyuanClientPool(["a", "b"], state_path=state)
+    pool = ShuiyuanClientPool(
+        ["a", "b"],
+        state_path=state,
+        stale_probe_extra_gap_seconds=0.0,
+    )
     pool._stale_lockout_probe_interval_seconds = 0.0
     far = time.time() + 99999.0
     pool._blocked_until["a"] = far
@@ -433,7 +525,11 @@ def test_pool_stale_probe_throttled(monkeypatch, tmp_path):
         "frontend.shuiyuan_integration.client.ShuiyuanClient.check_user_api_key_session",
         fake_check,
     )
-    pool = ShuiyuanClientPool(["x", "y"], state_path=tmp_path / "s.json")
+    pool = ShuiyuanClientPool(
+        ["x", "y"],
+        state_path=tmp_path / "s.json",
+        stale_probe_extra_gap_seconds=0.0,
+    )
     far = time.time() + 99999.0
     pool._blocked_until["x"] = far
     pool._blocked_until["y"] = far
@@ -501,6 +597,7 @@ def test_pool_probe_user_actions_429_updates_local_wait(monkeypatch, tmp_path):
         ["k1"],
         state_path=tmp_path / "st.json",
         probe_username="u1",
+        stale_probe_extra_gap_seconds=0.0,
     )
     pool._stale_lockout_probe_interval_seconds = 0.0
     pool._blocked_until["k1"] = time.time() + 99999.0

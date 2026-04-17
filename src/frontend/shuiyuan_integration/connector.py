@@ -5,8 +5,8 @@
 1. Topic 监控模式（allowed_topic_ids 非空）：轮询指定 topic 的新帖，解析正文 @owner+trigger
    - 不依赖 user_actions/notifications，可识别自 @
    - 可配置权限：仅在这些 topic 中响应
-2. 通知模式（allowed_topic_ids 为空）：轮询 user_actions + notifications
-   - 可能漏掉自 @
+2. 通知模式（allowed_topic_ids 为空）：user_actions（filter=7、filter=7+acting_username 自 @、filter=5 本人帖）+ notifications
+   - 自 @：filter=7+acting_username=主人 + filter=5 兜底；仍可能不如 topic 监控完整
 """
 
 from __future__ import annotations
@@ -20,8 +20,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from agent_core.config import Config, get_config
 
-# Discourse user_actions filter: 7 = mentions
+# Discourse user_actions filter: 7 = mentions；5 = 本人发帖/回复流（用于兜底：自 @ 帖会作为「自己的回复」出现）
 USER_ACTIONS_FILTER_MENTIONS = 7
+USER_ACTIONS_FILTER_MY_POSTS = 5
 # notifications notification_type: 1 = mentioned（含自 @）
 NOTIFICATION_TYPE_MENTIONED = (1, "1", "mentioned")
 
@@ -32,6 +33,9 @@ logger = logging.getLogger("shuiyuan_connector")
 
 
 _STREAM_MAP_PATH = Path("./data/shuiyuan/connector_stream_map.json")
+# 通知模式：已见过的 post_id 快照，避免重启后冷启动仅采 Top60 导致旧帖/自 @ 被误判为「新提及」
+_NOTIFY_STREAM_PATH = Path("./data/shuiyuan/connector_notify_stream.json")
+_NOTIFY_STREAM_MAX_IDS = 1200
 
 
 def _load_stream_map() -> Dict[int, Set[int]]:
@@ -61,6 +65,42 @@ def _load_stream_map() -> Dict[int, Set[int]]:
                 if ids:
                     out[topic_id] = ids
     return out
+
+
+def _load_notify_stream_list() -> List[int]:
+    """加载通知模式已见 post_id 列表（新前旧后，与 _collect 排序一致）。"""
+    if not _NOTIFY_STREAM_PATH.is_file():
+        return []
+    try:
+        text = _NOTIFY_STREAM_PATH.read_text(encoding="utf-8") or "{}"
+        raw = json.loads(text)
+    except Exception:
+        return []
+    ids = raw.get("post_ids") if isinstance(raw, dict) else raw
+    if not isinstance(ids, list):
+        return []
+    out: List[int] = []
+    for x in ids:
+        try:
+            out.append(int(x))
+        except Exception:
+            continue
+    return out[:_NOTIFY_STREAM_MAX_IDS]
+
+
+def _save_notify_stream_list(post_ids: List[int]) -> None:
+    """持久化通知模式 post_id 快照，重启后继续用同一水位，减少历史误触发。"""
+    if not post_ids:
+        return
+    try:
+        _NOTIFY_STREAM_PATH.parent.mkdir(parents=True, exist_ok=True)
+        trimmed = [int(x) for x in post_ids[:_NOTIFY_STREAM_MAX_IDS]]
+        _NOTIFY_STREAM_PATH.write_text(
+            json.dumps({"post_ids": trimmed}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        logger.debug("保存 connector_notify_stream 失败", exc_info=True)
 
 
 def _save_stream_map(stream_map: Dict[int, Set[int]]) -> None:
@@ -150,10 +190,10 @@ def _collect_from_topic_watch(
             seen.add(int(pid))
             if is_first:
                 continue
-            # 始终通过 get_post_by_id 获取带 raw 的完整帖子，再做触发判断与递归防护。
+            # 带 raw 的完整帖子（单帖 403 时尝试话题内 posts.json 回退）。
             full_raw = ""
             try:
-                post_full = client.get_post_by_id(topic_id, int(pid))
+                post_full = client.get_post_with_read_fallback(topic_id, int(pid))
             except Exception:
                 post_full = None
             if isinstance(post_full, dict):
@@ -180,7 +220,11 @@ def _collect_mention_post_ids(
 ) -> List[Tuple[int, int, int]]:
     """
     从 user_actions + notifications 收集 (topic_id, post_number, post_id) 列表。
-    notifications 可能包含自 @，user_actions 通常不含。
+
+    自 @（自己 @ 自己）：
+    - filter=7 默认流往往**不含**自 @，需额外请求 filter=7 且 acting_username=主人（与 client 文档一致）；
+    - filter=5 拉取本人发帖/回复，自 @ 帖会作为你的新回复出现；
+    - notifications 中 mention 类型作兜底（是否产生取决于站点）。
     """
     owner = (config.shuiyuan.owner_username or "").strip()
     if not owner:
@@ -210,11 +254,35 @@ def _collect_mention_post_ids(
     except Exception as e:
         logger.debug("get_user_actions 失败: %s", e)
 
-    # 2. user_actions filter=5（自己发的帖子：用于支持“自己 @ 自己”的调用）
+    # 1b. filter=7 + acting_username=主人：显式拉取「发帖人即本人」的提及流，覆盖自 @（默认 filter=7 常不含此项）
     try:
         data = client.get_user_actions(
             owner,
-            filter_type=5,
+            filter_type=USER_ACTIONS_FILTER_MENTIONS,
+            offset=0,
+            acting_username=owner,
+        )
+        actions = data.get("user_actions") or []
+        if isinstance(actions, list):
+            for a in actions:
+                pid = a.get("post_id")
+                tid = a.get("topic_id")
+                pn = a.get("post_number", 1)
+                if (
+                    pid is not None
+                    and tid is not None
+                    and int(pid) not in seen_post_ids
+                ):
+                    seen_post_ids.add(int(pid))
+                    out.append((int(tid), int(pn), int(pid)))
+    except Exception as e:
+        logger.debug("get_user_actions(自 @ acting_username) 失败: %s", e)
+
+    # 2. user_actions filter=5（本人发帖/回复流：自 @ 帖作为你的新回复出现，与其它发帖共用）
+    try:
+        data = client.get_user_actions(
+            owner,
+            filter_type=USER_ACTIONS_FILTER_MY_POSTS,
             offset=0,
         )
         actions = data.get("user_actions") or []
@@ -414,7 +482,9 @@ async def _poll_once(
             await asyncio.sleep(0.6)
             try:
                 post = await asyncio.to_thread(
-                    client.get_post_by_id, topic_id, int(post_id)
+                    client.get_post_with_read_fallback,
+                    topic_id,
+                    int(post_id),
                 )
             except Exception as e:
                 logger.warning(
@@ -424,7 +494,9 @@ async def _poll_once(
 
             if not post:
                 logger.warning(
-                    "无法获取帖子 topic=%s post_id=%s", topic_id, post_id
+                    "无法获取帖子 topic=%s post_id=%s（404、403 受限版块或仅站内可见时常见）",
+                    topic_id,
+                    post_id,
                 )
                 return
 
@@ -597,8 +669,14 @@ async def run_connector_loop(
         return
 
     # 通知模式：user_actions + notifications
-    stream_list: List[int] = []
+    stream_list: List[int] = _load_notify_stream_list()
     backoff_until_notify: float = 0.0
+    if stream_list:
+        logger.info(
+            "水源 connector 启动（通知模式），已加载 %s 条历史 post_id 水位（%s）",
+            len(stream_list),
+            _NOTIFY_STREAM_PATH,
+        )
     logger.info(
         "水源 connector 启动（user_actions filter=7），owner=%s，轮询间隔 %s 秒",
         owner,
@@ -607,6 +685,7 @@ async def run_connector_loop(
     while not stop.is_set():
         try:
             stream_list = await _poll_once(client, cfg, stream_list)
+            _save_notify_stream_list(stream_list)
         except Exception as e:
             from .client import ShuiyuanRateLimitError
 

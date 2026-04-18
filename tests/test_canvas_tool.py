@@ -2,8 +2,16 @@
 
 import pytest
 
-from agent_core.config import Config, LLMConfig, CanvasIntegrationConfig
-from system.tools.canvas_tools import SyncCanvasTool, FetchCanvasOverviewTool
+from agent_core.config import Config, LLMConfig, CanvasIntegrationConfig, FileToolsConfig
+from system.tools.canvas_tools import (
+    SyncCanvasTool,
+    FetchCanvasOverviewTool,
+    FetchCanvasCourseAssignmentsTool,
+    FetchCanvasAssignmentDetailTool,
+    FetchCanvasSubmissionTool,
+    FetchCanvasAssignmentAttachmentsTool,
+    DownloadCanvasFileTool,
+)
 from agent_core.storage.json_repository import EventRepository, TaskRepository
 
 
@@ -282,3 +290,190 @@ async def test_fetch_canvas_overview_success(monkeypatch, tmp_path):
     assert len(overview["upcoming_assignments"]) == 1
     assert len(overview["upcoming_events"]) == 1
     assert len(overview["planner_items"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_canvas_course_assignments_success(monkeypatch, tmp_path):
+    class _FakeAssignClient(_FakeCanvasClient):
+        async def get_assignments(
+            self, course_id, include_submission=True, all_dates=True, course_name=None
+        ):
+            from frontend.canvas_integration.models import CanvasAssignment
+
+            return [
+                CanvasAssignment(
+                    id=501,
+                    name="Lab 1",
+                    course_id=course_id,
+                    course_name="SE101",
+                )
+            ]
+
+    config = Config(
+        llm=LLMConfig(api_key="x", model="x"),
+        canvas=CanvasIntegrationConfig(
+            enabled=True,
+            api_key="dummy_canvas_key_12345",
+        ),
+    )
+    tool = FetchCanvasCourseAssignmentsTool(config=config)
+    monkeypatch.setattr("system.tools.canvas_tools.CanvasConfig", _FakeCanvasConfig)
+    monkeypatch.setattr("system.tools.canvas_tools.CanvasClient", _FakeAssignClient)
+
+    result = await tool.execute(course_id=1)
+    assert result.success is True
+    assert len(result.data["assignments"]) == 1
+    assert result.data["assignments"][0]["id"] == 501
+
+
+@pytest.mark.asyncio
+async def test_fetch_canvas_assignment_detail_by_id(monkeypatch, tmp_path):
+    class _FakeDetailClient(_FakeCanvasClient):
+        async def get_assignment(
+            self, course_id, assignment_id, include_submission=True, **kwargs
+        ):
+            from frontend.canvas_integration.models import CanvasAssignment
+
+            return CanvasAssignment(
+                id=assignment_id,
+                name="Midterm",
+                description="<p>Do problems 1-3</p>",
+                course_id=course_id,
+                course_name="SE101",
+            )
+
+    config = Config(
+        llm=LLMConfig(api_key="x", model="x"),
+        canvas=CanvasIntegrationConfig(enabled=True, api_key="dummy_canvas_key_12345"),
+    )
+    tool = FetchCanvasAssignmentDetailTool(config=config)
+    monkeypatch.setattr("system.tools.canvas_tools.CanvasConfig", _FakeCanvasConfig)
+    monkeypatch.setattr("system.tools.canvas_tools.CanvasClient", _FakeDetailClient)
+
+    result = await tool.execute(course_id=1, assignment_id=77)
+    assert result.success is True
+    assert result.data["assignment"]["id"] == 77
+    assert "problems" in result.data["assignment"]["description"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_canvas_assignment_detail_ambiguous(monkeypatch, tmp_path):
+    class _FakeAmbClient(_FakeCanvasClient):
+        async def get_assignments(self, *args, **kwargs):
+            from frontend.canvas_integration.models import CanvasAssignment
+
+            return [
+                CanvasAssignment(id=1, name="HW1 draft", course_id=1, course_name="X"),
+                CanvasAssignment(id=2, name="HW1 final", course_id=1, course_name="X"),
+            ]
+
+    config = Config(
+        llm=LLMConfig(api_key="x", model="x"),
+        canvas=CanvasIntegrationConfig(enabled=True, api_key="dummy_canvas_key_12345"),
+    )
+    tool = FetchCanvasAssignmentDetailTool(config=config)
+    monkeypatch.setattr("system.tools.canvas_tools.CanvasConfig", _FakeCanvasConfig)
+    monkeypatch.setattr("system.tools.canvas_tools.CanvasClient", _FakeAmbClient)
+
+    result = await tool.execute(course_id=1, assignment_search="HW1")
+    assert result.success is False
+    assert result.error == "ASSIGNMENT_AMBIGUOUS"
+
+
+@pytest.mark.asyncio
+async def test_fetch_canvas_submission_success(monkeypatch, tmp_path):
+    class _FakeSubClient(_FakeCanvasClient):
+        async def get_submission(self, course_id, assignment_id):
+            return {
+                "id": 900,
+                "assignment_id": assignment_id,
+                "workflow_state": "graded",
+                "grade": "88",
+                "body": "B" * 9000,
+                "attachments": [{"id": 1, "display_name": "a.pdf", "url": "http://x"}],
+            }
+
+    config = Config(
+        llm=LLMConfig(api_key="x", model="x"),
+        canvas=CanvasIntegrationConfig(enabled=True, api_key="dummy_canvas_key_12345"),
+    )
+    tool = FetchCanvasSubmissionTool(config=config)
+    monkeypatch.setattr("system.tools.canvas_tools.CanvasConfig", _FakeCanvasConfig)
+    monkeypatch.setattr("system.tools.canvas_tools.CanvasClient", _FakeSubClient)
+
+    result = await tool.execute(course_id=1, assignment_id=12, body_max_chars=4000)
+    assert result.success is True
+    assert result.data["submission"]["grade"] == "88"
+    assert len(result.data["submission"]["body"]) == 4000
+    assert result.data["submission"]["attachments"][0]["display_name"] == "a.pdf"
+
+
+@pytest.mark.asyncio
+async def test_fetch_canvas_assignment_attachments(monkeypatch, tmp_path):
+    class _FakeAttClient(_FakeCanvasClient):
+        async def fetch_assignment_dict(self, course_id, assignment_id, **kwargs):
+            return {
+                "id": assignment_id,
+                "attachments": [
+                    {
+                        "id": 55,
+                        "display_name": "hw.pdf",
+                        "filename": "hw.pdf",
+                        "content_type": "application/pdf",
+                        "size": 1024,
+                        "url": "http://example.invalid/download",
+                    }
+                ],
+            }
+
+    config = Config(
+        llm=LLMConfig(api_key="x", model="x"),
+        canvas=CanvasIntegrationConfig(enabled=True, api_key="dummy_canvas_key_12345"),
+    )
+    tool = FetchCanvasAssignmentAttachmentsTool(config=config)
+    monkeypatch.setattr("system.tools.canvas_tools.CanvasConfig", _FakeCanvasConfig)
+    monkeypatch.setattr("system.tools.canvas_tools.CanvasClient", _FakeAttClient)
+
+    result = await tool.execute(course_id=1, assignment_id=10)
+    assert result.success is True
+    assert len(result.data["attachments"]) == 1
+    assert result.data["attachments"][0]["id"] == 55
+    assert "url" not in result.data["attachments"][0]
+
+
+@pytest.mark.asyncio
+async def test_download_canvas_file_writes_bytes(monkeypatch, tmp_path):
+    class _FakeDlClient(_FakeCanvasClient):
+        async def get_file_metadata(self, file_id, course_id=None):
+            return {"id": file_id, "size": 5}
+
+        async def download_file_bytes(self, file_id, course_id=None, assignment_id=None):
+            return b"hello", "note.txt"
+
+    out_path = tmp_path / "out.txt"
+
+    def _fake_resolve(path_str, exec_ctx, ft_cfg, config):
+        return out_path, None
+
+    monkeypatch.setattr(
+        "system.tools.canvas_tools._resolve_mutation_path_for_file_tool",
+        _fake_resolve,
+    )
+
+    config = Config(
+        llm=LLMConfig(api_key="x", model="x"),
+        canvas=CanvasIntegrationConfig(enabled=True, api_key="dummy_canvas_key_12345"),
+        file_tools=FileToolsConfig(allow_write=True),
+    )
+    tool = DownloadCanvasFileTool(config=config)
+    monkeypatch.setattr("system.tools.canvas_tools.CanvasConfig", _FakeCanvasConfig)
+    monkeypatch.setattr("system.tools.canvas_tools.CanvasClient", _FakeDlClient)
+
+    result = await tool.execute(
+        file_id=9,
+        dest_path="ignored/path.txt",
+        course_id=1,
+        __execution_context__={},
+    )
+    assert result.success is True
+    assert out_path.read_bytes() == b"hello"

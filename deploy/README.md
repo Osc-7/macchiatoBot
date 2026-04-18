@@ -10,6 +10,7 @@
 | `systemd/*.service.in`     | 服务单元**模板**（含占位符，勿直接复制到 `/etc`）            |
 | `systemd/macchiato.target` | 聚合目标：一键启动/停止三个服务                          |
 | `systemd/install.sh`       | 将模板展开为真实路径与用户，并安装到 `/etc/systemd/system/` |
+| `systemd/50-macchiato-proxy.conf` | 可选 drop-in：HTTP(S) 代理 + `NO_PROXY`（与 `--with-proxy` 配套） |
 
 
 ## 版本库
@@ -44,6 +45,16 @@ git commit -m "Add systemd deploy units and install script"
 cd /path/to/macchiatoBot
 sudo ./deploy/systemd/install.sh "$(pwd)" 你的系统用户名
 ```
+
+本机使用 **Clash / 7890** 等 HTTP 代理访问境外 LLM（Gemini、OpenAI）时，**shell 有代理而 systemd 没有**会导致 daemon 内请求超时。安装单元时一并注入代理与直连名单：
+
+```bash
+sudo ./deploy/systemd/install.sh "$(pwd)" 你的系统用户名 --with-proxy
+sudo systemctl daemon-reload
+sudo systemctl restart macchiato-automation.service macchiato-feishu-gateway.service macchiato-shuiyuan-connector.service
+```
+
+代理与 `NO_PROXY` 内容见 `deploy/systemd/50-macchiato-proxy.conf`（端口非 `7890` 时请编辑该文件后重装 `--with-proxy`，或改 `/etc/systemd/system/macchiato-*.service.d/50-macchiato-proxy.conf`）。
 
 仅查看生成内容、不写系统目录：
 
@@ -93,6 +104,8 @@ sudo systemctl edit macchiato-automation.service
 ```
 
 在打开的 override 中于 `[Service]` 下添加 `Environment=KEY=value`，或使用 **仅含 `KEY=value` 行** 的文件并在 override 里 `EnvironmentFile=` 指向该文件。
+
+**HTTP 代理（境外 LLM）**：优先使用仓库内 `50-macchiato-proxy.conf` + `install.sh --with-proxy`（见上文），避免国内 API 误走代理时可编辑该文件中的 `NO_PROXY` 列表。
 
 ## 卸载（本机）
 

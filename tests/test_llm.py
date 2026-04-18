@@ -4,10 +4,14 @@ LLM 客户端测试
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+from openai.types.chat.chat_completion_message_tool_call import (
+    ChatCompletionMessageToolCall,
+)
 
 from agent_core.llm import LLMClient, LLMResponse, ToolCall
 from agent_core.llm.client import _strip_thinking_content
 from agent_core.config import Config, LLMConfig
+from agent_core.context import ConversationContext
 
 
 def _install_mock_openai_client(client: LLMClient, mock_client) -> None:
@@ -105,6 +109,36 @@ class TestToolCall:
         assert tool_call.id == "call_123"
         assert tool_call.name == "create_event"
         assert tool_call.arguments == {"title": "测试事件"}
+
+    def test_tool_call_extra_content_optional(self):
+        """extra_content 可选，用于 Gemini/Kimi 等 thought_signature 等多轮回传。"""
+        tc = ToolCall(
+            id="c1",
+            name="f",
+            arguments={},
+            extra_content={"google": {"thought_signature": "x"}},
+        )
+        assert tc.extra_content["google"]["thought_signature"] == "x"
+
+
+class TestConversationContextToolCalls:
+    """上下文中的 tool_calls 须能携带厂商扩展字段。"""
+
+    def test_extra_content_preserved_in_messages(self):
+        ctx = ConversationContext()
+        ctx.add_assistant_message(
+            content=None,
+            tool_calls=[
+                {
+                    "id": "1",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "{}"},
+                    "extra_content": {"google": {"thought_signature": "sig"}},
+                }
+            ],
+        )
+        msg = ctx.get_messages()[-1]
+        assert msg["tool_calls"][0]["extra_content"]["google"]["thought_signature"] == "sig"
 
 
 class TestLLMResponse:
@@ -228,6 +262,56 @@ class TestLLMClient:
             call_args = mock_client.chat.completions.create.call_args
             assert "tools" in call_args.kwargs
             assert call_args.kwargs["tool_choice"] == "auto"
+
+    @pytest.mark.asyncio
+    async def test_chat_with_tools_preserves_gemini_extra_content(self, mock_config):
+        """OpenAI 兼容层在 tool_call 上可附带 extra_content.thought_signature（Gemini/Kimi 等），须解析并保留。"""
+        tc = ChatCompletionMessageToolCall.model_validate(
+            {
+                "id": "call_sig",
+                "type": "function",
+                "function": {
+                    "name": "request_permission",
+                    "arguments": "{}",
+                },
+                "extra_content": {
+                    "google": {"thought_signature": "test-signature-blob"},
+                },
+            }
+        )
+        response = MagicMock()
+        response.choices = [MagicMock()]
+        response.choices[0].message.content = None
+        response.choices[0].message.tool_calls = [tc]
+        response.choices[0].finish_reason = "tool_calls"
+        response.usage = None
+
+        with patch(_OPENAI_PATCH) as mock_openai:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create = AsyncMock(return_value=response)
+            mock_client.close = AsyncMock()
+            mock_openai.return_value = mock_client
+
+            client = LLMClient(config=mock_config)
+            _install_mock_openai_client(client, mock_client)
+
+            out = await client.chat_with_tools(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "request_permission",
+                            "parameters": {"type": "object"},
+                        },
+                    }
+                ],
+            )
+
+        assert len(out.tool_calls) == 1
+        assert out.tool_calls[0].extra_content == {
+            "google": {"thought_signature": "test-signature-blob"},
+        }
 
     @pytest.mark.asyncio
     async def test_chat_with_image(self, mock_config):

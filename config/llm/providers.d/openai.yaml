@@ -1,0 +1,13 @@
+openai_official_gpt4o:
+  label: "GPT-5.3 codex"
+  base_url: "https://api.openai.com/v1"
+  api_key: "${OPENAI_API_KEY}"
+  model: "gpt-5.3-codex"
+  vendor_params: {}
+  capabilities:
+    vision: true
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: false
+    thinking_tag_inline: false
+    context_window: null

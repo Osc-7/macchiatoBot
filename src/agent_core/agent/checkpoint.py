@@ -26,7 +26,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CoreCheckpoint:
-    """会话状态快照。"""
+    """会话状态快照。
+
+    core_profile 为 CoreProfile.asdict 结果（含 _checkpoint_core_profile_format），
+    供 Kernel 重启后还原 tool_template / 权限，与热更新前一致。
+    """
 
     session_id: str
     owner_id: str
@@ -45,6 +49,8 @@ class CoreCheckpoint:
     saved_at: float = field(default_factory=time.time)
     # 生命周期标记：True = 已被 evict，下次 kernel 启动时清理
     expired: bool = False
+    # CoreProfile 全量 JSON（与 CoreEntry.profile 一致）；缺省为旧版 checkpoint
+    core_profile: Optional[Dict[str, Any]] = None
 
 
 class CoreCheckpointManager:
@@ -85,6 +91,10 @@ class CoreCheckpointManager:
             return None
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
+            raw_profile = data.get("core_profile")
+            core_profile: Optional[Dict[str, Any]] = None
+            if isinstance(raw_profile, dict):
+                core_profile = dict(raw_profile)
             return CoreCheckpoint(
                 session_id=str(data.get("session_id", "")),
                 owner_id=str(data.get("owner_id", "")),
@@ -99,6 +109,7 @@ class CoreCheckpointManager:
                 compression_round=int(data.get("compression_round", 0)),
                 saved_at=float(data.get("saved_at", 0.0)),
                 expired=bool(data.get("expired", False)),
+                core_profile=core_profile,
             )
         except Exception as exc:
             logger.warning("CoreCheckpointManager: read failed (%s): %s", self._path, exc)

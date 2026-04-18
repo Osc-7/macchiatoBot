@@ -18,7 +18,11 @@ from .action import (
     ToolResultEvent,
 )
 from .loader import InternalLoader, LLMPayload
-from .profile import CoreProfile
+from .profile import (
+    CoreProfile,
+    core_profile_from_checkpoint_dict,
+    core_profile_to_checkpoint_dict,
+)
 
 __all__ = [
     # Actions (Core → Kernel)
@@ -41,4 +45,6 @@ __all__ = [
     "LLMPayload",
     # Profile
     "CoreProfile",
+    "core_profile_to_checkpoint_dict",
+    "core_profile_from_checkpoint_dict",
 ]

@@ -2,8 +2,10 @@
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, Tuple
+from urllib.parse import unquote
 import httpx
 
 from .config import CanvasConfig
@@ -16,6 +18,22 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _filename_from_content_disposition(value: str) -> str:
+    """从 Content-Disposition 头解析文件名（支持 filename*）。"""
+    if not value:
+        return ""
+    m = re.search(r"filename\*=(?:UTF-8''|)([^;]+)", value, re.I)
+    if m:
+        return unquote(m.group(1).strip().strip('"'))
+    m2 = re.search(r'filename="([^"]+)"', value)
+    if m2:
+        return m2.group(1)
+    m3 = re.search(r"filename=([^;]+)", value)
+    if m3:
+        return m3.group(1).strip().strip('"')
+    return ""
 
 
 class CanvasAPIError(Exception):
@@ -366,6 +384,147 @@ class CanvasClient:
                 logger.error(f"Failed to parse assignment {item.get('id')}: {e}")
 
         return assignments
+
+    async def fetch_assignment_dict(
+        self,
+        course_id: int,
+        assignment_id: int,
+        include_submission: bool = True,
+        all_dates: bool = True,
+    ) -> Dict[str, Any]:
+        """获取作业原始 JSON（含 attachments 等字段，若服务端返回）。
+
+        对应 Canvas API: GET /courses/:course_id/assignments/:id
+        """
+        params: Dict[str, Any] = {}
+        if include_submission:
+            params["include[]"] = "submission"
+        if all_dates:
+            params["all_dates"] = "true"
+
+        data = await self.request(
+            "GET",
+            f"/courses/{course_id}/assignments/{assignment_id}",
+            params,
+        )
+        if not isinstance(data, dict):
+            raise CanvasAPIError("Unexpected assignment response shape")
+        return data
+
+    async def get_assignment(
+        self,
+        course_id: int,
+        assignment_id: int,
+        include_submission: bool = True,
+        all_dates: bool = True,
+        course_name: Optional[str] = None,
+    ) -> CanvasAssignment:
+        """获取单门课程中的单个作业详情
+
+        对应 Canvas API: GET /courses/:course_id/assignments/:id
+
+        Args:
+            course_id: 课程 ID
+            assignment_id: 作业 ID
+            include_submission: 是否包含当前用户的 submission（用于提交/评分状态）
+            all_dates: 是否包含 due_at / lock_at / unlock_at 等全部日期字段
+            course_name: 课程名称（可选，省略时会尝试从课程列表解析）
+
+        Returns:
+            CanvasAssignment 实例
+        """
+        data = await self.fetch_assignment_dict(
+            course_id,
+            assignment_id,
+            include_submission=include_submission,
+            all_dates=all_dates,
+        )
+
+        if not course_name:
+            try:
+                courses = await self.get_courses()
+                course_map = {c["id"]: c["name"] for c in courses}
+                course_name = course_map.get(course_id, "")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to get course name for assignment {assignment_id}: {e}"
+                )
+                course_name = ""
+
+        return CanvasAssignment.from_api_response(data, course_name)
+
+    async def get_file_metadata(
+        self,
+        file_id: int,
+        course_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """获取文件元数据（含 size、display_name）。
+
+        GET /files/:id 或 GET /courses/:course_id/files/:id
+        """
+        if course_id is not None:
+            return await self.request(
+                "GET",
+                f"/courses/{course_id}/files/{file_id}",
+            )
+        return await self.request("GET", f"/files/{file_id}")
+
+    async def download_file_bytes(
+        self,
+        file_id: int,
+        *,
+        course_id: Optional[int] = None,
+        assignment_id: Optional[int] = None,
+    ) -> Tuple[bytes, str]:
+        """下载文件二进制内容。
+
+        依次尝试（与 Canvas 文档一致）：
+        - /assignments/:assignment_id/files/:id/download
+        - /courses/:course_id/files/:id/download
+        - /files/:id/download
+
+        Returns:
+            (content, filename_hint)  filename 来自 Content-Disposition 或文件元数据
+        """
+        if assignment_id is not None:
+            path = f"/assignments/{assignment_id}/files/{file_id}/download"
+        elif course_id is not None:
+            path = f"/courses/{course_id}/files/{file_id}/download"
+        else:
+            path = f"/files/{file_id}/download"
+
+        url = f"{self.base_url}{path}"
+        client = self._get_client()
+        response = await client.get(url, follow_redirects=True)
+
+        if response.status_code == 401:
+            raise CanvasAuthError(
+                "Authentication failed. Please check your API key."
+            )
+        if response.status_code == 429:
+            raise CanvasRateLimitError("Rate limited while downloading file.")
+        if response.status_code >= 400:
+            raise CanvasAPIError(
+                f"File download error {response.status_code}: "
+                f"{response.text[:200]}"
+            )
+
+        filename = _filename_from_content_disposition(
+            response.headers.get("content-disposition", "")
+        )
+        if not filename:
+            try:
+                meta = await self.get_file_metadata(file_id, course_id=course_id)
+                filename = (
+                    meta.get("display_name")
+                    or meta.get("filename")
+                    or f"canvas_{file_id}"
+                )
+            except Exception as e:
+                logger.warning(f"Could not resolve filename for file {file_id}: {e}")
+                filename = f"canvas_{file_id}"
+
+        return response.content, str(filename)
 
     async def get_calendar_events(
         self,

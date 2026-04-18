@@ -894,10 +894,16 @@ class CorePool:
 
             # ③ 未过期：通过 acquire() 重建 Core（内部调用 _load() + restore_from_checkpoint）
             try:
+                from agent_core.kernel_interface.profile import (
+                    core_profile_from_checkpoint_dict,
+                )
+
+                restored_profile = core_profile_from_checkpoint_dict(ckpt.core_profile)
                 await self.acquire(
                     session_id,
                     source=ckpt.source,
                     user_id=ckpt.owner_id,
+                    profile=restored_profile,
                 )
                 restored += 1
                 logger.info(
@@ -942,9 +948,12 @@ class CorePool:
         from agent_core.agent.checkpoint import CoreCheckpointManager
         from agent_core.agent.memory_paths import resolve_memory_owner_paths
         from agent_core.kernel_interface import CoreProfile as _CoreProfile
+        from agent_core.kernel_interface.profile import core_profile_from_checkpoint_dict
         from .core_logger import CoreLifecycleLogger
 
+        profile_synthesized_here = False
         if profile is None:
+            profile_synthesized_here = True
             # sub:* 会话必须与 register_sub / _run_subagent_task 一致使用 default_sub，
             # 否则 subagent 源会被 default_full 误判为 mode=full（工具全开），破坏 P2P 协议。
             if (session_id or "").startswith("sub:"):
@@ -973,6 +982,25 @@ class CorePool:
                     ),
                     tools_config=self._config.tools,
                 )
+
+        # 仅在本函数内按 source 推断了 profile时：尝试用 checkpoint 内存档的 CoreProfile 覆盖（新版 JSON）
+        if profile_synthesized_here and not (session_id or "").startswith("cron:"):
+            try:
+                mem_paths = resolve_memory_owner_paths(
+                    self._config.memory, user_id, config=self._config, source=source
+                )
+                disk_ckpt = CoreCheckpointManager(mem_paths["checkpoint_path"]).read()
+                if (
+                    disk_ckpt is not None
+                    and not disk_ckpt.expired
+                    and disk_ckpt.session_id == session_id
+                    and disk_ckpt.core_profile
+                ):
+                    recovered = core_profile_from_checkpoint_dict(disk_ckpt.core_profile)
+                    if recovered is not None:
+                        profile = recovered
+            except Exception:
+                pass
 
         # 优先使用 system.tools.build_tool_registry，与 Kernel/MCP 工具装配一致
         from system.tools import build_tool_registry
@@ -1205,7 +1233,17 @@ class CorePool:
             stripped_reg.register(tool)
         entry.agent._tool_registry = stripped_reg
         entry.agent._tool_catalog = tool_catalog
+        from agent_core.agent.working_set_pins import compute_pinned_tool_names_for_core
+        from agent_core.orchestrator import ToolWorkingSetManager
         from agent_core.tools import CallToolTool, SearchToolsTool
+
+        agent_cfg = getattr(entry.agent, "_config", None) or self._config
+        entry.agent._working_set = ToolWorkingSetManager(
+            pinned_tools=compute_pinned_tool_names_for_core(
+                agent_cfg, profile, entry.agent._source
+            ),
+            working_set_size=agent_cfg.agent.working_set_size,
+        )
         entry.agent._tool_registry.register(
             SearchToolsTool(
                 registry=tool_catalog,

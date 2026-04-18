@@ -57,6 +57,9 @@ class ToolCall:
     arguments: Union[Dict[str, Any], str]
     """工具参数；通常为 dict。流式解析失败时可能为原始 JSON 字符串，由执行层尝试解析或返回错误。"""
 
+    extra_content: Optional[Dict[str, Any]] = None
+    """厂商扩展字段。OpenAI 兼容层里常见 ``extra_content.google.thought_signature``（Gemini、Kimi 等），多轮工具须原样回传，否则 400。"""
+
 
 @dataclass
 class LLMResponse:

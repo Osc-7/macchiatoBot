@@ -15,11 +15,17 @@ mode 枚举语义：
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Literal, Optional
+import logging
+from dataclasses import asdict, dataclass, field, fields
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from agent_core.config import Config, ToolsConfig
+
+
+CHECKPOINT_CORE_PROFILE_FORMAT = 1
 
 
 def _resolve_tool_template_config(
@@ -305,3 +311,31 @@ class CoreProfile:
     # 向后兼容别名
     default_cron = default_background
     default_heartbeat = default_background
+
+
+def core_profile_to_checkpoint_dict(
+    profile: Optional[CoreProfile],
+) -> Optional[Dict[str, Any]]:
+    """将 CoreProfile 序列化为可写入 checkpoint JSON 的 dict（None 表示未挂载 profile）。"""
+    if profile is None:
+        return None
+    out = asdict(profile)
+    out["_checkpoint_core_profile_format"] = CHECKPOINT_CORE_PROFILE_FORMAT
+    return out
+
+
+def core_profile_from_checkpoint_dict(
+    data: Optional[Dict[str, Any]],
+) -> Optional[CoreProfile]:
+    """从 checkpoint dict 还原 CoreProfile；无法解析时返回 None（调用方走默认推断）。"""
+    if not data or not isinstance(data, dict):
+        return None
+    payload = dict(data)
+    payload.pop("_checkpoint_core_profile_format", None)
+    field_names = {f.name for f in fields(CoreProfile)}
+    kwargs = {k: v for k, v in payload.items() if k in field_names}
+    try:
+        return CoreProfile(**kwargs)
+    except TypeError as exc:
+        logger.warning("CoreProfile checkpoint deserialize failed: %s", exc)
+        return None

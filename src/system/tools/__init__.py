@@ -66,6 +66,11 @@ from .canvas_tools import (
     SyncCanvasTool,
     FetchCanvasOverviewTool,
     FetchCanvasCourseContentTool,
+    FetchCanvasCourseAssignmentsTool,
+    FetchCanvasAssignmentDetailTool,
+    FetchCanvasSubmissionTool,
+    FetchCanvasAssignmentAttachmentsTool,
+    DownloadCanvasFileTool,
 )
 from .automation_tools import (
     SyncSourcesTool,
@@ -241,6 +246,11 @@ def _build_canvas_tools(config: Config) -> List[BaseTool]:
         SyncCanvasTool(config=config),
         FetchCanvasOverviewTool(config=config),
         FetchCanvasCourseContentTool(config=config),
+        FetchCanvasCourseAssignmentsTool(config=config),
+        FetchCanvasAssignmentDetailTool(config=config),
+        FetchCanvasSubmissionTool(config=config),
+        FetchCanvasAssignmentAttachmentsTool(config=config),
+        DownloadCanvasFileTool(config=config),
     ]
     return tools
 

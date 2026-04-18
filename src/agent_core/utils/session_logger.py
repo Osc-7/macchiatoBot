@@ -128,13 +128,14 @@ class SessionLogger:
                     args = json.loads(args) if args else {}
                 except json.JSONDecodeError:
                     args = {"_raw_preview": args[:500] + ("...(截断)" if len(args) > 500 else "")}
-            tool_calls.append(
-                {
-                    "id": tc.id,
-                    "name": tc.name,
-                    "arguments": args,
-                }
-            )
+            row: Dict[str, Any] = {
+                "id": tc.id,
+                "name": tc.name,
+                "arguments": args,
+            }
+            if getattr(tc, "extra_content", None):
+                row["extra_content"] = tc.extra_content
+            tool_calls.append(row)
         record: Dict[str, Any] = {
             "event": "llm_response",
             "timestamp": self._timestamp(),

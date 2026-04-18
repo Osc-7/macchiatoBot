@@ -7,6 +7,8 @@
    - 可配置权限：仅在这些 topic 中响应
 2. 通知模式（allowed_topic_ids 为空）：user_actions（filter=7、filter=7+acting_username 自 @、filter=5 本人帖）+ notifications
    - 自 @：filter=7+acting_username=主人 + filter=5 兜底；仍可能不如 topic 监控完整
+
+调度：轮询与水位更新尽快返回；``run_shuiyuan_reply`` 以 asyncio Task 后台执行，避免长耗时回复阻塞下一轮提及扫描。
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Dict, List, Optional, Set, Tuple
 
 from agent_core.config import Config, get_config
 
@@ -28,8 +30,61 @@ NOTIFICATION_TYPE_MENTIONED = (1, "1", "mentioned")
 
 # 并发回复上限：不同用户可并行处理，受此限制避免 429 和 daemon 过载
 MAX_CONCURRENT_REPLIES = 6
+# 收到停止信号后，等待后台回复任务结束的最长时间（秒）
+_PENDING_REPLIES_DRAIN_TIMEOUT_SEC = 120.0
 
 logger = logging.getLogger("shuiyuan_connector")
+
+
+def _schedule_background_reply(
+    aw: Awaitable[Any],
+    *,
+    pending_tasks: Optional[Set[asyncio.Task[Any]]] = None,
+) -> None:
+    """在事件循环中后台执行回复协程，不阻塞轮询；可选登记到 ``pending_tasks`` 以便退出时排空。"""
+
+    async def _guarded() -> None:
+        try:
+            await aw
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("水源回复后台任务失败")
+
+    t = asyncio.create_task(_guarded())
+    if pending_tasks is not None:
+        pending_tasks.add(t)
+
+        def _on_done(task: asyncio.Task[Any]) -> None:
+            pending_tasks.discard(task)
+
+        t.add_done_callback(_on_done)
+
+
+async def _drain_pending_reply_tasks(
+    pending: Set[asyncio.Task[Any]],
+    *,
+    timeout: float = _PENDING_REPLIES_DRAIN_TIMEOUT_SEC,
+) -> None:
+    """进程退出前等待后台回复结束；超时则 cancel 剩余任务。"""
+    if not pending:
+        return
+    snap = list(pending)
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*snap, return_exceptions=True),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "停止 connector 时仍有 %d 个水源回复任务未在 %.0f 秒内结束，将取消",
+            len(snap),
+            timeout,
+        )
+        for t in snap:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*snap, return_exceptions=True)
 
 
 _STREAM_MAP_PATH = Path("./data/shuiyuan/connector_stream_map.json")
@@ -354,6 +409,9 @@ async def _poll_topic_watch(
     client: Any,
     config: Config,
     stream_map: Dict[int, Set[int]],
+    *,
+    reply_sem: asyncio.Semaphore,
+    pending_tasks: Optional[Set[asyncio.Task[Any]]] = None,
 ) -> tuple[Dict[int, Set[int]], bool]:
     """
     Topic 监控模式轮询一次。仅处理 allowed_topic_ids 中的新帖。
@@ -376,7 +434,6 @@ async def _poll_topic_watch(
 
     from .session import run_shuiyuan_reply
 
-    sem = asyncio.Semaphore(MAX_CONCURRENT_REPLIES)
     had_mention = False
 
     async def _run_one(
@@ -387,7 +444,7 @@ async def _poll_topic_watch(
     ) -> bool:
         if not topic_id or not post_id:
             return False
-        async with sem:
+        async with reply_sem:
             await asyncio.sleep(1.0)  # 降低 429 风险
             raw = (post.get("raw") or post.get("cooked") or "").strip()
             username = (post.get("username") or "").strip()
@@ -414,17 +471,14 @@ async def _poll_topic_watch(
                 logger.exception("水源回复失败: %s", e)
                 return True  # 异常也视为有活动（已尝试处理）
 
-    tasks = [
-        _run_one(int(topic_id), int(post_number), int(post_id), post)
-        for topic_id, post_number, post_id, post in items
-        if topic_id and post_id
-    ]
-    if tasks:
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        had_mention = True  # 本轮有提及需要处理
-        for r in results:
-            if isinstance(r, Exception):
-                logger.exception("并发回复任务异常: %s", r)
+    for topic_id, post_number, post_id, post in items:
+        if not topic_id or not post_id:
+            continue
+        had_mention = True
+        _schedule_background_reply(
+            _run_one(int(topic_id), int(post_number), int(post_id), post),
+            pending_tasks=pending_tasks,
+        )
 
     return stream_map, had_mention
 
@@ -433,6 +487,9 @@ async def _poll_once(
     client: Any,
     config: Config,
     stream_list: List[int],
+    *,
+    reply_sem: asyncio.Semaphore,
+    pending_tasks: Optional[Set[asyncio.Task[Any]]] = None,
 ) -> List[int]:
     """
     轮询一次，仅处理新增提及（user_actions + notifications，含自 @）。
@@ -473,12 +530,10 @@ async def _poll_once(
 
     from .session import is_invocation_valid_from_raw, run_shuiyuan_reply
 
-    sem = asyncio.Semaphore(MAX_CONCURRENT_REPLIES)
-
     async def _run_one(topic_id: int, post_number: int, post_id: int) -> None:
         if not topic_id or not post_id:
             return
-        async with sem:
+        async with reply_sem:
             await asyncio.sleep(0.6)
             try:
                 post = await asyncio.to_thread(
@@ -530,16 +585,13 @@ async def _poll_once(
             except Exception as e:
                 logger.exception("水源回复失败: %s", e)
 
-    tasks = [
-        _run_one(int(topic_id), int(post_number), int(post_id))
-        for topic_id, post_number, post_id in new_items
-        if topic_id and post_id
-    ]
-    if tasks:
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for r in results:
-            if isinstance(r, Exception):
-                logger.exception("并发回复任务异常: %s", r)
+    for topic_id, post_number, post_id in new_items:
+        if not topic_id or not post_id:
+            continue
+        _schedule_background_reply(
+            _run_one(int(topic_id), int(post_number), int(post_id)),
+            pending_tasks=pending_tasks,
+        )
 
     return new_stream
 
@@ -580,6 +632,9 @@ async def run_connector_loop(
 
     allowed = cfg.shuiyuan.allowed_topic_ids or []
     stop = stop_event or asyncio.Event()
+    # 跨轮询共享：避免每轮新建 Semaphore 导致并发失控
+    reply_sem = asyncio.Semaphore(MAX_CONCURRENT_REPLIES)
+    pending_reply_tasks: Set[asyncio.Task[Any]] = set()
 
     if allowed:
         # 加载历史 stream_map，避免每次重启都从历史帖子重新初始化
@@ -615,7 +670,11 @@ async def run_connector_loop(
                 continue
             try:
                 stream_map, had_mention = await _poll_topic_watch(
-                    client, cfg, stream_map
+                    client,
+                    cfg,
+                    stream_map,
+                    reply_sem=reply_sem,
+                    pending_tasks=pending_reply_tasks,
                 )
                 _save_stream_map(stream_map)
                 if had_mention:
@@ -666,6 +725,7 @@ async def run_connector_loop(
                 await asyncio.wait_for(stop.wait(), timeout=interval)
             except asyncio.TimeoutError:
                 pass
+        await _drain_pending_reply_tasks(pending_reply_tasks)
         return
 
     # 通知模式：user_actions + notifications
@@ -684,7 +744,13 @@ async def run_connector_loop(
     )
     while not stop.is_set():
         try:
-            stream_list = await _poll_once(client, cfg, stream_list)
+            stream_list = await _poll_once(
+                client,
+                cfg,
+                stream_list,
+                reply_sem=reply_sem,
+                pending_tasks=pending_reply_tasks,
+            )
             _save_notify_stream_list(stream_list)
         except Exception as e:
             from .client import ShuiyuanRateLimitError
@@ -722,6 +788,7 @@ async def run_connector_loop(
             await asyncio.wait_for(stop.wait(), timeout=wait_secs)
         except asyncio.TimeoutError:
             pass
+    await _drain_pending_reply_tasks(pending_reply_tasks)
 
 
 def main() -> None:

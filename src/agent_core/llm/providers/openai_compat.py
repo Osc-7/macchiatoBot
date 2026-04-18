@@ -26,6 +26,20 @@ from .base import BaseProvider
 
 logger = logging.getLogger(__name__)
 
+
+def _tool_call_extra_content(tc: Any) -> Optional[Dict[str, Any]]:
+    """解析 OpenAI 兼容响应里单个 tool_call 上的 ``extra_content``（Gemini/Kimi 等附带的 thought_signature 等）。"""
+    ex = getattr(tc, "extra_content", None)
+    if isinstance(ex, dict) and ex:
+        return ex
+    me = getattr(tc, "model_extra", None)
+    if isinstance(me, dict):
+        nested = me.get("extra_content")
+        if isinstance(nested, dict) and nested:
+            return nested
+    return None
+
+
 # Qwen 深度思考模式会将推理内容放在 content 中（有时与回复混合），用 <think>...</think> 包裹。
 # 参见 https://www.alibabacloud.com/help/zh/model-studio/deep-thinking
 THINKING_END_TAG = "</think>"
@@ -323,6 +337,11 @@ class OpenAICompatProvider(BaseProvider):
                 on_reasoning_delta=on_reasoning_delta,
             )
 
+        logger.debug(
+            "OpenAICompatProvider[%s] chat.completions (stream=False) model=%s",
+            self._name,
+            self._model,
+        )
         response = await self._client.chat.completions.create(**request_params)
         choice = response.choices[0]
 
@@ -334,6 +353,7 @@ class OpenAICompatProvider(BaseProvider):
                         id=tc.id,
                         name=tc.function.name,
                         arguments=tc.function.arguments,
+                        extra_content=_tool_call_extra_content(tc),
                     )
                 )
 
@@ -367,6 +387,11 @@ class OpenAICompatProvider(BaseProvider):
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        logger.debug(
+            "OpenAICompatProvider[%s] chat.completions (stream=True) model=%s",
+            self._name,
+            self._model,
+        )
         stream = await self._client.chat.completions.create(**params)
 
         content_parts: List[str] = []
@@ -412,6 +437,7 @@ class OpenAICompatProvider(BaseProvider):
                             "id": getattr(tc, "id", "") or "",
                             "name": getattr(tc.function, "name", "") or "",
                             "arguments": getattr(tc.function, "arguments", "") or "",
+                            "extra_content": _tool_call_extra_content(tc),
                         }
                     else:
                         if getattr(tc, "id", None):
@@ -423,6 +449,9 @@ class OpenAICompatProvider(BaseProvider):
                                 tool_calls_map[idx]["arguments"] += (
                                     tc.function.arguments or ""
                                 )
+                        ex = _tool_call_extra_content(tc)
+                        if ex is not None:
+                            tool_calls_map[idx]["extra_content"] = ex
 
             if hasattr(chunk, "usage") and chunk.usage:
                 last_usage = chunk.usage
@@ -435,6 +464,7 @@ class OpenAICompatProvider(BaseProvider):
             tc = tool_calls_map[idx]
             if tc["id"] and tc["name"]:
                 raw = tc["arguments"] or ""
+                ex = tc.get("extra_content")
                 if not raw:
                     logger.warning(
                         "流式 tool_call 的 arguments 为空 name=%s id=%s",
@@ -442,7 +472,12 @@ class OpenAICompatProvider(BaseProvider):
                         tc["id"],
                     )
                     tool_calls_list.append(
-                        ToolCall(id=tc["id"], name=tc["name"], arguments={})
+                        ToolCall(
+                            id=tc["id"],
+                            name=tc["name"],
+                            arguments={},
+                            extra_content=ex,
+                        )
                     )
                     continue
                 try:
@@ -457,11 +492,21 @@ class OpenAICompatProvider(BaseProvider):
                         raw[:300] if len(raw) > 300 else raw,
                     )
                     tool_calls_list.append(
-                        ToolCall(id=tc["id"], name=tc["name"], arguments=raw)
+                        ToolCall(
+                            id=tc["id"],
+                            name=tc["name"],
+                            arguments=raw,
+                            extra_content=ex,
+                        )
                     )
                 else:
                     tool_calls_list.append(
-                        ToolCall(id=tc["id"], name=tc["name"], arguments=args)
+                        ToolCall(
+                            id=tc["id"],
+                            name=tc["name"],
+                            arguments=args,
+                            extra_content=ex,
+                        )
                     )
 
         usage = TokenUsage.from_usage(last_usage) if last_usage else None

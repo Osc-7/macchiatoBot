@@ -2,7 +2,10 @@
 # 将模板 unit 安装到 /etc/systemd/system/ 并 daemon-reload。
 # 用法:
 #   ./deploy/systemd/install.sh /path/to/macchiatoBot [运行用户]
+#   ./deploy/systemd/install.sh /path/to/macchiatoBot ubuntu --with-proxy
 #   ./deploy/systemd/install.sh --dry-run /path/to/macchiatoBot ubuntu
+#
+# --with-proxy  同时安装 50-macchiato-proxy.conf（本机 Clash 等 HTTP 代理 + NO_PROXY 直连国内域名）
 #
 # 安装前请在项目根执行: uv sync（或 source init.sh），确保 .venv 存在。
 
@@ -10,12 +13,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRY_RUN=0
-if [[ "${1:-}" == "--dry-run" ]]; then
-  DRY_RUN=1
-  shift
-fi
+WITH_PROXY=0
+RAW_ARGS=()
+for a in "$@"; do
+  case "$a" in
+    --dry-run) DRY_RUN=1 ;;
+    --with-proxy) WITH_PROXY=1 ;;
+    *) RAW_ARGS+=("$a") ;;
+  esac
+done
+set -- "${RAW_ARGS[@]}"
 
-ROOT="${1:?用法: $0 [--dry-run] <MACCHIATO_ROOT> [USER]}"
+ROOT="${1:?用法: $0 [--dry-run] [--with-proxy] <MACCHIATO_ROOT> [USER]}"
 ROOT="$(cd "$ROOT" && pwd)"
 RUN_USER="${2:-${SUDO_USER:-$USER}}"
 
@@ -59,6 +68,31 @@ for s in macchiato-automation macchiato-feishu-gateway macchiato-shuiyuan-connec
   install_service "$s"
 done
 
+install_proxy_dropins() {
+  local src="$SCRIPT_DIR/50-macchiato-proxy.conf"
+  if [[ ! -f "$src" ]]; then
+    echo "缺少 $src" >&2
+    exit 1
+  fi
+  for s in macchiato-automation macchiato-feishu-gateway macchiato-shuiyuan-connector; do
+    local dir="/etc/systemd/system/${s}.service.d"
+    local dst="${dir}/50-macchiato-proxy.conf"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      echo "===== $dst (copy from 50-macchiato-proxy.conf) ====="
+      cat "$src"
+      echo
+    else
+      sudo mkdir -p "$dir"
+      sudo cp "$src" "$dst"
+      echo "已写入 $dst"
+    fi
+  done
+}
+
+if [[ "$WITH_PROXY" -eq 1 ]]; then
+  install_proxy_dropins
+fi
+
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "===== /etc/systemd/system/macchiato.target (copy) ====="
   cat "$SCRIPT_DIR/macchiato.target"
@@ -69,6 +103,9 @@ else
 fi
 
 echo
+if [[ "$WITH_PROXY" -eq 0 ]]; then
+  echo "提示: 若 systemd 内访问 Gemini/OpenAI 超时而 shell 里正常，多半是未继承本机代理；可重装并加 --with-proxy"
+fi
 echo "安装完成。首次启用示例:"
 echo "  sudo systemctl enable --now macchiato-automation.service"
 echo "  sudo systemctl enable --now macchiato-feishu-gateway.service"

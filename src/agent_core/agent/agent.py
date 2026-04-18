@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, cast
 
 from agent_core.config import Config, MemoryConfig, MCPServerConfig, get_config
+from agent_core.kernel_interface.profile import core_profile_to_checkpoint_dict
 from agent_core.context import ConversationContext
 from agent_core.utils.billing import compute_cost_from_calls
 from agent_core.mcp import MCPClientManager
@@ -149,36 +150,11 @@ class AgentCore:
         self._timezone = timezone
         self._session_logger = session_logger
         agent_cfg = self._config.agent
-        tools_cfg = self._config.tools
-        template_name = (
-            getattr(core_profile, "tool_template", None)
-            or ("shuiyuan" if self._source == "shuiyuan" else "default")
+        from agent_core.agent.working_set_pins import compute_pinned_tool_names_for_core
+
+        deduped_pinned = compute_pinned_tool_names_for_core(
+            self._config, core_profile, self._source
         )
-        template = tools_cfg.get_template(template_name)
-        exposure_mode = getattr(
-            core_profile, "tool_exposure_mode", template.exposure
-        ) or template.exposure
-        pinned_tools = list(tools_cfg.core_tools or [])
-        if exposure_mode == "pinned":
-            pinned_tools.extend(tools_cfg.pinned_tools or [])
-        pinned_tools.extend(template.extra or [])
-        deduped_pinned: List[str] = []
-        for name in pinned_tools:
-            norm = str(name).strip()
-            if norm and norm not in deduped_pinned:
-                deduped_pinned.append(norm)
-        # 与内核约定一致：交互式 Core 必须能调用人类审批；勿依赖用户是否在 config 中列出。
-        # background（cron/heartbeat）无人工在前端，不强制加入 request_permission，避免挂起。
-        _required_in_working_set = ("search_tools", "call_tool", "bash")
-        for req in _required_in_working_set:
-            if req not in deduped_pinned:
-                deduped_pinned.append(req)
-        _mode = getattr(core_profile, "mode", None) if core_profile is not None else None
-        if _mode != "background":
-            if "request_permission" not in deduped_pinned:
-                deduped_pinned.append("request_permission")
-            if "ask_user" not in deduped_pinned:
-                deduped_pinned.append("ask_user")
         self._working_set = ToolWorkingSetManager(
             pinned_tools=deduped_pinned,
             working_set_size=self._config.agent.working_set_size,
@@ -827,6 +803,7 @@ class AgentCore:
                                     id=tool_call.id,
                                     name=tool_call.name,
                                     arguments=tool_call.arguments or {},
+                                    extra_content=tool_call.extra_content,
                                 ),
                             )
 
@@ -980,6 +957,7 @@ class AgentCore:
                         last_history_id=self._last_history_id,
                         token_usage=dict(self._token_usage),
                         compression_round=self._working_memory.compression_round,
+                        core_profile=core_profile_to_checkpoint_dict(profile),
                     )
                 )
             except Exception as exc:
@@ -1020,6 +998,7 @@ class AgentCore:
                     last_history_id=self._last_history_id,
                     token_usage=dict(self._token_usage),
                     compression_round=self._working_memory.compression_round,
+                    core_profile=core_profile_to_checkpoint_dict(profile),
                 )
             )
         except Exception as exc:
@@ -1056,16 +1035,17 @@ class AgentCore:
                     args_str = json.dumps({}, ensure_ascii=False)
             else:
                 args_str = json.dumps(tc.arguments, ensure_ascii=False)
-            tool_calls.append(
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": args_str,
-                    },
-                }
-            )
+            entry: Dict[str, Any] = {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.name,
+                    "arguments": args_str,
+                },
+            }
+            if tc.extra_content:
+                entry["extra_content"] = tc.extra_content
+            tool_calls.append(entry)
 
         self._context.add_assistant_message(
             content=response.content,

@@ -227,7 +227,17 @@ class LLMClient:
                 f"未知 provider: {name}；已注册：{list(self._providers.keys())}"
             )
         self._active = key
-        logger.info("LLMClient 主 provider 切换到: %s", name)
+        prov_map = getattr(self._config.llm, "providers", None) or {}
+        entry = prov_map.get(key)
+        base_url = str(getattr(entry, "base_url", "") or "") if entry is not None else ""
+        api_model = str(getattr(entry, "model", "") or "") if entry is not None else ""
+        logger.info(
+            "LLMClient 主 provider 切换到: query=%r -> key=%s api_model=%s base_url=%s",
+            name,
+            key,
+            api_model,
+            base_url,
+        )
 
     def list_models(self) -> List[Tuple[str, Capabilities]]:
         """列出所有已注册 provider 的 (name, capabilities)，按注册顺序。"""

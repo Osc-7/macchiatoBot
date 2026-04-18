@@ -26,6 +26,10 @@ from .base import BaseProvider
 
 logger = logging.getLogger(__name__)
 
+# Gemini 多轮工具：无 API 生成签名时（跨模型迁移、中途切换、客户端合成 tool_calls）须带占位符，否则 400。
+# 官方允许二选一，见 https://ai.google.dev/gemini-api/docs/thought-signatures
+_GEMINI_DUMMY_THOUGHT_SIGNATURE_SKIP = "skip_thought_signature_validator"
+
 
 def _tool_call_extra_content(tc: Any) -> Optional[Dict[str, Any]]:
     """解析 OpenAI 兼容响应里单个 tool_call 上的 ``extra_content``（Gemini/Kimi 等附带的 thought_signature 等）。"""
@@ -38,6 +42,66 @@ def _tool_call_extra_content(tc: Any) -> Optional[Dict[str, Any]]:
         if isinstance(nested, dict) and nested:
             return nested
     return None
+
+
+def _gemini_tc_has_thought_signature(tc: Dict[str, Any]) -> bool:
+    ex = tc.get("extra_content")
+    if not isinstance(ex, dict):
+        return False
+    g = ex.get("google")
+    if not isinstance(g, dict):
+        return False
+    sig = g.get("thought_signature")
+    return isinstance(sig, str) and bool(sig.strip())
+
+
+def inject_gemini_dummy_thought_signatures_in_messages(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    为 assistant 的 ``tool_calls`` 补齐 ``extra_content.google.thought_signature``。
+
+    仅应在确认请求发往 Gemini OpenAI 兼容端点时使用；占位符为官方文档允许的 dummy，
+    用于无真实签名的历史（见模块常量说明）。
+    """
+    out: List[Dict[str, Any]] = []
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            out.append(msg)
+            continue
+        tcs = msg.get("tool_calls")
+        if not isinstance(tcs, list) or not tcs:
+            out.append(msg)
+            continue
+        need_any = False
+        for tc in tcs:
+            if isinstance(tc, dict) and not _gemini_tc_has_thought_signature(tc):
+                need_any = True
+                break
+        if not need_any:
+            out.append(msg)
+            continue
+        new_tcs: List[Any] = []
+        for tc in tcs:
+            if not isinstance(tc, dict):
+                new_tcs.append(tc)
+                continue
+            if _gemini_tc_has_thought_signature(tc):
+                new_tcs.append(tc)
+                continue
+            ex = tc.get("extra_content")
+            ex2 = dict(ex) if isinstance(ex, dict) else {}
+            g = ex2.get("google")
+            g2 = dict(g) if isinstance(g, dict) else {}
+            g2["thought_signature"] = _GEMINI_DUMMY_THOUGHT_SIGNATURE_SKIP
+            ex2["google"] = g2
+            tc2 = dict(tc)
+            tc2["extra_content"] = ex2
+            new_tcs.append(tc2)
+        msg2 = dict(msg)
+        msg2["tool_calls"] = new_tcs
+        out.append(msg2)
+    return out
 
 
 # Qwen 深度思考模式会将推理内容放在 content 中（有时与回复混合），用 <think>...</think> 包裹。
@@ -161,6 +225,7 @@ class OpenAICompatProvider(BaseProvider):
         headers: Optional[Dict[str, str]] = None,
     ) -> None:
         self._name = name
+        self._base_url = str(base_url or "")
         self._model = model
         self._capabilities = capabilities
         self._temperature = temperature
@@ -214,6 +279,19 @@ class OpenAICompatProvider(BaseProvider):
         if self._vendor_params:
             request_params["extra_body"] = self._vendor_params
 
+    def _is_likely_gemini_openai_target(self) -> bool:
+        """是否对请求消息做 Gemini thought_signature 占位符注入（中途切模型 / 跨模型历史）。"""
+        bu = self._base_url.lower()
+        if "generativelanguage.googleapis.com" in bu:
+            return True
+        m = (self._model or "").lower()
+        return "gemini" in m
+
+    def _prepare_openai_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not self._is_likely_gemini_openai_target():
+            return messages
+        return inject_gemini_dummy_thought_signatures_in_messages(messages)
+
     async def chat(
         self,
         messages: List[Dict[str, Any]],
@@ -222,7 +300,7 @@ class OpenAICompatProvider(BaseProvider):
         full_messages: List[Dict[str, Any]] = []
         if system_message:
             full_messages.append({"role": "system", "content": system_message})
-        full_messages.extend(messages)
+        full_messages.extend(self._prepare_openai_messages(messages))
 
         request_params: Dict[str, Any] = {
             "model": self._model,
@@ -312,7 +390,7 @@ class OpenAICompatProvider(BaseProvider):
         full_messages: List[Dict[str, Any]] = []
         if system_message:
             full_messages.append({"role": "system", "content": system_message})
-        full_messages.extend(messages)
+        full_messages.extend(self._prepare_openai_messages(messages))
 
         request_params: Dict[str, Any] = {
             "model": self._model,

@@ -10,6 +10,9 @@ from openai.types.chat.chat_completion_message_tool_call import (
 
 from agent_core.llm import LLMClient, LLMResponse, ToolCall
 from agent_core.llm.client import _strip_thinking_content
+from agent_core.llm.providers.openai_compat import (
+    inject_gemini_dummy_thought_signatures_in_messages,
+)
 from agent_core.config import Config, LLMConfig
 from agent_core.context import ConversationContext
 
@@ -119,6 +122,40 @@ class TestToolCall:
             extra_content={"google": {"thought_signature": "x"}},
         )
         assert tc.extra_content["google"]["thought_signature"] == "x"
+
+
+class TestGeminiDummyThoughtSignatures:
+    """Gemini 文档：无真实签名时可用官方 dummy 通过校验（跨模型 / 中途切换）。"""
+
+    def test_inject_fills_missing_signature(self):
+        msgs = [
+            {"role": "assistant", "tool_calls": [
+                {
+                    "id": "1",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "{}"},
+                }
+            ]},
+        ]
+        out = inject_gemini_dummy_thought_signatures_in_messages(msgs)
+        assert (
+            out[0]["tool_calls"][0]["extra_content"]["google"]["thought_signature"]
+            == "skip_thought_signature_validator"
+        )
+
+    def test_inject_skips_when_signature_present(self):
+        msgs = [
+            {"role": "assistant", "tool_calls": [
+                {
+                    "id": "1",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "{}"},
+                    "extra_content": {"google": {"thought_signature": "real"}},
+                }
+            ]},
+        ]
+        out = inject_gemini_dummy_thought_signatures_in_messages(msgs)
+        assert out[0]["tool_calls"][0]["extra_content"]["google"]["thought_signature"] == "real"
 
 
 class TestConversationContextToolCalls:

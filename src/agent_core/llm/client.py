@@ -261,8 +261,14 @@ class LLMClient:
         tool_choice: str = "auto",
         on_content_delta: Optional[Callable[[str], Any]] = None,
         on_reasoning_delta: Optional[Callable[[str], Any]] = None,
+        max_tokens_override: Optional[int] = None,
     ) -> LLMResponse:
-        """支持工具调用的对话，走当前 active provider。"""
+        """
+        支持工具调用的对话，走当前 active provider。
+
+        ``max_tokens_override`` 转发给 provider，覆盖构造期固定的 ``max_tokens``，
+        供 AgentCore 按当前 prompt 大小动态收紧 completion 预算。
+        """
         return await self._active_provider().chat_with_tools(
             messages=messages,
             tools=tools,
@@ -270,6 +276,7 @@ class LLMClient:
             tool_choice=tool_choice,
             on_content_delta=on_content_delta,
             on_reasoning_delta=on_reasoning_delta,
+            max_tokens_override=max_tokens_override,
         )
 
     async def chat_with_image(

@@ -95,6 +95,7 @@ def print_help():
 
 - `/quit` / `exit` &nbsp;&nbsp;退出程序
 - `/clear` &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;清空对话历史
+- `/compress [N]` &nbsp;&nbsp;主动折叠上下文为摘要；可选 `N` 指定保留最近几轮
 - `/help` &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;显示此帮助
 - `/usage` / `/stats` &nbsp;&nbsp;本会话 token 用量
 - `/session` &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;显示当前会话
@@ -126,6 +127,7 @@ def print_help():
         print("可用命令:")
         print("  /quit 或 exit        退出程序")
         print("  /clear               清空对话历史")
+        print("  /compress [N]        主动折叠上下文为摘要（可选 N 指定保留最近几轮）")
         print("  /help                显示此帮助")
         print("  /usage 或 /stats     本会话 token 用量")
         print("  /session             查看当前会话")
@@ -200,6 +202,58 @@ def print_token_usage_data(u: dict):
             print(
                 f"  上下文窗口:   当前 {ctx_cur:,} / 最大 {ctx_max:,}，剩余 {ctx_rem:,} token"
             )
+        print("=" * 50)
+        print()
+
+
+def _print_compress_result(res: dict) -> None:
+    """渲染 ``/compress`` 命令返回的结构化结果。
+
+    与 ``print_token_usage_data`` 风格一致：rich 渲染 markdown，回退纯文本。
+    """
+    before = int(res.get("messages_before", 0) or 0)
+    after = int(res.get("messages_after", 0) or 0)
+    summary_chars = int(res.get("summary_chars", 0) or 0)
+    cur_tokens = int(res.get("current_tokens", 0) or 0)
+    threshold = int(res.get("threshold_tokens", 0) or 0)
+    rounds = int(res.get("compression_round", 0) or 0)
+    model = str(res.get("model") or "—")
+    compressed = bool(res.get("compressed"))
+    session_loaded = res.get("session_loaded", True)
+
+    if not session_loaded:
+        msg = "当前会话尚未在 daemon 内驻留，无法压缩。请先发送任意消息触发加载。"
+        if _HAS_RICH and _RICH_CONSOLE is not None:
+            _RICH_CONSOLE.print(Markdown(f"# 上下文压缩\n\n- {msg}"))
+        else:
+            print()
+            print("  上下文压缩: " + msg)
+        return
+
+    status = "已压缩" if compressed else "未触发压缩（消息数不足以折叠或无变化）"
+    md = f"""
+# 上下文压缩
+
+- **状态**: `{status}`
+- **消息数**: `{before}` → `{after}`（保留 `{int(res.get("kept", after))}` 条）
+- **摘要长度**: `{summary_chars}` 字符
+- **触发时上下文**: `{cur_tokens:,}` token  /  阈值 `{threshold:,}` token
+- **当前模型**: `{model}`
+- **累计压缩轮次**: `{rounds}`
+"""
+    if _HAS_RICH and _RICH_CONSOLE is not None:
+        _RICH_CONSOLE.print(Markdown(md))
+    else:
+        print()
+        print("=" * 50)
+        print("  上下文压缩")
+        print("=" * 50)
+        print(f"  状态:           {status}")
+        print(f"  消息数:         {before} → {after}（保留 {int(res.get('kept', after))} 条）")
+        print(f"  摘要长度:       {summary_chars} 字符")
+        print(f"  触发时上下文:   {cur_tokens:,} token  /  阈值 {threshold:,} token")
+        print(f"  当前模型:       {model}")
+        print(f"  累计压缩轮次:   {rounds}")
         print("=" * 50)
         print()
 
@@ -540,6 +594,35 @@ async def run_interactive_loop(agent: Any) -> str:
             if cmd_lower == "clear":
                 await _call_method("clear_context")
                 print(hint("  对话历史已清空。"))
+                print(thin_separator())
+                continue
+
+            if cmd_lower.split()[:1] == ["compress"]:
+                parts_c = cmd_text.strip().split()
+                keep_arg: Optional[int] = None
+                if len(parts_c) >= 2:
+                    try:
+                        keep_arg = max(1, int(parts_c[1]))
+                    except (TypeError, ValueError):
+                        print(
+                            hint(
+                                "  用法: /compress [N]   N 为保留最近几轮（正整数）"
+                            )
+                        )
+                        print(thin_separator())
+                        continue
+                fn = getattr(agent, "compress_context", None)
+                if not callable(fn):
+                    print(hint("  当前 agent 不支持 /compress 指令。"))
+                    print(thin_separator())
+                    continue
+                try:
+                    res = await _maybe_await(fn(keep_recent_turns=keep_arg))
+                except Exception as exc:
+                    print(accent("  压缩失败: ") + str(exc))
+                    print(thin_separator())
+                    continue
+                _print_compress_result(res or {})
                 print(thin_separator())
                 continue
 

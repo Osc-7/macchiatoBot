@@ -457,6 +457,172 @@ class AgentCore:
             sid, source=self._source
         )
 
+    async def compress_context(
+        self,
+        *,
+        keep_recent_turns: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        手动触发上下文压缩（``/compress`` 命令路径）。
+
+        与自动触发（``ContextOverflowAction``）走完全相同的 Kernel 逻辑，**不是**
+        另起一套独立实现，因此对 ``running_summary`` / ``compression_round`` /
+        ``[会话进行中摘要]`` 注入都是同一种行为。
+
+        典型用途：
+
+        - 切换到更小窗口模型前先压一下，避免下一轮 LLM 直接超窗。
+        - 长会话主动瘦身，缩短后续 prompt、降低费用。
+        - 验证 / 调试上下文压缩链路。
+
+        Args:
+            keep_recent_turns: 保留最近 N 个完整 user 轮次；None 则取 profile / 全局默认。
+
+        Returns:
+            结构化结果字典，前端可直接渲染：
+
+            ============================  ===========================================
+            字段                           含义
+            ============================  ===========================================
+            ``compressed``                 是否实际发生压缩（消息数变少 或 产出摘要）
+            ``summary``                    本次摘要正文（无 summary LLM 时为空字符串）
+            ``summary_chars``              摘要字符数
+            ``messages_before`` / ``_after`` 压缩前后 messages 条数
+            ``current_tokens``             触发时上下文估算 token 数
+            ``threshold_tokens``           当前阈值（即 ``_compute_compress_threshold``）
+            ``compression_round``          已完成的压缩轮次
+            ``model``                      触发时活跃 provider 的 API 模型 ID
+            ============================  ===========================================
+        """
+        from system.kernel import AgentKernel
+
+        before = len(self._context.get_messages())
+        current_tokens = self._working_memory.get_current_tokens(
+            actual_tokens=self._last_prompt_tokens
+        )
+        threshold = self._compute_compress_threshold()
+
+        summary, kept = await AgentKernel.compress_context(
+            self, keep_recent_turns=keep_recent_turns
+        )
+
+        after = len(self._context.get_messages())
+        # 压缩后下一轮 LLM 的 prompt_tokens 会显著变化；清掉缓存的提示，
+        # 让 _compute_compress_threshold / get_token_usage 在下一轮基于真实计数。
+        self._last_prompt_tokens = None
+
+        try:
+            active_model = self._llm_client.model
+        except Exception:
+            active_model = ""
+
+        return {
+            "compressed": (after < before) or bool((summary or "").strip()),
+            "summary": summary or "",
+            "summary_chars": len(summary or ""),
+            "messages_before": before,
+            "messages_after": after,
+            "kept": kept,
+            "current_tokens": int(current_tokens or 0),
+            "threshold_tokens": int(threshold),
+            "compression_round": self._working_memory.compression_round,
+            "model": active_model,
+        }
+
+    def _compute_effective_max_tokens(self, payload: Any) -> Optional[int]:
+        """
+        计算本次 ``chat_with_tools`` 的 completion 预算（``max_tokens``）。
+
+        部分 provider（OpenAI 兼容、Kimi 等）会把 ``max_tokens`` 视作「必须从
+        context_window 里预留的额度」——例如配置 ``max_tokens=65536`` 而模型窗口
+        128k 时，prompt 只剩 ~62k 可用；prompt 一旦更大就会以 400 报错
+        ``maximum context length is X. However, you requested ...``。
+
+        本方法把预算收紧为
+        ``min(provider 配置 max_tokens, context_window − estimated_prompt − safety)``，
+        让 completion 跟着 prompt 大小自动让位；返回值会作为 ``max_tokens_override``
+        传给 provider，``None`` 表示按 provider 构造期固定值走（无法估算时回退）。
+
+        ``payload`` 是 ``InternalLoader.assemble`` 的产物，含 ``system`` / ``messages``
+        / ``tools``。估算口径与 ``estimate_messages_tokens`` 一致。
+        """
+        try:
+            cw = int(getattr(self._llm_client, "context_window", 0) or 0)
+        except Exception:
+            cw = 0
+        try:
+            cfg_max = int(getattr(self._llm_client, "max_tokens", 0) or 0)
+        except Exception:
+            cfg_max = 0
+
+        if cw <= 0:
+            # 没有窗口信息，无法判断，按构造期固定值；不返回 override
+            return None
+
+        # 估算 prompt = system + messages + tools schema
+        try:
+            from agent_core.memory.working_memory import (
+                estimate_messages_tokens,
+                estimate_tokens,
+            )
+            est = 0
+            sys_text = getattr(payload, "system", None) or ""
+            est += estimate_tokens(sys_text)
+            msgs = getattr(payload, "messages", None) or []
+            est += estimate_messages_tokens(msgs)
+            tools = getattr(payload, "tools", None) or []
+            if tools:
+                import json as _json
+
+                est += estimate_tokens(_json.dumps(tools, ensure_ascii=False))
+        except Exception:
+            return None
+
+        safety_margin = 1024
+        budget = cw - est - safety_margin
+        if budget < 256:
+            # 已经几乎溢出；给最少 256 token 的尝试空间，让 provider 自己报错
+            # （此时压缩 / overflow 截断应已介入；不能给 0 否则部分 provider 直接拒绝）
+            budget = 256
+
+        if cfg_max > 0:
+            return min(cfg_max, budget)
+        return budget
+
+    def _compute_compress_threshold(self) -> int:
+        """
+        计算当前轮次的「触发上下文压缩」阈值（token 数）。
+
+        由 ``min`` 三个上限构成，任一收紧都会先触发：
+
+        1. ``memory.max_working_tokens`` —— 配置的绝对上限；
+        2. ``CoreProfile.max_context_tokens`` —— 子 Agent / 后台 Core 的额外封顶；
+        3. ``ratio * llm_client.context_window`` —— 按当前**活跃模型**上下文窗口的比例。
+
+        引入第 3 项是为了在运行时切换模型（``/model``）后自动适配：例如把 ``max_working_tokens``
+        配成 1M 适配大窗口模型，但临时切到 200k 窗口模型时会按比例自动收紧，避免一进 LLM
+        就因 prompt 超窗而失败。``ratio`` 取 ``memory.context_window_ratio``；为 ``None``
+        或 ``context_window`` 不可用时跳过该项。
+        """
+        threshold = int(self._working_memory.max_tokens)
+
+        profile = getattr(self, "_core_profile", None)
+        mct = getattr(profile, "max_context_tokens", None) if profile else None
+        if isinstance(mct, int) and mct > 0:
+            threshold = min(threshold, mct)
+
+        ratio = getattr(self._config.memory, "context_window_ratio", None)
+        if ratio:
+            try:
+                cw = int(getattr(self._llm_client, "context_window", 0) or 0)
+            except Exception:
+                cw = 0
+            if cw > 0:
+                ratio_threshold = max(int(cw * float(ratio)), 1)
+                threshold = min(threshold, ratio_threshold)
+
+        return max(threshold, 1)
+
     def get_token_usage(self) -> dict:
         """
         获取本会话累计的 token 用量。
@@ -662,13 +828,7 @@ class AgentCore:
                 current_tokens = self._working_memory.get_current_tokens(
                     actual_tokens=self._last_prompt_tokens
                 )
-                compress_threshold = self._working_memory.max_tokens
-                profile = getattr(self, "_core_profile", None)
-                mct = (
-                    getattr(profile, "max_context_tokens", None) if profile else None
-                )
-                if mct is not None:
-                    compress_threshold = min(compress_threshold, mct)
+                compress_threshold = self._compute_compress_threshold()
                 if current_tokens >= compress_threshold:
                     _ = yield ContextOverflowAction(
                         current_tokens=current_tokens,
@@ -707,6 +867,11 @@ class AgentCore:
                     },
                 )
 
+                # 自适应 completion 预算：把 max_tokens 收到
+                # ``min(配置 max_tokens, context_window − estimated_prompt − safety)``，
+                # 防止常量 max_tokens（例如 65536）+ prompt 一起把窗口顶爆。
+                effective_max_tokens = self._compute_effective_max_tokens(payload)
+
                 # ── AgentCore 直接调用 LLM（CPU 自旋，无 Kernel 中介）───
                 response = await self._llm_client.chat_with_tools(
                     system_message=payload.system,
@@ -715,6 +880,7 @@ class AgentCore:
                     tool_choice="auto",
                     on_content_delta=hooks.on_assistant_delta if hooks else None,
                     on_reasoning_delta=hooks.on_reasoning_delta if hooks else None,
+                    max_tokens_override=effective_max_tokens,
                 )
 
                 if self._session_logger:
@@ -842,15 +1008,29 @@ class AgentCore:
                                 turn_id, iteration, tool_call.id, result, duration_ms
                             )
 
-                        self._context.add_tool_result(tool_call.id, result)
+                        # 媒体与待发送附件用「原始 result」，避免截断丢失 data 中的
+                        # 资源指针（图片/视频路径等）。
                         self._queue_media_for_next_call(result)
                         self._collect_outgoing_attachment(result)
+
+                        # 入场截断：单条 tool result 超阈值时落盘到工作区
+                        # .tool_results/，messages 与 chat_history.db 中只留 head + 标记，
+                        # 防止单次 web_search/file_read 等撑爆模型上下文窗口。
+                        store_result = self._maybe_offload_tool_result_for_context(
+                            result,
+                            tool_name=tool_call.name,
+                            tool_call_id=tool_call.id,
+                            turn_id=turn_id,
+                            iteration=iteration,
+                        )
+
+                        self._context.add_tool_result(tool_call.id, store_result)
 
                         if self._memory_enabled:
                             msg_id = self._require_chat_history_db().write_message(
                                 session_id=self._session_id,
                                 role="tool",
-                                content=result.to_json(),
+                                content=store_result.to_json(),
                                 tool_name=tool_call.name,
                                 source=self._source,
                             )
@@ -1147,6 +1327,85 @@ class AgentCore:
     def _collect_outgoing_attachment(self, result: ToolResult) -> None:
         """将工具结果中声明的「随回复发给用户的附件」加入本轮待发送列表。"""
         collect_outgoing_attachment(result, self._outgoing_attachments)
+
+    def _maybe_offload_tool_result_for_context(
+        self,
+        result: ToolResult,
+        *,
+        tool_name: str,
+        tool_call_id: str,
+        turn_id: int = 0,
+        iteration: int = 0,
+    ) -> ToolResult:
+        """
+        包装 :func:`tool_result_overflow.maybe_offload_tool_result`：
+
+        若 ``memory.max_tool_result_tokens`` 为 None/0 或当前 result 不超阈值，
+        原样返回；否则把完整 JSON 落盘到工作区 ``.tool_results/``，返回截断后的
+        新 ``ToolResult``。
+
+        触发时会通过 ``session_logger`` 记一条 ``tool_overflow`` 审计事件，
+        便于事后定位「为什么这条 tool result 在 messages 里只剩 head」。
+        """
+        from agent_core.agent.tool_result_overflow import (
+            maybe_offload_tool_result,
+            resolve_overflow_dirs,
+        )
+
+        mem_cfg = self._config.memory
+        max_tokens = getattr(mem_cfg, "max_tool_result_tokens", None)
+        if not max_tokens or max_tokens <= 0:
+            return result
+
+        cmd_cfg = self._config.command_tools
+        overflow_dir_name = (
+            getattr(mem_cfg, "tool_result_overflow_dir", None) or ".tool_results"
+        )
+        try:
+            workspace_dir, is_admin, admin_dir = resolve_overflow_dirs(
+                cmd_cfg=cmd_cfg,
+                user_id=self._user_id,
+                source=self._source,
+                profile=getattr(self, "_core_profile", None),
+                overflow_dir_name=overflow_dir_name,
+            )
+        except Exception as exc:  # pragma: no cover —— workspace_paths 极少抛
+            logger.warning(
+                "_maybe_offload_tool_result_for_context: resolve dirs failed: %s; skip",
+                exc,
+            )
+            return result
+
+        new_result, outcome = maybe_offload_tool_result(
+            result,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            workspace_dir=workspace_dir,
+            max_tokens=int(max_tokens),
+            overflow_dir_name=overflow_dir_name,
+            is_workspace_admin=is_admin,
+            admin_overflow_dir=admin_dir,
+        )
+
+        if outcome.triggered and self._session_logger is not None:
+            try:
+                self._session_logger.on_tool_overflow(
+                    turn_id=turn_id,
+                    iteration=iteration,
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    original_tokens=outcome.original_tokens,
+                    kept_tokens=outcome.kept_tokens,
+                    max_tokens=int(max_tokens),
+                    overflow_path=str(outcome.overflow_path)
+                    if outcome.overflow_path
+                    else "",
+                    display_path=outcome.display_path,
+                )
+            except Exception:  # session_logger 写失败不应影响主路径
+                pass
+
+        return new_result
 
     def get_outgoing_attachments(self) -> List[Dict[str, Any]]:
         """返回本轮登记的要随回复一起发给用户的附件列表（只读副本）。"""

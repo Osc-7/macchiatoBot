@@ -441,6 +441,54 @@ class AutomationCoreGateway:
             if callable(clear_fn):
                 clear_fn()
 
+    async def compress_context_for_session(
+        self,
+        session_id: str,
+        *,
+        keep_recent_turns: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """主动触发指定 session 的 AgentCore 压缩，返回结构化结果给 IPC 客户端。
+
+        若 session 当前未驻留（CorePool 没有 live entry），返回未命中的占位结果。
+        """
+        entry = self._kernel_scheduler.core_pool.get_entry(session_id)
+        if entry is None:
+            return {
+                "compressed": False,
+                "summary": "",
+                "summary_chars": 0,
+                "messages_before": 0,
+                "messages_after": 0,
+                "kept": 0,
+                "current_tokens": 0,
+                "threshold_tokens": 0,
+                "compression_round": 0,
+                "model": "",
+                "session_loaded": False,
+            }
+        fn = getattr(entry.agent, "compress_context", None)
+        if not callable(fn):
+            return {
+                "compressed": False,
+                "summary": "",
+                "summary_chars": 0,
+                "messages_before": 0,
+                "messages_after": 0,
+                "kept": 0,
+                "current_tokens": 0,
+                "threshold_tokens": 0,
+                "compression_round": 0,
+                "model": "",
+                "session_loaded": True,
+                "supported": False,
+            }
+        result = await fn(keep_recent_turns=keep_recent_turns)
+        if isinstance(result, dict):
+            result.setdefault("session_loaded", True)
+            result.setdefault("supported", True)
+            return result
+        return {"compressed": False, "session_loaded": True, "supported": True}
+
     def clear_context(self) -> None:
         entry = self._kernel_scheduler.core_pool.get_entry(self._active_session_id)
         if entry is not None:

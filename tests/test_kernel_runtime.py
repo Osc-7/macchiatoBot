@@ -379,7 +379,7 @@ async def test_compress_context_keeps_complete_recent_turn() -> None:
     ]
     agent = SimpleNamespace(_context=ctx, _summary_llm_client=None)
 
-    summary, kept = await kernel._compress_context(agent, keep_recent_turns=1)
+    summary, kept = await kernel.compress_context(agent, keep_recent_turns=1)
 
     assert summary == ""
     assert kept == 4
@@ -415,7 +415,7 @@ async def test_compress_context_inserts_single_summary_message_before_kept_turns
         _build_system_prompt=MagicMock(return_value="主系统提示"),
     )
 
-    summary, kept = await kernel._compress_context(agent, keep_recent_turns=1)
+    summary, kept = await kernel.compress_context(agent, keep_recent_turns=1)
 
     assert summary.strip() == "压缩结果"
     assert kept == 3

@@ -47,6 +47,7 @@ def _format_token_usage(u: Dict[str, Any]) -> str:
 def _help_text() -> str:
     return """可用指令：
 /clear - 清空对话历史
+/compress [N] - 主动折叠上下文为摘要（可选 N 指定保留最近几轮）
 /usage 或 /stats - 本会话 token 用量
 /model 或 /model list - 列出可用 LLM（★ 为当前主对话）
 /model <备注名或配置名> - 切换主对话模型（与配置里 label 一致即可，可含空格）
@@ -56,6 +57,35 @@ def _help_text() -> str:
 /session new [id] - 创建并切换到新会话
 /session delete <id> - 删除会话记录
 /help - 显示此帮助"""
+
+
+def _format_compress_result(res: Dict[str, Any]) -> str:
+    """把 ``/compress`` 返回的结构化结果格式化为飞书可读纯文本。"""
+    if not res.get("session_loaded", True):
+        return (
+            "上下文压缩：当前会话尚未在 daemon 内驻留，无法压缩。\n"
+            "请先发送任意消息触发加载，再执行 /compress。"
+        )
+
+    before = int(res.get("messages_before", 0) or 0)
+    after = int(res.get("messages_after", 0) or 0)
+    kept = int(res.get("kept", after) or after)
+    cur = int(res.get("current_tokens", 0) or 0)
+    th = int(res.get("threshold_tokens", 0) or 0)
+    chars = int(res.get("summary_chars", 0) or 0)
+    rounds = int(res.get("compression_round", 0) or 0)
+    model = str(res.get("model") or "—")
+    status = "已压缩" if res.get("compressed") else "未触发压缩（消息数不足以折叠）"
+
+    return (
+        "上下文压缩\n"
+        f"状态: {status}\n"
+        f"消息数: {before} → {after}（保留 {kept} 条）\n"
+        f"摘要长度: {chars} 字符\n"
+        f"触发时上下文: {cur:,} token  /  阈值 {th:,} token\n"
+        f"当前模型: {model}\n"
+        f"累计压缩轮次: {rounds}"
+    )
 
 
 async def try_handle_slash_command(
@@ -90,6 +120,20 @@ async def try_handle_slash_command(
     if cmd_lower == "clear":
         await client.clear_context()
         return True, "对话历史已清空。"
+
+    # /compress [N]
+    if cmd_lower == "compress":
+        keep_arg: Optional[int] = None
+        if len(parts) >= 2:
+            try:
+                keep_arg = max(1, int(parts[1]))
+            except (TypeError, ValueError):
+                return True, "用法: /compress [N]   N 为保留最近几轮（正整数）"
+        try:
+            res = await client.compress_context(keep_arg)
+        except Exception as exc:
+            return True, f"压缩失败: {exc}"
+        return True, _format_compress_result(res or {})
 
     # /help
     if cmd_lower == "help":

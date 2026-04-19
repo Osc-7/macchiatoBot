@@ -85,6 +85,40 @@ async def test_chat_with_tools_respects_parallel_tool_calls_cap():
 
 
 @pytest.mark.asyncio
+async def test_chat_with_tools_max_tokens_override_takes_effect():
+    """``max_tokens_override`` 应覆盖构造期 ``max_tokens``，供 AgentCore 自适应收紧。"""
+    with patch("agent_core.llm.providers.openai_compat.AsyncOpenAI") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=_mock_openai_chat_completion_response()
+        )
+        mock_client.close = AsyncMock()
+        mock_cls.return_value = mock_client
+
+        provider = _make_provider(max_tokens=65536)
+        await provider.chat_with_tools(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            max_tokens_override=8192,
+        )
+        assert mock_client.chat.completions.create.call_args.kwargs["max_tokens"] == 8192
+
+        # None / 0 / 负值 → 回退到构造期固定值，不污染请求
+        await provider.chat_with_tools(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            max_tokens_override=None,
+        )
+        assert mock_client.chat.completions.create.call_args.kwargs["max_tokens"] == 65536
+        await provider.chat_with_tools(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            max_tokens_override=0,
+        )
+        assert mock_client.chat.completions.create.call_args.kwargs["max_tokens"] == 65536
+
+
+@pytest.mark.asyncio
 async def test_vendor_params_forwarded_as_extra_body():
     with patch("agent_core.llm.providers.openai_compat.AsyncOpenAI") as mock_cls:
         mock_client = AsyncMock()

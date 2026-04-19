@@ -327,6 +327,17 @@ class AutomationIPCServer:
             await self._gateway.clear_context_for_session(active_session)
             return {"ok": True}
 
+        if method == "compress_context":
+            keep_raw = params.get("keep_recent_turns")
+            try:
+                keep = int(keep_raw) if keep_raw is not None else None
+            except (TypeError, ValueError):
+                keep = None
+            result = await self._gateway.compress_context_for_session(
+                active_session, keep_recent_turns=keep
+            )
+            return {"ok": True, "result": result}
+
         if method == "get_token_usage":
             usage = self._gateway.get_token_usage(session_id=active_session)
             return {"usage": usage}
@@ -668,6 +679,23 @@ class AutomationIPCClient:
 
     async def clear_context(self) -> None:
         await self._request("clear_context", {})
+
+    async def compress_context(
+        self,
+        keep_recent_turns: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """请求 daemon 侧对当前 session 的上下文做主动压缩。
+
+        返回结构化结果（``compressed`` / ``messages_before`` / ``messages_after``
+        / ``summary_chars`` / ``current_tokens`` / ``threshold_tokens`` / ``model``
+        / ``compression_round`` / ``session_loaded`` 等），由前端格式化为人类可读消息。
+        """
+        params: Dict[str, Any] = {}
+        if isinstance(keep_recent_turns, int) and keep_recent_turns > 0:
+            params["keep_recent_turns"] = keep_recent_turns
+        data = await self._request("compress_context", params)
+        result = data.get("result")
+        return dict(result) if isinstance(result, dict) else {}
 
     async def list_models(self) -> List[Dict[str, Any]]:
         """列出 daemon 侧当前 session 可用的 LLM provider。"""

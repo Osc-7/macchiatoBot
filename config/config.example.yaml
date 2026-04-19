@@ -313,6 +313,15 @@ memory:
   working_summary_threshold: 0.8  # 软阈值：tokens 达此比例且消息数 > keep_recent*2 时总结
   working_summary_hard_ratio: null  # 硬阈值：设为数字(如 5)则 tokens >= max_working_tokens*此值时强制总结，不受条数限制
   working_keep_recent: 4          # 总结时保留最近几轮原始消息
+  # 按当前活跃模型 context_window 的比例计算压缩阈值，与 max_working_tokens 取较小值；
+  # 运行时切换模型（/model）会自动适配——例如从 1M 模型切到 200k 模型时会按 200k*ratio 收紧。
+  # 设为 null 关闭按比例计算，仅按 max_working_tokens 触发。
+  context_window_ratio: 0.75
+  # 单个 tool result 的 token 上限。超出时 messages 中只保留 head N tokens 与显式截断标记，
+  # 完整内容自动转储到工作区 .tool_results/，AI 可用 read_file/cat 按需检索。
+  # 防止 web_search、file_read 等单条工具结果一次性撑爆模型上下文窗口。设为 null/0 关闭。
+  max_tool_result_tokens: 30000
+  tool_result_overflow_dir: ".tool_results"
   # 记忆库路径（统一按 frontend/user 划分）
   memory_base_dir: "./data/memory"  # 各 owner: {base}/{frontend}/{user}/ 含 content/、long_term/、chat_history.db
   # 检索策略

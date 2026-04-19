@@ -64,8 +64,15 @@ class BaseProvider(ABC):
         tool_choice: str = "auto",
         on_content_delta: Optional[Callable[[str], Any]] = None,
         on_reasoning_delta: Optional[Callable[[str], Any]] = None,
+        max_tokens_override: Optional[int] = None,
     ) -> LLMResponse:
-        """支持工具调用的对话（主循环使用）。"""
+        """
+        支持工具调用的对话（主循环使用）。
+
+        ``max_tokens_override`` 不为 ``None`` 时覆盖构造期固定的 ``max_tokens``，
+        供 AgentCore 在调用前按「context_window − estimated_prompt − safety_margin」
+        动态收紧 completion 预算，避免常量 ``max_tokens`` 把窗口顶爆。
+        """
 
     @abstractmethod
     async def chat_with_image(

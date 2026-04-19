@@ -4,6 +4,7 @@ Agent 测试用例
 测试 AgentCore 的核心功能。
 """
 
+import json
 from typing import Any, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -772,3 +773,501 @@ class TestAgentIntegration:
 
         assert len(agent.context) == 0
         assert agent.get_turn_count() == 0
+
+
+# ============== 上下文压缩阈值测试 ==============
+
+
+class TestCompressThreshold:
+    """``AgentCore._compute_compress_threshold`` 的单元测试。
+
+    覆盖三个上限的 ``min`` 组合，以及切换模型时按 context_window 比例自适应的行为。
+    """
+
+    @staticmethod
+    def _make_agent(
+        *,
+        max_working_tokens: int,
+        context_window_ratio: Optional[float],
+        context_window: Optional[int],
+        profile_max: Optional[int] = None,
+    ):
+        """构造最小可用 AgentCore，避开真实 LLM 与磁盘 IO。"""
+        cfg = Config(
+            llm=LLMConfig(api_key="k", model="test-model"),
+            agent=AgentConfig(max_iterations=1),
+        )
+        cfg.memory.enabled = False
+        cfg.memory.max_working_tokens = max_working_tokens
+        cfg.memory.context_window_ratio = context_window_ratio
+
+        profile = (
+            CoreProfile(max_context_tokens=profile_max)
+            if profile_max is not None
+            else None
+        )
+
+        with patch("agent_core.agent.agent.LLMClient"):
+            agent = AgentCore(config=cfg, tools=[], core_profile=profile)
+
+        # 用属性 mock 替换 LLMClient 的 context_window，让测试可控；
+        # None 表示模拟 provider 暂未声明窗口。
+        type(agent._llm_client).context_window = property(  # type: ignore[assignment]
+            lambda _self, _cw=context_window: _cw if _cw is not None else 0
+        )
+        return agent
+
+    def test_threshold_uses_min_of_absolute_and_ratio_window(self):
+        """ratio*window < max_working_tokens 时应以前者为阈值。"""
+        agent = self._make_agent(
+            max_working_tokens=1_000_000,
+            context_window_ratio=0.5,
+            context_window=200_000,
+        )
+        assert agent._compute_compress_threshold() == 100_000
+
+    def test_threshold_falls_back_to_absolute_when_ratio_disabled(self):
+        """ratio=None 应只看绝对上限，与窗口大小无关。"""
+        agent = self._make_agent(
+            max_working_tokens=8_000,
+            context_window_ratio=None,
+            context_window=1_000_000,
+        )
+        assert agent._compute_compress_threshold() == 8_000
+
+    def test_threshold_falls_back_to_absolute_when_window_unknown(self):
+        """provider 未声明 context_window（返回 0）时跳过比例项。"""
+        agent = self._make_agent(
+            max_working_tokens=50_000,
+            context_window_ratio=0.75,
+            context_window=None,
+        )
+        assert agent._compute_compress_threshold() == 50_000
+
+    def test_threshold_respects_profile_max_context_tokens(self):
+        """profile.max_context_tokens 进一步收紧（子 Agent 场景）。"""
+        agent = self._make_agent(
+            max_working_tokens=200_000,
+            context_window_ratio=None,
+            context_window=1_000_000,
+            profile_max=40_000,
+        )
+        assert agent._compute_compress_threshold() == 40_000
+
+    def test_threshold_takes_min_across_all_three(self):
+        """三路上限同时存在，最终取最小那一路。"""
+        agent = self._make_agent(
+            max_working_tokens=300_000,
+            context_window_ratio=0.8,
+            context_window=200_000,  # ratio*window=160_000
+            profile_max=120_000,
+        )
+        assert agent._compute_compress_threshold() == 120_000
+
+    def test_threshold_shrinks_after_model_switch_to_smaller_window(self):
+        """模拟运行时 /model 切换：context_window 变小后，阈值自动收紧。"""
+        agent = self._make_agent(
+            max_working_tokens=1_000_000,
+            context_window_ratio=0.75,
+            context_window=1_000_000,
+        )
+        # 切换前：ratio*1M = 750_000
+        assert agent._compute_compress_threshold() == 750_000
+
+        # 模拟 switch_model 后，活跃 provider 窗口变成 200k
+        type(agent._llm_client).context_window = property(  # type: ignore[assignment]
+            lambda _self: 200_000
+        )
+        # 切换后：ratio*200k = 150_000，应立即生效（无需重建 WorkingMemory）
+        assert agent._compute_compress_threshold() == 150_000
+
+
+# ============== /compress 手动压缩测试 ==============
+
+
+class TestManualCompressContext:
+    """``AgentCore.compress_context``：``/compress`` 命令路径的端到端单测。
+
+    覆盖：
+    - 有 summary LLM 时正常折叠并返回结构化结果；
+    - 无 summary LLM 时仅截断；
+    - 消息数不足以折叠时的幂等返回；
+    - 压缩后 ``_last_prompt_tokens`` 重置（避免下一轮阈值判断误用旧值）。
+    """
+
+    @staticmethod
+    def _make_agent(*, with_summary_llm: bool, max_working_tokens: int = 200_000):
+        cfg = Config(
+            llm=LLMConfig(api_key="k", model="test-model"),
+            agent=AgentConfig(max_iterations=1),
+        )
+        cfg.memory.enabled = False
+        cfg.memory.max_working_tokens = max_working_tokens
+
+        with patch("agent_core.agent.agent.LLMClient"):
+            agent = AgentCore(config=cfg, tools=[])
+
+        type(agent._llm_client).context_window = property(  # type: ignore[assignment]
+            lambda _self: 200_000
+        )
+        type(agent._llm_client).model = property(  # type: ignore[assignment]
+            lambda _self: "test-model"
+        )
+
+        if with_summary_llm:
+            llm = MagicMock()
+            llm.chat = AsyncMock(
+                return_value=MagicMock(content="折叠后的会话摘要")
+            )
+            agent._summary_llm_client = llm
+        else:
+            agent._summary_llm_client = None
+        return agent
+
+    def _seed_messages(self, agent, n_user_turns: int) -> None:
+        """填充 n_user_turns 个 (user, assistant) 对到 context.messages。"""
+        ctx = agent._context
+        for i in range(n_user_turns):
+            ctx.add_user_message(f"u{i}")
+            ctx.add_assistant_message(content=f"a{i}")
+
+    @pytest.mark.asyncio
+    async def test_compress_with_summary_llm_returns_structured_result(self):
+        agent = self._make_agent(with_summary_llm=True)
+        self._seed_messages(agent, n_user_turns=8)
+        agent._last_prompt_tokens = 12345
+
+        res = await agent.compress_context(keep_recent_turns=2)
+
+        assert res["compressed"] is True
+        assert res["summary"] == "折叠后的会话摘要"
+        assert res["summary_chars"] == len("折叠后的会话摘要")
+        assert res["messages_before"] == 16
+        # 摘要 user + 最近 2 轮 (user, assistant) = 5 条
+        assert res["messages_after"] == 5
+        assert res["kept"] == 5
+        assert res["compression_round"] == 1
+        # 当前模型字段从 LLMClient 透出，便于前端展示
+        assert res["model"] == "test-model"
+        # 阈值字段必须有，供 /compress 卡片展示
+        assert res["threshold_tokens"] > 0
+        # 上下文 messages 的首条应是注入的「[会话进行中摘要]」
+        first = agent._context.get_messages()[0]
+        assert first["role"] == "user"
+        assert "[会话进行中摘要]" in first["content"]
+        # 压缩后 _last_prompt_tokens 必须重置，否则下一轮阈值判断会用旧值
+        assert agent._last_prompt_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_compress_without_summary_llm_only_truncates(self):
+        agent = self._make_agent(with_summary_llm=False)
+        self._seed_messages(agent, n_user_turns=6)
+
+        res = await agent.compress_context(keep_recent_turns=2)
+
+        assert res["summary"] == ""
+        assert res["summary_chars"] == 0
+        assert res["messages_before"] == 12
+        # 无摘要：保留最近 2 轮原文
+        assert res["messages_after"] == 4
+        # 即使没摘要，也算压缩生效（消息数变少）
+        assert res["compressed"] is True
+        # 截断后 messages 应以最近的 user 起头
+        assert agent._context.get_messages()[0]["content"] == "u4"
+
+    @pytest.mark.asyncio
+    async def test_compress_is_idempotent_when_too_few_messages(self):
+        """消息数 ≤ keep_recent*2 时直接返回原状态（不调 summary LLM）。"""
+        agent = self._make_agent(with_summary_llm=True)
+        self._seed_messages(agent, n_user_turns=2)  # 4 条 messages
+
+        res = await agent.compress_context(keep_recent_turns=6)
+
+        assert res["compressed"] is False
+        assert res["messages_before"] == res["messages_after"] == 4
+        assert res["summary"] == ""
+        # 不应触发 LLM
+        agent._summary_llm_client.chat.assert_not_called()
+
+
+# ============== 自适应 completion 预算 ==============
+
+
+class TestEffectiveMaxTokens:
+    """``AgentCore._compute_effective_max_tokens``：按 prompt 大小动态收紧
+    completion 预算，避免常量 ``max_tokens`` 把窗口顶爆。
+
+    覆盖：
+    - 窗口未知时返回 None（按 provider 构造期固定值走）；
+    - prompt 留有大量余量时取 ``min(配置 max_tokens, budget)``；
+    - prompt 占满窗口时退化到最小预算 256，不返回 0；
+    - 切换到小窗口模型后预算自动收紧。
+    """
+
+    @staticmethod
+    def _make_agent(*, configured_max: int = 65536):
+        cfg = Config(
+            llm=LLMConfig(api_key="k", model="test-model", max_tokens=configured_max),
+            agent=AgentConfig(max_iterations=1),
+        )
+        cfg.memory.enabled = False
+        with patch("agent_core.agent.agent.LLMClient"):
+            agent = AgentCore(config=cfg, tools=[])
+        return agent
+
+    @staticmethod
+    def _set_window(agent, *, window: int, max_tokens: int):
+        type(agent._llm_client).context_window = property(  # type: ignore[assignment]
+            lambda _self, _cw=window: _cw
+        )
+        type(agent._llm_client).max_tokens = property(  # type: ignore[assignment]
+            lambda _self, _m=max_tokens: _m
+        )
+
+    @staticmethod
+    def _payload(*, system: str = "", messages=None, tools=None):
+        p = MagicMock()
+        p.system = system
+        p.messages = messages or []
+        p.tools = tools or []
+        return p
+
+    def test_returns_none_when_window_unknown(self):
+        agent = self._make_agent()
+        self._set_window(agent, window=0, max_tokens=65536)
+        assert agent._compute_effective_max_tokens(self._payload()) is None
+
+    def test_clamps_to_configured_max_when_budget_is_larger(self):
+        """prompt 很小、budget >> 配置 max_tokens 时，返回配置值（不放大）。"""
+        agent = self._make_agent(configured_max=4_000)
+        self._set_window(agent, window=128_000, max_tokens=4_000)
+        out = agent._compute_effective_max_tokens(
+            self._payload(system="hi", messages=[{"role": "user", "content": "x"}])
+        )
+        assert out == 4_000
+
+    def test_shrinks_when_prompt_takes_most_of_window(self):
+        """prompt 占走大半窗口时，budget < 配置 max_tokens，应返回 budget。"""
+        agent = self._make_agent(configured_max=65536)
+        self._set_window(agent, window=128_000, max_tokens=65536)
+        # 构造约 100k tokens 的 messages
+        big = "abcd" * 25_000  # ~25k tokens
+        msgs = [{"role": "user", "content": big} for _ in range(4)]  # ~100k
+        out = agent._compute_effective_max_tokens(self._payload(messages=msgs))
+        assert out is not None
+        assert out < 65536, f"预算应被收紧到窗口剩余空间，实际 {out}"
+        assert out > 256
+
+    def test_falls_back_to_min_floor_when_prompt_overflows(self):
+        """prompt 已经接近/超过窗口时，预算退化为 256（不返回 0/负数）。"""
+        agent = self._make_agent(configured_max=4_000)
+        self._set_window(agent, window=8_000, max_tokens=4_000)
+        big = "abcd" * 10_000  # ~10k tokens > window
+        out = agent._compute_effective_max_tokens(
+            self._payload(messages=[{"role": "user", "content": big}])
+        )
+        assert out == 256
+
+    def test_window_switch_shrinks_budget(self):
+        """模拟运行时切换到小窗口模型，预算应自动收紧。"""
+        agent = self._make_agent(configured_max=65536)
+        msgs = [{"role": "user", "content": "abcd" * 10_000}]  # ~10k tokens
+
+        self._set_window(agent, window=1_000_000, max_tokens=65536)
+        big_window_budget = agent._compute_effective_max_tokens(self._payload(messages=msgs))
+
+        self._set_window(agent, window=64_000, max_tokens=65536)
+        small_window_budget = agent._compute_effective_max_tokens(self._payload(messages=msgs))
+
+        assert big_window_budget == 65536
+        assert small_window_budget is not None
+        assert small_window_budget < big_window_budget
+
+
+# ============== 入场截断在 run_loop 中的集成 ==============
+
+
+class TestRunLoopToolResultOverflow:
+    """验证 ``AgentCore.run_loop`` 在 ``add_tool_result`` 前正确触发入场截断。
+
+    完全在内存中跑 mock 的 LLM + tool，确认 messages 中的 tool result 已被截断、
+    完整内容已落盘到 ``{workspace_dir}/.tool_results/``。
+    """
+
+    @pytest.mark.asyncio
+    async def test_oversized_tool_result_is_truncated_and_persisted(self, tmp_path):
+        from agent_core.config import CommandToolsConfig
+        from agent_core.kernel_interface import (
+            ContextOverflowAction,
+            ReturnAction,
+            ToolCallAction,
+            ToolResultEvent,
+        )
+        from agent_core.memory.working_memory import estimate_tokens
+
+        # 大返回的 tool —— 估算约 40k tokens 的 data
+        big_text = "abcd" * 40_000  # ~40k tokens
+        big_tool = MockTool(
+            name="big_tool",
+            execute_result=ToolResult(
+                success=True, message="search done", data={"raw": big_text}
+            ),
+        )
+
+        cfg = Config(
+            llm=LLMConfig(api_key="k", model="test-model"),
+            agent=AgentConfig(max_iterations=3),
+            command_tools=CommandToolsConfig(
+                enabled=False,
+                workspace_base_dir=str(tmp_path / "workspace"),
+                workspace_isolation_enabled=True,
+            ),
+        )
+        cfg.memory.enabled = False
+        cfg.memory.max_tool_result_tokens = 5_000
+
+        with patch("agent_core.agent.agent.LLMClient"):
+            agent = AgentCore(
+                config=cfg,
+                tools=[big_tool],
+                user_id="alice",
+                source="cli",
+            )
+
+        # 第一轮：调一次 big_tool；第二轮：返回最终回复
+        tool_call_response = LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(id="call_big", name="big_tool", arguments={"input": "go"})
+            ],
+            finish_reason="tool_calls",
+        )
+        final_response = LLMResponse(content="done", tool_calls=[])
+
+        # 让自适应 max_tokens 退路：context_window=0 时返回 None，省掉 patch
+        type(agent._llm_client).context_window = property(  # type: ignore[assignment]
+            lambda _self: 0
+        )
+        type(agent._llm_client).max_tokens = property(  # type: ignore[assignment]
+            lambda _self: 4096
+        )
+
+        # 直接驱动 run_loop 协程，避免依赖完整 AgentKernel
+        agent._context.add_user_message("trigger")
+        gen = agent.run_loop(turn_id=1, hooks=None)
+        # 1) 第一次 yield：LLM 调用前，patch chat_with_tools 返回 tool_call_response
+        with patch.object(
+            agent._llm_client,
+            "chat_with_tools",
+            new_callable=AsyncMock,
+            side_effect=[tool_call_response, final_response],
+        ):
+            action = await gen.asend(None)
+            # 期望先 yield ToolCallAction（首轮 token=0，不会触发压缩）
+            assert isinstance(action, ToolCallAction), f"unexpected: {type(action)}"
+            assert action.tool_name == "big_tool"
+
+            # 2) 喂回 tool 执行结果
+            action = await gen.asend(
+                ToolResultEvent(
+                    tool_call_id=action.tool_call_id,
+                    result=big_tool._execute_result,
+                )
+            )
+            # run_loop 应在第二轮回到 LLM；此时 messages 中的 tool result 应已截断
+            assert isinstance(action, (ReturnAction, ContextOverflowAction))
+
+        # 验证 messages 中的 tool result 已被截断
+        msgs = agent._context.get_messages()
+        tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+        assert len(tool_msgs) == 1
+        tool_content = tool_msgs[0]["content"]
+        # 截断后的 content 估算 token 应受 max_tool_result_tokens 约束
+        assert estimate_tokens(tool_content) <= 5_000, (
+            f"tool message content estimate={estimate_tokens(tool_content)} 超过上限 5000"
+        )
+        # 应含截断 marker（指向工作区相对路径）
+        assert "已截断" in tool_content
+        assert ".tool_results/" in tool_content
+
+        # 验证完整内容已落盘到 {workspace_base}/cli/alice/.tool_results/
+        overflow_dir = tmp_path / "workspace" / "cli" / "alice" / ".tool_results"
+        assert overflow_dir.is_dir()
+        files = list(overflow_dir.glob("*_big_tool_*.json"))
+        assert len(files) == 1, f"应落盘一份完整 JSON，实际 {files}"
+        full = json.loads(files[0].read_text(encoding="utf-8"))
+        assert full["data"]["raw"] == big_text, "落盘内容应是原始未截断的 data"
+
+    @pytest.mark.asyncio
+    async def test_small_tool_result_not_truncated(self, tmp_path):
+        from agent_core.config import CommandToolsConfig
+        from agent_core.kernel_interface import (
+            ContextOverflowAction,
+            ReturnAction,
+            ToolCallAction,
+            ToolResultEvent,
+        )
+
+        small_tool = MockTool(
+            name="small_tool",
+            execute_result=ToolResult(
+                success=True, message="done", data={"x": "tiny"}
+            ),
+        )
+        cfg = Config(
+            llm=LLMConfig(api_key="k", model="test-model"),
+            agent=AgentConfig(max_iterations=3),
+            command_tools=CommandToolsConfig(
+                enabled=False,
+                workspace_base_dir=str(tmp_path / "workspace"),
+                workspace_isolation_enabled=True,
+            ),
+        )
+        cfg.memory.enabled = False
+        cfg.memory.max_tool_result_tokens = 5_000
+
+        with patch("agent_core.agent.agent.LLMClient"):
+            agent = AgentCore(
+                config=cfg, tools=[small_tool], user_id="bob", source="cli"
+            )
+        type(agent._llm_client).context_window = property(  # type: ignore[assignment]
+            lambda _self: 0
+        )
+        type(agent._llm_client).max_tokens = property(  # type: ignore[assignment]
+            lambda _self: 4096
+        )
+
+        agent._context.add_user_message("hi")
+        gen = agent.run_loop(turn_id=1, hooks=None)
+        with patch.object(
+            agent._llm_client,
+            "chat_with_tools",
+            new_callable=AsyncMock,
+            side_effect=[
+                LLMResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCall(id="c1", name="small_tool", arguments={"input": "x"})
+                    ],
+                    finish_reason="tool_calls",
+                ),
+                LLMResponse(content="ok", tool_calls=[]),
+            ],
+        ):
+            action = await gen.asend(None)
+            assert isinstance(action, ToolCallAction)
+            action = await gen.asend(
+                ToolResultEvent(
+                    tool_call_id=action.tool_call_id,
+                    result=small_tool._execute_result,
+                )
+            )
+            assert isinstance(action, (ReturnAction, ContextOverflowAction))
+
+        # 未触发：不应有落盘文件
+        overflow_dir = tmp_path / "workspace" / "cli" / "bob" / ".tool_results"
+        assert not overflow_dir.exists() or not any(overflow_dir.iterdir())
+        # tool message 内容里也不应有截断标记
+        tool_msgs = [m for m in agent._context.get_messages() if m.get("role") == "tool"]
+        assert len(tool_msgs) == 1
+        assert "已截断" not in tool_msgs[0]["content"]

@@ -259,6 +259,15 @@ class CoreSessionAdapter:
     def clear_context(self) -> None:
         self._agent.clear_context()
 
+    async def compress_context(
+        self, *, keep_recent_turns: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """代理 ``AgentCore.compress_context``，给 ``/compress`` 命令路径用。"""
+        fn = getattr(self._agent, "compress_context", None)
+        if not callable(fn):
+            return {"compressed": False, "messages_before": 0, "messages_after": 0}
+        return await fn(keep_recent_turns=keep_recent_turns)
+
     def get_token_usage(self) -> dict:
         return self._agent.get_token_usage()
 

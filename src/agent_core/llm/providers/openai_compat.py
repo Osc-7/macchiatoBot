@@ -386,17 +386,23 @@ class OpenAICompatProvider(BaseProvider):
         tool_choice: str = "auto",
         on_content_delta: Optional[Callable[[str], Any]] = None,
         on_reasoning_delta: Optional[Callable[[str], Any]] = None,
+        max_tokens_override: Optional[int] = None,
     ) -> LLMResponse:
         full_messages: List[Dict[str, Any]] = []
         if system_message:
             full_messages.append({"role": "system", "content": system_message})
         full_messages.extend(self._prepare_openai_messages(messages))
 
+        effective_max_tokens = (
+            int(max_tokens_override)
+            if max_tokens_override and max_tokens_override > 0
+            else self._max_tokens
+        )
         request_params: Dict[str, Any] = {
             "model": self._model,
             "messages": full_messages,
             "temperature": self._temperature,
-            "max_tokens": self._max_tokens,
+            "max_tokens": effective_max_tokens,
         }
 
         if tools and self._capabilities.function_calling:

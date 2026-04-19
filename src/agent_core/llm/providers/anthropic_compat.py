@@ -490,15 +490,21 @@ class AnthropicCompatProvider(BaseProvider):
         tool_choice: str = "auto",
         on_content_delta: Optional[Callable[[str], Any]] = None,
         on_reasoning_delta: Optional[Callable[[str], Any]] = None,
+        max_tokens_override: Optional[int] = None,
     ) -> LLMResponse:
         """支持工具调用的对话。"""
         system, anthropic_messages = self._convert_messages(messages, system_message)
         anthropic_tools = self._convert_tools(tools)
-        
+
+        effective_max_tokens = (
+            int(max_tokens_override)
+            if max_tokens_override and max_tokens_override > 0
+            else self._max_tokens
+        )
         payload: Dict[str, Any] = {
             "model": self._model,
             "messages": anthropic_messages,
-            "max_tokens": self._max_tokens,
+            "max_tokens": effective_max_tokens,
             "temperature": self._temperature,
         }
         

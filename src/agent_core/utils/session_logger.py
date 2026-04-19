@@ -228,6 +228,41 @@ class SessionLogger:
             }
         )
 
+    def on_tool_overflow(
+        self,
+        turn_id: int,
+        iteration: int,
+        tool_call_id: str,
+        tool_name: str,
+        *,
+        original_tokens: int,
+        kept_tokens: int,
+        max_tokens: int,
+        overflow_path: str = "",
+        display_path: str = "",
+    ) -> None:
+        """
+        单条 tool result 因超过 ``memory.max_tool_result_tokens`` 被截断 + 落盘的审计事件。
+
+        便于事后定位「为什么这条 tool result 在 messages 里只剩 head」，以及通过
+        ``overflow_path`` 找回完整内容。
+        """
+        self._write_record(
+            {
+                "event": "tool_overflow",
+                "timestamp": self._timestamp(),
+                "turn_id": turn_id,
+                "iteration": iteration,
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "original_tokens": int(original_tokens),
+                "kept_tokens": int(kept_tokens),
+                "max_tokens": int(max_tokens),
+                "overflow_path": overflow_path,
+                "display_path": display_path,
+            }
+        )
+
     def on_assistant_message(self, turn_id: int, content: str) -> None:
         """最终助手回复"""
         self._write_record(

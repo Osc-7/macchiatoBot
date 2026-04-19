@@ -654,6 +654,34 @@ class MemoryConfig(BaseModel):
         ge=1,
         description="工作记忆总结时保留的最近消息轮次数",
     )
+    context_window_ratio: Optional[float] = Field(
+        default=0.75,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "按当前活跃模型 context_window 的比例计算压缩阈值，与 max_working_tokens / "
+            "profile.max_context_tokens 取较小值；切换模型时自动适配（如从 1M 模型切到 200k "
+            "模型时，阈值会随之收紧）。设为 None 关闭按比例计算。"
+        ),
+    )
+    max_tool_result_tokens: Optional[int] = Field(
+        default=30000,
+        ge=0,
+        description=(
+            "单个 tool result 的 token 上限。超出时 messages 内只保留 head N tokens 与显式截断标记，"
+            "完整内容会落盘到工作区 .tool_results/ 目录，AI 可用 read_file/cat 检索。"
+            "防止单条工具结果（如 web_search、file_read）一次撑爆模型上下文窗口。"
+            "设为 None 或 0 关闭此机制。"
+        ),
+    )
+    tool_result_overflow_dir: str = Field(
+        default=".tool_results",
+        description=(
+            "tool result 转储文件存放的子目录（相对工作区根）。"
+            "对 bash_workspace_admin 的 Core，转储目录会改放到对应的 /tmp/macchiato/{frontend}/{user}/，"
+            "避免污染项目根。"
+        ),
+    )
 
     # 短期记忆
     short_term_k: int = Field(

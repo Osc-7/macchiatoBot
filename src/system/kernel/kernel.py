@@ -229,7 +229,7 @@ class AgentKernel:
                 )
                 from agent_core.kernel_interface import ContextCompressedEvent
 
-                compressed_summary, messages_kept = await self._compress_context(agent)
+                compressed_summary, messages_kept = await self.compress_context(agent)
                 action = await gen.asend(
                     ContextCompressedEvent(
                         compressed_summary=compressed_summary,
@@ -289,13 +289,15 @@ class AgentKernel:
 
     _SUMMARY_USER_PREFIX = "[会话进行中摘要]"
 
-    async def _compress_context(
-        self,
+    @classmethod
+    async def compress_context(
+        cls,
         agent: "AgentCore",
         keep_recent_turns: Optional[int] = None,
     ) -> tuple[str, int]:
         """
-        压缩对话上下文。
+        压缩对话上下文。可由 ``run()`` 内的 ContextOverflowAction 路径触发，
+        也可由前端 ``/compress`` 命令路径主动触发——逻辑完全一致。
 
         1. 按 user 轮切分，保留最近 keep_recent_turns 轮；其余为待折叠段。
         2. 将待折叠段（含 assistant / tool / tool_result）原样交给 summary LLM，最后一条 user 为「请总结」。
@@ -333,13 +335,13 @@ class AgentKernel:
 
         wm = getattr(agent, "_working_memory", None)
         fold_before = int(getattr(wm, "compression_round", 0) or 0) if wm else 0
-        summary_text = await self._summarize_messages(agent, old_messages)
+        summary_text = await cls._summarize_messages(agent, old_messages)
 
         if summary_text.strip():
             summary_msg = {
                 "role": "user",
                 "content": (
-                    f"{self._SUMMARY_USER_PREFIX}\n{summary_text.strip()}"
+                    f"{cls._SUMMARY_USER_PREFIX}\n{summary_text.strip()}"
                 ),
             }
             ctx.messages = [summary_msg] + list(new_messages)

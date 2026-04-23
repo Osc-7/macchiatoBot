@@ -11,9 +11,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote
 
 import json
 import logging
+import re
 import httpx
 
 from .config import get_feishu_config
@@ -373,46 +375,82 @@ class FeishuClient:
         """
         将 Agent 返回的附件列表中的图片上传并发送到指定会话。
 
-        attachments 每项为 {"type": "image", "path": "..."} 或 {"type": "image", "url": "..."}
+        attachments 每项支持：
+        - {"type": "image", "path": "..."} 或 {"type": "image", "url": "..."}
+        - {"type": "file", "path": "..."} 或 {"type": "file", "url": "...", "file_name": "..."}
         """
         if not chat_id or not attachments:
             return
         for att in attachments:
-            if att.get("type") != "image":
-                continue
-            image_bytes: Optional[bytes] = None
-            content_type = "image/png"
-            if "path" in att:
-                path = Path(att["path"]).expanduser().resolve()
-                if not path.exists() or not path.is_file():
+            att_type = str(att.get("type") or "").strip().lower()
+            if att_type == "image":
+                image_bytes: Optional[bytes] = None
+                content_type = "image/png"
+                if "path" in att:
+                    path = Path(att["path"]).expanduser().resolve()
+                    if not path.exists() or not path.is_file():
+                        continue
+                    image_bytes = path.read_bytes()
+                    suffix = path.suffix.lower()
+                    if suffix in (".jpg", ".jpeg"):
+                        content_type = "image/jpeg"
+                    elif suffix == ".gif":
+                        content_type = "image/gif"
+                    elif suffix == ".webp":
+                        content_type = "image/webp"
+                elif "url" in att:
+                    url_str = str(att["url"]).strip()
+                    if url_str.startswith(("http://", "https://")):
+                        async with httpx.AsyncClient(timeout=30.0) as client:
+                            resp = await client.get(url_str)
+                            resp.raise_for_status()
+                            image_bytes = resp.content
+                            ct = resp.headers.get("content-type", "")
+                            if "image/" in ct:
+                                content_type = ct.split(";")[0].strip()
+                if not image_bytes or len(image_bytes) > 10 * 1024 * 1024:
                     continue
-                image_bytes = path.read_bytes()
-                suffix = path.suffix.lower()
-                if suffix in (".jpg", ".jpeg"):
-                    content_type = "image/jpeg"
-                elif suffix == ".gif":
-                    content_type = "image/gif"
-                elif suffix == ".webp":
-                    content_type = "image/webp"
-            elif "url" in att:
-                url_str = str(att["url"]).strip()
-                if url_str.startswith(("http://", "https://")):
-                    async with httpx.AsyncClient(timeout=30.0) as client:
-                        resp = await client.get(url_str)
-                        resp.raise_for_status()
-                        image_bytes = resp.content
-                        ct = resp.headers.get("content-type", "")
-                        if "image/" in ct:
-                            content_type = ct.split(";")[0].strip()
-            if not image_bytes or len(image_bytes) > 10 * 1024 * 1024:
+                try:
+                    image_key = await self.upload_image(
+                        image_bytes=image_bytes, content_type=content_type
+                    )
+                    await self.send_image_message(chat_id=chat_id, image_key=image_key)
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("飞书发送回复附图失败: %s", exc)
                 continue
-            try:
-                image_key = await self.upload_image(
-                    image_bytes=image_bytes, content_type=content_type
-                )
-                await self.send_image_message(chat_id=chat_id, image_key=image_key)
-            except Exception as exc:
-                logging.getLogger(__name__).warning("飞书发送回复附图失败: %s", exc)
+
+            if att_type == "file":
+                file_bytes: Optional[bytes] = None
+                file_name = str(att.get("file_name") or "").strip()
+                if "path" in att:
+                    path = Path(att["path"]).expanduser().resolve()
+                    if not path.exists() or not path.is_file():
+                        continue
+                    file_bytes = path.read_bytes()
+                    if not file_name:
+                        file_name = path.name
+                elif "url" in att:
+                    url_str = str(att["url"]).strip()
+                    if url_str.startswith(("http://", "https://")):
+                        async with httpx.AsyncClient(timeout=60.0) as client:
+                            resp = await client.get(url_str)
+                            resp.raise_for_status()
+                            file_bytes = resp.content
+                            if not file_name:
+                                file_name = self._infer_filename_from_response(
+                                    resp.headers.get("content-disposition"), url_str
+                                )
+                if not file_bytes:
+                    continue
+                file_name = file_name or "attachment.bin"
+                try:
+                    file_key = await self.upload_file(
+                        file_bytes=file_bytes,
+                        file_name=file_name,
+                    )
+                    await self.send_file_message(chat_id=chat_id, file_key=file_key)
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("飞书发送回复附件失败: %s", exc)
                 continue
 
     async def download_message_resource(
@@ -421,7 +459,7 @@ class FeishuClient:
         message_id: str,
         file_key: str,
         resource_type: str,
-    ) -> Tuple[bytes, str]:
+    ) -> Tuple[bytes, str, str]:
         """
         下载消息中的资源文件（图片、视频、音频、文件）。
 
@@ -434,7 +472,7 @@ class FeishuClient:
             resource_type: "image" 或 "file"
 
         Returns:
-            (bytes, mime_type) 或抛出 RuntimeError
+            (bytes, mime_type, filename) 或抛出 RuntimeError
         """
         if not message_id or not file_key:
             raise ValueError("message_id 和 file_key 不能为空")
@@ -454,4 +492,112 @@ class FeishuClient:
 
         content_type = resp.headers.get("content-type", "application/octet-stream")
         mime = content_type.split(";")[0].strip() or "application/octet-stream"
-        return resp.content, mime
+        filename = self._infer_filename_from_response(
+            resp.headers.get("content-disposition")
+        )
+        return resp.content, mime, filename
+
+    @staticmethod
+    def _infer_filename_from_response(
+        content_disposition: Optional[str],
+        fallback_url: Optional[str] = None,
+    ) -> str:
+        if content_disposition:
+            m = re.search(r"filename\*=UTF-8''([^;]+)", content_disposition, re.I)
+            if m:
+                return unquote(m.group(1)).strip('"').strip() or "attachment.bin"
+            m = re.search(r'filename="?([^";]+)"?', content_disposition, re.I)
+            if m:
+                return m.group(1).strip() or "attachment.bin"
+        if fallback_url:
+            tail = (fallback_url.rsplit("/", 1)[-1] or "").split("?", 1)[0].strip()
+            if tail:
+                return tail
+        return "attachment.bin"
+
+    async def upload_file(self, *, file_bytes: bytes, file_name: str) -> str:
+        """上传文件并返回 file_key，用于发送 file 消息。"""
+        token = await self._get_tenant_access_token()
+        url = f"{self._base_url}/open-apis/im/v1/files"
+        headers = {"Authorization": f"Bearer {token}"}
+        
+        # 根据文件扩展名判断 MIME 类型
+        _MIME_BY_EXT: Dict[str, str] = {
+            ".pdf": "application/pdf",
+            ".doc": "application/msword",
+            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".xls": "application/vnd.ms-excel",
+            ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ".ppt": "application/vnd.ms-powerpoint",
+            ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ".txt": "text/plain",
+            ".csv": "text/csv",
+            ".zip": "application/zip",
+            ".rar": "application/x-rar-compressed",
+            ".tar": "application/x-tar",
+            ".gz": "application/gzip",
+            ".json": "application/json",
+            ".xml": "application/xml",
+            ".html": "text/html",
+            ".css": "text/css",
+            ".js": "application/javascript",
+            ".py": "text/x-python",
+            ".tex": "application/x-tex",
+        }
+        p = Path(file_name)
+        mime_type = _MIME_BY_EXT.get(p.suffix.lower(), "application/octet-stream")
+        file_type = self._infer_upload_file_type(file_name)
+
+        files = {
+            "file": (
+                file_name or "attachment.bin",
+                file_bytes,
+                mime_type,
+            )
+        }
+        data = {
+            "file_type": file_type,
+            "file_name": file_name or "attachment.bin",
+        }
+        async with httpx.AsyncClient(timeout=max(self._timeout, 60.0)) as client:
+            resp = await client.post(url, headers=headers, data=data, files=files)
+            resp.raise_for_status()
+            result = resp.json()
+        if int(result.get("code", 0)) != 0:
+            raise RuntimeError(f"飞书上传文件失败: {result}")
+        key = (result.get("data") or {}).get("file_key")
+        if not key:
+            raise RuntimeError(f"飞书上传文件未返回 file_key: {result}")
+        return str(key)
+
+    @staticmethod
+    def _infer_upload_file_type(file_name: str) -> str:
+        suffix = Path(file_name or "").suffix.lower()
+        if suffix == ".pdf":
+            return "pdf"
+        if suffix in {".doc", ".docx"}:
+            return "doc"
+        if suffix in {".xls", ".xlsx", ".csv"}:
+            return "xls"
+        if suffix in {".ppt", ".pptx"}:
+            return "ppt"
+        return "stream"
+
+    async def send_file_message(self, *, chat_id: str, file_key: str) -> None:
+        """向指定 chat 发送文件消息（需先通过 upload_file 获得 file_key）。"""
+        if not chat_id or not file_key:
+            raise ValueError("chat_id 和 file_key 不能为空")
+        token = await self._get_tenant_access_token()
+        url = f"{self._base_url}/open-apis/im/v1/messages?receive_id_type=chat_id"
+        payload = {
+            "receive_id": chat_id,
+            "msg_type": "file",
+            "content": json.dumps({"file_key": file_key}, ensure_ascii=False),
+        }
+        headers = {"Authorization": f"Bearer {token}"}
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        if int(data.get("code", 0)) != 0:
+            raise RuntimeError(f"发送飞书文件消息失败: {data}")

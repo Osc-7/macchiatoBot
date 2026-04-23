@@ -55,11 +55,16 @@ def parse_feishu_content_to_refs(
     if not key_val:
         return [], ""
 
+    extra = {"message_id": message_id}
+    file_name = str(data.get("file_name") or "").strip()
+    if file_name:
+        extra["file_name"] = file_name
+
     ref = ContentReference(
         source="feishu",
         ref_type=ref_type,
         key=key_val,
-        extra={"message_id": message_id},
+        extra=extra,
     )
     content_refs.append(ref)
 

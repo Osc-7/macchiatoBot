@@ -39,8 +39,20 @@ def test_parse_media_message():
     assert refs[0].source == "feishu"
     assert refs[0].ref_type == "video"
     assert refs[0].key == "file_abc"
-    assert refs[0].extra == {"message_id": "om_3"}
+    assert refs[0].extra == {"message_id": "om_3", "file_name": "vid.mp4"}
     assert text == "[用户发送了一段视频]"
+
+
+def test_parse_file_message_keeps_original_filename():
+    refs, text = parse_feishu_message(
+        message_id="om_file",
+        message_type="file",
+        content='{"file_key":"file_pdf","file_name":"测试文档.pdf"}',
+    )
+    assert len(refs) == 1
+    assert refs[0].ref_type == "document"
+    assert refs[0].extra == {"message_id": "om_file", "file_name": "测试文档.pdf"}
+    assert text == "[用户发送了一个文件]"
 
 
 def test_parse_post_message_with_image():

@@ -19,6 +19,31 @@ from system.kernel import AgentKernel
 logger = logging.getLogger(__name__)
 
 
+def _enrich_content_refs_with_context(
+    raw_refs: List[Any],
+    *,
+    source: str,
+    user_id: str,
+) -> List[Dict[str, Any]]:
+    """在 content_refs.extra 中补齐 source/user_id，便于 resolver 选择正确工作区。"""
+    enriched: List[Dict[str, Any]] = []
+    for raw in raw_refs or []:
+        if isinstance(raw, dict):
+            item = dict(raw)
+        else:
+            try:
+                item = raw.to_dict()  # type: ignore[attr-defined]
+            except Exception:
+                continue
+        extra = item.get("extra")
+        extra_dict = dict(extra) if isinstance(extra, dict) else {}
+        extra_dict.setdefault("source", source)
+        extra_dict.setdefault("user_id", user_id)
+        item["extra"] = extra_dict
+        enriched.append(item)
+    return enriched
+
+
 class CoreSessionAdapter:
     """
     将现有 AgentCore 映射为稳定 CoreSession 接口。
@@ -66,7 +91,22 @@ class CoreSessionAdapter:
                 agent_input.metadata.get("content_refs") if agent_input.metadata else None
             )
             if isinstance(raw_refs, list) and raw_refs:
-                refs = [ContentReference.from_dict(r) for r in raw_refs]
+                refs = [
+                    ContentReference.from_dict(r)
+                    for r in _enrich_content_refs_with_context(
+                        raw_refs,
+                        source=str(
+                            (agent_input.metadata or {}).get("source")
+                            or getattr(self._agent, "_source", "cli")
+                            or "cli"
+                        ),
+                        user_id=str(
+                            (agent_input.metadata or {}).get("user_id")
+                            or getattr(self._agent, "_user_id", "root")
+                            or "root"
+                        ),
+                    )
+                ]
                 try:
                     content_items = await resolve_content_refs(refs)
                     logger.info(

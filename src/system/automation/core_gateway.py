@@ -26,6 +26,32 @@ logger = logging.getLogger(__name__)
 _PUSH_BUFFER_MAXLEN = 50
 
 
+def _enrich_content_refs_with_context(
+    raw_refs: List[Any],
+    *,
+    source: str,
+    user_id: str,
+) -> List[Dict[str, Any]]:
+    """在前端传入的 content_refs 上补齐 source/user_id，供 resolver 落盘到正确工作区。"""
+    enriched: List[Dict[str, Any]] = []
+    for raw in raw_refs or []:
+        if isinstance(raw, dict):
+            item = dict(raw)
+        else:
+            # 兼容已经是 ContentReference 的情况
+            try:
+                item = raw.to_dict()  # type: ignore[attr-defined]
+            except Exception:
+                continue
+        extra = item.get("extra")
+        extra_dict = dict(extra) if isinstance(extra, dict) else {}
+        extra_dict.setdefault("source", source)
+        extra_dict.setdefault("user_id", user_id)
+        item["extra"] = extra_dict
+        enriched.append(item)
+    return enriched
+
+
 CoreSessionFactory = Callable[[str], CoreSession | Awaitable[CoreSession]]
 
 
@@ -309,7 +335,14 @@ class AutomationCoreGateway:
         raw_refs = metadata.get("content_refs")
         if isinstance(raw_refs, list) and raw_refs:
             try:
-                refs = [ContentReference.from_dict(r) for r in raw_refs]
+                refs = [
+                    ContentReference.from_dict(r)
+                    for r in _enrich_content_refs_with_context(
+                        raw_refs,
+                        source=str(metadata.get("source") or self._source or "feishu"),
+                        user_id=str(metadata.get("user_id") or self._owner_id or "unknown"),
+                    )
+                ]
                 content_items = await resolve_content_refs(refs)
                 if content_items:
                     metadata["content_items"] = content_items

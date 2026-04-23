@@ -4,7 +4,11 @@
 
 import pytest
 
-from system.tools.media_tools import AttachMediaTool, AttachImageToReplyTool
+from system.tools.media_tools import (
+    AttachMediaTool,
+    AttachImageToReplyTool,
+    AttachFileToReplyTool,
+)
 
 
 class TestAttachMediaTool:
@@ -82,3 +86,37 @@ class TestAttachImageToReplyTool:
         result = await tool.execute(image_url="not-a-url")
         assert result.success is False
         assert result.error == "INVALID_URL"
+
+
+class TestAttachFileToReplyTool:
+    @pytest.mark.asyncio
+    async def test_execute_requires_file_path_or_file_url(self):
+        tool = AttachFileToReplyTool()
+        result = await tool.execute()
+        assert result.success is False
+        assert result.error == "INVALID_INPUT"
+
+    @pytest.mark.asyncio
+    async def test_execute_with_valid_path_returns_outgoing_attachment(self, tmp_path):
+        p = tmp_path / "report.txt"
+        p.write_text("ok", encoding="utf-8")
+        tool = AttachFileToReplyTool()
+        result = await tool.execute(file_path=str(p))
+        assert result.success is True
+        assert result.metadata.get("outgoing_attachment") == {
+            "type": "file",
+            "path": str(p.resolve()),
+        }
+
+    @pytest.mark.asyncio
+    async def test_execute_with_url_returns_outgoing_attachment(self):
+        tool = AttachFileToReplyTool()
+        result = await tool.execute(
+            file_url="https://example.com/spec.pdf", file_name="spec.pdf"
+        )
+        assert result.success is True
+        assert result.metadata.get("outgoing_attachment") == {
+            "type": "file",
+            "url": "https://example.com/spec.pdf",
+            "file_name": "spec.pdf",
+        }

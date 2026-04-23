@@ -1,4 +1,4 @@
-"""Helpers for multimodal carry-over and outgoing attachments."""
+"""Helpers for multimodal carry-over and file/media input adaptation."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def collect_outgoing_attachment(
     att = result.metadata.get("outgoing_attachment")
     if not att or not isinstance(att, dict):
         return
-    if att.get("type") != "image":
+    if att.get("type") not in {"image", "file"}:
         return
     if "path" in att or "url" in att:
         outgoing_attachments.append(dict(att))
@@ -111,6 +111,74 @@ def append_pending_multimodal_messages(
     else:
         new_msg = {"role": "user", "content": text}
     return [*messages, new_msg]
+
+
+def adapt_content_items_for_provider(
+    content_items: Optional[List[Dict[str, Any]]],
+    *,
+    supported_file_mime_types: Optional[List[str]] = None,
+    enable_native_file_blocks: bool = False,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    Adapt generic content items to the active provider's native input schema.
+
+    Returns:
+        (preface_text, adapted_items)
+
+        ``preface_text`` 用于把「文件已保存到工作区」之类的提示拼进 user 文本；
+        ``adapted_items`` 则为可直接注入到本轮 user message.content 的内容块。
+    """
+    if not content_items:
+        return "", []
+
+    supported = {
+        str(m).strip().lower()
+        for m in (supported_file_mime_types or [])
+        if str(m).strip()
+    }
+    text_lines: List[str] = []
+    adapted: List[Dict[str, Any]] = []
+
+    for raw in content_items:
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("type") != "user_file":
+            adapted.append(raw)
+            continue
+
+        mime = str(raw.get("mime_type") or "application/octet-stream").strip().lower()
+        path = str(raw.get("path") or "").strip()
+        name = str(raw.get("name") or "").strip() or "attachment.bin"
+        file_data = str(raw.get("file_data") or "").strip()
+        preview_text = str(raw.get("preview_text") or "").strip()
+
+        if path:
+            text_lines.append(f"[用户上传文件已保存到工作区] {path}")
+        if mime:
+            text_lines.append(f"mime={mime}")
+
+        if enable_native_file_blocks and file_data and mime in supported:
+            adapted.append(
+                {
+                    "type": "file",
+                    "file": {
+                        "filename": name,
+                        "file_data": file_data,
+                    },
+                    "mime_type": mime,
+                    "path": path,
+                    "name": name,
+                }
+            )
+            continue
+
+        if preview_text:
+            text_lines.append("以下是文件内容预览：")
+            text_lines.append(preview_text)
+        else:
+            text_lines.append("该文件类型当前不会直接挂载给模型，请按路径读取后再处理。")
+
+    return "\n".join(text_lines).strip(), adapted
 
 
 def _downgrade_media_items_to_text(

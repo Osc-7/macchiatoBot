@@ -32,7 +32,7 @@ from .memory_tools import (
     MemoryStoreTool,
     MemoryIngestTool,
 )
-from .media_tools import AttachMediaTool, AttachImageToReplyTool
+from .media_tools import AttachMediaTool, AttachImageToReplyTool, AttachFileToReplyTool
 from .canvas_tools import (
     SyncCanvasTool,
     FetchCanvasOverviewTool,
@@ -142,6 +142,7 @@ def get_default_tools(
     if config and config.multimodal.enabled:
         tools.append(AttachMediaTool())
         tools.append(AttachImageToReplyTool(config=config))
+        tools.append(AttachFileToReplyTool(config=config))
 
     tools.append(SyncCanvasTool(config=config))
     tools.append(FetchCanvasOverviewTool(config=config))

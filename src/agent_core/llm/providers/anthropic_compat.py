@@ -26,6 +26,58 @@ from .base import BaseProvider
 logger = logging.getLogger(__name__)
 
 
+def _convert_openai_user_content_part_to_anthropic(part: Any) -> Any:
+    """将 OpenAI 风格 user content part 转成 Anthropic content block。"""
+    if not isinstance(part, dict):
+        return part
+
+    part_type = part.get("type")
+    if part_type == "text":
+        return {"type": "text", "text": str(part.get("text") or "")}
+
+    if part_type == "image_url":
+        image_url = (part.get("image_url") or {}).get("url")
+        if isinstance(image_url, str) and image_url.strip():
+            return {
+                "type": "image",
+                "source": {"type": "url", "url": image_url.strip()},
+            }
+
+    if part_type == "file":
+        file_obj = part.get("file") or {}
+        mime = str(part.get("mime_type") or "application/octet-stream").strip().lower()
+        if mime != "application/pdf":
+            return None
+        file_data = str(file_obj.get("file_data") or "").strip()
+        if not file_data:
+            return None
+        return {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": mime,
+                "data": file_data,
+            },
+        }
+
+    return part
+
+
+def _convert_openai_user_content_to_anthropic(content: Any) -> Any:
+    """将 OpenAI 风格 user content 转成 Anthropic Messages content。"""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return content
+
+    converted: List[Any] = []
+    for part in content:
+        block = _convert_openai_user_content_part_to_anthropic(part)
+        if block is not None:
+            converted.append(block)
+    return converted
+
+
 def _is_single_tool_result_user_message(msg: Dict[str, Any]) -> bool:
     if msg.get("role") != "user":
         return False
@@ -323,7 +375,12 @@ class AnthropicCompatProvider(BaseProvider):
                 continue
 
             if role == "user":
-                anthropic_messages.append({"role": "user", "content": content})
+                anthropic_messages.append(
+                    {
+                        "role": "user",
+                        "content": _convert_openai_user_content_to_anthropic(content),
+                    }
+                )
                 i += 1
                 continue
 

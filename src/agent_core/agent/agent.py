@@ -162,6 +162,9 @@ class AgentCore:
         self._last_snapshot = ToolSnapshot(version=-1, tool_names=[], openai_tools=[])
         self._current_visible_tools: set[str] = set()
         self._pending_multimodal_items: List[Dict[str, Any]] = []
+        # 前端（如飞书）可将媒体标记为 defer_with_next_user_input，
+        # 这些内容会缓存到下一次“带文本的用户输入”再注入，避免收到图片即立刻触发分析。
+        self._pending_user_multimodal_items: List[Dict[str, Any]] = []
         # 当主模型不具备 vision 时，对图片做文字占位降级（见 media_helpers.append_pending_multimodal_messages），
         # 同时把原始媒体登记到这里供 recognize_image 工具按 name/path 回查。
         self._last_unseen_media: List[Dict[str, Any]] = []
@@ -709,22 +712,59 @@ class AgentCore:
         # 主模型无 vision 且配置了 vision_provider 时，把本轮 image/video 折叠成文字占位；
         # 原始条目登记到 _last_unseen_media，供 recognize_image 工具按 name 回查。
         effective_text = text
-        effective_media_items: Optional[List[Dict[str, Any]]] = content_items or None
+        incoming_items = list(content_items or [])
+        immediate_items: List[Dict[str, Any]] = []
+        for item in incoming_items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("defer_with_next_user_input"):
+                copied = dict(item)
+                copied.pop("defer_with_next_user_input", None)
+                self._pending_user_multimodal_items.append(copied)
+            else:
+                immediate_items.append(item)
+
+        # 仅在用户本轮确实给了文本输入时，才把前序缓存媒体并入本轮，
+        # 达到“图片和后续文本一起进入下一轮”的交互效果。
+        merged_items = list(immediate_items)
+        if text.strip() and self._pending_user_multimodal_items:
+            merged_items = [*self._pending_user_multimodal_items, *merged_items]
+            self._pending_user_multimodal_items.clear()
+
+        effective_media_items: Optional[List[Dict[str, Any]]] = merged_items or None
+        if merged_items:
+            from agent_core.agent.media_helpers import adapt_content_items_for_provider
+
+            file_preface, adapted_items = adapt_content_items_for_provider(
+                merged_items,
+                supported_file_mime_types=list(
+                    getattr(self._llm_client.capabilities, "file_input_mime_types", ()) or ()
+                ),
+                enable_native_file_blocks=bool(
+                    getattr(self._llm_client, "supports_native_file_blocks", False)
+                ),
+            )
+            if file_preface:
+                effective_text = f"{effective_text}\n\n{file_preface}" if effective_text else file_preface
+            effective_media_items = adapted_items or None
+
         try:
             caps_vision = bool(self._llm_client.capabilities.vision)
             has_vision_provider = bool(self._llm_client.vision_provider_name)
             should_downgrade = (not caps_vision) and has_vision_provider
         except Exception:
             should_downgrade = False
-        if should_downgrade and content_items:
+        if should_downgrade and effective_media_items:
             from agent_core.agent.media_helpers import downgrade_user_media_to_text
 
             placeholder_text, kept_items = downgrade_user_media_to_text(
-                content_items, unseen_media=self._last_unseen_media
+                effective_media_items, unseen_media=self._last_unseen_media
             )
             if placeholder_text:
                 effective_text = (
-                    f"{text}\n\n{placeholder_text}" if text else placeholder_text
+                    f"{effective_text}\n\n{placeholder_text}"
+                    if effective_text
+                    else placeholder_text
                 )
             effective_media_items = kept_items or None
 

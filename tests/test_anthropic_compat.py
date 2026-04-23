@@ -208,6 +208,34 @@ def test_convert_messages_openai_nested_tool_calls():
     assert tu["input"] == {"query": "x", "tags": ["a"]}
 
 
+def test_convert_user_pdf_file_block_to_anthropic_document():
+    p = _provider(caps=Capabilities(file_input_mime_types=("application/pdf",)))
+    _, msgs = p._convert_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "请总结这个 PDF"},
+                    {
+                        "type": "file",
+                        "file": {
+                            "filename": "spec.pdf",
+                            "file_data": "JVBERi0xLjc=",
+                        },
+                        "mime_type": "application/pdf",
+                    },
+                ],
+            }
+        ]
+    )
+    blocks = msgs[0]["content"]
+    assert blocks[0] == {"type": "text", "text": "请总结这个 PDF"}
+    assert blocks[1]["type"] == "document"
+    assert blocks[1]["source"]["type"] == "base64"
+    assert blocks[1]["source"]["media_type"] == "application/pdf"
+    assert blocks[1]["source"]["data"] == "JVBERi0xLjc="
+
+
 @pytest.mark.asyncio
 async def test_close():
     p = _provider(caps=Capabilities())

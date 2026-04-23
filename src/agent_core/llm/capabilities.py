@@ -13,7 +13,7 @@ Provider 能力声明。
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -37,3 +37,6 @@ class Capabilities:
 
     context_window: Optional[int] = None
     """模型上下文窗口 token 数；None 表示按模型名启发式推断。"""
+
+    file_input_mime_types: Tuple[str, ...] = ()
+    """模型原生支持的输入文件 MIME 列表；空表示不支持直接文件输入。"""

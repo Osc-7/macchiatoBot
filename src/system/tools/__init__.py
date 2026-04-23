@@ -61,7 +61,7 @@ from .chat_history_tools import (
     ChatScrollTool,
     ChatSearchTool,
 )
-from .media_tools import AttachMediaTool, AttachImageToReplyTool
+from .media_tools import AttachMediaTool, AttachImageToReplyTool, AttachFileToReplyTool
 from .canvas_tools import (
     SyncCanvasTool,
     FetchCanvasOverviewTool,
@@ -238,6 +238,7 @@ def _build_multimodal_tools(config: Config) -> List[BaseTool]:
     if mm_cfg and getattr(mm_cfg, "enabled", False):
         tools.append(AttachMediaTool())
         tools.append(AttachImageToReplyTool(config=config))
+        tools.append(AttachFileToReplyTool(config=config))
     return tools
 
 

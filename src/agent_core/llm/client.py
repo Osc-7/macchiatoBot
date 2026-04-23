@@ -67,6 +67,11 @@ def _build_provider_from_entry(
         context_window=(
             getattr(caps_src, "context_window", None) if caps_src is not None else None
         ),
+        file_input_mime_types=tuple(
+            str(x).strip().lower()
+            for x in (getattr(caps_src, "file_input_mime_types", []) or [])
+            if str(x).strip()
+        ),
     )
 
     vendor_params = dict(getattr(entry, "vendor_params", {}) or {})
@@ -190,6 +195,16 @@ class LLMClient:
     def capabilities(self) -> Capabilities:
         """当前 active provider 的能力矩阵。"""
         return self._active_provider().capabilities
+
+    @property
+    def supports_native_file_blocks(self) -> bool:
+        """
+        当前 active provider 是否支持在消息 content 中原生文件块。
+
+        目前仅对 Anthropic Messages 路径启用（document block）。
+        OpenAI 兼容 chat.completions 在多数网关并不稳定支持文件块，统一走回退策略。
+        """
+        return isinstance(self._active_provider(), AnthropicCompatProvider)
 
     @property
     def model(self) -> str:

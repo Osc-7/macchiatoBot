@@ -44,6 +44,10 @@ class CapabilitiesModel(BaseModel):
         ge=1,
         description="模型上下文窗口（token）；未设置则按模型名启发式推断",
     )
+    file_input_mime_types: List[str] = Field(
+        default_factory=list,
+        description="模型原生支持的输入文件 MIME 列表；空表示不支持直接文件输入",
+    )
 
 
 class ProviderEntry(BaseModel):

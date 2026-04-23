@@ -20,6 +20,8 @@ kimi_code:
     reasoning_content: true
     thinking_tag_inline: false
     context_window: 262144
+    file_input_mime_types:
+      - application/pdf
 
 # kimi_k25:
 #   label: "Kimi K2.5"

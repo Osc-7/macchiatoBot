@@ -224,3 +224,111 @@ class AttachImageToReplyTool(BaseTool):
             message="图片已加入回复附件，用户将在对话中看到该图片。",
             metadata={"outgoing_attachment": attachment},
         )
+
+
+class AttachFileToReplyTool(BaseTool):
+    """将一个文件登记为「随本轮回复一起发给用户」的附件。"""
+
+    def __init__(self, config: Optional[Config] = None) -> None:
+        self._config = config or get_config()
+
+    @property
+    def name(self) -> str:
+        return "attach_file_to_reply"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="attach_file_to_reply",
+            description="""将一个文件随本轮回复一起发给用户。
+
+当用户明确要“发文件/把文件给我”时，使用本工具：
+- 提供本地文件路径（推荐）或 http(s) 下载地址
+- 工具会将文件登记为本轮回复附件；前端（如飞书）会上传并发送文件消息
+""",
+            parameters=[
+                ToolParameter(
+                    name="file_path",
+                    type="string",
+                    description="本地文件路径（与 file_url 二选一）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="file_url",
+                    type="string",
+                    description="文件下载 URL（http/https，与 file_path 二选一）",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="file_name",
+                    type="string",
+                    description="可选：发送时使用的文件名；未提供则沿用路径名/URL 推断名",
+                    required=False,
+                ),
+            ],
+            examples=[
+                {
+                    "description": "把本地日志文件发给用户",
+                    "params": {"file_path": "reports/debug.log"},
+                },
+                {
+                    "description": "把远程文档发给用户",
+                    "params": {
+                        "file_url": "https://example.com/spec.pdf",
+                        "file_name": "spec.pdf",
+                    },
+                },
+            ],
+            usage_notes=[
+                "file_path 与 file_url 必须且只能提供一个。",
+                "建议优先使用 file_path，避免远程下载失败导致发送失败。",
+            ],
+            tags=["附件", "回复", "文件", "飞书"],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        file_path = kwargs.get("file_path")
+        file_url = kwargs.get("file_url")
+        file_name = str(kwargs.get("file_name") or "").strip()
+
+        if bool(file_path) == bool(file_url):
+            return ToolResult(
+                success=False,
+                error="INVALID_INPUT",
+                message="必须且只能提供 file_path 或 file_url 其中一个",
+            )
+
+        if file_path:
+            ctx = kwargs.get("__execution_context__") or {}
+            path_str = expand_user_path_str_for_session(
+                str(file_path).strip(),
+                self._config,
+                exec_ctx=ctx,
+            )
+            p = Path(path_str).resolve()
+            if not p.exists() or not p.is_file():
+                return ToolResult(
+                    success=False,
+                    error="FILE_NOT_FOUND",
+                    message=f"文件不存在或不是文件: {p}",
+                )
+            attachment = {"type": "file", "path": str(p)}
+            if file_name:
+                attachment["file_name"] = file_name
+        else:
+            url_str = str(file_url).strip()
+            if not url_str.startswith(("http://", "https://")):
+                return ToolResult(
+                    success=False,
+                    error="INVALID_URL",
+                    message="file_url 必须以 http:// 或 https:// 开头",
+                )
+            attachment = {"type": "file", "url": url_str}
+            if file_name:
+                attachment["file_name"] = file_name
+
+        return ToolResult(
+            success=True,
+            data=attachment,
+            message="文件已加入回复附件，用户将在对话中收到该文件。",
+            metadata={"outgoing_attachment": attachment},
+        )

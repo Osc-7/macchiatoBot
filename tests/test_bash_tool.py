@@ -98,6 +98,16 @@ class TestBashSecurity:
         v = sec.check("eval 'rm -rf /'")
         assert v.needs_confirmation
 
+    def test_dangerous_printf_octal_pipe_to_bash(self):
+        sec = self._sec()
+        v = sec.check('printf "\\162m -\\162 -vf /*" | bash | wc')
+        assert v.needs_confirmation
+
+    def test_safe_plain_pipe_not_blocked(self):
+        sec = self._sec()
+        v = sec.check("echo hello | wc -c")
+        assert v.allowed
+
     # -- Layer 3: 确认跳过 --
 
     def test_confirmed_allows_dangerous(self):

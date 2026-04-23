@@ -15,6 +15,7 @@ BashSecurity -- 命令安全校验模块。
 
 from __future__ import annotations
 
+import codecs
 import re
 import shlex
 from dataclasses import dataclass
@@ -68,6 +69,7 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # 扩展：参考 Claude Code bashSecurity 的部分模式
     (re.compile(r"\bcurl\b.*\|\s*(ba)?sh\b", re.I), "curl pipe to shell"),
     (re.compile(r"\bwget\b.*\|\s*(ba)?sh\b", re.I), "wget pipe to shell"),
+    (re.compile(r"\|\s*(?:env\s+)?(?:ba|da|k|z)?sh(?:\s|$)", re.I), "pipe script to shell"),
     (re.compile(r"\beval\b", re.I), "eval 动态执行"),
     (re.compile(r">\s*/etc/", re.I), "写入 /etc/ 系统目录"),
     (re.compile(r"\bkill\s+-9\s", re.I), "kill -9 强制终止"),
@@ -103,6 +105,19 @@ _WORKSPACE_WRITE_EXEMPT_POSIX_DEVS = frozenset(
         "/dev/stdout",
         "/dev/stderr",
     }
+)
+
+_SHELL_ESCAPE_PATTERN = re.compile(
+    r"""
+    \\(
+        [0-7]{1,3} |
+        x[0-9A-Fa-f]{2} |
+        u[0-9A-Fa-f]{4} |
+        U[0-9A-Fa-f]{8} |
+        [abfnrtv'"\\]
+    )
+    """,
+    re.VERBOSE,
 )
 
 
@@ -457,7 +472,33 @@ class BashSecurity:
     @staticmethod
     def _check_dangerous(command: str) -> Optional[str]:
         """检测危险命令模式，返回匹配的描述或 None。"""
-        for pattern, description in _DANGEROUS_PATTERNS:
-            if pattern.search(command):
-                return description
+        for candidate in BashSecurity._iter_danger_scan_variants(command):
+            for pattern, description in _DANGEROUS_PATTERNS:
+                if pattern.search(candidate):
+                    return description
         return None
+
+    @staticmethod
+    def _iter_danger_scan_variants(command: str) -> List[str]:
+        candidates: list[str] = []
+        raw = str(command or "")
+        if raw:
+            candidates.append(raw)
+        decoded = BashSecurity._decode_shell_escapes(raw)
+        if decoded and decoded not in candidates:
+            candidates.append(decoded)
+        return candidates
+
+    @staticmethod
+    def _decode_shell_escapes(command: str) -> str:
+        if "\\" not in command:
+            return command
+
+        def _replace(match: re.Match[str]) -> str:
+            token = match.group(0)
+            try:
+                return codecs.decode(token, "unicode_escape")
+            except Exception:
+                return token
+
+        return _SHELL_ESCAPE_PATTERN.sub(_replace, command)

@@ -93,7 +93,9 @@ async def main_async(args: Optional[List[str]] = None):
     )
     if not await ipc_client.ping():
         print(f"错误: 未连接到 automation daemon ({ipc_socket})")
-        print("请先运行: python automation_daemon.py")
+        print("请先确认 systemd 服务: sudo systemctl status macchiato-automation.service")
+        print("若使用自定义 socket，请检查环境变量 SCHEDULE_AUTOMATION_SOCKET。")
+        print("本地前台运行可用: uv run automation_daemon.py")
         sys.exit(1)
 
     await ipc_client.connect()

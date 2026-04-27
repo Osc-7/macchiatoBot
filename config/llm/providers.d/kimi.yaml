@@ -23,19 +23,19 @@ kimi_code:
     file_input_mime_types:
       - application/pdf
 
-# kimi_k25:
-#   label: "Kimi K2.5"
-#   base_url: "https://api.moonshot.cn/v1"
-#   api_key: "${MOONSHOT_API_KEY}"
-#   model: "kimi-k2.5"
-#   temperature: 1.0
-#   vendor_params:
-#     thinking:
-#       type: "enabled"
-#   capabilities:
-#     vision: true
-#     function_calling: true
-#     parallel_tool_calls: true
-#     reasoning_content: true
-#     thinking_tag_inline: false
-#     context_window: 262144
+kimi_k2.6:
+  label: "Kimi K2.6"
+  base_url: "https://api.moonshot.cn/v1"
+  api_key: "${MOONSHOT_API_KEY}"
+  model: "kimi-k2.6"
+  temperature: 1.0
+  vendor_params:
+    thinking:
+      type: "enabled"
+  capabilities:
+    vision: true
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: true
+    thinking_tag_inline: false
+    context_window: 262144

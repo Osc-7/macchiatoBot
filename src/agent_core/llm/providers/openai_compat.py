@@ -292,6 +292,45 @@ class OpenAICompatProvider(BaseProvider):
             return messages
         return inject_gemini_dummy_thought_signatures_in_messages(messages)
 
+    def _thinking_mode_tool_rounds_need_nonstream(self) -> bool:
+        """DeepSeek thinking + 工具：下一轮请求必须带回 assistant 的 ``reasoning_content``。
+
+        官方文档要求带 tool_calls 时 ``reasoning_content`` 必须参与拼接；流式 delta
+        在部分网关/SDK 组合下可能无法稳定汇总该字段，导致 400：
+        ``The reasoning_content in the thinking mode must be passed back to the API``。
+        非流式 ``choice.message`` 与官方示例一致，可一次取全 ``content`` / ``reasoning_content`` / ``tool_calls``。
+        """
+        if not self._capabilities.reasoning_content:
+            return False
+        vp = self._vendor_params or {}
+        th = vp.get("thinking")
+        if not isinstance(th, dict):
+            return False
+        return str(th.get("type", "")).strip().lower() == "enabled"
+
+    @staticmethod
+    def _reasoning_fragment_from_delta(delta: Any) -> Optional[str]:
+        """从流式 delta 取一段 ``reasoning_content``（兼容 extra 字段与 model_dump）。"""
+        if delta is None:
+            return None
+        rc = getattr(delta, "reasoning_content", None)
+        if isinstance(rc, str) and rc:
+            return rc
+        extra = getattr(delta, "__pydantic_extra__", None)
+        if isinstance(extra, dict):
+            er = extra.get("reasoning_content")
+            if isinstance(er, str) and er:
+                return er
+        try:
+            dumped = delta.model_dump()
+            if isinstance(dumped, dict):
+                dr = dumped.get("reasoning_content")
+                if isinstance(dr, str) and dr:
+                    return dr
+        except Exception:
+            pass
+        return None
+
     async def chat(
         self,
         messages: List[Dict[str, Any]],
@@ -414,7 +453,8 @@ class OpenAICompatProvider(BaseProvider):
 
         self._apply_vendor_extra_body(request_params)
 
-        if self._stream:
+        use_stream = self._stream and not self._thinking_mode_tool_rounds_need_nonstream()
+        if use_stream:
             return await self._chat_with_tools_stream(
                 request_params,
                 on_content_delta=on_content_delta,
@@ -506,10 +546,11 @@ class OpenAICompatProvider(BaseProvider):
                         maybe_awaitable = on_content_delta(filtered)
                         if inspect.isawaitable(maybe_awaitable):
                             await maybe_awaitable
-            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                reasoning_parts.append(delta.reasoning_content)
+            rfrag = OpenAICompatProvider._reasoning_fragment_from_delta(delta)
+            if rfrag:
+                reasoning_parts.append(rfrag)
                 if on_reasoning_delta:
-                    maybe_awaitable = on_reasoning_delta(delta.reasoning_content)
+                    maybe_awaitable = on_reasoning_delta(rfrag)
                     if inspect.isawaitable(maybe_awaitable):
                         await maybe_awaitable
 

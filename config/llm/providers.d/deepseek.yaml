@@ -1,8 +1,8 @@
-deepseek_chat_thinking:
-  label: "DeepSeek V3.2"
+deepseek_V4_flash:
+  label: "DeepSeek V4 Flash"
   base_url: "https://api.deepseek.com/v1"
   api_key: "${DEEPSEEK_API_KEY}"
-  model: "deepseek-chat"
+  model: "deepseek-v4-flash"
   vendor_params:
     thinking:
       type: enabled
@@ -11,5 +11,19 @@ deepseek_chat_thinking:
     function_calling: true
     parallel_tool_calls: true
     reasoning_content: true
-    thinking_tag_inline: false
-    context_window: 131072
+    context_window: 1048576
+
+deepseek_V4_pro:
+  label: "DeepSeek V4 Pro"
+  base_url: "https://api.deepseek.com/v1"
+  api_key: "${DEEPSEEK_API_KEY}"
+  model: "deepseek-v4-pro"
+  vendor_params:
+    thinking:
+      type: enabled
+  capabilities:
+    vision: false
+    function_calling: true
+    parallel_tool_calls: true 
+    reasoning_content: true
+    context_window: 1048576

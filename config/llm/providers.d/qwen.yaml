@@ -2,11 +2,36 @@
 # api_key: ${DASHSCOPE_API_KEY} · 见仓库根 .env.example
 # 文档: https://help.aliyun.com/zh/model-studio/
 
-qwen_dashscope:
+qwen_3.5_plus:
   label: "Qwen3.5 Plus"
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   api_key: "${DASHSCOPE_API_KEY}"
   model: "qwen3.5-plus"
+  vendor_params:
+    enable_search: false
+    enable_thinking: true
+    thinking_budget: 65536
+    enable_web_extractor: false
+    search_options:
+      forced_search: false
+      search_strategy: "turbo"
+      enable_source: false
+      enable_citation: false
+      citation_format: "[<number>]"
+      enable_search_extension: false
+  capabilities:
+    vision: true
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: false
+    thinking_tag_inline: true
+    context_window: 1000000
+
+qwen_3.6_plus:
+  label: "Qwen3.6 Plus"
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  api_key: "${DASHSCOPE_API_KEY}"
+  model: "qwen3.6-plus"
   vendor_params:
     enable_search: false
     enable_thinking: true

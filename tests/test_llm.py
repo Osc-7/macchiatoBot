@@ -10,7 +10,9 @@ from openai.types.chat.chat_completion_message_tool_call import (
 
 from agent_core.llm import LLMClient, LLMResponse, ToolCall
 from agent_core.llm.client import _strip_thinking_content
+from agent_core.llm.capabilities import Capabilities
 from agent_core.llm.providers.openai_compat import (
+    OpenAICompatProvider,
     inject_gemini_dummy_thought_signatures_in_messages,
 )
 from agent_core.config import Config, LLMConfig
@@ -662,6 +664,28 @@ class TestLLMClient:
 
             extra_body = mock_client.chat.completions.create.call_args.kwargs["extra_body"]
             assert extra_body["search_options"].get("search_strategy") != "agent_max"
+
+
+class TestDeepSeekThinkingToolRoundsUseNonstream:
+    """DeepSeek thinking + 工具：须回传 reasoning_content，chat_with_tools 应走非流式。"""
+
+    def test_thinking_enabled_requests_nonstream_for_tools(self):
+        p = OpenAICompatProvider(
+            name="ds",
+            base_url="https://api.deepseek.com/v1",
+            api_key="k",
+            model="deepseek-v4-pro",
+            capabilities=Capabilities(reasoning_content=True),
+            stream=True,
+            vendor_params={"thinking": {"type": "enabled"}},
+        )
+        assert p._thinking_mode_tool_rounds_need_nonstream() is True
+
+    def test_reasoning_fragment_from_delta_extra(self):
+        from openai.types.chat.chat_completion_chunk import ChoiceDelta
+
+        d = ChoiceDelta.model_validate({"reasoning_content": "步"})
+        assert OpenAICompatProvider._reasoning_fragment_from_delta(d) == "步"
 
 
 class TestLLMClientIntegration:

@@ -95,7 +95,9 @@ class WebExtractorTool(BaseTool):
             if full_name in candidates:
                 return full_name
             for candidate in candidates:
-                if full_name.endswith(f".{candidate}"):
+                if full_name.endswith(f".{candidate}") or full_name.endswith(
+                    f"__{candidate}"
+                ):
                     return full_name
         return None
 

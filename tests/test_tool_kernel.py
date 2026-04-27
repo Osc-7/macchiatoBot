@@ -24,6 +24,13 @@ from agent_core.tools import (
 )
 
 
+def test_mcp_openai_safe_local_name():
+    from agent_core.mcp.client import mcp_openai_safe_local_name
+
+    assert mcp_openai_safe_local_name("tavily", "tavily_search") == "tavily__tavily_search"
+    assert mcp_openai_safe_local_name("a.b", "c") == "a_b__c"
+
+
 class DummyTool(BaseTool):
     def __init__(
         self,
@@ -88,15 +95,15 @@ class TestVersionedRegistry:
 
     def test_search_name_prefix(self):
         registry = VersionedToolRegistry()
-        registry.register(DummyTool(name="tavily.alpha", description="a"))
-        registry.register(DummyTool(name="tavily.beta", description="b"))
+        registry.register(DummyTool(name="tavily__alpha", description="a"))
+        registry.register(DummyTool(name="tavily__beta", description="b"))
         registry.register(DummyTool(name="get_tasks", description="任务"))
 
         results = registry.search(
-            query="", limit=10, name_prefix="tavily.", tags=None
+            query="", limit=10, name_prefix="tavily__", tags=None
         )
         names = [item["name"] for item in results]
-        assert set(names) == {"tavily.alpha", "tavily.beta"}
+        assert set(names) == {"tavily__alpha", "tavily__beta"}
 
     def test_search_hits_tool_tags_via_query(self):
         """工具 tags 参与语料：用户只写 query 也能命中仅 tag 含关键词的工具。"""
@@ -128,7 +135,7 @@ class TestVersionedRegistry:
         )
         proxy = MCPProxyTool(
             manager=MagicMock(),
-            local_name="discourse.list_topics",
+            local_name="discourse__list_topics",
             server_name="discourse",
             remote_name="list_topics",
             description="列出话题",
@@ -137,7 +144,7 @@ class TestVersionedRegistry:
         registry.register(proxy)
         results = registry.search("MCP Server", limit=5)
         names = [item["name"] for item in results]
-        assert "discourse.list_topics" in names
+        assert "discourse__list_topics" in names
 
 
 class TestKernelTools:
@@ -161,10 +168,10 @@ class TestKernelTools:
     @pytest.mark.asyncio
     async def test_search_tools_name_prefix_and_tool_source(self):
         registry = VersionedToolRegistry()
-        registry.register(DummyTool(name="tavily.x", description="x"))
+        registry.register(DummyTool(name="tavily__builtin", description="x"))
         proxy = MCPProxyTool(
             manager=MagicMock(),
-            local_name="tavily.remote_z",
+            local_name="tavily__z",
             server_name="tavily",
             remote_name="z",
             description="z tool",
@@ -176,14 +183,14 @@ class TestKernelTools:
             working_set_size=5,
         )
         tool = SearchToolsTool(registry=registry, working_set=working_set)
-        result = await tool.execute(name_prefix="tavily.")
+        result = await tool.execute(name_prefix="tavily__")
         assert result.success
         names = [t["name"] for t in result.data["tools"]]
-        assert "tavily.remote_z" in names
-        row = next(r for r in result.data["tools"] if r["name"] == "tavily.remote_z")
+        assert "tavily__z" in names
+        row = next(r for r in result.data["tools"] if r["name"] == "tavily__z")
         assert row["tool_source"] == "mcp"
         assert row["mcp_server"] == "tavily"
-        plain = next(r for r in result.data["tools"] if r["name"] == "tavily.x")
+        plain = next(r for r in result.data["tools"] if r["name"] == "tavily__builtin")
         assert plain["tool_source"] == "native"
         assert plain.get("mcp_server") is None
 

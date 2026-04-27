@@ -45,8 +45,8 @@ class CallToolTool(BaseTool):
                     type="string",
                     description=(
                         "目标工具名称，须与 ToolRegistry 中已注册名一致，例如 add_event、get_tasks；"
-                        "MCP 工具一般为「前缀.远端名」，如 tavily.xxx、discourse.xxx（取决于 mcp.servers 里 "
-                        "的 name / tool_name_prefix，无统一 mcp.* 命名空间）。"
+                        "MCP 工具一般为「前缀__远端名」（双下划线），如 tavily__tavily_search（取决于 mcp.servers 里 "
+                        "的 name / tool_name_prefix）。"
                     ),
                     required=True,
                 ),

@@ -40,7 +40,8 @@ class SearchToolsTool(BaseTool):
             description=(
                 "在完整工具库中搜索可用工具（含进程内原生工具 + 已连接的 MCP 代理工具）。"
                 "当你需要当前看不到的能力时，先搜索再使用 call_tool 按「注册名」执行。"
-                "MCP 工具名一般为「前缀.远端名」，如 tavily.xxx、discourse.xxx（取决于配置里的 name / tool_name_prefix）。"
+                "MCP 工具名为「前缀__远端名」（双下划线），如 tavily__tavily_search；"
+                "仅含字母数字与 _-，以便兼容 OpenAI/DeepSeek 等 API 对 function.name 的校验。"
             ),
             parameters=[
                 ToolParameter(
@@ -62,7 +63,7 @@ class SearchToolsTool(BaseTool):
                     name="name_prefix",
                     type="string",
                     description=(
-                        "仅返回工具名以此前缀开头的条目，例如 tavily. 或 discourse.；"
+                        "仅返回工具名以此前缀开头的条目，例如 tavily__ 或 discourse__；"
                         "已知 MCP 命名空间时可直接缩小范围，不必猜全名"
                     ),
                     required=False,

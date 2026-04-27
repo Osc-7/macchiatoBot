@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +22,25 @@ from .proxy_tool import MCPProxyTool
 from .stdio_transport import MCPServerRuntime, connect_stdio_mcp_with_retries
 
 logger = logging.getLogger(__name__)
+
+# OpenAI / DeepSeek 等端点对 function.name 常要求 ^[a-zA-Z0-9_-]+$，不得含「.」。
+_MCP_NAME_BAD_CHARS = re.compile(r"[^a-zA-Z0-9_-]+")
+
+
+def mcp_openai_safe_local_name(local_prefix: str, remote_name: str) -> str:
+    """
+    生成本地注册用的 MCP 代理工具名，仅含 [a-zA-Z0-9_-]。
+
+    使用「prefix__remote」双下划线分隔，与旧版「prefix.remote」对应。
+    """
+
+    def _seg(s: str) -> str:
+        t = _MCP_NAME_BAD_CHARS.sub("_", (s or "").strip())
+        t = re.sub(r"_+", "_", t).strip("_")
+        return t or "x"
+
+    a, b = _seg(local_prefix), _seg(remote_name)
+    return f"{a}__{b}"
 
 
 class MCPClientManager:
@@ -35,6 +55,15 @@ class MCPClientManager:
         self._connected = False
         self._pooled_release_keys: List[str] = []
         self._pool_key_by_server: Dict[str, str] = {}
+
+    def _alloc_proxy_local_name(self, local_prefix: str, remote_name: str) -> str:
+        base = mcp_openai_safe_local_name(local_prefix, remote_name)
+        name = base
+        n = 2
+        while any(t.name == name for t in self._proxy_tools):
+            name = f"{base}__{n}"
+            n += 1
+        return name
 
     async def connect(self) -> None:
         """连接所有启用的 MCP Server，并构建代理工具。"""
@@ -68,9 +97,9 @@ class MCPClientManager:
 
                 for remote_name, description, input_schema in tool_metas:
                     local_prefix = server.tool_name_prefix or server.name
-                    local_name = f"{local_prefix}.{remote_name}"
-                    if any(t.name == local_name for t in self._proxy_tools):
-                        raise ValueError(f"MCP 工具名冲突: {local_name}")
+                    local_name = self._alloc_proxy_local_name(
+                        str(local_prefix), str(remote_name)
+                    )
 
                     self._proxy_tools.append(
                         MCPProxyTool(
@@ -112,11 +141,9 @@ class MCPClientManager:
                 if not remote_name:
                     continue
                 local_prefix = server.tool_name_prefix or server.name
-                local_name = f"{local_prefix}.{remote_name}"
-                if any(t.name == local_name for t in self._proxy_tools):
-                    await attempt_stack.aclose()
-                    del self._servers[server.name]
-                    raise ValueError(f"MCP 工具名冲突: {local_name}")
+                local_name = self._alloc_proxy_local_name(
+                    str(local_prefix), str(remote_name)
+                )
 
                 self._proxy_tools.append(
                     MCPProxyTool(

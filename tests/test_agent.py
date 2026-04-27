@@ -611,7 +611,7 @@ class TestMcpToolCatalogSync:
     async def test_mcp_proxies_merged_into_tool_catalog(self, mock_config):
         mock_config.mcp = MCPConfig(enabled=True, servers=[])
         cat = VersionedToolRegistry()
-        proxy = MockTool(name="tavily.stub_search")
+        proxy = MockTool(name="tavily__stub_search")
 
         with patch("agent_core.agent.agent.MCPClientManager") as MCM:
             mgr = MagicMock()
@@ -625,9 +625,9 @@ class TestMcpToolCatalogSync:
                 tools=[MockTool(name="ordinary")],
                 tool_catalog=cat,
             ) as agent:
-                assert agent._tool_registry.has("tavily.stub_search")
+                assert agent._tool_registry.has("tavily__stub_search")
                 assert cat.has(
-                    "tavily.stub_search"
+                    "tavily__stub_search"
                 ), "search_tools/call_tool 使用 tool_catalog 时必须能解析 MCP 工具名"
 
 

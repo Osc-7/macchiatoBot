@@ -7,14 +7,16 @@ Prompt 加载与组合
 
 组装顺序（``mode=full``，默认配方）：
 1. Identity / Soul — 人设与基调（可按渠道省略）
-2. Runtime: time — 当前时间上下文
+2. Runtime: time — **静态**说明（实时时刻在用户消息 ``[Time:...]`` 前缀）
 3. Safety — runtime_safety
 4. Tooling — tools_kernel
 5. Channel overlay — 可选（如 ``shuiyuan/system``）
-6. Workspace — 按配方注入 ``agents`` / ``multi_agent`` / ``schedule`` / ``user`` 等；可选 Skills 索引
-7. Runtime 扩展 — 联网、抓取、文件、记忆（按配置）
+6. Workspace — 按配方注入 ``agents`` / ``multi_agent`` / ``schedule`` / ``user`` 等；可选 Skills 索引（随本机 ``user.md`` / CLI skills 变化）
+7. Runtime 扩展 — 联网、抓取、文件、记忆说明（按配置）
 
-minimal（后台 Core / background）：time → safety → tools → runtime 扩展；无人设、无 overlay、无 Workspace。
+``build_agent_system_prompt`` 还会在末尾追加「记忆上下文」「自动化摘要」（按会话变化），利于前缀缓存静态 instruction 段。
+
+minimal（后台 Core / background）：静态 time 说明 → safety → tools → runtime 扩展；无人设、无 overlay、无 Workspace。
 
 Skills 采用渐进式披露：system prompt 仅注入 metadata（name + description），
 完整内容需通过 load_skill 工具按需加载。
@@ -302,7 +304,6 @@ def _load_user_section(max_chars: int = DEFAULT_MAX_SECTION_CHARS) -> str:
 
 
 def build_system_prompt(
-    time_context: str,
     config: Config,
     has_web_extractor: bool,
     has_file_tools: bool = False,
@@ -312,7 +313,8 @@ def build_system_prompt(
     skills_cli_path: Optional[Path] = None,
 ) -> str:
     """
-    构建 Agent 系统提示。先人设与时间、安全边界，再工具长文，渠道 overlay 与 Workspace 由 ``recipe`` 决定。
+    构建 Agent 系统提示。先人设与静态时间说明（实时时刻在用户消息前缀）、安全边界，
+    再工具长文，渠道 overlay 与 Workspace 由 ``recipe`` 决定。
     """
     rec = recipe if recipe is not None else PromptRecipe()
     parts: list[str] = []
@@ -333,11 +335,11 @@ def build_system_prompt(
         if rec.soul:
             _maybe_append(parts, _load_relative_md(rec.soul, max_section_chars))
 
-    # ---------- 2. Runtime: 当前时间（full / minimal 均尽早注入）----------
+    # ---------- 2. Runtime: 时间说明（静态；实时时刻在用户消息前缀 [Time:...]，便于缓存）----------
     if mode in ("full", "minimal"):
         time_section = load("runtime_time")
         if time_section:
-            _maybe_append(parts, time_section.format(time_context=time_context))
+            _maybe_append(parts, time_section.strip())
 
     # ---------- 3. Safety ----------
     if mode in ("full", "minimal"):

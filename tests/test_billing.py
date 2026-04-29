@@ -39,6 +39,27 @@ class TestComputeCost:
         cost = compute_cost(0, 0, "qwen3.5-plus")
         assert cost == 0.0
 
+    def test_configured_cache_pricing(self):
+        """配置价表支持 DeepSeek 类 cache hit/miss 分桶。"""
+        pricing = {
+            "deepseek-v4-flash": {
+                "currency": "USD",
+                "cny_per_currency_unit": 7.0,
+                "input_cache_hit_per_million": 0.028,
+                "input_cache_miss_per_million": 0.14,
+                "output_per_million": 0.28,
+            }
+        }
+        cost = compute_cost(
+            1_000,
+            100,
+            "deepseek-v4-flash",
+            pricing=pricing,
+            prompt_cache_hit_tokens=800,
+            prompt_cache_miss_tokens=200,
+        )
+        assert cost == pytest.approx(0.000549, rel=1e-5)
+
 
 class TestComputeCostFromCalls:
     """compute_cost_from_calls 阶梯计费累加"""
@@ -50,6 +71,21 @@ class TestComputeCostFromCalls:
         c1 = 0.05 * 0.8 + 0.001 * 4.8  # 0.04 + 0.0048 = 0.0448
         c2 = 0.15 * 2.0 + 0.002 * 12.0  # 0.3 + 0.024 = 0.324
         assert cost == pytest.approx(c1 + c2, rel=1e-5)
+
+    def test_multiple_calls_configured_cache_pricing(self):
+        pricing = {
+            "deepseek-v4-flash": {
+                "input_cache_hit_per_million": 0.028,
+                "input_cache_miss_per_million": 0.14,
+                "output_per_million": 0.28,
+            }
+        }
+        calls = [
+            (1_000, 100, 0, 1_000),
+            (1_000, 100, 800, 200),
+        ]
+        cost = compute_cost_from_calls(calls, "deepseek-v4-flash", pricing=pricing)
+        assert cost == pytest.approx(0.000246, rel=1e-5)
 
 
 class TestGetModelPrices:
@@ -64,3 +100,7 @@ class TestGetModelPrices:
     def test_unknown_model(self):
         """未知模型返回 None"""
         assert get_model_prices("unknown") is None
+
+    def test_configured_model_price(self):
+        pricing = {"my-model": {"input_per_million": 1.0, "output_per_million": 2.0}}
+        assert get_model_prices("my_model", pricing=pricing) == pricing["my-model"]

@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from agent_core.context import (
     ConversationContext,
     TimeContext,
+    apply_user_message_time_prefix,
     get_time_context,
     get_relative_date_desc,
 )
@@ -178,6 +179,17 @@ class TestGetTimeContext:
         ctx = get_time_context("America/New_York")
 
         assert ctx.timezone_name == "America/New_York"
+
+
+class TestApplyUserMessageTimePrefix:
+    def test_prefix_then_body(self):
+        out = apply_user_message_time_prefix("你好", "Asia/Shanghai")
+        assert out.startswith("[Time:")
+        assert "你好" in out
+
+    def test_skips_when_already_prefixed(self):
+        raw = "[Time:2099-01-01 12:00] 已有"
+        assert apply_user_message_time_prefix(raw, "Asia/Shanghai") == raw
 
 
 class TestGetRelativeDateDesc:

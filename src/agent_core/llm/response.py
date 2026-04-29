@@ -17,6 +17,10 @@ class TokenUsage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    #: DeepSeek 等：输入侧 KV 缓存命中 token（未返回时为 0）
+    prompt_cache_hit_tokens: int = 0
+    #: DeepSeek 等：输入侧未命中缓存 token（未返回时为 0）
+    prompt_cache_miss_tokens: int = 0
 
     @classmethod
     def from_response(cls, response: Any) -> "TokenUsage":
@@ -26,21 +30,21 @@ class TokenUsage:
         usage = getattr(response, "usage", None)
         if usage is None:
             return cls()
-        return cls(
-            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-            total_tokens=getattr(usage, "total_tokens", 0) or 0,
-        )
+        return cls.from_usage(usage)
 
     @classmethod
     def from_usage(cls, usage: Any) -> "TokenUsage":
         """直接从 usage 对象解析；无则返回全 0。"""
         if usage is None:
             return cls()
+        hit = getattr(usage, "prompt_cache_hit_tokens", None)
+        miss = getattr(usage, "prompt_cache_miss_tokens", None)
         return cls(
             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
             total_tokens=getattr(usage, "total_tokens", 0) or 0,
+            prompt_cache_hit_tokens=int(hit) if hit is not None else 0,
+            prompt_cache_miss_tokens=int(miss) if miss is not None else 0,
         )
 
 

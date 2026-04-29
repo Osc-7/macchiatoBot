@@ -29,6 +29,11 @@ def _format_token_usage(u: Dict[str, Any]) -> str:
         f"输出 token: {u.get('completion_tokens', 0):,}",
         f"合计 token: {u.get('total_tokens', 0):,}{cost_str}",
     ]
+    hit = int(u.get("prompt_cache_hit_tokens") or 0)
+    miss = int(u.get("prompt_cache_miss_tokens") or 0)
+    if hit > 0 or miss > 0:
+        lines.append(f"输入缓存命中 token: {hit:,}")
+        lines.append(f"输入缓存未命中 token: {miss:,}")
     ctx_max = u.get("context_window_max_tokens")
     ctx_cur = u.get("context_window_current_tokens")
     ctx_rem = u.get("context_window_remaining_tokens")

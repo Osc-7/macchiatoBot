@@ -187,6 +187,8 @@ class KernelTerminal:
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 0,
         }
         fn_usage = getattr(agent, "get_token_usage", None) if agent is not None else None
         if callable(fn_usage):
@@ -196,6 +198,12 @@ class KernelTerminal:
                     token_usage["prompt_tokens"] = int(u.get("prompt_tokens", 0))
                     token_usage["completion_tokens"] = int(u.get("completion_tokens", 0))
                     token_usage["total_tokens"] = int(u.get("total_tokens", 0))
+                    token_usage["prompt_cache_hit_tokens"] = int(
+                        u.get("prompt_cache_hit_tokens", 0)
+                    )
+                    token_usage["prompt_cache_miss_tokens"] = int(
+                        u.get("prompt_cache_miss_tokens", 0)
+                    )
             except Exception:
                 pass
 

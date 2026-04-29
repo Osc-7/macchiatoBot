@@ -150,6 +150,8 @@ class SessionLogger:
                 "prompt_tokens": response.usage.prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,
+                "prompt_cache_hit_tokens": response.usage.prompt_cache_hit_tokens,
+                "prompt_cache_miss_tokens": response.usage.prompt_cache_miss_tokens,
             }
         self._write_record(record)
 

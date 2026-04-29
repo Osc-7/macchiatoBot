@@ -98,6 +98,31 @@ class TimeContext:
         return "\n".join(lines)
 
 
+# 与每条用户消息前缀一致：供模型将「发送时刻」与会话流对齐（通常为分钟粒度，降低无谓抖动）。
+USER_MESSAGE_TIME_LINE_FMT = "%Y-%m-%d %H:%M"
+
+
+def format_user_message_time_prefix(timezone: Optional[str] = None) -> str:
+    """
+    本轮用户消息正文前应附加的前缀（含尾部空格），形如 ``[Time:2026-04-29 14:30] ``。
+    实时时钟不在 system prompt 中注入，以利前缀缓存；权威时间在用户消息前缀。
+    """
+    tc = get_time_context(timezone)
+    line = tc.now.strftime(USER_MESSAGE_TIME_LINE_FMT)
+    return f"[Time:{line}] "
+
+
+def apply_user_message_time_prefix(body: str, timezone: Optional[str] = None) -> str:
+    """
+    在用户消息正文前附加发送时刻前缀；若正文已以 ``[Time:`` 开头则不再重复。
+    """
+    raw = body if body is not None else ""
+    if raw.lstrip().startswith("[Time:"):
+        return raw
+    pre = format_user_message_time_prefix(timezone)
+    return pre + raw
+
+
 def get_time_context(timezone: Optional[str] = None) -> TimeContext:
     """
     获取当前时间上下文。

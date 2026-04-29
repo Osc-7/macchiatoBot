@@ -2,11 +2,12 @@
 LLM 计费工具
 
 根据 token 用量和模型单价计算费用（人民币元）。
-支持阶梯计费（按单次请求的输入 token 数分档）。
+优先使用 provider 配置里的 ``pricing``；未配置时保留少量内置旧价表作为回退。
+支持阶梯计费（按单次请求的输入 token 数分档）与 DeepSeek 类 cache hit/miss 分桶。
 参考：https://help.aliyun.com/zh/model-studio/model-pricing
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 # 阶梯定义：(输入token上限, 输入单价, 输出单价) 元/百万token，中国内地
 # 按单次请求的输入 Token 数分档
@@ -79,10 +80,113 @@ def _compute_cost_per_call(
     return round(cost, 6)
 
 
+def _model_key(model: str) -> str:
+    return (model or "").lower().replace("_", "-")
+
+
+def _get_attr(obj: Any, name: str, default: Any = None) -> Any:
+    if obj is None:
+        return default
+    if isinstance(obj, Mapping):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _resolve_pricing(model: str, pricing: Optional[Mapping[str, Any]]) -> Any:
+    if not pricing:
+        return None
+    if model in pricing:
+        return pricing[model]
+    key = _model_key(model)
+    for k, v in pricing.items():
+        if _model_key(str(k)) == key:
+            return v
+    return None
+
+
+def _unpack_call(call: Any) -> Tuple[int, int, int, int]:
+    """返回 (prompt, completion, cache_hit, cache_miss)。兼容旧二元组。"""
+    if isinstance(call, Mapping):
+        return (
+            int(call.get("prompt_tokens", 0) or 0),
+            int(call.get("completion_tokens", 0) or 0),
+            int(call.get("prompt_cache_hit_tokens", 0) or 0),
+            int(call.get("prompt_cache_miss_tokens", 0) or 0),
+        )
+    if isinstance(call, (tuple, list)):
+        pt = int(call[0] if len(call) > 0 else 0)
+        ct = int(call[1] if len(call) > 1 else 0)
+        hit = int(call[2] if len(call) > 2 else 0)
+        miss = int(call[3] if len(call) > 3 else 0)
+        return pt, ct, hit, miss
+    return 0, 0, 0, 0
+
+
+def _compute_configured_cost_per_call(
+    call: Any,
+    model: str,
+    pricing: Optional[Mapping[str, Any]],
+) -> Optional[float]:
+    cfg = _resolve_pricing(model, pricing)
+    if cfg is None:
+        return None
+
+    prompt_tokens, completion_tokens, hit_tokens, miss_tokens = _unpack_call(call)
+    exchange = float(_get_attr(cfg, "cny_per_currency_unit", 1.0) or 1.0)
+    output_p = _get_attr(cfg, "output_per_million")
+
+    tiers = list(_get_attr(cfg, "tiers", []) or [])
+    if tiers:
+        tier_tuples: List[Tuple[int, float, float]] = []
+        for t in tiers:
+            tier_tuples.append(
+                (
+                    int(_get_attr(t, "input_token_limit", 0) or 0),
+                    float(_get_attr(t, "input_per_million", 0.0) or 0.0),
+                    float(_get_attr(t, "output_per_million", 0.0) or 0.0),
+                )
+            )
+        tier_tuples.sort(key=lambda x: x[0])
+        inp_p, out_p = _get_tier_prices(prompt_tokens, tier_tuples)
+        return round(
+            (
+                prompt_tokens / 1_000_000 * inp_p
+                + completion_tokens / 1_000_000 * out_p
+            )
+            * exchange,
+            6,
+        )
+
+    if output_p is None:
+        return None
+    out_p = float(output_p)
+
+    hit_p = _get_attr(cfg, "input_cache_hit_per_million")
+    miss_p = _get_attr(cfg, "input_cache_miss_per_million")
+    input_p = _get_attr(cfg, "input_per_million")
+    if hit_p is not None and miss_p is not None:
+        # 有 cache 分桶价格时：已知 hit/miss 分桶按分桶计；未上报的剩余输入按 miss 处理。
+        remainder = max(prompt_tokens - hit_tokens - miss_tokens, 0)
+        input_cost = (
+            hit_tokens / 1_000_000 * float(hit_p)
+            + (miss_tokens + remainder) / 1_000_000 * float(miss_p)
+        )
+    elif input_p is not None:
+        input_cost = prompt_tokens / 1_000_000 * float(input_p)
+    else:
+        return None
+
+    output_cost = completion_tokens / 1_000_000 * out_p
+    return round((input_cost + output_cost) * exchange, 6)
+
+
 def compute_cost(
     prompt_tokens: int,
     completion_tokens: int,
     model: str,
+    pricing: Optional[Mapping[str, Any]] = None,
+    prompt_cache_hit_tokens: int = 0,
+    prompt_cache_miss_tokens: int = 0,
 ) -> Optional[float]:
     """
     计算单次调用的费用（元），支持阶梯计费。
@@ -95,39 +199,61 @@ def compute_cost(
     Returns:
         费用（人民币元），未知模型返回 None
     """
+    configured = _compute_configured_cost_per_call(
+        (
+            prompt_tokens,
+            completion_tokens,
+            prompt_cache_hit_tokens,
+            prompt_cache_miss_tokens,
+        ),
+        model,
+        pricing,
+    )
+    if configured is not None:
+        return configured
     return _compute_cost_per_call(prompt_tokens, completion_tokens, model)
 
 
 def compute_cost_from_calls(
-    calls: List[Tuple[int, int]],
+    calls: Sequence[Any],
     model: str,
+    pricing: Optional[Mapping[str, Any]] = None,
 ) -> Optional[float]:
     """
     根据多次调用的 (prompt_tokens, completion_tokens) 列表，按阶梯计费累加总费用。
 
     Args:
-        calls: [(prompt_tokens, completion_tokens), ...]
+        calls: [(prompt_tokens, completion_tokens), ...] 或
+               [(prompt_tokens, completion_tokens, cache_hit, cache_miss), ...]
         model: 模型名称
 
     Returns:
         总费用（元），未知模型返回 None
     """
     total = 0.0
-    for pt, ct in calls:
-        c = _compute_cost_per_call(pt, ct, model)
+    for call in calls:
+        c = _compute_configured_cost_per_call(call, model, pricing)
+        if c is None:
+            pt, ct, _, _ = _unpack_call(call)
+            c = _compute_cost_per_call(pt, ct, model)
         if c is None:
             return None
         total += c
     return round(total, 6)
 
 
-def get_model_prices(model: str) -> Optional[object]:
+def get_model_prices(
+    model: str, pricing: Optional[Mapping[str, Any]] = None
+) -> Optional[object]:
     """
     获取模型定价信息（阶梯或单价）。
 
     Returns:
         阶梯模型返回 tiers 列表，平价为 (input, output)，未知返回 None
     """
+    configured = _resolve_pricing(model, pricing)
+    if configured is not None:
+        return configured
     key = model if model in _TIERED_PRICES else model.lower().replace("_", "-")
     if key in _TIERED_PRICES:
         return _TIERED_PRICES[key]

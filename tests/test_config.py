@@ -510,6 +510,47 @@ llm:
         assert config.llm.active == "deepseek"
         assert config.llm.vision_provider == "qwen3vl"
 
+    def test_provider_pricing_table(self, tmp_path):
+        """provider.pricing 应随具体模型配置解析。"""
+        config_content = """
+llm:
+  active: "deepseek"
+  providers:
+    deepseek:
+      base_url: "https://example.com/v1"
+      api_key: "a"
+      model: "deepseek-v4-flash"
+      pricing:
+        currency: "USD"
+        cny_per_currency_unit: 7.25
+        input_cache_hit_per_million: 0.028
+        input_cache_miss_per_million: 0.14
+        output_per_million: 0.28
+    qwen:
+      base_url: "https://example.com/v1"
+      api_key: "b"
+      model: "qwen3.5-plus"
+      pricing:
+        currency: "CNY"
+        tiers:
+          - input_token_limit: 128000
+            input_per_million: 0.8
+            output_per_million: 4.8
+"""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+
+        config = load_config(config_file)
+
+        ds = config.llm.providers["deepseek"].pricing
+        assert ds is not None
+        assert ds.currency == "USD"
+        assert ds.cny_per_currency_unit == 7.25
+        assert ds.input_cache_hit_per_million == 0.028
+        qwen = config.llm.providers["qwen"].pricing
+        assert qwen is not None
+        assert qwen.tiers[0].input_token_limit == 128000
+
     def test_provider_env_var_expansion(self, tmp_path, monkeypatch):
         """providers 下 ${ENV_VAR} 语法应由加载器就地展开。"""
         monkeypatch.setenv("SJTU_API_KEY", "env-sjtu-key")

@@ -170,7 +170,6 @@ class TestBuildSystemPromptSkills:
             skills=SkillsConfig(enabled=[], cli_dir=None),
         )
         prompt = build_system_prompt(
-            time_context="2025-01-01 12:00",
             config=cfg,
             has_web_extractor=False,
             mode="full",
@@ -189,7 +188,6 @@ class TestBuildSystemPromptSkills:
             skills=SkillsConfig(enabled=["example"], cli_dir=str(tmp_path)),
         )
         prompt = build_system_prompt(
-            time_context="2025-01-01 12:00",
             config=cfg,
             has_web_extractor=False,
             mode="full",

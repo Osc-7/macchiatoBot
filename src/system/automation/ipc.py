@@ -593,6 +593,8 @@ class AutomationIPCClient:
             "total_tokens": 0,
             "call_count": 0,
             "cost_yuan": 0.0,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 0,
         }
         self._turn_count_cache = 0
         self._client_id = f"{os.getpid()}-{id(self)}"

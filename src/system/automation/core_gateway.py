@@ -535,6 +535,8 @@ class AutomationCoreGateway:
         "total_tokens": 0,
         "call_count": 0,
         "cost_yuan": 0.0,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 0,
     }
 
     def get_token_usage(self, session_id: Optional[str] = None) -> dict:

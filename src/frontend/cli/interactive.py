@@ -172,13 +172,19 @@ def print_token_usage_data(u: dict):
         ctx_line = f"\n- **上下文窗口**: `当前 {ctx_cur:,} / 最大 {ctx_max:,}，剩余 {ctx_rem:,} token`"
     else:
         ctx_line = ""
+    hit = int(u.get("prompt_cache_hit_tokens") or 0)
+    miss = int(u.get("prompt_cache_miss_tokens") or 0)
+    cache_md = ""
+    if hit > 0 or miss > 0:
+        cache_md = f"\n- **输入缓存命中 token**: `{hit}`\n- **输入缓存未命中 token**: `{miss}`"
+
     md = f"""
 # Token 用量统计
 
 - **调用次数**: `{call_count}`
 - **输入 token**: `{prompt_tokens}`
 - **输出 token**: `{completion_tokens}`
-- **合计 token**: `{total_tokens}`{cost_line}{ctx_line}
+- **合计 token**: `{total_tokens}`{cost_line}{cache_md}{ctx_line}
 """
     if _HAS_RICH and _RICH_CONSOLE is not None:
         _RICH_CONSOLE.print(Markdown(md))
@@ -191,6 +197,9 @@ def print_token_usage_data(u: dict):
         print(f"  输入 token:   {u.get('prompt_tokens', 0)}")
         print(f"  输出 token:   {u.get('completion_tokens', 0)}")
         print(f"  合计 token:   {u.get('total_tokens', 0)}")
+        if hit > 0 or miss > 0:
+            print(f"  输入缓存命中 token:   {hit}")
+            print(f"  输入缓存未命中 token: {miss}")
         if u.get("cost_yuan") is not None:
             print(f"  预估费用:     ¥{u['cost_yuan']:.4f}")
         if (
@@ -297,6 +306,8 @@ async def run_interactive_loop(agent: Any) -> str:
         "total_tokens": 0,
         "call_count": 0,
         "cost_yuan": 0.0,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 0,
     }
 
     def _normalize_usage(u: dict) -> dict:

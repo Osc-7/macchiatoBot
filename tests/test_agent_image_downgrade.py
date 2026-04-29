@@ -133,6 +133,7 @@ async def test_prepare_turn_downgrades_image_when_main_lacks_vision():
     last = agent.context.messages[-1]
     assert last["role"] == "user"
     assert isinstance(last["content"], str)
+    assert last["content"].startswith("[Time:")
     assert "[用户附上图片" in last["content"]
     # 原始媒体应被登记到 _last_unseen_media
     assert len(agent._last_unseen_media) == 1
@@ -178,6 +179,7 @@ async def test_prepare_turn_keeps_pdf_file_block_when_provider_supports_it():
     last = agent.context.messages[-1]
     assert isinstance(last["content"], list)
     assert last["content"][0]["type"] == "text"
+    assert last["content"][0]["text"].startswith("[Time:")
     assert last["content"][1]["type"] == "file"
 
 
@@ -199,6 +201,7 @@ async def test_prepare_turn_falls_back_to_text_when_file_not_supported():
     )
     last = agent.context.messages[-1]
     assert isinstance(last["content"], str)
+    assert last["content"].startswith("[Time:")
     assert "/tmp/spec.pdf" in last["content"]
     assert "first page text" in last["content"]
 
@@ -225,6 +228,7 @@ async def test_prepare_turn_defers_marked_image_until_next_text_input():
     await agent.prepare_turn("请根据我刚才发的图回答")
     second = agent.context.messages[-1]
     assert isinstance(second["content"], str)
+    assert second["content"].startswith("[Time:")
     assert "请根据我刚才发的图回答" in second["content"]
     assert "p1.png" in second["content"]
 

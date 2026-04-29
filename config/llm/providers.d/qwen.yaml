@@ -7,6 +7,18 @@ qwen_3.5_plus:
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   api_key: "${DASHSCOPE_API_KEY}"
   model: "qwen3.5-plus"
+  pricing:
+    currency: "CNY"
+    tiers:
+      - input_token_limit: 128000
+        input_per_million: 0.8
+        output_per_million: 4.8
+      - input_token_limit: 256000
+        input_per_million: 2.0
+        output_per_million: 12.0
+      - input_token_limit: 1000000
+        input_per_million: 4.0
+        output_per_million: 24.0
   vendor_params:
     enable_search: false
     enable_thinking: true

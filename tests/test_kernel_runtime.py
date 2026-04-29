@@ -352,6 +352,8 @@ async def test_agent_prepare_turn_populates_recall_result(tmp_path) -> None:
     assert turn_id == 1
     assert recall_called, "prepare_turn 在 memory_enabled=True 时应调用 recall_policy.should_recall"
     assert len(agent._context.get_messages()) == 1
+    assert agent._context.messages[0]["content"].startswith("[Time:")
+    assert "测试消息" in agent._context.messages[0]["content"]
 
 
 @pytest.mark.asyncio

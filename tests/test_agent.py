@@ -197,20 +197,134 @@ class TestContextManagement:
         assert len(agent.context) == 0
 
 
+class TestMissingToolReasoningRetry:
+    @pytest.mark.asyncio
+    async def test_retry_tool_call_response_missing_reasoning(self, mock_config):
+        from agent_core.kernel_interface import ReturnAction, ToolCallAction, ToolResultEvent
+
+        tool = MockTool(name="tool_a")
+        agent = AgentCore(config=mock_config, tools=[tool], max_iterations=5)
+        type(agent._llm_client).context_window = property(  # type: ignore[assignment]
+            lambda _self: 0
+        )
+        type(agent._llm_client).max_tokens = property(  # type: ignore[assignment]
+            lambda _self: 4096
+        )
+        type(agent._llm_client).capabilities = property(  # type: ignore[assignment]
+            lambda _self: type("Caps", (), {"reasoning_content": True})()
+        )
+        agent._llm_client._active_provider()._vendor_params = {  # type: ignore[attr-defined]
+            "thinking": {"type": "enabled"}
+        }
+
+        missing_reasoning = LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="c1", name="tool_a", arguments={"input": "x"})],
+            finish_reason="tool_calls",
+            reasoning_content=None,
+        )
+        recovered = LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="c2", name="tool_a", arguments={"input": "y"})],
+            finish_reason="tool_calls",
+            reasoning_content="need tool",
+        )
+        final_response = LLMResponse(content="done", tool_calls=[])
+
+        agent.context.add_user_message("hi")
+        gen = agent.run_loop(turn_id=1, hooks=None)
+        with patch.object(
+            agent._llm_client,
+            "chat_with_tools",
+            new_callable=AsyncMock,
+            side_effect=[missing_reasoning, recovered, final_response],
+        ) as mock_chat:
+            action = await gen.asend(None)
+            assert isinstance(action, ToolCallAction)
+            assert action.tool_call_id == "c2"
+            assert mock_chat.await_count == 2
+
+            assistant_msgs = [
+                m for m in agent.context.get_messages() if m.get("role") == "assistant"
+            ]
+            assert len(assistant_msgs) == 1
+            assert assistant_msgs[0]["tool_calls"][0]["id"] == "c2"
+            assert assistant_msgs[0]["reasoning_content"] == "need tool"
+
+            action = await gen.asend(
+                ToolResultEvent(
+                    tool_call_id=action.tool_call_id,
+                    result=tool._execute_result,
+                )
+            )
+            assert isinstance(action, ReturnAction)
+            assert action.message == "done"
+
+    @pytest.mark.asyncio
+    async def test_abort_when_tool_call_reasoning_missing_after_retry(self, mock_config):
+        from agent_core.kernel_interface import ReturnAction
+
+        tool = MockTool(name="tool_a")
+        agent = AgentCore(config=mock_config, tools=[tool], max_iterations=5)
+        type(agent._llm_client).context_window = property(  # type: ignore[assignment]
+            lambda _self: 0
+        )
+        type(agent._llm_client).max_tokens = property(  # type: ignore[assignment]
+            lambda _self: 4096
+        )
+        type(agent._llm_client).capabilities = property(  # type: ignore[assignment]
+            lambda _self: type("Caps", (), {"reasoning_content": True})()
+        )
+        agent._llm_client._active_provider()._vendor_params = {  # type: ignore[attr-defined]
+            "thinking": {"type": "enabled"}
+        }
+
+        missing_1 = LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="c1", name="tool_a", arguments={"input": "x"})],
+            finish_reason="tool_calls",
+            reasoning_content=None,
+        )
+        missing_2 = LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="c2", name="tool_a", arguments={"input": "y"})],
+            finish_reason="tool_calls",
+            reasoning_content=None,
+        )
+
+        agent.context.add_user_message("hi")
+        gen = agent.run_loop(turn_id=1, hooks=None)
+        with patch.object(
+            agent._llm_client,
+            "chat_with_tools",
+            new_callable=AsyncMock,
+            side_effect=[missing_1, missing_2],
+        ) as mock_chat:
+            action = await gen.asend(None)
+            assert isinstance(action, ReturnAction)
+            assert action.status == "error"
+            assert "缺少 reasoning_content" in action.message
+            assert mock_chat.await_count == 2
+
+        assistant_msgs = [
+            m for m in agent.context.get_messages() if m.get("role") == "assistant"
+        ]
+        assert assistant_msgs == []
+
+
 # ============== 系统提示构建测试 ==============
 
 
 class TestBuildSystemPrompt:
     """测试系统提示构建"""
 
-    def test_build_system_prompt_contains_time_context(self, agent):
-        """测试系统提示包含时间上下文"""
+    def test_build_system_prompt_explains_time_in_user_prefix(self, agent):
+        """系统提示说明时间在用户消息前缀；不再注入每秒变化的墙钟。"""
         prompt = agent._build_system_prompt()
 
         assert "当前时间上下文" in prompt
-        assert "当前时间:" in prompt
-        assert "日期:" in prompt
-        assert "时区:" in prompt
+        assert "[Time:" in prompt
+        assert "用户消息" in prompt or "每条用户消息" in prompt
 
     def test_build_system_prompt_has_no_working_memory_section(self, agent):
         """工作记忆仅为滑动窗口，system 不再含「# 工作记忆摘要」。"""

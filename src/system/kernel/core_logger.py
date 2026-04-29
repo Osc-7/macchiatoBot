@@ -206,9 +206,14 @@ class CoreLifecycleLogger:
         }
         usage = getattr(response, "usage", None)
         if usage:
+            uhit = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
+            umiss = getattr(usage, "prompt_cache_miss_tokens", 0) or 0
             record["usage"] = {
                 "prompt_tokens": getattr(usage, "prompt_tokens", 0),
                 "completion_tokens": getattr(usage, "completion_tokens", 0),
+                "total_tokens": getattr(usage, "total_tokens", 0),
+                "prompt_cache_hit_tokens": int(uhit),
+                "prompt_cache_miss_tokens": int(umiss),
             }
         self._write(record)
 

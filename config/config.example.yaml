@@ -29,6 +29,13 @@ llm:
       base_url: "https://api.openai.com/v1"
       api_key: "${OPENAI_API_KEY}"
       model: "gpt-4o-mini"
+      # 可选：该 provider/model 的价格表，单位均为“每 1M token”。
+      # cost_yuan = 价格 * cny_per_currency_unit；官方价格/促销/汇率变化时，只需更新这里。
+      pricing:
+        currency: "USD"
+        cny_per_currency_unit: 7.25
+        input_per_million: 0.15
+        output_per_million: 0.60
       vendor_params: {}
       capabilities:
         vision: true

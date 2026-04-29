@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any, List
 
-from agent_core.context import get_time_context
 from agent_core.memory import RecallResult
 from agent_core.prompts.loader import (
     PromptMode,
@@ -47,8 +46,6 @@ def build_agent_system_prompt(agent: Any) -> str:
     工作记忆不再单独注入 system：会话状态即 ``ConversationContext.messages`` 滑动窗口
     （含 Kernel 折叠产生的 ``[会话进行中摘要]`` user 条）；长期记忆等仍见「# 记忆上下文」。
     """
-    time_ctx = get_time_context(agent._timezone)
-    time_str = time_ctx.to_prompt_string()
     scopes = _visible_scopes(agent)
 
     recipe = get_recipe(getattr(agent, "_source", "cli") or "cli")
@@ -59,7 +56,6 @@ def build_agent_system_prompt(agent: Any) -> str:
         profile=getattr(agent, "_core_profile", None),
     )
     prompt = build_prompt(
-        time_context=time_str,
         config=agent._config,
         has_web_extractor=agent._tool_registry.has("extract_web_content"),
         has_file_tools=agent._tool_registry.has("read_file"),

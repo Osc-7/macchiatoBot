@@ -38,6 +38,21 @@ def test_format_token_usage():
     assert "0.001" in out
 
 
+def test_format_token_usage_includes_cache_when_present():
+    u = {
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "total_tokens": 150,
+        "call_count": 1,
+        "prompt_cache_hit_tokens": 80,
+        "prompt_cache_miss_tokens": 20,
+    }
+    out = _format_token_usage(u)
+    assert "缓存命中" in out
+    assert "80" in out
+    assert "20" in out
+
+
 @pytest.mark.asyncio
 async def test_try_handle_slash_command_help():
     client = MagicMock()

@@ -39,7 +39,6 @@ class TestBuildSystemPromptRecipes:
     def test_default_includes_identity_agents_schedule_multi_agent(self):
         cfg = _minimal_config()
         p = build_system_prompt(
-            time_context="2025-01-01",
             config=cfg,
             has_web_extractor=False,
             mode="full",
@@ -54,7 +53,6 @@ class TestBuildSystemPromptRecipes:
     def test_shuiyuan_has_overlay_and_multi_agent_not_schedule(self):
         cfg = _minimal_config()
         p = build_system_prompt(
-            time_context="2025-01-01",
             config=cfg,
             has_web_extractor=False,
             mode="full",
@@ -79,7 +77,6 @@ class TestBuildSystemPromptRecipes:
             include_digest=False,
         )
         p = build_system_prompt(
-            time_context="t",
             config=cfg,
             has_web_extractor=False,
             mode="full",

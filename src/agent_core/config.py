@@ -50,6 +50,56 @@ class CapabilitiesModel(BaseModel):
     )
 
 
+class PricingTierConfig(BaseModel):
+    """按单次 prompt token 数分档的价格（每百万 token，币种见 ModelPricingConfig）。"""
+
+    input_token_limit: int = Field(..., ge=0, description="该档适用的输入 token 上限")
+    input_per_million: float = Field(..., ge=0, description="输入 token 单价/百万")
+    output_per_million: float = Field(..., ge=0, description="输出 token 单价/百万")
+
+
+class ModelPricingConfig(BaseModel):
+    """模型价格表项。
+
+    支持两类计费：
+    - 普通输入/输出单价：input_per_million + output_per_million
+    - DeepSeek 等缓存分桶：input_cache_hit_per_million + input_cache_miss_per_million + output_per_million
+
+    所有价格最终会乘以 ``cny_per_currency_unit`` 转为人民币，用于现有 ``cost_yuan`` 展示。
+    """
+
+    currency: str = Field(default="CNY", description="价格币种，仅作说明")
+    cny_per_currency_unit: float = Field(
+        default=1.0,
+        ge=0,
+        description="该币种到人民币的换算；CNY 保持 1，USD 可按本地预算口径填写",
+    )
+    input_per_million: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="普通输入 token 单价/百万；无 cache 字段时使用",
+    )
+    output_per_million: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="输出 token 单价/百万",
+    )
+    input_cache_hit_per_million: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="输入缓存命中 token 单价/百万",
+    )
+    input_cache_miss_per_million: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="输入缓存未命中 token 单价/百万",
+    )
+    tiers: List[PricingTierConfig] = Field(
+        default_factory=list,
+        description="阶梯价；非空时优先于普通输入单价，cache 分桶不参与阶梯价",
+    )
+
+
 class ProviderEntry(BaseModel):
     """
     一个 LLM provider 的完整连接与能力声明。
@@ -89,6 +139,10 @@ class ProviderEntry(BaseModel):
         ge=0,
         le=2,
         description="覆盖全局 llm.temperature；未设置时使用 llm.temperature（部分厂商模型仅允许固定值如 1）",
+    )
+    pricing: Optional[ModelPricingConfig] = Field(
+        default=None,
+        description="该 provider/model 的价格表（每百万 token）；跟随 provider 片段维护",
     )
 
 

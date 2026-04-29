@@ -15,11 +15,11 @@ import time
 from datetime import datetime
 from datetime import timezone as dt_timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
 
 from agent_core.config import Config, MemoryConfig, MCPServerConfig, get_config
 from agent_core.kernel_interface.profile import core_profile_to_checkpoint_dict
-from agent_core.context import ConversationContext
+from agent_core.context import ConversationContext, apply_user_message_time_prefix
 from agent_core.utils.billing import compute_cost_from_calls
 from agent_core.mcp import MCPClientManager
 from agent_core.orchestrator import ToolSnapshot, ToolWorkingSetManager
@@ -89,6 +89,45 @@ def _format_subagent_limit_msg(
 
 
 logger = logging.getLogger(__name__)
+
+
+def _default_token_usage_dict() -> dict[str, int]:
+    """会话累计用量默认值（含 DeepSeek prompt_cache_* 累计）。"""
+    return {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "call_count": 0,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 0,
+    }
+
+
+_MISSING_TOOL_REASONING_RETRY_LIMIT = 1
+
+
+def _should_attach_user_time_stamp(
+    effective_text: str,
+    effective_media_items: Optional[List[Dict[str, Any]]],
+) -> bool:
+    """仅在确有发往模型的正文或多模态时附加时间前缀（避免仅 defer 的空 user 条出现孤立前缀）。"""
+    if effective_media_items:
+        return True
+    return bool((effective_text or "").strip())
+
+
+def _pricing_map_for_active_provider(agent: Any) -> Optional[dict[str, Any]]:
+    """返回当前 active provider 的局部价表，供 billing 按 model ID 匹配。"""
+    try:
+        name = agent._llm_client.active_provider_name
+        entry = agent._config.llm.providers.get(name)
+        pricing = getattr(entry, "pricing", None) if entry is not None else None
+        model = getattr(entry, "model", None) if entry is not None else None
+        if pricing is not None and model:
+            return {str(model): pricing}
+    except Exception:
+        return None
+    return None
 
 
 class AgentCore:
@@ -171,14 +210,9 @@ class AgentCore:
         # 本轮回复要附带发给用户的图片等附件（由 attach_image_to_reply 等工具登记）
         self._outgoing_attachments: List[Dict[str, Any]] = []
         # 本会话 token 用量累计
-        self._token_usage = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "call_count": 0,
-        }
-        # 每次调用的 (prompt_tokens, completion_tokens)，用于阶梯计费
-        self._usage_calls: List[Tuple[int, int]] = []
+        self._token_usage = _default_token_usage_dict()
+        # 每次调用的 (prompt_tokens, completion_tokens, cache_hit, cache_miss)，用于计费
+        self._usage_calls: List[tuple[int, int, int, int]] = []
         # 上一轮 LLM 的 prompt_tokens，供工作记忆阈值判断
         self._last_prompt_tokens: Optional[int] = None
         # 最近一次 memory recall 结果（每轮 prepare_turn 更新；__init__ 必须初始化，
@@ -430,6 +464,44 @@ class AgentCore:
         else:
             self._working_set.unpin("recognize_image")
 
+    def _should_retry_missing_tool_reasoning(self, response: LLMResponse) -> bool:
+        """
+        是否应丢弃本次响应并重试。
+
+        某些 reasoning-capable 模型在 thinking + tool_calls 场景下会偶发返回
+        ``tool_calls`` 但缺少 ``reasoning_content``。若把该响应写入历史，下一轮
+        回传给 DeepSeek/Kimi/GLM 等端点时可能触发 400，并污染整段会话。
+        """
+        if not response.tool_calls:
+            return False
+        caps = getattr(self._llm_client, "capabilities", None)
+        if getattr(caps, "reasoning_content", False) is not True:
+            return False
+        provider = None
+        try:
+            provider = self._llm_client._active_provider()
+        except Exception:
+            provider = None
+        model = str(getattr(provider, "model", "") or "").strip().lower()
+        vendor_params = getattr(provider, "_vendor_params", None)
+        thinking_enabled = False
+        if isinstance(vendor_params, dict):
+            th = vendor_params.get("thinking")
+            if isinstance(th, dict):
+                thinking_enabled = (
+                    str(th.get("type", "")).strip().lower() == "enabled"
+                )
+            if not thinking_enabled:
+                out_cfg = vendor_params.get("output_config")
+                if isinstance(out_cfg, dict) and str(out_cfg.get("effort", "")).strip():
+                    thinking_enabled = True
+        if not thinking_enabled and "reasoner" not in model:
+            return False
+        rc = response.reasoning_content
+        if isinstance(rc, str):
+            return not rc.strip()
+        return rc is None
+
     def unregister_tool(self, name: str) -> bool:
         """
         注销工具。
@@ -500,9 +572,7 @@ class AgentCore:
         from system.kernel import AgentKernel
 
         before = len(self._context.get_messages())
-        current_tokens = self._working_memory.get_current_tokens(
-            actual_tokens=self._last_prompt_tokens
-        )
+        current_tokens = self._estimate_current_context_tokens()
         threshold = self._compute_compress_threshold()
 
         summary, kept = await AgentKernel.compress_context(
@@ -626,37 +696,72 @@ class AgentCore:
 
         return max(threshold, 1)
 
+    def _estimate_current_context_tokens(self) -> int:
+        """估算当前若发起下一次 LLM 请求会占用的 prompt tokens。
+
+        旧的 ``_last_prompt_tokens`` 是上一轮 API 返回的真实 prompt token，只能代表
+        「上一次请求」。用户消息、assistant 回复、tool result 写入后，它会变成过期值。
+        这里按当前 system + messages + tools schema 估算，更适合 /usage 与压缩检查。
+        """
+        try:
+            from agent_core.kernel_interface.loader import _strip_orphan_tool_messages
+            from agent_core.memory.working_memory import (
+                estimate_messages_tokens,
+                estimate_tokens,
+            )
+
+            total = estimate_tokens(self._build_system_prompt())
+            total += estimate_messages_tokens(
+                _strip_orphan_tool_messages(self._context.get_messages())
+            )
+
+            snapshot = self._working_set.build_snapshot(self._tool_registry)
+            tools = snapshot.openai_tools
+            profile = getattr(self, "_core_profile", None)
+            if profile is not None:
+                tools = [
+                    t
+                    for t in tools
+                    if profile.is_tool_allowed(t.get("function", {}).get("name", ""))
+                ]
+            if tools:
+                total += estimate_tokens(json.dumps(tools, ensure_ascii=False))
+            return int(total)
+        except Exception:
+            return int(self._working_memory.get_current_tokens())
+
     def get_token_usage(self) -> dict:
         """
         获取本会话累计的 token 用量。
 
         Returns:
-            包含 prompt_tokens, completion_tokens, total_tokens, call_count, cost_yuan 等字段的字典
+            包含 prompt_tokens, completion_tokens, total_tokens, call_count，
+            DeepSeek 等支持的 prompt_cache_hit_tokens / prompt_cache_miss_tokens 累计，
+            cost_yuan、上下文窗口相关字段等。
         """
         out: dict[str, int | float] = dict(self._token_usage)
 
         # 上下文窗口（context window）相关信息
         max_ctx_tokens = self._llm_client.context_window
         if max_ctx_tokens and max_ctx_tokens > 0:
-            # 当前上下文 token 数：
-            # 优先使用上一轮真实的 prompt_tokens（包含 system + messages），
-            # 若不存在则回退到根据当前消息估算。
-            current_ctx_tokens: int
-            if self._last_prompt_tokens is not None and self._last_prompt_tokens > 0:
-                current_ctx_tokens = int(self._last_prompt_tokens)
-            else:
-                # 估算当前上下文长度（仅基于 messages），这里不额外估算 system，
-                # 只作为无 usage 时的近似值。
-                current_ctx_tokens = self._working_memory.get_current_tokens()
+            # 当前上下文 token 数按“下一次请求 payload”估算（system + messages + tools）。
+            # 上一轮 API 返回的 prompt_tokens 也保留为诊断字段；若估算偏小，用真实值兜底。
+            estimated_ctx_tokens = self._estimate_current_context_tokens()
+            last_prompt_tokens = int(self._last_prompt_tokens or 0)
+            current_ctx_tokens = max(estimated_ctx_tokens, last_prompt_tokens)
 
             remaining_ctx_tokens = max(max_ctx_tokens - current_ctx_tokens, 0)
             out["context_window_max_tokens"] = max_ctx_tokens
             out["context_window_current_tokens"] = current_ctx_tokens
             out["context_window_remaining_tokens"] = remaining_ctx_tokens
+            out["context_window_estimated_tokens"] = estimated_ctx_tokens
+            if last_prompt_tokens > 0:
+                out["context_window_last_prompt_tokens"] = last_prompt_tokens
 
         cost = compute_cost_from_calls(
             self._usage_calls,
             self._llm_client.model,
+            pricing=_pricing_map_for_active_provider(self),
         )
         if cost is not None:
             out["cost_yuan"] = cost
@@ -668,12 +773,7 @@ class AgentCore:
 
     def reset_token_usage(self) -> None:
         """重置本会话的 token 用量统计"""
-        self._token_usage = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "call_count": 0,
-        }
+        self._token_usage = _default_token_usage_dict()
         self._usage_calls.clear()
 
     async def prepare_turn(
@@ -768,9 +868,16 @@ class AgentCore:
                 )
             effective_media_items = kept_items or None
 
+        if _should_attach_user_time_stamp(effective_text, effective_media_items):
+            effective_text = apply_user_message_time_prefix(
+                effective_text, self._timezone
+            )
+
         self._context.add_user_message(
             effective_text, media_items=effective_media_items
         )
+        # context 已变化，上一轮 API 返回的 prompt_tokens 不再代表当前窗口。
+        self._last_prompt_tokens = None
         self._outgoing_attachments.clear()
         if self._session_logger:
             self._session_logger.on_user_message(turn_id, text)
@@ -865,9 +972,7 @@ class AgentCore:
 
             try:
                 # ── 上下文压缩检查（信号机制：Core 检测 → Kernel 执行）──────
-                current_tokens = self._working_memory.get_current_tokens(
-                    actual_tokens=self._last_prompt_tokens
-                )
+                current_tokens = self._estimate_current_context_tokens()
                 compress_threshold = self._compute_compress_threshold()
                 if current_tokens >= compress_threshold:
                     _ = yield ContextOverflowAction(
@@ -877,67 +982,130 @@ class AgentCore:
                     )
                     # 摘要由 Kernel 写入 context.messages；此处不再写 running_summary
 
-                # ── 组装 LLM Payload（Prompt + Context + Tools）──────────
-                payload = loader.assemble(self)
+                missing_reasoning_retries = 0
+                while True:
+                    # ── 组装 LLM Payload（Prompt + Context + Tools）──────────
+                    payload = loader.assemble(self)
 
-                # Session 日志
-                if self._session_logger:
-                    self._session_logger.on_llm_request(
-                        turn_id=turn_id,
-                        iteration=iteration,
-                        message_count=len(payload.messages),
-                        tool_count=len(payload.tools),
-                        system_prompt_len=len(payload.system),
-                        system_prompt=payload.system
-                        if self._session_logger.enable_detailed_log
-                        else None,
-                        messages=payload.messages
-                        if self._session_logger.enable_detailed_log
-                        else None,
+                    # Session 日志
+                    if self._session_logger:
+                        self._session_logger.on_llm_request(
+                            turn_id=turn_id,
+                            iteration=iteration,
+                            message_count=len(payload.messages),
+                            tool_count=len(payload.tools),
+                            system_prompt_len=len(payload.system),
+                            system_prompt=payload.system
+                            if self._session_logger.enable_detailed_log
+                            else None,
+                            messages=payload.messages
+                            if self._session_logger.enable_detailed_log
+                            else None,
+                        )
+
+                    # Trace 事件
+                    await self._emit_trace(
+                        hooks,
+                        {
+                            "type": "llm_request",
+                            "turn_id": turn_id,
+                            "iteration": iteration,
+                            "tool_count": len(payload.tools),
+                            "retry_missing_reasoning": missing_reasoning_retries,
+                        },
                     )
 
-                # Trace 事件
-                await self._emit_trace(
-                    hooks,
-                    {
-                        "type": "llm_request",
-                        "turn_id": turn_id,
-                        "iteration": iteration,
-                        "tool_count": len(payload.tools),
-                    },
-                )
+                    # 自适应 completion 预算：把 max_tokens 收到
+                    # ``min(配置 max_tokens, context_window − estimated_prompt − safety)``，
+                    # 防止常量 max_tokens（例如 65536）+ prompt 一起把窗口顶爆。
+                    effective_max_tokens = self._compute_effective_max_tokens(payload)
 
-                # 自适应 completion 预算：把 max_tokens 收到
-                # ``min(配置 max_tokens, context_window − estimated_prompt − safety)``，
-                # 防止常量 max_tokens（例如 65536）+ prompt 一起把窗口顶爆。
-                effective_max_tokens = self._compute_effective_max_tokens(payload)
-
-                # ── AgentCore 直接调用 LLM（CPU 自旋，无 Kernel 中介）───
-                response = await self._llm_client.chat_with_tools(
-                    system_message=payload.system,
-                    messages=payload.messages,
-                    tools=payload.tools,
-                    tool_choice="auto",
-                    on_content_delta=hooks.on_assistant_delta if hooks else None,
-                    on_reasoning_delta=hooks.on_reasoning_delta if hooks else None,
-                    max_tokens_override=effective_max_tokens,
-                )
-
-                if self._session_logger:
-                    self._session_logger.on_llm_response(turn_id, iteration, response)
-
-                # 累计 token 用量（AgentCore 内部状态，Kernel 在回收时读取）
-                if response.usage:
-                    pt, ct = (
-                        response.usage.prompt_tokens,
-                        response.usage.completion_tokens,
+                    # ── AgentCore 直接调用 LLM（CPU 自旋，无 Kernel 中介）───
+                    response = await self._llm_client.chat_with_tools(
+                        system_message=payload.system,
+                        messages=payload.messages,
+                        tools=payload.tools,
+                        tool_choice="auto",
+                        on_content_delta=hooks.on_assistant_delta if hooks else None,
+                        on_reasoning_delta=hooks.on_reasoning_delta if hooks else None,
+                        max_tokens_override=effective_max_tokens,
                     )
-                    self._token_usage["prompt_tokens"] += pt
-                    self._token_usage["completion_tokens"] += ct
-                    self._token_usage["total_tokens"] += pt + ct
-                    self._token_usage["call_count"] += 1
-                    self._usage_calls.append((pt, ct))
-                    self._last_prompt_tokens = pt
+
+                    if self._session_logger:
+                        self._session_logger.on_llm_response(
+                            turn_id, iteration, response
+                        )
+
+                    # 累计 token 用量（AgentCore 内部状态，Kernel 在回收时读取）
+                    if response.usage:
+                        pt, ct = (
+                            response.usage.prompt_tokens,
+                            response.usage.completion_tokens,
+                        )
+                        self._token_usage["prompt_tokens"] += pt
+                        self._token_usage["completion_tokens"] += ct
+                        self._token_usage["total_tokens"] += pt + ct
+                        self._token_usage["call_count"] += 1
+                        self._token_usage["prompt_cache_hit_tokens"] += int(
+                            response.usage.prompt_cache_hit_tokens or 0
+                        )
+                        self._token_usage["prompt_cache_miss_tokens"] += int(
+                            response.usage.prompt_cache_miss_tokens or 0
+                        )
+                        self._usage_calls.append(
+                            (
+                                pt,
+                                ct,
+                                int(response.usage.prompt_cache_hit_tokens or 0),
+                                int(response.usage.prompt_cache_miss_tokens or 0),
+                            )
+                        )
+                        self._last_prompt_tokens = pt
+
+                    if not self._should_retry_missing_tool_reasoning(response):
+                        break
+
+                    missing_reasoning_retries += 1
+                    tool_names = [tc.name for tc in response.tool_calls]
+                    msg = (
+                        "模型返回了包含 tool_calls 但缺少 reasoning_content 的不完整响应，"
+                        "已丢弃本次响应并重试"
+                    )
+                    logger.warning(
+                        "%s: session=%s turn=%s iteration=%s retry=%s tools=%s",
+                        msg,
+                        self._session_id,
+                        turn_id,
+                        iteration,
+                        missing_reasoning_retries,
+                        tool_names,
+                    )
+                    await self._emit_trace(
+                        hooks,
+                        {
+                            "type": "llm_incomplete_tool_reasoning",
+                            "turn_id": turn_id,
+                            "iteration": iteration,
+                            "retry": missing_reasoning_retries,
+                            "tool_names": tool_names,
+                            "message": msg,
+                        },
+                    )
+                    if missing_reasoning_retries <= _MISSING_TOOL_REASONING_RETRY_LIMIT:
+                        continue
+
+                    fatal = (
+                        "模型返回了包含工具调用但缺少 reasoning_content 的不完整响应，"
+                        "已终止本轮以避免污染会话上下文。"
+                    )
+                    if self._session_logger:
+                        self._session_logger.on_assistant_message(turn_id, fatal)
+                    yield ReturnAction(
+                        message=fatal,
+                        status="error",
+                        attachments=list(self._outgoing_attachments),
+                    )
+                    return
 
                 # 子 Agent token 上限：超限则强制结束，防止卡住
                 profile = getattr(self, "_core_profile", None)
@@ -987,6 +1155,7 @@ class AgentCore:
                 # ── 处理工具调用 ─────────────────────────────────────────
                 if response.tool_calls:
                     self._add_assistant_message_with_tool_calls(response)
+                    self._last_prompt_tokens = None
 
                     for tool_call in response.tool_calls:
                         # Trace 事件（发出调用前记录）
@@ -1065,6 +1234,7 @@ class AgentCore:
                         )
 
                         self._context.add_tool_result(tool_call.id, store_result)
+                        self._last_prompt_tokens = None
 
                         if self._memory_enabled:
                             msg_id = self._require_chat_history_db().write_message(
@@ -1089,6 +1259,7 @@ class AgentCore:
                             response, "anthropic_message_content", None
                         ),
                     )
+                    self._last_prompt_tokens = None
                     if self._session_logger:
                         self._session_logger.on_assistant_message(
                             turn_id, response.content
@@ -1605,7 +1776,10 @@ class AgentCore:
         self._session_id = checkpoint.session_id
         self._current_turn_id = checkpoint.turn_count
         self._last_history_id = checkpoint.last_history_id
-        self._token_usage = dict(checkpoint.token_usage)
+        self._token_usage = {
+            **_default_token_usage_dict(),
+            **dict(checkpoint.token_usage),
+        }
         self._last_prompt_tokens = None
         self._last_recall_result = RecallResult()
         self._pending_multimodal_items.clear()

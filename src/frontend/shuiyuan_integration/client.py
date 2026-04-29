@@ -644,6 +644,7 @@ class ShuiyuanClient:
             "username": username,
             "filter": filter_type,
             "offset": offset,
+            "limit": limit,
         }
         if acting_username:
             params["acting_username"] = acting_username

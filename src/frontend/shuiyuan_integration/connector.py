@@ -9,6 +9,7 @@
    - 自 @：filter=7+acting_username=主人 + filter=5 兜底；仍可能不如 topic 监控完整
 
 调度：轮询与水位更新尽快返回；``run_shuiyuan_reply`` 以 asyncio Task 后台执行，避免长耗时回复阻塞下一轮提及扫描。
+通知模式另持久化 ``connector_processed_post_ids.json``：对已调度回复的 ``post_id`` 去重，避免 ``stream_list`` 锚点断裂时重复触发。
 """
 
 from __future__ import annotations
@@ -91,6 +92,9 @@ _STREAM_MAP_PATH = Path("./data/shuiyuan/connector_stream_map.json")
 # 通知模式：已见过的 post_id 快照，避免重启后冷启动仅采 Top60 导致旧帖/自 @ 被误判为「新提及」
 _NOTIFY_STREAM_PATH = Path("./data/shuiyuan/connector_notify_stream.json")
 _NOTIFY_STREAM_MAX_IDS = 1200
+# 通知 / topic 监控共用：已对某 post_id 调度过回复则记入，防止 stream_list 水位断档时重复触发
+_PROCESSED_POST_IDS_PATH = Path("./data/shuiyuan/connector_processed_post_ids.json")
+_MAX_PROCESSED_POST_IDS = 50000
 
 
 def _load_stream_map() -> Dict[int, Set[int]]:
@@ -156,6 +160,74 @@ def _save_notify_stream_list(post_ids: List[int]) -> None:
         )
     except Exception:
         logger.debug("保存 connector_notify_stream 失败", exc_info=True)
+
+
+def _load_processed_post_ids() -> Set[int]:
+    """已调度回复的 Discourse post_id 集合（跨重启），用于去重。"""
+    if not _PROCESSED_POST_IDS_PATH.is_file():
+        return set()
+    try:
+        text = _PROCESSED_POST_IDS_PATH.read_text(encoding="utf-8") or "{}"
+        raw = json.loads(text)
+    except Exception:
+        return set()
+    ids = raw.get("post_ids") if isinstance(raw, dict) else raw
+    if not isinstance(ids, list):
+        return set()
+    out: Set[int] = set()
+    for x in ids:
+        try:
+            out.add(int(x))
+        except Exception:
+            continue
+    return out
+
+
+def _save_processed_post_ids(post_ids: Set[int]) -> None:
+    """持久化已处理 post_id；保留 post_id 较大的若干条（Discourse id 递增）。"""
+    if not post_ids:
+        return
+    try:
+        _PROCESSED_POST_IDS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        sorted_ids = sorted(int(x) for x in post_ids)
+        trimmed = sorted_ids[-_MAX_PROCESSED_POST_IDS :]
+        _PROCESSED_POST_IDS_PATH.write_text(
+            json.dumps({"post_ids": trimmed}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        logger.debug("保存 connector_processed_post_ids 失败", exc_info=True)
+
+
+def _seed_processed_post_ids_from_existing_state(
+    *,
+    stream_list: Optional[List[int]] = None,
+    stream_map: Optional[Dict[int, Set[int]]] = None,
+) -> Set[int]:
+    """首次启用 processed 去重时，从已有通知/topic 水位回填，避免历史项被重答。"""
+    if _PROCESSED_POST_IDS_PATH.is_file():
+        return _load_processed_post_ids()
+
+    seeded: Set[int] = set()
+    for pid in stream_list or []:
+        try:
+            seeded.add(int(pid))
+        except Exception:
+            continue
+    for ids in (stream_map or {}).values():
+        for pid in ids:
+            try:
+                seeded.add(int(pid))
+            except Exception:
+                continue
+
+    if seeded:
+        _save_processed_post_ids(seeded)
+        logger.info(
+            "首次初始化 connector_processed_post_ids：从已有水位回填 %d 条 post_id",
+            len(seeded),
+        )
+    return seeded
 
 
 def _save_stream_map(stream_map: Dict[int, Set[int]]) -> None:
@@ -430,6 +502,24 @@ async def _poll_topic_watch(
     if not items:
         return stream_map, False
 
+    processed_ids = _load_processed_post_ids()
+    novel: List[Tuple[int, int, int, dict]] = []
+    skipped_pr = 0
+    for topic_id, post_number, post_id, post in items:
+        if post_id in processed_ids:
+            skipped_pr += 1
+            continue
+        processed_ids.add(int(post_id))
+        novel.append((topic_id, post_number, post_id, post))
+    if skipped_pr:
+        logger.info(
+            "topic 监控：%d 条已在过往回复过去重跳过（post_id 持久化）", skipped_pr
+        )
+    if not novel:
+        _save_processed_post_ids(processed_ids)
+        return stream_map, False
+
+    items = novel
     logger.info("发现 %d 条新提及（topic 监控）", len(items))
 
     from .session import run_shuiyuan_reply
@@ -480,6 +570,7 @@ async def _poll_topic_watch(
             pending_tasks=pending_tasks,
         )
 
+    _save_processed_post_ids(processed_ids)
     return stream_map, had_mention
 
 
@@ -526,7 +617,24 @@ async def _poll_once(
     if not new_items:
         return new_stream
 
-    logger.info("发现 %d 条新提及", len(new_items))
+    processed_ids = _load_processed_post_ids()
+    novel_items: List[Tuple[int, int, int]] = []
+    skipped_pr = 0
+    for topic_id, post_number, post_id in new_items:
+        if post_id in processed_ids:
+            skipped_pr += 1
+            continue
+        processed_ids.add(int(post_id))
+        novel_items.append((topic_id, post_number, post_id))
+    if skipped_pr:
+        logger.info(
+            "通知模式：%d 条已在过往回复过去重跳过（post_id 持久化）", skipped_pr
+        )
+    if not novel_items:
+        _save_processed_post_ids(processed_ids)
+        return new_stream
+
+    logger.info("发现 %d 条新提及", len(novel_items))
 
     from .session import is_invocation_valid_from_raw, run_shuiyuan_reply
 
@@ -585,7 +693,7 @@ async def _poll_once(
             except Exception as e:
                 logger.exception("水源回复失败: %s", e)
 
-    for topic_id, post_number, post_id in new_items:
+    for topic_id, post_number, post_id in novel_items:
         if not topic_id or not post_id:
             continue
         _schedule_background_reply(
@@ -593,6 +701,7 @@ async def _poll_once(
             pending_tasks=pending_tasks,
         )
 
+    _save_processed_post_ids(processed_ids)
     return new_stream
 
 
@@ -639,6 +748,7 @@ async def run_connector_loop(
     if allowed:
         # 加载历史 stream_map，避免每次重启都从历史帖子重新初始化
         stream_map: Dict[int, Set[int]] = _load_stream_map()
+        _seed_processed_post_ids_from_existing_state(stream_map=stream_map)
         # 动态轮询节奏：根据最近是否有 @ 活动选择快/中/慢轮询
         last_mention_ts: float | None = None
         # 快速轮询：刚有人 @ 时，优先降低响应延迟
@@ -730,6 +840,7 @@ async def run_connector_loop(
 
     # 通知模式：user_actions + notifications
     stream_list: List[int] = _load_notify_stream_list()
+    _seed_processed_post_ids_from_existing_state(stream_list=stream_list)
     backoff_until_notify: float = 0.0
     if stream_list:
         logger.info(

@@ -2201,6 +2201,7 @@ class AgentCore:
 
             from agent_core.agent.memory_paths import resolve_memory_owner_paths
             from agent_core.agent.workspace_paths import (
+                build_bash_admin_bootstrap_init,
                 build_bash_workspace_guard_init,
                 ensure_workspace_owner_layout,
                 is_bash_workspace_admin,
@@ -2208,6 +2209,12 @@ class AgentCore:
                 resolve_bash_working_dir,
                 resolve_project_root,
                 resolve_workspace_tmp_dir,
+            )
+            from agent_core.bash_os_user import (
+                chown_tree_to_user,
+                minimal_subprocess_env_for_runuser,
+                provision_system_user,
+                resolve_bash_run_as_user,
             )
 
             profile = self._core_profile
@@ -2218,6 +2225,41 @@ class AgentCore:
             ws_restricted = cmd_cfg.workspace_isolation_enabled and not is_bash_workspace_admin(
                 cmd_cfg, self._source, self._user_id, profile
             )
+            posix_run_as, _os_reason = resolve_bash_run_as_user(
+                cmd_cfg,
+                source=self._source,
+                user_id=self._user_id,
+                ws_restricted=ws_restricted,
+                profile=profile,
+            )
+            os_user_bash = bool(posix_run_as)
+            jail_cd = not (os_user_bash and ws_restricted)
+            if os_user_bash and ws_restricted:
+                if getattr(cmd_cfg, "bash_os_auto_provision_users", True):
+                    provision_system_user(
+                        posix_run_as,
+                        system=True,
+                        comment=f"macchiato {self._source}:{self._user_id}",
+                    )
+                ch_paths = [
+                    Path(bash_cwd).resolve(),
+                    Path(
+                        resolve_workspace_tmp_dir(
+                            cmd_cfg, self._user_id, source=self._source
+                        )
+                    ).resolve(),
+                ]
+                if self._memory_enabled:
+                    mp0 = resolve_memory_owner_paths(
+                        self._config.memory,
+                        self._user_id,
+                        config=self._config,
+                        source=self._source,
+                    )
+                    ch_paths.append(
+                        Path(mp0["chat_history_db_path"]).parent.resolve()
+                    )
+                chown_tree_to_user(ch_paths, posix_run_as)
             mem_lt: Optional[str] = None
             mem_owner_dir: Optional[str] = None
             if self._memory_enabled:
@@ -2229,8 +2271,19 @@ class AgentCore:
                 )
                 mem_lt = mp["long_term_dir"]
                 mem_owner_dir = str(Path(mp["chat_history_db_path"]).parent)
-            guard_init = (
-                build_bash_workspace_guard_init(
+            if ws_restricted:
+                guard_init = build_bash_workspace_guard_init(
+                    str(Path(bash_cwd).resolve()),
+                    project_root=str(resolve_project_root().resolve()),
+                    memory_long_term_dir=mem_lt,
+                    memory_owner_dir=mem_owner_dir,
+                    extra_real_home_path_suffixes=list(
+                        cmd_cfg.bash_real_home_path_suffixes or []
+                    ),
+                    jail_cd=jail_cd,
+                )
+            elif os_user_bash:
+                guard_init = build_bash_admin_bootstrap_init(
                     str(Path(bash_cwd).resolve()),
                     project_root=str(resolve_project_root().resolve()),
                     memory_long_term_dir=mem_lt,
@@ -2239,9 +2292,8 @@ class AgentCore:
                         cmd_cfg.bash_real_home_path_suffixes or []
                     ),
                 )
-                if ws_restricted
-                else []
-            )
+            else:
+                guard_init = []
             jail_root = (
                 str(Path(bash_cwd).resolve()) if ws_restricted else None
             )
@@ -2261,6 +2313,13 @@ class AgentCore:
                 else []
             )
             init_cmds = guard_init + list(cmd_cfg.init_commands or [])
+            sub_env = None
+            if posix_run_as:
+                sub_env = minimal_subprocess_env_for_runuser(
+                    cwd=Path(bash_cwd).resolve(),
+                    project_root=resolve_project_root().resolve(),
+                    macchiato_real_home=Path.home().resolve(),
+                )
             rt_config = BashRuntimeConfig(
                 shell_path=cmd_cfg.shell_path,
                 base_dir=bash_cwd,
@@ -2271,6 +2330,9 @@ class AgentCore:
                 init_commands=init_cmds,
                 snapshot_enabled=cmd_cfg.snapshot_enabled,
                 snapshot_dir=cmd_cfg.snapshot_dir,
+                run_as_user=posix_run_as,
+                runuser_path=cmd_cfg.bash_runuser_path,
+                subprocess_env=sub_env,
             )
             self._bash = BashRuntime(config=rt_config)
             await self._bash.start()

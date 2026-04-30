@@ -22,7 +22,7 @@ import signal
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,11 @@ class BashRuntimeConfig:
     init_commands: list[str] = field(default_factory=list)
     snapshot_enabled: bool = False
     snapshot_dir: str = "./data/bash_snapshots"
+    # 非空时以 ``runuser_path -u <user> -- <shell>`` 启动 bash（Linux 降权）
+    run_as_user: Optional[str] = None
+    runuser_path: str = "/sbin/runuser"
+    # 若设置则作为子进程完整环境（不继承 os.environ）；用于 runuser 场景避免泄露宿主 env
+    subprocess_env: Optional[Dict[str, str]] = None
 
 
 class BashRuntime:
@@ -83,24 +88,43 @@ class BashRuntime:
         if not base_dir.is_dir():
             base_dir = Path.cwd()
 
+        env: Dict[str, str]
+        if self._config.subprocess_env is not None:
+            env = dict(self._config.subprocess_env)
+        else:
+            env = {**os.environ, "MACCHIATO_BASH": "1"}
+
+        run_as = (self._config.run_as_user or "").strip()
+        if run_as:
+            cmd: tuple[str, ...] = (
+                self._config.runuser_path,
+                "-u",
+                run_as,
+                "--",
+                self._config.shell_path,
+                "--norc",
+                "--noprofile",
+            )
+        else:
+            cmd = (self._config.shell_path, "--norc", "--noprofile")
+
         self._process = await asyncio.create_subprocess_exec(
-            self._config.shell_path,
-            "--norc",
-            "--noprofile",
+            *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(base_dir),
             start_new_session=(os.name != "nt"),
-            env={**os.environ, "MACCHIATO_BASH": "1"},
+            env=env,
         )
         self._started = True
         self._command_count = 0
         logger.info(
-            "BashRuntime started: pid=%s shell=%s cwd=%s",
+            "BashRuntime started: pid=%s shell=%s cwd=%s run_as=%s",
             self._process.pid,
             self._config.shell_path,
             base_dir,
+            run_as or "-",
         )
 
         if snapshot_path and snapshot_path.is_file():

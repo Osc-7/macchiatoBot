@@ -619,6 +619,35 @@ class CommandToolsConfig(BaseModel):
         default="./data/bash_snapshots",
         description="bash 快照文件存储目录",
     )
+    bash_os_user_enabled: bool = Field(
+        default=False,
+        description=(
+            "为 True 且本机为 Linux 且 runuser 可用时，隔离 bash 以对应 Linux 用户运行；"
+            "租户自动 useradd + chown 工作区；管理员须在 bash_os_admin_system_users 中映射到已有系统用户"
+        ),
+    )
+    bash_runuser_path: str = Field(
+        default="/sbin/runuser",
+        description="runuser 可执行文件路径（util-linux）",
+    )
+    bash_os_tenant_user_prefix: str = Field(
+        default="m_",
+        description="租户 Linux 用户名前缀（须符合 POSIX 用户名规则）",
+    )
+    bash_os_admin_system_users: Dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "bash 工作区管理员 memory_owner（如 cli:root）→ 已有 Linux 用户名；"
+            "用于以带管理员组权限的 OS 用户跑 bash（须预先 useradd 并加入相应组）"
+        ),
+    )
+    bash_os_auto_provision_users: bool = Field(
+        default=True,
+        description=(
+            "为 True 时租户首次会话对 logic 映射的 Linux 用户执行 useradd（不存在则创建）；"
+            "管理员映射的用户不自动创建，须运维预先配置"
+        ),
+    )
 
 
 class MCPServerConfig(BaseModel):

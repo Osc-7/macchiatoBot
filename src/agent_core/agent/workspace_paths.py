@@ -286,6 +286,7 @@ def build_bash_workspace_guard_init(
     memory_owner_dir: Optional[str] = None,
     real_home: Optional[str] = None,
     extra_real_home_path_suffixes: Optional[List[str]] = None,
+    jail_cd: bool = True,
 ) -> List[str]:
     """
     返回写入 bash 启动序列的脚本：覆盖 cd/pushd/popd；**HOME 即用户单元格根目录**
@@ -300,6 +301,8 @@ def build_bash_workspace_guard_init(
 
     ``HOME`` 设置后由 ``agent_core.bash_user_env`` 注入 **XDG 基线** 与 **类终端 PATH**
     （项目 / 工作区 node_modules、宿主常见工具链目录）；详见 ``render_terminal_like_bootstrap_bash``。
+
+    ``jail_cd``：为 False 时不重写 cd/pushd/popd（配合以 Linux 用户 + DAC 隔离时使用）。
     """
     q = shlex.quote(str(Path(workspace_root_resolved).resolve()))
     pr = project_root or str(_PROJECT_ROOT.resolve())
@@ -324,7 +327,9 @@ mkdir -p "$MACCHIATO_WORKSPACE_ROOT" || true
 export HOME="$MACCHIATO_WORKSPACE_ROOT"{extra_exports}
 {user_env}
 unset CDPATH
-cd() {{
+{(
+        """
+cd() {
   builtin cd "$@" || return $?
   local here
   here=$(pwd -P)
@@ -336,8 +341,8 @@ cd() {{
       return 1
       ;;
   esac
-}}
-pushd() {{
+}
+pushd() {
   builtin pushd "$@" || return $?
   local here
   here=$(pwd -P)
@@ -350,8 +355,8 @@ pushd() {{
       return 1
       ;;
   esac
-}}
-popd() {{
+}
+popd() {
   builtin popd "$@" || return $?
   local here
   here=$(pwd -P)
@@ -363,7 +368,51 @@ popd() {{
       return 1
       ;;
   esac
-}}
+}
+"""
+        if jail_cd
+        else ""
+    )}
+""".strip()
+    return [script]
+
+
+def build_bash_admin_bootstrap_init(
+    base_dir_resolved: str,
+    *,
+    project_root: Optional[str] = None,
+    memory_long_term_dir: Optional[str] = None,
+    memory_owner_dir: Optional[str] = None,
+    real_home: Optional[str] = None,
+    extra_real_home_path_suffixes: Optional[List[str]] = None,
+) -> List[str]:
+    """
+    管理员 OS 用户模式下的 bash 启动片段：cwd 通常为 ``command_tools.base_dir``（项目根），
+    不重写 cd；导出与租户一致的 MACCHIATO_* 与 PATH/XDG 基线。
+    """
+    q = shlex.quote(str(Path(base_dir_resolved).resolve()))
+    pr = project_root or str(_PROJECT_ROOT.resolve())
+    q_pr = shlex.quote(pr)
+    q_real_home = shlex.quote(
+        str(Path(real_home).resolve()) if real_home else str(Path.home().resolve())
+    )
+    extra_exports = ""
+    if memory_long_term_dir:
+        extra_exports += f'\nexport MACCHIATO_MEMORY_LONG_TERM={shlex.quote(memory_long_term_dir)}'
+    if memory_owner_dir:
+        extra_exports += f'\nexport MACCHIATO_MEMORY_OWNER_DIR={shlex.quote(memory_owner_dir)}'
+    user_env = render_terminal_like_bootstrap_bash(
+        extra_real_home_suffixes=list(extra_real_home_path_suffixes or []),
+    )
+    script = f"""
+export MACCHIATO_REAL_HOME={q_real_home}
+export MACCHIATO_WORKSPACE_ROOT={q}
+export MACCHIATO_USER_ROOT="$MACCHIATO_WORKSPACE_ROOT"
+export MACCHIATO_PROJECT_ROOT={q_pr}
+mkdir -p "$MACCHIATO_WORKSPACE_ROOT" || true
+export HOME="$MACCHIATO_WORKSPACE_ROOT"{extra_exports}
+{user_env}
+unset CDPATH
 """.strip()
     return [script]
 

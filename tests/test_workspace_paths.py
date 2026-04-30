@@ -136,6 +136,29 @@ def test_build_bash_workspace_guard_init_contains_root(tmp_path) -> None:
     assert "cd()" in script
 
 
+def test_build_bash_workspace_guard_init_no_jail_cd(tmp_path) -> None:
+    root = str(tmp_path / "ws" / "cli" / "u1")
+    lines = build_bash_workspace_guard_init(
+        root,
+        project_root="/proj",
+        jail_cd=False,
+    )
+    script = lines[0]
+    assert "MACCHIATO_WORKSPACE_ROOT=" in script
+    assert "cd()" not in script
+
+
+def test_build_bash_admin_bootstrap_init_no_cd_override(tmp_path) -> None:
+    from agent_core.agent.workspace_paths import build_bash_admin_bootstrap_init
+
+    base = str(tmp_path / "repo")
+    Path(base).mkdir(parents=True)
+    lines = build_bash_admin_bootstrap_init(base, project_root="/proj")
+    script = lines[0]
+    assert "MACCHIATO_PROJECT_ROOT=" in script
+    assert "cd()" not in script
+
+
 def test_ensure_workspace_data_memory_symlink_grafts(tmp_path) -> None:
     pr = tmp_path / "repo"
     (pr / "data" / "memory" / "cli" / "u1").mkdir(parents=True)

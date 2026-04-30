@@ -164,6 +164,14 @@ file_tools:
 command_tools:
   enabled: true       # 是否启用 bash 工具
   allow_run: true     # 是否允许执行终端命令
+  # Linux 生产可选：隔离 bash 以专用系统用户运行（须 root + util-linux runuser；租户自动 useradd/chown）
+  # bash_os_user_enabled: false
+  # bash_runuser_path: "/sbin/runuser"
+  # bash_os_tenant_user_prefix: "m_"
+  # bash_os_auto_provision_users: true
+  # 管理员 memory_owner → 预先创建的 Linux 用户名（须加入项目组等）；未映射则回退为服务 UID
+  # bash_os_admin_system_users:
+  #   "cli:root": "macchiato_admin"
   # 受限模式（subagent、tool_mode=sub）是否允许 bash；开启后仅可执行 subagent_command_whitelist 内命令
   allow_run_for_subagent: false
   # 受限模式命令白名单（默认含 find 等只读命令；可在此追加）

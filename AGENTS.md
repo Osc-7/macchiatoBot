@@ -256,3 +256,31 @@ async def execute(self, **kwargs) -> ToolResult:
 - Repository Pattern
 - Strategy Pattern (for LLM providers)
 
+## Cursor Cloud specific instructions
+
+### 服务概述
+
+macchiatoBot 是一个 daemon-first 的 Python 项目。核心运行时是 `automation_daemon.py`，所有前端（CLI、飞书、MCP）通过 Unix socket IPC 连接到它。
+
+### 常用命令
+
+| 操作 | 命令 |
+|------|------|
+| 安装依赖 | `uv sync --all-groups` |
+| 运行测试 | `uv run pytest tests/ -v --tb=short` |
+| 代码格式检查 | `black --check src/ tests/` / `isort --check-only src/ tests/` |
+| 启动 daemon | `uv run automation_daemon.py` |
+| 启动 CLI | `uv run main.py` |
+| 单条命令 | `uv run main.py "你的消息"` |
+
+### 注意事项
+
+- **Python >= 3.11** + **uv** 包管理器，虚拟环境在 `.venv/`
+- **PYTHONPATH** 必须包含 `src/`（`uv run` 会自动处理，但直接 `python` 时需手动 `export PYTHONPATH=$(pwd)/src`）
+- **config/config.yaml** 和 `.env** 必须存在才能启动 daemon。从 `.env.example` 和 `config/config.example.yaml` 复制即可
+- 测试不依赖外部服务或 API key，可直接 `uv run pytest tests/` 运行全部测试
+- 有 11 个测试因测试间状态泄漏会在全量运行时失败，但单独运行通过（pre-existing issue）
+- daemon 启动后 socket 位于 `data/automation/automation.sock`；CLI 会自动找到它
+- 没有 LLM API key 时 daemon 可正常启动，但 `run_turn`（实际对话）会报 401；IPC ping 和 model_list 等管理命令不受影响
+- `source init.sh` 是便捷脚本，会设置 PATH、PYTHONPATH 并 source `.env`；非必需但推荐在交互 shell 中使用
+

@@ -35,6 +35,7 @@ from .ipc_bridge import (
     send_feishu_error_notice,
     try_handle_slash_command_via_ipc,
 )
+from .session_override import resolve_session_override
 from .session_mapping import map_event_to_session
 from .card_callback import handle_feishu_card_action
 from .event_crypto import decrypt_feishu_event_body, verify_feishu_http_signature
@@ -217,6 +218,16 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
     )
 
     session_id, meta = map_event_to_session(event)
+    session_id = (
+        resolve_session_override(
+            chat_type=event.message.chat_type,
+            chat_id=event.message.chat_id,
+            open_id=event.sender.sender_id.open_id or "",
+            user_id=event.sender.sender_id.user_id or "",
+        )
+        or session_id
+    )
+    meta["feishu_session_id"] = session_id
     metadata: Dict[str, Any] = {**meta, "feishu_event_id": header.event_id}
     if content_refs:
         metadata["content_refs"] = [r.to_dict() for r in content_refs]
@@ -228,6 +239,10 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
                 session_id=session_id,
                 text=text,
                 timeout_seconds=get_config().feishu.automation_ipc_timeout_seconds,
+                feishu_chat_type=event.message.chat_type,
+                feishu_chat_id=event.message.chat_id,
+                feishu_open_id=event.sender.sender_id.open_id or "",
+                feishu_user_id=event.sender.sender_id.user_id or "",
             )
             if reply is not None:
                 feishu_client = _build_feishu_client()

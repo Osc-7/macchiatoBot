@@ -47,6 +47,7 @@ from .ipc_bridge import (
 )
 from .router import _is_duplicate_event  # 复用去重缓存
 from .reply_dispatch import send_feishu_agent_final_reply
+from .session_override import resolve_session_override
 from .session_mapping import map_event_to_session
 from .ask_user_card import (
     ASK_CUSTOM,
@@ -242,6 +243,16 @@ async def _handle_im_message_event_async(data: Any) -> None:
     )
 
     session_id, meta = map_event_to_session(event_model)
+    session_id = (
+        resolve_session_override(
+            chat_type=feishu_message.chat_type,
+            chat_id=feishu_message.chat_id,
+            open_id=feishu_sender.sender_id.open_id or "",
+            user_id=feishu_sender.sender_id.user_id or "",
+        )
+        or session_id
+    )
+    meta["feishu_session_id"] = session_id
     metadata = {
         **meta,
         "feishu_message_id": message_id,
@@ -259,6 +270,10 @@ async def _handle_im_message_event_async(data: Any) -> None:
                 text=text,
                 socket_path=None,
                 timeout_seconds=feishu_cfg.automation_ipc_timeout_seconds,
+                feishu_chat_type=feishu_message.chat_type,
+                feishu_chat_id=feishu_message.chat_id,
+                feishu_open_id=feishu_sender.sender_id.open_id or "",
+                feishu_user_id=feishu_sender.sender_id.user_id or "",
             )
             if reply is not None:
                 feishu_client = FeishuClient(timeout_seconds=feishu_cfg.timeout_seconds)

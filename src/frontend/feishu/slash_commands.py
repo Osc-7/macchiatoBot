@@ -61,6 +61,7 @@ def _help_text() -> str:
 /session switch <id> - 切换到指定会话
 /session new [id] - 创建并切换到新会话
 /session delete <id> - 删除会话记录
+/new [id] - 快速新开 core 对话（等价 /session new [id]）
 /help - 显示此帮助"""
 
 
@@ -209,6 +210,18 @@ async def try_handle_slash_command(
             )
         return True, f"已请求切换: {sub}"
 
+    # /new [id] -> /session new [id]
+    if cmd_lower == "new":
+        session_id = (
+            parts[1].strip()
+            if len(parts) > 1 and parts[1].strip()
+            else f"feishu:{int(time.time())}"
+        )
+        created = await client.switch_session(session_id, create_if_missing=True)
+        if created:
+            return True, f"已创建并切换到新会话: {session_id}"
+        return True, f"会话已存在，已切换: {session_id}"
+
     # /session 系列
     if cmd_lower != "session":
         return False, None
@@ -271,5 +284,5 @@ async def try_handle_slash_command(
 
     return (
         True,
-        "用法: /session | /session list | /session switch <id> | /session new [id] | /session delete <id>",
+        "用法: /session | /session list | /session switch <id> | /session new [id] | /session delete <id> | /new [id]",
     )

@@ -13,6 +13,7 @@ import inspect
 import json
 import logging
 import re
+import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
@@ -25,6 +26,64 @@ from agent_core.llm.response import LLMResponse, ToolCall, TokenUsage
 from .base import BaseProvider
 
 logger = logging.getLogger(__name__)
+
+
+# region agent log
+def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: Dict[str, Any]) -> None:
+    """Append minimal NDJSON debug evidence for the current Cursor debug session."""
+    try:
+        payload = {
+            "sessionId": "972f2b",
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with open("/home/ubuntu/macchiatoBot/.cursor/debug-972f2b.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+# endregion
+
+
+def _debug_reasoning_message_stats(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    stats: Dict[str, Any] = {
+        "total": len(messages),
+        "assistant_total": 0,
+        "assistant_with_tool_calls": 0,
+        "assistant_missing_reasoning": 0,
+        "assistant_tool_missing_reasoning": 0,
+        "missing_indexes": [],
+        "tool_missing_indexes": [],
+        "last_roles": [],
+    }
+    for idx, msg in enumerate(messages):
+        role = msg.get("role")
+        if idx >= max(0, len(messages) - 10):
+            stats["last_roles"].append(
+                {
+                    "idx": idx,
+                    "role": role,
+                    "has_tool_calls": bool(msg.get("tool_calls")),
+                    "has_reasoning_content": "reasoning_content" in msg,
+                    "reasoning_nonempty": bool(str(msg.get("reasoning_content", "")).strip()),
+                }
+            )
+        if role != "assistant":
+            continue
+        stats["assistant_total"] += 1
+        has_tools = bool(msg.get("tool_calls"))
+        if has_tools:
+            stats["assistant_with_tool_calls"] += 1
+        if "reasoning_content" not in msg:
+            stats["assistant_missing_reasoning"] += 1
+            stats["missing_indexes"].append(idx)
+            if has_tools:
+                stats["assistant_tool_missing_reasoning"] += 1
+                stats["tool_missing_indexes"].append(idx)
+    return stats
 
 # Gemini 多轮工具：无 API 生成签名时（跨模型迁移、中途切换、客户端合成 tool_calls）须带占位符，否则 400。
 # 官方允许二选一，见 https://ai.google.dev/gemini-api/docs/thought-signatures
@@ -453,7 +512,26 @@ class OpenAICompatProvider(BaseProvider):
 
         self._apply_vendor_extra_body(request_params)
 
-        use_stream = self._stream and not self._thinking_mode_tool_rounds_need_nonstream()
+        if self._capabilities.reasoning_content:
+            # region agent log
+            _agent_debug_log(
+                "H1-H3-H4",
+                "src/agent_core/llm/providers/openai_compat.py:chat_with_tools:before_request",
+                "reasoning-capable request message stats before provider call",
+                {
+                    "provider": self._name,
+                    "model": self._model,
+                    "stream": bool(self._stream),
+                    "thinking_enabled": (
+                        isinstance((self._vendor_params or {}).get("thinking"), dict)
+                        and str((self._vendor_params or {}).get("thinking", {}).get("type", "")).lower() == "enabled"
+                    ),
+                    "stats": _debug_reasoning_message_stats(full_messages),
+                },
+            )
+            # endregion
+
+        use_stream = self._stream
         if use_stream:
             return await self._chat_with_tools_stream(
                 request_params,
@@ -489,6 +567,25 @@ class OpenAICompatProvider(BaseProvider):
 
         rc = getattr(choice.message, "reasoning_content", None)
         reasoning_content = rc.strip() if isinstance(rc, str) and rc.strip() else None
+
+        if self._capabilities.reasoning_content:
+            # region agent log
+            _agent_debug_log(
+                "H1-H2",
+                "src/agent_core/llm/providers/openai_compat.py:chat_with_tools:after_response",
+                "provider response reasoning_content/tool_calls summary",
+                {
+                    "provider": self._name,
+                    "model": self._model,
+                    "finish_reason": choice.finish_reason,
+                    "tool_call_count": len(tool_calls),
+                    "raw_reasoning_type": type(rc).__name__,
+                    "raw_reasoning_present": rc is not None,
+                    "parsed_reasoning_nonempty": bool(reasoning_content),
+                    "content_present": bool(content),
+                },
+            )
+            # endregion
 
         return LLMResponse(
             content=content,
@@ -644,6 +741,24 @@ class OpenAICompatProvider(BaseProvider):
             if reasoning_joined and reasoning_joined.strip()
             else None
         )
+
+        if self._capabilities.reasoning_content:
+            # region agent log
+            _agent_debug_log(
+                "H1-H2",
+                "src/agent_core/llm/providers/openai_compat.py:_chat_with_tools_stream:after_stream",
+                "stream response reasoning_content/tool_calls summary",
+                {
+                    "provider": self._name,
+                    "model": self._model,
+                    "finish_reason": finish_reason,
+                    "tool_call_count": len(tool_calls_list),
+                    "reasoning_fragment_count": len(reasoning_parts),
+                    "parsed_reasoning_nonempty": bool(reasoning_content),
+                    "content_present": bool(content),
+                },
+            )
+            # endregion
 
         return LLMResponse(
             content=content,

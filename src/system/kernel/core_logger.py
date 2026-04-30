@@ -194,6 +194,8 @@ class CoreLifecycleLogger:
                 }
             )
         content = getattr(response, "content", None) or ""
+        rc_raw = getattr(response, "reasoning_content", None)
+        rc_str = rc_raw if isinstance(rc_raw, str) else ""
         record: Dict[str, Any] = {
             "event": "llm_response",
             "timestamp": self._timestamp(),
@@ -201,6 +203,9 @@ class CoreLifecycleLogger:
             "turn_id": turn_id,
             "iteration": iteration,
             "content_preview": content[:500] + ("..." if len(content) > 500 else ""),
+            # 不写 reasoning 正文，便于排查 DeepSeek thinking 等问题时确认「模型是否带回思维字段」
+            "reasoning_present": rc_raw is not None,
+            "reasoning_nonempty": bool(rc_str.strip()),
             "tool_calls": tool_calls,
             "finish_reason": getattr(response, "finish_reason", None),
         }

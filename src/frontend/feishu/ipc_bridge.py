@@ -13,6 +13,7 @@ from system.automation import AutomationIPCClient, default_socket_path
 from .client import FeishuClient
 from .feishu_turn_hooks import FeishuTurnHooksController
 from .reply_dispatch import send_feishu_agent_final_reply
+from .session_override import resolve_session_override, set_session_override
 from .slash_commands import try_handle_slash_command
 
 """
@@ -57,6 +58,33 @@ MSG_FEISHU_DAEMON_UNAVAILABLE = (
 )
 
 
+def _extract_override_session_target(text: str) -> tuple[Optional[str], bool]:
+    """解析会改变当前会话绑定的斜杠命令目标 session_id。
+
+    Returns:
+        (target, needs_active_fallback)
+    """
+    raw = (text or "").strip()
+    if not raw.startswith("/"):
+        return None, False
+    parts = raw[1:].strip().split()
+    if not parts:
+        return None, False
+    cmd = parts[0].lower()
+    if cmd == "new":
+        if len(parts) > 1 and parts[1].strip():
+            return parts[1].strip(), False
+        return None, True
+    if cmd != "session" or len(parts) < 2:
+        return None, False
+    sub = parts[1].lower()
+    if sub in ("new", "switch"):
+        if len(parts) > 2 and parts[2].strip():
+            return parts[2].strip(), False
+        return None, sub == "new"
+    return None, False
+
+
 def format_feishu_processing_error(exc: BaseException) -> str:
     """将异常格式化为飞书用户可见的一行说明（避免过长）。"""
     msg = str(exc).strip() or type(exc).__name__
@@ -92,6 +120,10 @@ async def try_handle_slash_command_via_ipc(
     timeout_seconds: float = 120.0,
     owner_id: str = "root",
     source: str = "feishu",
+    feishu_chat_type: str = "p2p",
+    feishu_chat_id: str = "",
+    feishu_open_id: str = "",
+    feishu_user_id: str = "",
 ) -> Optional[str]:
     """
     尝试处理斜杠指令（/clear、/usage、/session、/help）。
@@ -109,8 +141,37 @@ async def try_handle_slash_command_via_ipc(
         raise AutomationDaemonUnavailable(
             f"automation daemon is not reachable via IPC socket: {socket_path or default_socket_path()}"
         )
-    await client.switch_session(session_id, create_if_missing=True)
+    effective_session = (
+        resolve_session_override(
+            chat_type=feishu_chat_type,
+            chat_id=feishu_chat_id,
+            open_id=feishu_open_id,
+            user_id=feishu_user_id,
+        )
+        or session_id
+    )
+    await client.switch_session(effective_session, create_if_missing=True)
     handled, reply = await try_handle_slash_command(client, text)
+    if handled:
+        target, needs_active_fallback = _extract_override_session_target(text)
+        if target:
+            set_session_override(
+                chat_type=feishu_chat_type,
+                chat_id=feishu_chat_id,
+                open_id=feishu_open_id,
+                user_id=feishu_user_id,
+                session_id=target,
+            )
+        elif needs_active_fallback:
+            active = getattr(client, "active_session_id", "")
+            if isinstance(active, str) and active.strip():
+                set_session_override(
+                    chat_type=feishu_chat_type,
+                    chat_id=feishu_chat_id,
+                    open_id=feishu_open_id,
+                    user_id=feishu_user_id,
+                    session_id=active.strip(),
+                )
     return reply if handled else None
 
 

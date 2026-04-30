@@ -91,6 +91,52 @@ def _format_subagent_limit_msg(
 logger = logging.getLogger(__name__)
 
 
+# region agent log
+def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: Dict[str, Any]) -> None:
+    """Append minimal NDJSON debug evidence for the current Cursor debug session."""
+    try:
+        payload = {
+            "sessionId": "972f2b",
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with open("/home/ubuntu/macchiatoBot/.cursor/debug-972f2b.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+# endregion
+
+
+def _debug_context_reasoning_stats(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    stats: Dict[str, Any] = {
+        "total": len(messages),
+        "assistant_total": 0,
+        "assistant_with_tool_calls": 0,
+        "assistant_missing_reasoning": 0,
+        "assistant_tool_missing_reasoning": 0,
+        "missing_indexes": [],
+        "tool_missing_indexes": [],
+    }
+    for idx, msg in enumerate(messages):
+        if msg.get("role") != "assistant":
+            continue
+        stats["assistant_total"] += 1
+        has_tools = bool(msg.get("tool_calls"))
+        if has_tools:
+            stats["assistant_with_tool_calls"] += 1
+        if "reasoning_content" not in msg:
+            stats["assistant_missing_reasoning"] += 1
+            stats["missing_indexes"].append(idx)
+            if has_tools:
+                stats["assistant_tool_missing_reasoning"] += 1
+                stats["tool_missing_indexes"].append(idx)
+    return stats
+
+
 def _default_token_usage_dict() -> dict[str, int]:
     """会话累计用量默认值（含 DeepSeek prompt_cache_* 累计）。"""
     return {
@@ -501,6 +547,107 @@ class AgentCore:
         if isinstance(rc, str):
             return not rc.strip()
         return rc is None
+
+    def _looks_like_deepseek_api(self, provider: Any) -> bool:
+        """配置文件里 provider key / model 可能被写成非 deepseek 字样，但 base_url 仍会暴露真实端点。"""
+        if provider is None:
+            return False
+        name = str(getattr(provider, "name", "") or "").lower()
+        model = str(getattr(provider, "model", "") or "").lower()
+        base = str(getattr(provider, "_base_url", "") or "").lower()
+        return "deepseek" in name or "deepseek" in model or "deepseek" in base
+
+    @staticmethod
+    def _looks_like_vendor_excluded_from_ds_empty_reasoning(provider: Any) -> bool:
+        """对明确非 DeepSeek 的厂商不重试写入空 reasoning（例如 Kimi/GPT）。"""
+        model = str(getattr(provider, "model", "") or "").lower()
+        base = str(getattr(provider, "_base_url", "") or "").lower()
+        name = str(getattr(provider, "name", "") or "").lower()
+        hay = f"{model} {base} {name}"
+        for tok in ("kimi", "moonshot", "openai.com", "api.openai", "gpt-4", "gpt-5", "glm", "dashscope"):
+            if tok in hay:
+                return True
+        return False
+
+    def _looks_like_deepseek_usage_cache_split(self, response: LLMResponse) -> bool:
+        """会话日志里 DS 计费会给出同时非零或可区分的 prompt_cache_hit/miss（区别于多数网关全 0）。"""
+        u = getattr(response, "usage", None)
+        if u is None:
+            return False
+        try:
+            hit = int(getattr(u, "prompt_cache_hit_tokens", None) or 0)
+            miss = int(getattr(u, "prompt_cache_miss_tokens", None) or 0)
+        except (TypeError, ValueError):
+            return False
+        return (hit + miss) > 0
+
+    def _provider_eligible_for_empty_reasoning_synthesis(self, response: LLMResponse) -> bool:
+        """是否应对缺字段的合成 ``reasoning_content=\"\"``（provider 画像与用量启发式）。"""
+        provider = None
+        try:
+            provider = self._llm_client._active_provider()
+        except Exception:
+            provider = None
+        if provider is None:
+            return False
+        if self._looks_like_deepseek_api(provider):
+            return True
+        if self._looks_like_vendor_excluded_from_ds_empty_reasoning(provider):
+            return False
+        if type(provider).__name__ != "OpenAICompatProvider":
+            return False
+        return self._looks_like_deepseek_usage_cache_split(response)
+
+    def _thinking_final_response_missing_reasoning_content(self, response: LLMResponse) -> bool:
+        """thinking + 仅有正文、无 tool_calls 时，模型也可能不返回 ``reasoning_content``。"""
+        if response.tool_calls:
+            return False
+        caps = getattr(self._llm_client, "capabilities", None)
+        if getattr(caps, "reasoning_content", False) is not True:
+            return False
+        if not str(response.content or "").strip():
+            return False
+        provider = None
+        try:
+            provider = self._llm_client._active_provider()
+        except Exception:
+            provider = None
+        model = str(getattr(provider, "model", "") or "").strip().lower()
+        vendor_params = getattr(provider, "_vendor_params", None)
+        thinking_enabled = False
+        if isinstance(vendor_params, dict):
+            th = vendor_params.get("thinking")
+            if isinstance(th, dict):
+                thinking_enabled = (
+                    str(th.get("type", "")).strip().lower() == "enabled"
+                )
+            if not thinking_enabled:
+                out_cfg = vendor_params.get("output_config")
+                if isinstance(out_cfg, dict) and str(out_cfg.get("effort", "")).strip():
+                    thinking_enabled = True
+        if not thinking_enabled and "reasoner" not in model:
+            return False
+        rc = response.reasoning_content
+        if isinstance(rc, str):
+            return not rc.strip()
+        return rc is None
+
+    def _should_synthesize_empty_final_reasoning(self, response: LLMResponse) -> bool:
+        if not self._thinking_final_response_missing_reasoning_content(response):
+            return False
+        return self._provider_eligible_for_empty_reasoning_synthesis(response)
+
+    def _should_synthesize_empty_tool_reasoning(self, response: LLMResponse) -> bool:
+        """
+        DeepSeek thinking + tool_calls 偶发不返回 ``reasoning_content``。
+
+        DeepSeek API 的实际校验要求是字段存在；直连探针已验证空字符串可通过。
+        因此对 DeepSeek 缺字段响应合成 ``reasoning_content=""``，避免重试同一
+        payload 反复得到同样的不完整响应并中断本轮。
+        """
+        if not self._should_retry_missing_tool_reasoning(response):
+            return False
+        return self._provider_eligible_for_empty_reasoning_synthesis(response)
 
     def unregister_tool(self, name: str) -> bool:
         """
@@ -1062,8 +1209,71 @@ class AgentCore:
                         )
                         self._last_prompt_tokens = pt
 
+                    if self._should_synthesize_empty_tool_reasoning(response):
+                        response.reasoning_content = ""
+                        tool_names = [tc.name for tc in response.tool_calls]
+                        logger.warning(
+                            "DeepSeek thinking tool response missing reasoning_content; "
+                            "synthesizing empty field: session=%s turn=%s iteration=%s tools=%s",
+                            self._session_id,
+                            turn_id,
+                            iteration,
+                            tool_names,
+                        )
+                        # region agent log
+                        _agent_debug_log(
+                            "H1-H5",
+                            "src/agent_core/agent/agent.py:run_loop:synthesize_empty_tool_reasoning",
+                            "synthesized empty reasoning_content for DeepSeek tool-call response",
+                            {
+                                "session_id": self._session_id,
+                                "turn_id": turn_id,
+                                "iteration": iteration,
+                                "tool_names": tool_names,
+                                "tool_call_count": len(response.tool_calls),
+                            },
+                        )
+                        # endregion
+                        break
+
                     if not self._should_retry_missing_tool_reasoning(response):
                         break
+
+                    # region agent log
+                    _prov = None
+                    try:
+                        _prov = self._llm_client._active_provider()
+                    except Exception:
+                        _prov = None
+                    _u = getattr(response, "usage", None)
+                    _agent_debug_log(
+                        "H3",
+                        "src/agent_core/agent/agent.py:run_loop:missing_tool_reasoning_before_retry",
+                        "missing reasoning on tool_calls; will retry or fatal",
+                        {
+                            "session_id": self._session_id,
+                            "turn_id": turn_id,
+                            "iteration": iteration,
+                            "next_retry_count": missing_reasoning_retries + 1,
+                            "looks_deepseek_name_model_base": (
+                                self._looks_like_deepseek_api(_prov) if _prov else False
+                            ),
+                            "would_synth_ds_cache_split": (
+                                self._looks_like_deepseek_usage_cache_split(response)
+                                if _prov
+                                else False
+                            ),
+                            "provider_cls": type(_prov).__name__ if _prov else None,
+                            "provider_key": str(getattr(_prov, "name", "") or ""),
+                            "cache_hit": getattr(_u, "prompt_cache_hit_tokens", None)
+                            if _u
+                            else None,
+                            "cache_miss": getattr(_u, "prompt_cache_miss_tokens", None)
+                            if _u
+                            else None,
+                        },
+                    )
+                    # endregion
 
                     missing_reasoning_retries += 1
                     tool_names = [tc.name for tc in response.tool_calls]
@@ -1154,6 +1364,22 @@ class AgentCore:
 
                 # ── 处理工具调用 ─────────────────────────────────────────
                 if response.tool_calls:
+                    # region agent log
+                    _agent_debug_log(
+                        "H2-H3",
+                        "src/agent_core/agent/agent.py:run_loop:before_add_tool_assistant",
+                        "about to store assistant tool-call response in context",
+                        {
+                            "session_id": self._session_id,
+                            "turn_id": turn_id,
+                            "iteration": iteration,
+                            "tool_call_count": len(response.tool_calls),
+                            "reasoning_present": response.reasoning_content is not None,
+                            "reasoning_nonempty": bool((response.reasoning_content or "").strip()),
+                            "content_present": bool(response.content),
+                        },
+                    )
+                    # endregion
                     self._add_assistant_message_with_tool_calls(response)
                     self._last_prompt_tokens = None
 
@@ -1252,6 +1478,42 @@ class AgentCore:
 
                 # ── 最终响应，先检查上下文溢出再 ReturnAction ─────────────
                 if response.content:
+                    if self._should_synthesize_empty_final_reasoning(response):
+                        response.reasoning_content = ""
+                        logger.warning(
+                            "DeepSeek thinking final message missing reasoning_content; "
+                            "synthesizing empty field: session=%s turn=%s iteration=%s",
+                            self._session_id,
+                            turn_id,
+                            iteration,
+                        )
+                        # region agent log
+                        _agent_debug_log(
+                            "H5",
+                            "src/agent_core/agent/agent.py:run_loop:synthesize_empty_final_reasoning",
+                            "synthesized empty reasoning_content for DeepSeek final assistant message",
+                            {
+                                "session_id": self._session_id,
+                                "turn_id": turn_id,
+                                "iteration": iteration,
+                            },
+                        )
+                        # endregion
+                    # region agent log
+                    _agent_debug_log(
+                        "H3",
+                        "src/agent_core/agent/agent.py:run_loop:before_add_final_assistant",
+                        "about to store final assistant response in context",
+                        {
+                            "session_id": self._session_id,
+                            "turn_id": turn_id,
+                            "iteration": iteration,
+                            "reasoning_present": response.reasoning_content is not None,
+                            "reasoning_nonempty": bool((response.reasoning_content or "").strip()),
+                            "content_present": bool(response.content),
+                        },
+                    )
+                    # endregion
                     self._context.add_assistant_message(
                         content=response.content,
                         reasoning_content=response.reasoning_content,
@@ -1754,6 +2016,19 @@ class AgentCore:
                 self._context.add_user_message(content)
             elif role == "assistant":
                 self._context.add_assistant_message(content=content)
+        # region agent log
+        _agent_debug_log(
+            "H4",
+            "src/agent_core/agent/agent.py:activate_session",
+            "session replay from ChatHistoryDB completed",
+            {
+                "session_id": self._session_id,
+                "replay_rows": len(replay_rows),
+                "history_rows": len(history),
+                "stats": _debug_context_reasoning_stats(self._context.get_messages()),
+            },
+        )
+        # endregion
         self._current_turn_id = sum(1 for r in replay_rows if r.get("role") == "user")
         self._last_history_id = max(int(r.get("id", 0)) for r in history)
         if replay_rows:
@@ -1787,6 +2062,18 @@ class AgentCore:
         self._context.clear()
         for msg in checkpoint.recent_messages:
             self._context.messages.append(dict(msg))
+        # region agent log
+        _agent_debug_log(
+            "H4",
+            "src/agent_core/agent/agent.py:restore_from_checkpoint",
+            "session restored from checkpoint",
+            {
+                "session_id": self._session_id,
+                "checkpoint_messages": len(checkpoint.recent_messages),
+                "stats": _debug_context_reasoning_stats(self._context.get_messages()),
+            },
+        )
+        # endregion
 
         self._working_memory = WorkingMemory(
             context=self._context,
@@ -1816,6 +2103,18 @@ class AgentCore:
                 self._context.add_user_message(content)
             elif role == "assistant":
                 self._context.add_assistant_message(content=content)
+        # region agent log
+        _agent_debug_log(
+            "H4",
+            "src/agent_core/agent/agent.py:_sync_external_session_updates",
+            "external ChatHistoryDB rows synced into active context",
+            {
+                "session_id": self._session_id,
+                "new_rows": len(new_rows),
+                "stats": _debug_context_reasoning_stats(self._context.get_messages()),
+            },
+        )
+        # endregion
         # 有外部新增时，强制让本轮阈值判断基于当前上下文重估，确保压缩及时触发。
         self._last_prompt_tokens = None
         self._last_history_id = max(

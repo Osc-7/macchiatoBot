@@ -136,12 +136,16 @@ class SessionLogger:
             if getattr(tc, "extra_content", None):
                 row["extra_content"] = tc.extra_content
             tool_calls.append(row)
+        rc_raw = response.reasoning_content
+        rc_str = rc_raw if isinstance(rc_raw, str) else ""
         record: Dict[str, Any] = {
             "event": "llm_response",
             "timestamp": self._timestamp(),
             "turn_id": turn_id,
             "iteration": iteration,
             "content": response.content,
+            "reasoning_present": rc_raw is not None,
+            "reasoning_nonempty": bool(rc_str.strip()),
             "tool_calls": tool_calls,
             "finish_reason": response.finish_reason,
         }

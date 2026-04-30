@@ -20,6 +20,7 @@ def test_help_text():
     assert "/usage" in h
     assert "/model" in h
     assert "/session" in h
+    assert "/new" in h
     assert "/help" in h
 
 
@@ -219,3 +220,13 @@ async def test_try_handle_slash_command_model_switch():
     assert reply is not None
     assert "kimi_k25" in reply
     client.switch_model.assert_awaited_once_with("Kimi K2.5")
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_new_alias():
+    client = MagicMock()
+    client.switch_session = AsyncMock(return_value=True)
+    handled, reply = await try_handle_slash_command(client, "/new")
+    assert handled is True
+    assert "已创建并切换到新会话" in (reply or "")
+    client.switch_session.assert_awaited_once()

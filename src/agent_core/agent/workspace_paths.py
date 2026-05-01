@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 import shutil
 from pathlib import Path
@@ -10,8 +11,17 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from agent_core.bash_user_env import render_terminal_like_bootstrap_bash
 from agent_core.config import CommandToolsConfig
+from agent_core.bash_os_user import (
+    logic_os_user_name,
+    resolve_os_user_home,
+    should_use_os_home_for_logic_user,
+)
 
-from .memory_paths import resolve_memory_owner_paths, validate_logic_namespace_segment
+from .memory_paths import (
+    ensure_memory_owner_layout,
+    resolve_memory_owner_paths,
+    validate_logic_namespace_segment,
+)
 from .writable_ephemeral_grants import list_ephemeral_writable_prefixes
 from .writable_roots_store import load_user_writable_prefixes
 
@@ -101,8 +111,6 @@ def ensure_workspace_data_memory_symlink(
 
     在用户根下相对路径请用 ``data/memory/long_term``、``content`` 等（不要再叠一层 ``data/memory/feishu/...``）。
     """
-    import os
-
     pr = (project_root or resolve_project_root()).resolve()
     fe = validate_logic_namespace_segment(_ns_segment(source, "cli"), what="frontend")
     uid = validate_logic_namespace_segment(_ns_segment(user_id, "root"), what="user_id")
@@ -160,6 +168,13 @@ def resolve_workspace_owner_dir(
     """返回 {workspace_base_dir}/{frontend}/{user_id}/ 目录路径字符串。"""
     fe = validate_logic_namespace_segment(_ns_segment(source, "cli"), what="frontend")
     uid = validate_logic_namespace_segment(_ns_segment(user_id, "root"), what="user_id")
+    if should_use_os_home_for_logic_user(cmd_cfg, source=fe, user_id=uid, profile=None):
+        posix_name = logic_os_user_name(
+            fe,
+            uid,
+            prefix=str(getattr(cmd_cfg, "bash_os_tenant_user_prefix", "m_")),
+        )
+        return str(resolve_os_user_home(cmd_cfg, posix_name))
     base = Path((cmd_cfg.workspace_base_dir or "./data/workspace").strip())
     return str(base / fe / uid)
 
@@ -181,6 +196,7 @@ def ensure_workspace_owner_layout(
     user_id: str,
     *,
     source: str = "cli",
+    app_config: Optional["Config"] = None,
 ) -> Dict[str, Any]:
     """
     在 {workspace_base_dir}/{frontend}/{user}/ 与 /tmp/macchiato/{frontend}/{user}/
@@ -190,7 +206,7 @@ def ensure_workspace_owner_layout(
     """
     fe = validate_logic_namespace_segment(_ns_segment(source, "cli"), what="frontend")
     uid = validate_logic_namespace_segment(_ns_segment(user_id, "root"), what="user_id")
-    owner = Path((cmd_cfg.workspace_base_dir or "./data/workspace").strip()) / fe / uid
+    owner = Path(resolve_workspace_owner_dir(cmd_cfg, uid, source=fe)).resolve()
     tmp_dir = _TMP_BASE_DIR / fe / uid
     created_paths: List[str] = []
     for path_obj, label in ((owner, "工作区路径"), (tmp_dir, "临时目录路径")):
@@ -201,12 +217,16 @@ def ensure_workspace_owner_layout(
             path_obj.mkdir(parents=True, exist_ok=True)
             created_paths.append(str(path_obj))
 
-    try:
-        ensure_workspace_data_memory_symlink(
-            owner, project_root=resolve_project_root(), source=source, user_id=uid
-        )
-    except Exception as exc:
-        logger.warning("ensure_workspace_owner_layout: data/memory graft skipped: %s", exc)
+    if should_use_os_home_for_logic_user(cmd_cfg, source=fe, user_id=uid, profile=None):
+        if app_config is not None and getattr(app_config, "memory", None) is not None:
+            ensure_memory_owner_layout(app_config.memory, uid, source=fe, config=app_config)
+    else:
+        try:
+            ensure_workspace_data_memory_symlink(
+                owner, project_root=resolve_project_root(), source=source, user_id=uid
+            )
+        except Exception as exc:
+            logger.warning("ensure_workspace_owner_layout: data/memory graft skipped: %s", exc)
 
     return {
         "frontend": fe,
@@ -215,6 +235,69 @@ def ensure_workspace_owner_layout(
         "owner_dir": str(owner),
         "tmp_dir": str(tmp_dir),
         "created_paths": created_paths,
+    }
+
+
+def migrate_legacy_workspace_and_memory_to_home(
+    cmd_cfg: CommandToolsConfig,
+    mem_cfg: Optional[Any],
+    *,
+    source: str,
+    user_id: str,
+) -> Dict[str, Any]:
+    """
+    将 legacy {workspace_base_dir}/{fe}/{uid} 与 {memory_base_dir}/{fe}/{uid} 合并迁入 Linux home。
+
+    仅在 tenant Linux 用户隔离模式下生效；幂等，不覆盖目标已有同名文件。
+    """
+    fe = validate_logic_namespace_segment(_ns_segment(source, "cli"), what="frontend")
+    uid = validate_logic_namespace_segment(_ns_segment(user_id, "root"), what="user_id")
+    if not should_use_os_home_for_logic_user(cmd_cfg, source=fe, user_id=uid, profile=None):
+        return {"migrated": False, "reason": "os_home_disabled"}
+
+    posix_name = logic_os_user_name(
+        fe,
+        uid,
+        prefix=str(getattr(cmd_cfg, "bash_os_tenant_user_prefix", "m_")),
+    )
+    home_root = resolve_os_user_home(cmd_cfg, posix_name)
+    legacy_workspace_root = (
+        Path((cmd_cfg.workspace_base_dir or "./data/workspace").strip()) / fe / uid
+    ).resolve()
+    legacy_memory_root: Optional[Path] = None
+    if mem_cfg is not None:
+        legacy_memory_root = (
+            Path((getattr(mem_cfg, "memory_base_dir", "./data/memory") or "./data/memory").strip())
+            / fe
+            / uid
+        ).resolve()
+
+    migrated_paths: List[str] = []
+    skipped_paths: List[str] = []
+    home_root.mkdir(parents=True, exist_ok=True)
+    if legacy_workspace_root != home_root:
+        _merge_move_tree(
+            legacy_workspace_root,
+            home_root,
+            migrated_paths=migrated_paths,
+            skipped_paths=skipped_paths,
+            skip_relative_paths={"data/memory"},
+        )
+    if legacy_memory_root is not None:
+        target_memory_root = home_root / "data" / "memory"
+        target_memory_root.mkdir(parents=True, exist_ok=True)
+        if legacy_memory_root != target_memory_root:
+            _merge_move_tree(
+                legacy_memory_root,
+                target_memory_root,
+                migrated_paths=migrated_paths,
+                skipped_paths=skipped_paths,
+            )
+    return {
+        "migrated": bool(migrated_paths),
+        "home_root": str(home_root),
+        "migrated_paths": migrated_paths,
+        "skipped_paths": skipped_paths,
     }
 
 
@@ -231,6 +314,47 @@ def list_user_ids_under_workspace(
         if p.is_dir() and not p.name.startswith("."):
             names.append(p.name)
     return names
+
+
+def _merge_move_tree(
+    src: Path,
+    dst: Path,
+    *,
+    migrated_paths: List[str],
+    skipped_paths: List[str],
+    skip_relative_paths: Optional[set[str]] = None,
+) -> None:
+    if not src.exists():
+        return
+    skip = {s.strip("/").strip() for s in (skip_relative_paths or set()) if s.strip()}
+    dst.mkdir(parents=True, exist_ok=True)
+    for child in list(src.iterdir()):
+        rel = child.name
+        if rel in skip:
+            skipped_paths.append(str(child))
+            continue
+        target = dst / child.name
+        if not target.exists():
+            shutil.move(str(child), str(target))
+            migrated_paths.append(f"{child} -> {target}")
+            continue
+        if child.is_dir() and target.is_dir() and not child.is_symlink():
+            _merge_move_tree(
+                child,
+                target,
+                migrated_paths=migrated_paths,
+                skipped_paths=skipped_paths,
+            )
+            try:
+                child.rmdir()
+            except OSError:
+                pass
+            continue
+        skipped_paths.append(str(child))
+    try:
+        src.rmdir()
+    except OSError:
+        pass
 
 
 def is_bash_workspace_admin(

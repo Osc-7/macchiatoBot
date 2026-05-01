@@ -9,7 +9,7 @@
 | -------------------------- | ----------------------------------------- |
 | `systemd/*.service.in`     | 服务单元**模板**（含占位符，勿直接复制到 `/etc`）            |
 | `systemd/macchiato.target` | 聚合目标：一键启动/停止三个服务                          |
-| `systemd/install.sh`       | 将模板展开为真实路径与用户，并安装到 `/etc/systemd/system/` |
+| `systemd/install.sh`       | 将模板展开为真实路径与用户，并安装到 `/etc/systemd/system/`（可选 `--automation-root`） |
 | `systemd/50-macchiato-proxy.conf` | 可选 drop-in：HTTP(S) 代理 + `NO_PROXY`（与 `--with-proxy` 配套） |
 
 
@@ -46,6 +46,14 @@ cd /path/to/macchiatoBot
 sudo ./deploy/systemd/install.sh "$(pwd)" 你的系统用户名
 ```
 
+若 `config/config.yaml` 中 `command_tools.bash_os_user_enabled: true`（Linux 下用 `runuser` 隔离 bash），**automation daemon 必须以 root 运行**，安装时追加 **`--automation-root`**（飞书 / 水源连接器仍为普通用户，不变）：
+
+```bash
+sudo ./deploy/systemd/install.sh "$(pwd)" 你的系统用户名 --automation-root
+```
+
+请先为 `bash_os_admin_system_users` 创建对应 Linux 用户（如 `useradd -r -M macchiato_bash_admin`），并安装 `util-linux`（提供 `/sbin/runuser`）。
+
 本机使用 **Clash / 7890** 等 HTTP 代理访问境外 LLM（Gemini、OpenAI）时，**shell 有代理而 systemd 没有**会导致 daemon 内请求超时。安装单元时一并注入代理与直连名单：
 
 ```bash
@@ -60,6 +68,7 @@ sudo systemctl restart macchiato-automation.service macchiato-feishu-gateway.ser
 
 ```bash
 ./deploy/systemd/install.sh --dry-run "$(pwd)" 你的系统用户名
+./deploy/systemd/install.sh --dry-run "$(pwd)" 你的系统用户名 --automation-root
 ```
 
 安装完成后：
@@ -105,7 +114,7 @@ sudo systemctl edit macchiato-automation.service
 
 在打开的 override 中于 `[Service]` 下添加 `Environment=KEY=value`，或使用 **仅含 `KEY=value` 行** 的文件并在 override 里 `EnvironmentFile=` 指向该文件。
 
-**HTTP 代理（境外 LLM）**：优先使用仓库内 `50-macchiato-proxy.conf` + `install.sh --with-proxy`（见上文），避免国内 API 误走代理时可编辑该文件中的 `NO_PROXY` 列表。
+**HTTP 代理（境外 LLM）**：优先使用仓库内 `50-macchiato-proxy.conf` + `install.sh --with-proxy`（见上文），避免国内 API 误走代理时可编辑该文件中的 `NO_PROXY` 列表。可与 `--automation-root` 同一条命令指定：`install.sh "$(pwd)" ubuntu --automation-root --with-proxy`。
 
 ## 卸载（本机）
 

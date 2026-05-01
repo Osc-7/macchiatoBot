@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 import uuid
@@ -41,6 +42,7 @@ def ensure_memory_owner_layout(
     user_id: str,
     *,
     source: str = "cli",
+    config: Optional[Config] = None,
 ) -> Dict[str, Any]:
     """
     在 data/memory/{frontend}/{user}/ 下创建标准目录布局（幂等）。
@@ -49,7 +51,7 @@ def ensure_memory_owner_layout(
     """
     fe = validate_logic_namespace_segment(_ns_segment(source, "cli"), what="frontend")
     uid = validate_logic_namespace_segment(_ns_segment(user_id, "root"), what="user_id")
-    paths = resolve_memory_owner_paths(mem_cfg, uid, source=fe)
+    paths = resolve_memory_owner_paths(mem_cfg, uid, config=config, source=fe)
     owner = Path(paths["chat_history_db_path"]).parent
     long_term = Path(paths["long_term_dir"])
     content = Path(paths["content_dir"])
@@ -61,6 +63,24 @@ def ensure_memory_owner_layout(
             continue
         p.mkdir(parents=True, exist_ok=True)
         created_paths.append(str(p))
+    home_marker = _logic_user_marker_path(config, source=fe, user_id=uid)
+    if home_marker is not None:
+        if not home_marker.parent.exists():
+            home_marker.parent.mkdir(parents=True, exist_ok=True)
+        if not home_marker.exists():
+            home_marker.write_text(
+                json.dumps(
+                    {
+                        "frontend": fe,
+                        "user_id": uid,
+                        "memory_owner": f"{fe}:{uid}",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            created_paths.append(str(home_marker))
     return {
         "frontend": fe,
         "user_id": uid,
@@ -76,12 +96,11 @@ def list_user_ids_under_frontend(mem_cfg: MemoryConfig, *, frontend: str = "cli"
     """列出磁盘上某 frontend 下已有记忆目录的 user_id（仅一级子目录名）。"""
     fe = validate_logic_namespace_segment(_ns_segment(frontend, "cli"), what="frontend")
     base = Path((mem_cfg.memory_base_dir or "./data/memory").strip()) / fe
-    if not base.is_dir():
-        return []
     names: List[str] = []
-    for p in sorted(base.iterdir()):
-        if p.is_dir() and not p.name.startswith("."):
-            names.append(p.name)
+    if base.is_dir():
+        for p in sorted(base.iterdir()):
+            if p.is_dir() and not p.name.startswith("."):
+                names.append(p.name)
     return names
 
 
@@ -119,12 +138,15 @@ def resolve_memory_owner_paths(
 
     示例：data/memory/cli/root/、data/memory/feishu/user123/、data/memory/shuiyuan/osc7/
     """
-    base = Path((mem_cfg.memory_base_dir or "./data/memory").strip())
     frontend_id = _ns_segment(source, "cli")
     uid = _ns_segment(user_id, "root")
+    if _should_use_os_home_layout(config, source=frontend_id, user_id=uid):
+        owner_dir = _resolve_os_home_memory_owner_dir(config, source=frontend_id, user_id=uid)
+    else:
+        base = Path((mem_cfg.memory_base_dir or "./data/memory").strip())
+        owner_dir = base / frontend_id / uid
 
     # 统一按 data/memory/{frontend}/{user}/ 划分，不使用 data/memory/long_term/shuiyuan
-    owner_dir = base / frontend_id / uid
     long_term_dir = owner_dir / "long_term"
     content_dir = owner_dir / "content"
     chat_db_path = owner_dir / "chat_history.db"
@@ -149,6 +171,71 @@ def get_kernel_shutdown_at_path(mem_cfg: MemoryConfig) -> str:
     """
     base = Path((mem_cfg.memory_base_dir or "./data/memory").strip())
     return str(base / ".kernel_last_shutdown_at")
+
+
+def _should_use_os_home_layout(
+    config: Optional[Config],
+    *,
+    source: str,
+    user_id: str,
+) -> bool:
+    if config is None:
+        return False
+    cmd_cfg = getattr(config, "command_tools", None)
+    if cmd_cfg is None:
+        return False
+    from agent_core.bash_os_user import should_use_os_home_for_logic_user
+
+    return should_use_os_home_for_logic_user(
+        cmd_cfg, source=source, user_id=user_id, profile=None
+    )
+
+
+def _resolve_os_home_memory_owner_dir(
+    config: Optional[Config],
+    *,
+    source: str,
+    user_id: str,
+) -> Path:
+    if config is None:
+        raise ValueError("config is required for os-home memory layout")
+    from agent_core.bash_os_user import (
+        logic_os_user_name,
+        resolve_os_user_home,
+    )
+
+    cmd_cfg = config.command_tools
+    posix_name = logic_os_user_name(
+        source,
+        user_id,
+        prefix=str(getattr(cmd_cfg, "bash_os_tenant_user_prefix", "m_")),
+    )
+    home_dir = resolve_os_user_home(cmd_cfg, posix_name)
+    return home_dir / "data" / "memory"
+
+
+def _logic_user_marker_path(
+    config: Optional[Config],
+    *,
+    source: str,
+    user_id: str,
+) -> Optional[Path]:
+    if not _should_use_os_home_layout(config, source=source, user_id=user_id):
+        return None
+    if config is None:
+        return None
+    from agent_core.bash_os_user import (
+        logic_os_user_name,
+        resolve_os_user_home,
+    )
+
+    cmd_cfg = config.command_tools
+    posix_name = logic_os_user_name(
+        source,
+        user_id,
+        prefix=str(getattr(cmd_cfg, "bash_os_tenant_user_prefix", "m_")),
+    )
+    return resolve_os_user_home(cmd_cfg, posix_name) / ".macchiato-owner.json"
 
 
 def new_session_id() -> str:

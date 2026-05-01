@@ -7,6 +7,7 @@ import pytest
 from agent_core.bash_os_user import (
     logic_os_user_name,
     memory_owner_key,
+    resolve_os_user_home,
     resolve_bash_run_as_user,
 )
 from agent_core.config import CommandToolsConfig
@@ -31,6 +32,15 @@ def test_logic_os_user_name_long_user_id_stable() -> None:
     b = logic_os_user_name("feishu", long_uid, prefix="m_")
     assert a == b
     assert len(a) <= 31
+
+
+def test_resolve_os_user_home_uses_configured_base(tmp_path) -> None:
+    cfg = CommandToolsConfig(
+        bash_os_user_enabled=True,
+        bash_os_user_home_base_dir=str(tmp_path / "homes"),
+    )
+    home = resolve_os_user_home(cfg, "m_cli_alice")
+    assert home == (tmp_path / "homes" / "m_cli_alice").resolve()
 
 
 def test_resolve_bash_run_as_user_disabled() -> None:

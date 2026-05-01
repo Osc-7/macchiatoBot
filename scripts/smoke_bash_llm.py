@@ -4,11 +4,17 @@
 
 用法（仓库根）::
   source init.sh
+  # 使用 config 里 llm.active 对应的 provider（须已在 .env 配好对应 key）
   python scripts/smoke_bash_llm.py
+
+  # 显式指定 provider 名（与 config/llm/providers.d/*.yaml 里条目的 key 一致，如 deepseek_V4_flash）
+  python scripts/smoke_bash_llm.py --provider deepseek_V4_flash
+  MACCHIATO_SMOKE_LLM_PROVIDER=gemini_31_flash_lite python scripts/smoke_bash_llm.py
+
   MACCHIATO_SMOKE_BASH_OS=1 python scripts/smoke_bash_llm.py
 
-需要 ``config/config.yaml`` 中已配置可用的 ``llm.providers``（及 .env 中的 API key）。
-默认关闭记忆、推迟 MCP，仅验证一条用户消息 +（若模型配合）bash 工具链。
+密钥：各厂商片段里常用 ``${DEEPSEEK_API_KEY}``、``${GEMINI_API_KEY}``、``${DASHSCOPE_API_KEY}`` 等，
+由 ``load_config`` 从环境展开；请在仓库根 ``.env`` 中填写对应变量（勿提交 .env）。
 
 退出码：0 成功；2 未配置密钥或 LLM 失败；3 bash 子进程不可用。
 """
@@ -27,8 +33,30 @@ if str(_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_ROOT / "src"))
 
 
+def _provider_api_key_ok(cfg, provider_key: str) -> tuple[bool, str]:
+    """api_key 已展开且非空（未残留 ${VAR}）。"""
+    prov = getattr(cfg.llm, "providers", None) or {}
+    entry = prov.get(provider_key)
+    if entry is None:
+        return False, f"unknown provider key: {provider_key!r}"
+    ak = str(getattr(entry, "api_key", "") or "")
+    if not ak.strip():
+        return False, "api_key is empty"
+    if "${" in ak:
+        return False, f"api_key not expanded from env (still contains placeholder): {ak[:48]}..."
+    return True, ak[:8] + "…" if len(ak) > 12 else ak
+
+
 async def _main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--provider",
+        default="",
+        help=(
+            "覆盖主对话 LLM：provider 注册名（如 deepseek_V4_flash、gemini_31_flash_lite）；"
+            "默认同 MACCHIATO_SMOKE_LLM_PROVIDER，再否则用 config llm.active"
+        ),
+    )
     parser.add_argument(
         "--bash-os",
         action="store_true",
@@ -73,6 +101,40 @@ async def _main() -> int:
         source="cli",
         defer_mcp_connect=True,
         memory_enabled=False,
+    )
+
+    prov_query = (
+        (args.provider or "").strip()
+        or os.environ.get("MACCHIATO_SMOKE_LLM_PROVIDER", "").strip()
+    )
+    if prov_query:
+        try:
+            core._llm_client.switch_model(prov_query)
+        except ValueError as exc:
+            keys = list((cfg.llm.providers or {}).keys())
+            print(
+                f"无法切换 LLM provider {prov_query!r}: {exc}\n"
+                f"已注册的 provider keys（节选）: {keys[:20]}{'…' if len(keys) > 20 else ''}",
+                file=sys.stderr,
+            )
+            return 2
+
+    active_key = core._llm_client.active_provider_name
+    ok, detail = _provider_api_key_ok(cfg, active_key)
+    if not ok:
+        print(
+            f"当前 provider={active_key!r} 的密钥无效: {detail}\n"
+            "请在 .env 中设置对应厂商变量（如 DEEPSEEK_API_KEY、GEMINI_API_KEY、DASHSCOPE_API_KEY），"
+            "并确保 config/llm/providers.d 里 api_key 使用 ${VAR} 引用。",
+            file=sys.stderr,
+        )
+        return 2
+
+    ent = (cfg.llm.providers or {}).get(active_key)
+    base_url = str(getattr(ent, "base_url", "") or "") if ent else ""
+    api_model = str(getattr(ent, "model", "") or "") if ent else ""
+    print(
+        f"--- LLM --- provider={active_key!r} model={api_model!r} base_url={base_url!r} key_ok={detail}"
     )
 
     prompt = (

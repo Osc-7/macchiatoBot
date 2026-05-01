@@ -19,8 +19,6 @@ llm:
   request_timeout_seconds: 120
   stream: true
   providers_dir: llm/providers.d
-  # 真实 API + bash 冒烟：仓库根执行 ``python scripts/smoke_bash_llm.py --provider <key>``，
-  # key 与 providers.d 中条目名一致（如 deepseek_V4_flash）；密钥在 .env（DEEPSEEK_API_KEY 等）
   # 可选：额外按文件合并（在 providers_dir 之后执行则覆盖同名）
   # provider_include: []
 

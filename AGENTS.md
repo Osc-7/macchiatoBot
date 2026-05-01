@@ -37,6 +37,15 @@ source init.sh
 
 **不要跳过这一步！** 确保环境正确后再继续。
 
+### Cursor Cloud 专用说明
+
+与 [Cloud Agent 设置](https://cursor.com/cn/docs/cloud-agent/setup) 对齐：
+
+- **机密（Secrets）**：在 [Cursor 仪表盘 → Cloud Agents / Security](https://cursor.com/dashboard?tab=cloud-agents) 配置 `DEEPSEEK_API_KEY`、`GEMINI_API_KEY`、`DASHSCOPE_API_KEY` 等；平台会以**环境变量**注入到云端 Agent 进程。
+- **仓库 `.env`**：若存在与 Secrets **同名**且**值为空**的行（如 `DEEPSEEK_API_KEY=`），旧版 `init.sh` 会在 `source .env` 时**覆盖**已注入的密钥。当前 `init.sh` 已跳过这类空赋值，避免清空 Cloud 注入的值。
+- **环境定义**：本仓库根下 `.cursor/environment.json` 的 `install` 会在机器启动时从**项目根**执行（与文档一致），用于 `uv sync`；解析顺序为：仓库 `environment.json` → 个人环境 → 团队环境。
+- **脱敏（Redacted）Secrets**：文档说明脱敏条目会额外扫描提交、并在工具结果中脱敏；若你发现进程里对应变量始终为空，可在仪表盘核对该项是否确有保存的**值**，或向 Cursor 支持确认脱敏条目是否仍注入为环境变量。
+
 ### Step 2: 了解项目状态
 
 1. **确认工作目录**: `pwd` 应该是项目根目录

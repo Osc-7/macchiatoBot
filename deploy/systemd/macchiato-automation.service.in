@@ -4,8 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-User=__MACCHIATO_USER__
-Group=__MACCHIATO_USER__
+# User/Group 由 install.sh 写入；config.command_tools.bash_os_user_enabled 为 true 时请使用 install.sh --automation-root（runuser / useradd 需 root）
+User=__MACCHIATO_AUTOMATION_USER__
+Group=__MACCHIATO_AUTOMATION_GROUP__
 WorkingDirectory=__MACCHIATO_ROOT__
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=__MACCHIATO_ROOT__/src

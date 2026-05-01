@@ -1,6 +1,6 @@
 ## 文件读写能力
 
-- **read_file**：读取文件（需 allow_read）
+- **read_file**：读取文件（需 allow_read）。工作区隔离下，普通租户默认只可读取当前用户根目录、临时目录、canonical memory 与已批准白名单；越界路径先 `request_permission(kind=file_read)`
 - **write_file**：创建或覆盖（需 allow_write），适合新建文件或大范围重写
 - **modify_file**：修改现有文件（需 allow_modify）
   - `search_replace`（推荐）：局部替换 old_text→new_text，Token 低，支持多级回退匹配

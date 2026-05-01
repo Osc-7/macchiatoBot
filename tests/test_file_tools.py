@@ -14,6 +14,8 @@ from agent_core.config import (
     CommandToolsConfig,
     MemoryConfig,
 )
+from agent_core.agent.readable_ephemeral_grants import add_ephemeral_readable_prefix
+from agent_core.agent.readable_roots_store import append_user_readable_prefix
 from agent_core.agent.workspace_paths import ensure_workspace_data_memory_symlink
 from system.tools.file_tools import ReadFileTool, WriteFileTool, ModifyFileTool
 from agent_core.tools.base import ToolDefinition
@@ -161,8 +163,38 @@ class TestReadFileTool:
             assert r.data["content"] == "lt-content"
 
     @pytest.mark.asyncio
-    async def test_read_file_workspace_allows_absolute_path_outside(self, tmp_path):
-        """工作区外路径保持只读，read_file 仍可读取。"""
+    async def test_read_memory_md_from_linux_home_layout(self, tmp_path):
+        home = tmp_path / "homes" / "m_feishu_u_mem"
+        mem_lt = home / "data" / "memory" / "long_term"
+        mem_lt.mkdir(parents=True)
+        (mem_lt / "MEMORY.md").write_text("home-memory", encoding="utf-8")
+        config = Config(
+            llm=LLMConfig(api_key="t", model="t"),
+            memory=MemoryConfig(memory_base_dir=str(tmp_path / "legacy-memory")),
+            file_tools=FileToolsConfig(
+                enabled=True,
+                allow_read=True,
+                base_dir=str(tmp_path),
+            ),
+            command_tools=CommandToolsConfig(
+                base_dir=str(tmp_path),
+                workspace_base_dir=str(tmp_path / "legacy-ws"),
+                workspace_isolation_enabled=True,
+                bash_os_user_enabled=True,
+                bash_os_user_home_base_dir=str(tmp_path / "homes"),
+            ),
+        )
+        tool = ReadFileTool(config=config)
+        result = await tool.execute(
+            path="MEMORY.md",
+            __execution_context__=_ctx("feishu", "u_mem"),
+        )
+        assert result.success
+        assert result.data["content"] == "home-memory"
+
+    @pytest.mark.asyncio
+    async def test_read_file_workspace_forbidden_outside(self, tmp_path):
+        """工作区隔离下，普通租户禁止读取用户根外宿主机路径。"""
         config = _make_workspace_sandbox_config(tmp_path, source="feishu")
         external = tmp_path / "outside.txt"
         external.write_text("outside", encoding="utf-8")
@@ -171,8 +203,65 @@ class TestReadFileTool:
             path=str(external),
             __execution_context__=_ctx("feishu", "r1"),
         )
+        assert not result.success
+        assert result.error == "FORBIDDEN_PATH"
+        assert result.metadata.get("suggested_tool") == "request_permission"
+        assert result.metadata.get("permission_kind") == "file_read"
+
+    @pytest.mark.asyncio
+    async def test_read_file_tmp_dir_allowed(self, tmp_path):
+        config = _make_workspace_sandbox_config(tmp_path, source="feishu")
+        temp_file = Path("/tmp/macchiato/feishu/r1/allowed.txt")
+        temp_file.parent.mkdir(parents=True, exist_ok=True)
+        temp_file.write_text("tmp-ok", encoding="utf-8")
+        tool = ReadFileTool(config=config)
+        try:
+            result = await tool.execute(
+                path=str(temp_file),
+                __execution_context__=_ctx("feishu", "r1"),
+            )
+            assert result.success
+            assert result.data["content"] == "tmp-ok"
+        finally:
+            temp_file.unlink(missing_ok=True)
+
+    @pytest.mark.asyncio
+    async def test_read_file_persisted_readable_prefix_allowed(self, tmp_path):
+        config = _make_workspace_sandbox_config(tmp_path, source="feishu")
+        external_dir = tmp_path / "shared"
+        external_dir.mkdir(parents=True)
+        external = external_dir / "note.txt"
+        external.write_text("shared-read", encoding="utf-8")
+        append_user_readable_prefix(
+            config.command_tools.acl_base_dir,
+            "feishu",
+            "r1",
+            str(external_dir),
+            config=config,
+        )
+        tool = ReadFileTool(config=config)
+        result = await tool.execute(
+            path=str(external),
+            __execution_context__=_ctx("feishu", "r1"),
+        )
         assert result.success
-        assert result.data["content"] == "outside"
+        assert result.data["content"] == "shared-read"
+
+    @pytest.mark.asyncio
+    async def test_read_file_ephemeral_readable_prefix_allowed(self, tmp_path):
+        config = _make_workspace_sandbox_config(tmp_path, source="feishu")
+        external_dir = tmp_path / "ephemeral-shared"
+        external_dir.mkdir(parents=True)
+        external = external_dir / "note.txt"
+        external.write_text("ephemeral-read", encoding="utf-8")
+        add_ephemeral_readable_prefix("feishu", "r1", str(external_dir), config=config)
+        tool = ReadFileTool(config=config)
+        result = await tool.execute(
+            path=str(external),
+            __execution_context__=_ctx("feishu", "r1"),
+        )
+        assert result.success
+        assert result.data["content"] == "ephemeral-read"
 
     @pytest.mark.asyncio
     async def test_read_file_not_found(self, tmp_path):

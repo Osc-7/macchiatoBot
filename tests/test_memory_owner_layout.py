@@ -8,9 +8,10 @@ from agent_core.agent.memory_paths import (
     effective_memory_namespace_from_execution_context,
     ensure_memory_owner_layout,
     list_user_ids_under_frontend,
+    resolve_memory_owner_paths,
     validate_logic_namespace_segment,
 )
-from agent_core.config import MemoryConfig
+from agent_core.config import CommandToolsConfig, Config, LLMConfig, MemoryConfig
 
 
 def test_validate_rejects_path_and_colon() -> None:
@@ -60,3 +61,18 @@ def test_list_user_ids_under_frontend(tmp_path) -> None:
     ensure_memory_owner_layout(mc, "u2", source="cli")
     ids = list_user_ids_under_frontend(mc, frontend="cli")
     assert set(ids) == {"u1", "u2"}
+
+
+def test_resolve_memory_owner_paths_uses_linux_home_for_tenant(tmp_path) -> None:
+    cfg = Config(
+        llm=LLMConfig(api_key="t", model="t"),
+        memory=MemoryConfig(memory_base_dir=str(tmp_path / "legacy-mem")),
+        command_tools=CommandToolsConfig(
+            bash_os_user_enabled=True,
+            bash_os_user_home_base_dir=str(tmp_path / "homes"),
+        ),
+    )
+    paths = resolve_memory_owner_paths(cfg.memory, "u1", config=cfg, source="feishu")
+    assert paths["memory_md_path"] == str(
+        tmp_path / "homes" / "m_feishu_u1" / "data" / "memory" / "long_term" / "MEMORY.md"
+    )

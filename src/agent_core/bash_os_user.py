@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import pwd
 import re
 import shutil
 import subprocess
@@ -108,6 +109,7 @@ def provision_system_user(
     *,
     system: bool = True,
     comment: str = "macchiato bash",
+    home_dir: Optional[Path] = None,
 ) -> None:
     """若系统用户不存在则 useradd（幂等）。需 root。"""
     check = subprocess.run(
@@ -118,9 +120,12 @@ def provision_system_user(
     )
     if check.returncode == 0:
         return
-    args: List[str] = ["useradd", "-M", "-c", comment, posix_name]
+    args: List[str] = ["useradd", "-m", "-c", comment]
+    if home_dir is not None:
+        args.extend(["-d", str(home_dir)])
     if system:
         args.insert(1, "-r")
+    args.append(posix_name)
     proc = subprocess.run(
         args,
         capture_output=True,
@@ -134,8 +139,6 @@ def provision_system_user(
 
 def chown_tree_to_user(paths: List[Path], posix_name: str) -> None:
     """将路径及其内容递归 chown 为 posix 用户的主 UID/GID。"""
-    import pwd
-
     try:
         pw = pwd.getpwnam(posix_name)
     except KeyError as exc:
@@ -197,6 +200,40 @@ def minimal_subprocess_env_for_runuser(
         }
     )
     return base
+
+
+def resolve_os_user_home(
+    cmd_cfg: "CommandToolsConfig",
+    posix_name: str,
+) -> Path:
+    """解析 Linux 用户 home；若系统中尚不存在则回退到配置的 home base。"""
+    try:
+        return Path(pwd.getpwnam(posix_name).pw_dir).resolve()
+    except KeyError:
+        pass
+    home_base = Path(
+        (getattr(cmd_cfg, "bash_os_user_home_base_dir", "/home") or "/home").strip()
+    ).expanduser()
+    return (home_base / posix_name).resolve()
+
+
+def should_use_os_home_for_logic_user(
+    cmd_cfg: "CommandToolsConfig",
+    *,
+    source: str,
+    user_id: str,
+    profile: Optional[Any] = None,
+) -> bool:
+    """
+    租户是否以 Linux home 作为 canonical workspace/memory 根。
+
+    管理员 Core 仍保留项目根 / 显式映射用户的行为，不迁入专属 home。
+    """
+    if not getattr(cmd_cfg, "bash_os_user_enabled", False):
+        return False
+    from agent_core.agent.workspace_paths import is_bash_workspace_admin
+
+    return not is_bash_workspace_admin(cmd_cfg, source, user_id, profile)
 
 
 def resolve_bash_run_as_user(

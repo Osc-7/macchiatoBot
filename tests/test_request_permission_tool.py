@@ -13,6 +13,10 @@ from agent_core.permissions.wait_registry import (
     resolve_permission,
     set_permission_notify_hook,
 )
+from agent_core.agent.readable_ephemeral_grants import (
+    clear_ephemeral_readable_grants_for_tests,
+)
+from agent_core.agent.readable_roots_store import load_user_readable_prefixes
 from agent_core.agent.writable_ephemeral_grants import (
     clear_ephemeral_writable_grants_for_tests,
 )
@@ -237,6 +241,104 @@ async def test_request_permission_ephemeral_skips_acl_file(patched_get_config):
     acl_file = tmp_path / "acl" / "cli" / "alice" / "writable_roots.json"
     assert not acl_file.exists()
     clear_ephemeral_writable_grants_for_tests()
+    set_permission_notify_hook(None)
+
+
+async def test_request_permission_file_read_persists_readable_acl(
+    patched_get_config,
+):
+    tmp_path, _c = patched_get_config
+    captured: list[str] = []
+
+    def _notify(pid: str, payload: object) -> None:
+        captured.append(pid)
+
+    set_permission_notify_hook(_notify)
+    tool = RequestPermissionTool()
+    exec_ctx = {"source": "cli", "user_id": "alice"}
+    outside = tmp_path / "readonly"
+    outside.mkdir(parents=True, exist_ok=True)
+
+    async def _run():
+        return await tool.execute(
+            summary="read outside",
+            kind="file_read",
+            details=json.dumps({"path": str(outside / "f.txt")}),
+            timeout_seconds=5.0,
+            __execution_context__=exec_ctx,
+        )
+
+    task = asyncio.create_task(_run())
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if captured:
+            break
+    assert captured
+    pid = captured[0]
+    ok = resolve_permission(
+        pid,
+        PermissionDecision(
+            allowed=True,
+            path_prefix=str(outside),
+            persist_acl=True,
+        ),
+    )
+    assert ok
+    result = await task
+    assert result.success
+    assert result.data.get("access_mode") == "read"
+    prefixes = load_user_readable_prefixes(
+        str(tmp_path / "acl"), "cli", "alice", config=_c
+    )
+    assert str(outside.resolve()) in prefixes
+
+
+async def test_request_permission_file_read_ephemeral_skips_readable_acl_file(
+    patched_get_config,
+):
+    tmp_path, _c = patched_get_config
+    captured: list[str] = []
+
+    def _notify(pid: str, payload: object) -> None:
+        captured.append(pid)
+
+    set_permission_notify_hook(_notify)
+    tool = RequestPermissionTool()
+    exec_ctx = {"source": "cli", "user_id": "alice"}
+    outside = tmp_path / "readonly-ephemeral"
+    outside.mkdir(parents=True, exist_ok=True)
+
+    async def _run():
+        return await tool.execute(
+            summary="read outside once",
+            kind="file_read",
+            details=json.dumps({"path": str(outside / "f.txt")}),
+            timeout_seconds=5.0,
+            __execution_context__=exec_ctx,
+        )
+
+    task = asyncio.create_task(_run())
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if captured:
+            break
+    assert captured
+    pid = captured[0]
+    ok = resolve_permission(
+        pid,
+        PermissionDecision(
+            allowed=True,
+            path_prefix=str(outside),
+            persist_acl=False,
+        ),
+    )
+    assert ok
+    result = await task
+    assert result.success
+    assert result.data.get("access_mode") == "read"
+    acl_file = tmp_path / "acl" / "cli" / "alice" / "readable_roots.json"
+    assert not acl_file.exists()
+    clear_ephemeral_readable_grants_for_tests()
     set_permission_notify_hook(None)
 
 

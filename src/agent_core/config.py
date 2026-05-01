@@ -634,6 +634,13 @@ class CommandToolsConfig(BaseModel):
         default="m_",
         description="租户 Linux 用户名前缀（须符合 POSIX 用户名规则）",
     )
+    bash_os_user_home_base_dir: str = Field(
+        default="/home",
+        description=(
+            "启用 bash_os_user_enabled 时，租户 Linux 用户 home 的父目录。"
+            "默认会把 tenant workspace 与 memory 都迁入 {base}/{linux_user}/"
+        ),
+    )
     bash_os_admin_system_users: Dict[str, str] = Field(
         default_factory=dict,
         description=(

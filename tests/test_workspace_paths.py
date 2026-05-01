@@ -12,11 +12,12 @@ from agent_core.agent.workspace_paths import (
     ensure_workspace_owner_layout,
     is_bash_workspace_admin,
     list_user_ids_under_workspace,
+    migrate_legacy_workspace_and_memory_to_home,
     resolve_bash_working_dir,
     resolve_workspace_owner_dir,
     resolve_workspace_tmp_dir,
 )
-from agent_core.config import CommandToolsConfig
+from agent_core.config import CommandToolsConfig, Config, LLMConfig, MemoryConfig
 from agent_core.kernel_interface.profile import CoreProfile
 
 
@@ -43,6 +44,16 @@ def test_resolve_workspace_owner_dir(tmp_path) -> None:
     cfg = CommandToolsConfig(workspace_base_dir=str(tmp_path / "w"))
     p = resolve_workspace_owner_dir(cfg, "bob", source="feishu")
     assert p == str(tmp_path / "w" / "feishu" / "bob")
+
+
+def test_resolve_workspace_owner_dir_uses_linux_home_for_tenant(tmp_path) -> None:
+    cfg = CommandToolsConfig(
+        workspace_base_dir=str(tmp_path / "w"),
+        bash_os_user_enabled=True,
+        bash_os_user_home_base_dir=str(tmp_path / "homes"),
+    )
+    p = resolve_workspace_owner_dir(cfg, "bob", source="feishu")
+    assert p == str(tmp_path / "homes" / "m_feishu_bob")
 
 
 def test_resolve_workspace_tmp_dir() -> None:
@@ -168,6 +179,57 @@ def test_ensure_workspace_data_memory_symlink_grafts(tmp_path) -> None:
     link = owner / "data" / "memory"
     assert link.is_symlink()
     assert link.resolve() == (pr / "data" / "memory" / "cli" / "u1").resolve()
+
+
+def test_ensure_workspace_owner_layout_uses_home_memory_layout(tmp_path) -> None:
+    cfg = Config(
+        llm=LLMConfig(api_key="t", model="t"),
+        memory=MemoryConfig(memory_base_dir=str(tmp_path / "legacy-memory")),
+        command_tools=CommandToolsConfig(
+            workspace_base_dir=str(tmp_path / "legacy-ws"),
+            workspace_isolation_enabled=True,
+            bash_os_user_enabled=True,
+            bash_os_user_home_base_dir=str(tmp_path / "homes"),
+        ),
+    )
+    layout = ensure_workspace_owner_layout(
+        cfg.command_tools,
+        "u1",
+        source="feishu",
+        app_config=cfg,
+    )
+    owner = tmp_path / "homes" / "m_feishu_u1"
+    assert layout["owner_dir"] == str(owner)
+    assert owner.is_dir()
+    assert (owner / "data" / "memory" / "long_term").is_dir()
+    assert not (owner / "data" / "memory").is_symlink()
+
+
+def test_migrate_legacy_workspace_and_memory_to_home(tmp_path) -> None:
+    legacy_ws = tmp_path / "legacy-ws" / "feishu" / "u1"
+    legacy_mem = tmp_path / "legacy-mem" / "feishu" / "u1"
+    (legacy_ws / "notes").mkdir(parents=True)
+    (legacy_ws / "notes" / "todo.txt").write_text("workspace", encoding="utf-8")
+    (legacy_mem / "long_term").mkdir(parents=True)
+    (legacy_mem / "long_term" / "MEMORY.md").write_text("memory", encoding="utf-8")
+    cmd = CommandToolsConfig(
+        workspace_base_dir=str(tmp_path / "legacy-ws"),
+        bash_os_user_enabled=True,
+        bash_os_user_home_base_dir=str(tmp_path / "homes"),
+    )
+    mem = MemoryConfig(memory_base_dir=str(tmp_path / "legacy-mem"))
+    result = migrate_legacy_workspace_and_memory_to_home(
+        cmd,
+        mem,
+        source="feishu",
+        user_id="u1",
+    )
+    home = tmp_path / "homes" / "m_feishu_u1"
+    assert result["migrated"]
+    assert (home / "notes" / "todo.txt").read_text(encoding="utf-8") == "workspace"
+    assert (home / "data" / "memory" / "long_term" / "MEMORY.md").read_text(
+        encoding="utf-8"
+    ) == "memory"
 
 
 def test_validate_rejects_bad_user_for_workspace(tmp_path) -> None:

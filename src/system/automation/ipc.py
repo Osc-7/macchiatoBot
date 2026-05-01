@@ -77,6 +77,10 @@ class AutomationIPCServer:
         self._server = await asyncio.start_unix_server(
             self._handle_client, path=str(path), limit=_STREAM_LIMIT
         )
+        # The daemon may run as root (for runuser-based bash isolation) while
+        # frontends such as Feishu run as the deploy user, so the Unix socket
+        # must be connectable across service users.
+        path.chmod(0o666)
         self._expire_task = asyncio.create_task(
             self._expire_loop(), name="automation-ipc-expire"
         )

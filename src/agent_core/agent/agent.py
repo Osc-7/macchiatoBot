@@ -2205,6 +2205,7 @@ class AgentCore:
                 build_bash_workspace_guard_init,
                 ensure_workspace_owner_layout,
                 is_bash_workspace_admin,
+                migrate_legacy_workspace_and_memory_to_home,
                 merged_bash_write_root_paths,
                 resolve_bash_working_dir,
                 resolve_project_root,
@@ -2214,11 +2215,17 @@ class AgentCore:
                 chown_tree_to_user,
                 minimal_subprocess_env_for_runuser,
                 provision_system_user,
+                resolve_os_user_home,
                 resolve_bash_run_as_user,
             )
 
             profile = self._core_profile
-            ensure_workspace_owner_layout(cmd_cfg, self._user_id, source=self._source)
+            ensure_workspace_owner_layout(
+                cmd_cfg,
+                self._user_id,
+                source=self._source,
+                app_config=self._config,
+            )
             bash_cwd = resolve_bash_working_dir(
                 cmd_cfg, self._user_id, source=self._source, profile=profile
             )
@@ -2235,12 +2242,20 @@ class AgentCore:
             os_user_bash = bool(posix_run_as)
             jail_cd = not (os_user_bash and ws_restricted)
             if os_user_bash and ws_restricted:
+                posix_home = resolve_os_user_home(cmd_cfg, posix_run_as)
                 if getattr(cmd_cfg, "bash_os_auto_provision_users", True):
                     provision_system_user(
                         posix_run_as,
                         system=True,
-                        comment=f"macchiato {self._source}:{self._user_id}",
+                        comment=f"macchiato {self._source}-{self._user_id}",
+                        home_dir=posix_home,
                     )
+                migrate_legacy_workspace_and_memory_to_home(
+                    cmd_cfg,
+                    self._config.memory if self._memory_enabled else None,
+                    source=self._source,
+                    user_id=self._user_id,
+                )
                 ch_paths = [
                     Path(bash_cwd).resolve(),
                     Path(
@@ -2315,10 +2330,12 @@ class AgentCore:
             init_cmds = guard_init + list(cmd_cfg.init_commands or [])
             sub_env = None
             if posix_run_as:
+                session_home = Path(bash_cwd).resolve()
                 sub_env = minimal_subprocess_env_for_runuser(
                     cwd=Path(bash_cwd).resolve(),
                     project_root=resolve_project_root().resolve(),
                     macchiato_real_home=Path.home().resolve(),
+                    home_for_session=session_home,
                 )
             rt_config = BashRuntimeConfig(
                 shell_path=cmd_cfg.shell_path,

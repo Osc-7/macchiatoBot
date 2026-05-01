@@ -455,12 +455,17 @@ class KernelTerminal:
         )
 
         mem_cfg = self._pool._config.memory
-        layout = ensure_memory_owner_layout(mem_cfg, user_id, source=frontend)
+        layout = ensure_memory_owner_layout(
+            mem_cfg,
+            user_id,
+            source=frontend,
+            config=self._pool._config,
+        )
         cmd_cfg = self._pool._config.command_tools
         workspace_layout: Optional[Dict[str, Any]] = None
         if getattr(cmd_cfg, "workspace_isolation_enabled", True):
             workspace_layout = ensure_workspace_owner_layout(
-                cmd_cfg, user_id, source=frontend
+                cmd_cfg, user_id, source=frontend, app_config=self._pool._config
             )
         result: Dict[str, Any] = {
             **layout,

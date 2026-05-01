@@ -55,10 +55,42 @@ log_info "PYTHONPATH 已设置: $PYTHONPATH"
 # 若项目根目录存在 .env，则 source 进当前 shell，便于配置 API Key 等。
 # 使用 Tavily 联网搜索时，在 .env 中加入一行即可：
 #   export TAVILY_API_KEY="tvly-你的密钥"
+#
+# Cursor Cloud Agents：Dashboard → Security → Secrets 会先注入环境变量。
+# 若仓库 .env 里同一名字写成空（如 DEEPSEEK_API_KEY=），直接 source 会覆盖掉
+# 已注入的密钥。下面先过滤掉「值为空的赋值」且该变量在环境中已有非空值的情况。
 if [ -f ".env" ]; then
+    _macchiato_env_filtered="$(mktemp "${TMPDIR:-/tmp}/macchiato_init_env.XXXXXX")"
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _t="${_line#"${_line%%[![:space:]]*}"}"
+        _t="${_t%"${_t##*[![:space:]]}"}"
+        case "$_t" in ''|'#'*) continue ;; esac
+        if [[ "$_t" =~ ^export[[:space:]]+(.+)$ ]]; then
+            _t="${BASH_REMATCH[1]}"
+            _t="${_t#"${_t%%[![:space:]]*}"}"
+            _t="${_t%"${_t##*[![:space:]]}"}"
+        fi
+        if [[ "$_t" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            _k="${BASH_REMATCH[1]}"
+            _v="${BASH_REMATCH[2]}"
+            _v="${_v#"${_v%%[![:space:]]*}"}"
+            _v="${_v%"${_v##*[![:space:]]}"}"
+            _v="${_v#\"}"; _v="${_v%\"}"
+            _v="${_v#\'}"; _v="${_v%\'}"
+            if [ -z "$_v" ]; then
+                _ex="$(printenv "$_k" 2>/dev/null || true)"
+                if [ -n "$_ex" ]; then
+                    continue
+                fi
+            fi
+        fi
+        printf '%s\n' "$_line" >> "$_macchiato_env_filtered"
+    done < .env
     set -a
-    source .env
+    # shellcheck disable=SC1090
+    . "$_macchiato_env_filtered"
     set +a
+    rm -f "$_macchiato_env_filtered"
     log_success "已加载 .env"
 fi
 

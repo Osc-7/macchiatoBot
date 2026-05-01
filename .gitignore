@@ -63,7 +63,8 @@ macchiato/
 
 user_file/
 pictures/
-scripts/
+scripts/*
+!scripts/smoke_bash_llm.py
 docs/
 
 # Local-only helpers

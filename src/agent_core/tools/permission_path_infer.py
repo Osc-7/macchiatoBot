@@ -1,4 +1,4 @@
-"""从 request_permission 的 details 推断可写入 ACL 的路径前缀。"""
+"""从 request_permission 的 details 推断可读/可写 ACL 的路径前缀。"""
 
 from __future__ import annotations
 
@@ -13,14 +13,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def infer_writable_prefix_from_details(
+def _infer_prefix_from_details(
     details: Any,
     *,
     config: "Config",
     exec_ctx: Dict[str, Any],
 ) -> Optional[str]:
     """
-    从 details（字符串 JSON 或 dict）推断应写入 writable_roots 的绝对路径前缀。
+    从 details（字符串 JSON 或 dict）推断应写入 ACL 的绝对路径前缀。
 
     优先使用 ``path_prefix`` / ``writable_prefix``；否则从 ``path`` / ``target_path``
     推导（文件路径取父目录，目录路径规范化）。
@@ -83,3 +83,21 @@ def infer_writable_prefix_from_details(
             continue
 
     return None
+
+
+def infer_writable_prefix_from_details(
+    details: Any,
+    *,
+    config: "Config",
+    exec_ctx: Dict[str, Any],
+) -> Optional[str]:
+    return _infer_prefix_from_details(details, config=config, exec_ctx=exec_ctx)
+
+
+def infer_readable_prefix_from_details(
+    details: Any,
+    *,
+    config: "Config",
+    exec_ctx: Dict[str, Any],
+) -> Optional[str]:
+    return _infer_prefix_from_details(details, config=config, exec_ctx=exec_ctx)

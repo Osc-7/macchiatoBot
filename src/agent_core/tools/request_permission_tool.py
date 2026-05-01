@@ -12,10 +12,15 @@ from agent_core.permissions.wait_registry import (
     notify_permission_pending,
     register_permission_wait,
 )
+from agent_core.agent.readable_ephemeral_grants import add_ephemeral_readable_prefix
+from agent_core.agent.readable_roots_store import append_user_readable_prefix
 from agent_core.agent.writable_ephemeral_grants import add_ephemeral_writable_prefix
 from agent_core.agent.writable_roots_store import append_user_writable_prefix
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
-from agent_core.tools.permission_path_infer import infer_writable_prefix_from_details
+from agent_core.tools.permission_path_infer import (
+    infer_readable_prefix_from_details,
+    infer_writable_prefix_from_details,
+)
 
 
 def _bash_command_from_details(details: Any) -> Optional[str]:
@@ -53,6 +58,7 @@ class RequestPermissionTool(BaseTool):
 
 用于：
 - 需要写入全局配置目录（如 ~/.agents/skills）
+- 需要读取工作区外的宿主机目录（如指定的共享只读目录）
 - 需要一次性或长期扩展可写路径前缀
 - 危险 bash（rm -rf、sudo 等）：kind=bash_dangerous_command，details 为 JSON，必须含 command 字段（与将执行的命令完全一致）。人类批准后，用返回的 data.permission_id 与同一 command 再调 bash（一次性）
 
@@ -69,13 +75,13 @@ class RequestPermissionTool(BaseTool):
                 ToolParameter(
                     name="kind",
                     type="string",
-                    description="类别：bash_write_outside_workspace、file_write、bash_dangerous_command、other",
+                    description="类别：bash_write_outside_workspace、file_write、file_read、bash_dangerous_command、other",
                     required=False,
                 ),
                 ToolParameter(
                     name="details",
                     type="string",
-                    description='可选 JSON：path、path_prefix、reason 等；用于推断待审批路径前缀。**是否持久加入白名单不由本字段决定**，由人类在飞书卡片上选择（返回 data.persist_acl）',
+                    description='可选 JSON：path、path_prefix、reason 等；用于推断待审批路径前缀。`file_read` 会登记到只读白名单，`file_write` / `bash_write_outside_workspace` 会登记到可写白名单。**是否持久加入白名单不由本字段决定**，由人类在飞书卡片上选择（返回 data.persist_acl）',
                     required=False,
                 ),
                 ToolParameter(
@@ -89,6 +95,7 @@ class RequestPermissionTool(BaseTool):
             usage_notes=[
                 "仅在工具返回 WORKSPACE_WRITE_DENIED、CONFIRMATION_REQUIRED 等且需要人类决策时调用",
                 "bash_dangerous_command：details 必须含 command，与后续 bash 的 command 逐字一致",
+                "file_read：适用于 read_file 读取用户根外路径被拒绝时申请只读前缀，不会附带写权限",
                 "持久白名单 / 仅本次放行：仅人类在飞书卡片上选；Agent 无 persist 参数，以工具返回 data.persist_acl 为准",
             ],
             tags=["权限", "审批"],
@@ -128,9 +135,13 @@ class RequestPermissionTool(BaseTool):
         }
         if feishu_cid:
             payload["feishu_chat_id"] = feishu_cid
-        inferred = infer_writable_prefix_from_details(
-            details, config=cfg, exec_ctx=dict(exec_ctx)
+        kind_l = kind.strip().lower().replace("-", "_")
+        infer = (
+            infer_readable_prefix_from_details
+            if kind_l in ("file_read", "file_read_outside_workspace")
+            else infer_writable_prefix_from_details
         )
+        inferred = infer(details, config=cfg, exec_ctx=dict(exec_ctx))
         if inferred:
             payload["path_prefix"] = inferred
         notify_permission_pending(pid, payload)
@@ -180,7 +191,6 @@ class RequestPermissionTool(BaseTool):
                 data={"permission_id": pid},
             )
 
-        kind_l = kind.strip().lower().replace("-", "_")
         if kind_l in ("bash_dangerous_command", "bash_dangerous"):
             from agent_core.permissions.bash_danger_approvals import (
                 register_bash_danger_grant,
@@ -197,11 +207,20 @@ class RequestPermissionTool(BaseTool):
             try:
                 src = str(exec_ctx.get("source") or "cli").strip() or "cli"
                 uid = str(exec_ctx.get("user_id") or "root").strip() or "root"
-                if persist:
+                is_read = kind_l in ("file_read", "file_read_outside_workspace")
+                if persist and is_read:
+                    append_user_readable_prefix(
+                        cmd_cfg.acl_base_dir, src, uid, pfx, config=cfg
+                    )
+                    prefix_msg = f" 已持久化只读前缀: {pfx}"
+                elif persist:
                     append_user_writable_prefix(
                         cmd_cfg.acl_base_dir, src, uid, pfx, config=cfg
                     )
                     prefix_msg = f" 已持久化可写前缀: {pfx}"
+                elif is_read:
+                    add_ephemeral_readable_prefix(src, uid, pfx, config=cfg)
+                    prefix_msg = f" 本次进程内允许该前缀只读访问（未写入永久白名单）: {pfx}"
                 else:
                     add_ephemeral_writable_prefix(src, uid, pfx, config=cfg)
                     prefix_msg = f" 本次进程内允许该前缀写入（未写入永久白名单）: {pfx}"
@@ -221,5 +240,6 @@ class RequestPermissionTool(BaseTool):
                 "path_prefix": decision.path_prefix,
                 "note": decision.note,
                 "persist_acl": persist,
+                "access_mode": "read" if kind_l in ("file_read", "file_read_outside_workspace") else "write",
             },
         )

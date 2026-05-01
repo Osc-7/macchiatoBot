@@ -20,6 +20,8 @@ from agent_core.agent.tool_path_resolution import (
     resolve_path_string_for_tool,
     resolve_workspace_root_for_exec_ctx,
 )
+from agent_core.agent.readable_ephemeral_grants import list_ephemeral_readable_prefixes
+from agent_core.agent.readable_roots_store import load_user_readable_prefixes
 
 # 工作区隔离下 ``data/memory`` 已嫁接至当前用户的 canonical owner（见 workspace_paths），
 # 相对工作区应使用此路径，勿再写 ``data/memory/{frontend}/{user}/...`` 以免路径重复一层。
@@ -117,6 +119,58 @@ def _resolve_mutation_path_for_file_tool(
     return resolved, None
 
 
+def _resolve_read_path_for_file_tool(
+    path_str: str,
+    exec_ctx: dict,
+    ft_cfg: FileToolsConfig,
+    config: Config,
+) -> tuple[Optional[Path], Optional[str]]:
+    """解析读取路径。隔离模式下，普通租户仅允许读自己的 owner root、tmp、memory 与审批白名单。"""
+    resolved, err = resolve_path_string_for_tool(
+        path_str, config, exec_ctx, file_tools_config=ft_cfg
+    )
+    if err or resolved is None:
+        return resolved, err
+    if not getattr(config.command_tools, "workspace_isolation_enabled", False):
+        return resolved, None
+    if bool(exec_ctx.get("bash_workspace_admin")):
+        return resolved, None
+
+    workspace_root = resolve_workspace_root_for_exec_ctx(exec_ctx, config)
+    tmp_root = _resolve_workspace_tmp_root_for_exec_ctx(exec_ctx, config)
+    from agent_core.agent.memory_paths import (
+        effective_memory_namespace_from_execution_context,
+    )
+    from agent_core.agent.workspace_paths import merged_bash_write_root_paths
+
+    src, uid = effective_memory_namespace_from_execution_context(exec_ctx)
+    write_roots = merged_bash_write_root_paths(
+        config.command_tools,
+        src,
+        uid,
+        app_config=config,
+    )
+    readable_roots = [
+        Path(p).resolve()
+        for p in load_user_readable_prefixes(
+            config.command_tools.acl_base_dir,
+            src,
+            uid,
+            config=config,
+        )
+    ]
+    ephemeral_readable_roots = [
+        Path(p).resolve() for p in list_ephemeral_readable_prefixes(src, uid)
+    ]
+    allowed = [workspace_root, tmp_root] + write_roots + readable_roots + ephemeral_readable_roots
+    if not any(_is_path_within_root(resolved, r) for r in allowed):
+        return None, (
+            "文件读取仅允许在当前用户根目录、临时目录、canonical memory 或已批准白名单内；"
+            "如需读取其他宿主机路径，请先调用 request_permission(kind=file_read)。"
+        )
+    return resolved, None
+
+
 class ReadFileTool(BaseTool):
     """
     读取文件工具
@@ -194,7 +248,7 @@ class ReadFileTool(BaseTool):
                 },
             ],
             usage_notes=[
-                "开启工作区隔离时，相对路径相对于当前 frontend/user 的工作区；绝对路径仍可读取任意位置",
+                "开启工作区隔离时，普通租户仅可读取当前用户根目录、临时目录、canonical memory 或已批准白名单；读取其他宿主机路径前应先 request_permission(kind=file_read)",
                 "只能读取文本文件，二进制文件会返回错误",
                 "文件不存在时返回明确错误",
                 "对于大文件，建议结合 start_line 和 max_lines 分段读取，以避免一次性加载过多内容",
@@ -222,14 +276,27 @@ class ReadFileTool(BaseTool):
                 message="文件读取功能未启用，请在配置中设置 file_tools.allow_read: true",
             )
 
-        resolved, err = resolve_path_string_for_tool(
-            path_str, self._config, exec_ctx, file_tools_config=self._ft_config
+        resolved, err = _resolve_read_path_for_file_tool(
+            path_str, exec_ctx, self._ft_config, self._config
         )
         if err:
             return ToolResult(
                 success=False,
-                error="INVALID_PATH",
+                error=(
+                    "FORBIDDEN_PATH"
+                    if "request_permission(kind=file_read)" in err
+                    or "当前用户根目录" in err
+                    or "已批准白名单" in err
+                    else "INVALID_PATH"
+                ),
                 message=err,
+                metadata={
+                    "suggested_tool": "request_permission",
+                    "permission_kind": "file_read",
+                    "permission_details": {"path": path_str, "reason": "read outside allowed roots"},
+                }
+                if "request_permission(kind=file_read)" in err
+                else {},
             )
         if resolved is None:
             return ToolResult(

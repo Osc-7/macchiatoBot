@@ -41,10 +41,11 @@ source init.sh
 
 与 [Cloud Agent 设置](https://cursor.com/cn/docs/cloud-agent/setup) 对齐：
 
-- **机密（Secrets）**：在 [Cursor 仪表盘 → Cloud Agents / Security](https://cursor.com/dashboard?tab=cloud-agents) 配置 `DEEPSEEK_API_KEY`、`GEMINI_API_KEY`、`DASHSCOPE_API_KEY` 等；平台会以**环境变量**注入到云端 Agent 进程。
+- **API 密钥 / 环境变量放哪**：官方 [environment.schema.json](https://www.cursor.com/schemas/environment.json) **没有**在仓库里声明 `env` 的字段；`.cursor/environment.json` 只能配 `install`、`start`、`build` 等。密钥必须在 **[Cursor 仪表盘 → Cloud Agents / Security → Secrets](https://cursor.com/dashboard?tab=cloud-agents)** 里以**键值对**配置，平台会把每条 Secret **以同名环境变量**注入到云端 VM。
+- **变量名必须与 YAML 一致**：`config/llm/providers.d/*.yaml` 使用 `${DEEPSEEK_API_KEY}`、`${GEMINI_API_KEY}`、`${DASHSCOPE_API_KEY}`、`${MOONSHOT_API_KEY}`、`${KIMI_CODE_API_KEY}`、`${SJTU_MODELS_API_KEY}`、`${OPENAI_API_KEY}` 等；Secrets 里的 **Name** 必须与这些占位符**完全一致**（含大小写），`load_config` 才能展开。
 - **仓库 `.env`**：若存在与 Secrets **同名**且**值为空**的行（如 `DEEPSEEK_API_KEY=`），旧版 `init.sh` 会在 `source .env` 时**覆盖**已注入的密钥。当前 `init.sh` 已跳过这类空赋值，避免清空 Cloud 注入的值。
-- **环境定义**：本仓库根下 `.cursor/environment.json` 的 `install` 会在机器启动时从**项目根**执行（与文档一致），用于 `uv sync`；解析顺序为：仓库 `environment.json` → 个人环境 → 团队环境。
-- **脱敏（Redacted）Secrets**：文档说明脱敏条目会额外扫描提交、并在工具结果中脱敏；若你发现进程里对应变量始终为空，可在仪表盘核对该项是否确有保存的**值**，或向 Cursor 支持确认脱敏条目是否仍注入为环境变量。
+- **依赖安装**：`.cursor/environment.json` 的 `install` 在 VM 启动时从**项目根**执行（`uv sync`）；解析顺序为：本仓库 `environment.json` → 个人环境 → 团队环境。
+- **脱敏（Redacted）Secrets**：文档说明脱敏条目会扫描提交、并在工具结果中脱敏；若进程里变量始终为空，请在仪表盘确认是否保存了**值**，或尝试非脱敏条目，或咨询 Cursor 支持。
 
 ### Step 2: 了解项目状态
 

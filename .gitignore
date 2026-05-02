@@ -64,7 +64,9 @@ macchiato/
 user_file/
 pictures/
 scripts/
-docs/
+# 默认忽略本地文档；权限审计报告纳入版本控制
+docs/**
+!docs/PERMISSION_AUDIT_REPORT.md
 
 # Local-only helpers
 gitleaks

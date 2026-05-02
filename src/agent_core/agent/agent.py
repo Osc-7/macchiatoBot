@@ -2200,55 +2200,49 @@ class AgentCore:
             from agent_core.tools.bash_tool import BashTool
 
             from agent_core.agent.memory_paths import resolve_memory_owner_paths
+            from agent_core.agent.session_capabilities import (
+                resolve_session_capabilities,
+            )
             from agent_core.agent.workspace_paths import (
                 build_bash_admin_bootstrap_init,
                 build_bash_workspace_guard_init,
                 ensure_workspace_owner_layout,
-                is_bash_workspace_admin,
                 migrate_legacy_workspace_and_memory_to_home,
                 merged_bash_write_root_paths,
-                resolve_bash_working_dir,
                 resolve_project_root,
-                resolve_workspace_tmp_dir,
             )
             from agent_core.bash_os_user import (
                 chown_tree_to_user,
                 minimal_subprocess_env_for_runuser,
                 provision_system_user,
-                resolve_os_user_home,
-                resolve_bash_run_as_user,
             )
 
             profile = self._core_profile
+            caps = resolve_session_capabilities(
+                self._config,
+                source=self._source,
+                user_id=self._user_id,
+                profile=profile,
+            )
             ensure_workspace_owner_layout(
                 cmd_cfg,
                 self._user_id,
                 source=self._source,
                 app_config=self._config,
-            )
-            bash_cwd = resolve_bash_working_dir(
-                cmd_cfg, self._user_id, source=self._source, profile=profile
-            )
-            ws_restricted = cmd_cfg.workspace_isolation_enabled and not is_bash_workspace_admin(
-                cmd_cfg, self._source, self._user_id, profile
-            )
-            posix_run_as, _os_reason = resolve_bash_run_as_user(
-                cmd_cfg,
-                source=self._source,
-                user_id=self._user_id,
-                ws_restricted=ws_restricted,
                 profile=profile,
             )
+            bash_cwd = str(caps.initial_cwd)
+            ws_restricted = caps.workspace_isolated and not caps.is_admin
+            posix_run_as = caps.run_as_user
             os_user_bash = bool(posix_run_as)
             jail_cd = not (os_user_bash and ws_restricted)
             if os_user_bash and ws_restricted:
-                posix_home = resolve_os_user_home(cmd_cfg, posix_run_as)
                 if getattr(cmd_cfg, "bash_os_auto_provision_users", True):
                     provision_system_user(
                         posix_run_as,
                         system=True,
                         comment=f"macchiato {self._source}-{self._user_id}",
-                        home_dir=posix_home,
+                        home_dir=caps.owner_root,
                     )
                 migrate_legacy_workspace_and_memory_to_home(
                     cmd_cfg,
@@ -2257,12 +2251,8 @@ class AgentCore:
                     user_id=self._user_id,
                 )
                 ch_paths = [
-                    Path(bash_cwd).resolve(),
-                    Path(
-                        resolve_workspace_tmp_dir(
-                            cmd_cfg, self._user_id, source=self._source
-                        )
-                    ).resolve(),
+                    caps.owner_root.resolve(),
+                    caps.tmp_root.resolve(),
                 ]
                 if self._memory_enabled:
                     mp0 = resolve_memory_owner_paths(
@@ -2312,11 +2302,7 @@ class AgentCore:
             jail_root = (
                 str(Path(bash_cwd).resolve()) if ws_restricted else None
             )
-            tmp_root = (
-                resolve_workspace_tmp_dir(cmd_cfg, self._user_id, source=self._source)
-                if ws_restricted
-                else None
-            )
+            tmp_root = str(caps.tmp_root) if ws_restricted else None
             extra_write_roots = (
                 merged_bash_write_root_paths(
                     cmd_cfg,
@@ -2330,12 +2316,11 @@ class AgentCore:
             init_cmds = guard_init + list(cmd_cfg.init_commands or [])
             sub_env = None
             if posix_run_as:
-                session_home = Path(bash_cwd).resolve()
                 sub_env = minimal_subprocess_env_for_runuser(
                     cwd=Path(bash_cwd).resolve(),
                     project_root=resolve_project_root().resolve(),
                     macchiato_real_home=Path.home().resolve(),
-                    home_for_session=session_home,
+                    home_for_session=caps.session_home,
                 )
             rt_config = BashRuntimeConfig(
                 shell_path=cmd_cfg.shell_path,

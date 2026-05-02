@@ -79,9 +79,12 @@ def test_resolve_bash_working_dir_config_admin_list(tmp_path) -> None:
         workspace_isolation_enabled=True,
         workspace_admin_memory_owners=["cli:root"],
         base_dir="/tmp/project",
+        bash_os_user_enabled=True,
+        bash_os_user_home_base_dir=str(tmp_path / "homes"),
+        bash_os_admin_system_users={"cli:root": "mac_admin"},
     )
     d = resolve_bash_working_dir(cfg, "root", source="cli", profile=None)
-    assert d == "/tmp/project"
+    assert d == str(tmp_path / "homes" / "mac_admin")
 
 
 def test_resolve_bash_working_dir_profile_admin(tmp_path) -> None:
@@ -90,10 +93,13 @@ def test_resolve_bash_working_dir_profile_admin(tmp_path) -> None:
         workspace_isolation_enabled=True,
         workspace_admin_memory_owners=[],
         base_dir="/srv/app",
+        bash_os_user_enabled=True,
+        bash_os_user_home_base_dir=str(tmp_path / "homes"),
+        bash_os_admin_system_users={"cli:alice": "mac_admin"},
     )
     prof = CoreProfile(bash_workspace_admin=True)
-    d = resolve_bash_working_dir(cfg, "root", source="cli", profile=prof)
-    assert d == "/srv/app"
+    d = resolve_bash_working_dir(cfg, "alice", source="cli", profile=prof)
+    assert d == str(tmp_path / "homes" / "mac_admin")
 
 
 def test_resolve_bash_working_dir_isolation_off(tmp_path) -> None:

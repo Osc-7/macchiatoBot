@@ -1,12 +1,16 @@
 """bash_os_user：逻辑用户到 Linux 用户名与 runuser 解析。"""
 
+import grp
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 from agent_core.bash_os_user import (
     logic_os_user_name,
     memory_owner_key,
+    reconcile_admin_sudo_group,
+    resolve_admin_system_user,
     resolve_os_user_home,
     resolve_bash_run_as_user,
 )
@@ -135,3 +139,50 @@ def test_resolve_bash_run_as_user_profile_admin() -> None:
         pytest.skip("no /sbin/runuser in environment")
     assert reason == "ok"
     assert u == "mac_admin"
+
+
+def test_resolve_admin_system_user() -> None:
+    cfg = CommandToolsConfig(
+        bash_os_admin_system_users={"cli:root": "mac_admin"},
+    )
+    assert resolve_admin_system_user(cfg, source="cli", user_id="root") == "mac_admin"
+    assert resolve_admin_system_user(cfg, source="cli", user_id="alice") is None
+
+
+def test_reconcile_admin_sudo_group(monkeypatch) -> None:
+    cfg = CommandToolsConfig(
+        bash_os_user_enabled=True,
+        bash_os_admin_manage_sudo_group=True,
+        bash_os_admin_sudo_group="sudo",
+        workspace_admin_memory_owners=["cli:root"],
+        bash_os_admin_system_users={
+            "cli:root": "mac_admin",
+            "cli:old": "old_admin",
+        },
+    )
+
+    called: list[list[str]] = []
+
+    monkeypatch.setattr("agent_core.bash_os_user.os.geteuid", lambda: 0)
+    monkeypatch.setattr(
+        "agent_core.bash_os_user.pwd.getpwnam",
+        lambda user: SimpleNamespace(pw_gid=100 if user == "mac_admin" else 101),
+    )
+    monkeypatch.setattr(
+        "agent_core.bash_os_user.grp.getgrnam",
+        lambda group: SimpleNamespace(
+            gr_gid=999,
+            gr_mem=["old_admin"],
+        ),
+    )
+
+    def _run(args, capture_output, text, timeout):
+        called.append(args)
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr("agent_core.bash_os_user.subprocess.run", _run)
+
+    reconcile_admin_sudo_group(cfg)
+
+    assert ["usermod", "-aG", "sudo", "mac_admin"] in called
+    assert ["gpasswd", "-d", "old_admin", "sudo"] in called

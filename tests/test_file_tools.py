@@ -264,6 +264,37 @@ class TestReadFileTool:
         assert result.data["content"] == "ephemeral-read"
 
     @pytest.mark.asyncio
+    async def test_read_file_admin_can_read_project_root(self, tmp_path):
+        project_file = Path(__file__).resolve().parents[1] / "AGENTS.md"
+        config = Config(
+            llm=LLMConfig(api_key="test", model="test"),
+            memory=MemoryConfig(memory_base_dir=str(tmp_path / "memory_parent")),
+            file_tools=FileToolsConfig(
+                enabled=True,
+                allow_read=True,
+                allow_write=True,
+                allow_modify=True,
+                base_dir=str(tmp_path),
+            ),
+            command_tools=CommandToolsConfig(
+                base_dir=str(tmp_path),
+                workspace_base_dir=str(tmp_path / "workspace_parent"),
+                workspace_isolation_enabled=True,
+                workspace_admin_memory_owners=["cli:root"],
+                bash_os_user_enabled=True,
+                bash_os_user_home_base_dir=str(tmp_path / "homes"),
+                bash_os_admin_system_users={"cli:root": "mac_admin"},
+            ),
+        )
+        tool = ReadFileTool(config=config)
+        result = await tool.execute(
+            path=str(project_file),
+            __execution_context__={"source": "cli", "user_id": "root", "bash_workspace_admin": True},
+        )
+        assert result.success
+        assert "AGENTS.md" in result.data["path"]
+
+    @pytest.mark.asyncio
     async def test_read_file_not_found(self, tmp_path):
         config = _make_config(allow_read=True, base_dir=str(tmp_path))
         tool = ReadFileTool(config=config)

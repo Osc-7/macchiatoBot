@@ -648,6 +648,14 @@ class CommandToolsConfig(BaseModel):
             "用于以带管理员组权限的 OS 用户跑 bash（须预先 useradd 并加入相应组）"
         ),
     )
+    bash_os_admin_manage_sudo_group: bool = Field(
+        default=True,
+        description="root daemon 启动时是否按管理员列表自动对账 sudo group 成员",
+    )
+    bash_os_admin_sudo_group: str = Field(
+        default="sudo",
+        description="管理员自动加入/移除的 sudo group 名称",
+    )
     bash_os_auto_provision_users: bool = Field(
         default=True,
         description=(

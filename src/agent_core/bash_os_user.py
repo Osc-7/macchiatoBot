@@ -8,6 +8,7 @@ Bash 会话以 Linux 系统用户（runuser）运行：租户 / 管理员与 con
 from __future__ import annotations
 
 import hashlib
+import grp
 import logging
 import os
 import pwd
@@ -91,6 +92,18 @@ def memory_owner_key(source: str, user_id: str) -> str:
         (user_id or "").strip() or "root", what="user_id"
     )
     return f"{fe}:{uid}"
+
+
+def resolve_admin_system_user(
+    cmd_cfg: "CommandToolsConfig",
+    *,
+    source: str,
+    user_id: str,
+) -> Optional[str]:
+    key = memory_owner_key(source, user_id)
+    mapping: Dict[str, str] = getattr(cmd_cfg, "bash_os_admin_system_users", {}) or {}
+    name = (mapping.get(key) or "").strip()
+    return name or None
 
 
 def runuser_available(runuser_path: str) -> bool:
@@ -227,13 +240,85 @@ def should_use_os_home_for_logic_user(
     """
     租户是否以 Linux home 作为 canonical workspace/memory 根。
 
-    管理员 Core 仍保留项目根 / 显式映射用户的行为，不迁入专属 home。
+    管理员 Core 不走租户 home 逻辑，改由显式映射的管理员系统用户 home 承载。
     """
     if not getattr(cmd_cfg, "bash_os_user_enabled", False):
         return False
     from agent_core.agent.workspace_paths import is_bash_workspace_admin
 
     return not is_bash_workspace_admin(cmd_cfg, source, user_id, profile)
+
+
+def _user_in_group(username: str, group_name: str) -> bool:
+    try:
+        pw = pwd.getpwnam(username)
+        gr = grp.getgrnam(group_name)
+    except KeyError:
+        return False
+    if pw.pw_gid == gr.gr_gid:
+        return True
+    return username in set(gr.gr_mem or [])
+
+
+def reconcile_admin_sudo_group(cmd_cfg: "CommandToolsConfig") -> None:
+    """root daemon 启动时按管理员映射对账 sudo group 成员。"""
+    if not getattr(cmd_cfg, "bash_os_user_enabled", False):
+        return
+    if not getattr(cmd_cfg, "bash_os_admin_manage_sudo_group", True):
+        return
+    if os.geteuid() != 0:
+        logger.debug("skip reconcile_admin_sudo_group: not running as root")
+        return
+
+    group_name = (
+        getattr(cmd_cfg, "bash_os_admin_sudo_group", "sudo") or "sudo"
+    ).strip()
+    if not group_name:
+        return
+
+    managed = {
+        owner.strip(): user.strip()
+        for owner, user in (getattr(cmd_cfg, "bash_os_admin_system_users", {}) or {}).items()
+        if owner and owner.strip() and user and user.strip()
+    }
+    desired_admins = {
+        owner.strip()
+        for owner in (getattr(cmd_cfg, "workspace_admin_memory_owners", []) or [])
+        if owner and owner.strip()
+    }
+
+    for owner, username in managed.items():
+        in_group = _user_in_group(username, group_name)
+        if owner in desired_admins and not in_group:
+            proc = subprocess.run(
+                ["usermod", "-aG", group_name, username],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if proc.returncode != 0:
+                err = (proc.stderr or proc.stdout or "").strip()
+                logger.warning(
+                    "reconcile_admin_sudo_group: failed to add %s to %s: %s",
+                    username,
+                    group_name,
+                    err,
+                )
+        if owner not in desired_admins and in_group:
+            proc = subprocess.run(
+                ["gpasswd", "-d", username, group_name],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if proc.returncode != 0:
+                err = (proc.stderr or proc.stdout or "").strip()
+                logger.warning(
+                    "reconcile_admin_sudo_group: failed to remove %s from %s: %s",
+                    username,
+                    group_name,
+                    err,
+                )
 
 
 def resolve_bash_run_as_user(
@@ -261,15 +346,13 @@ def resolve_bash_run_as_user(
         return None, "runuser_missing"
 
     admin = is_bash_workspace_admin(cmd_cfg, source, user_id, profile)
-    key = memory_owner_key(source, user_id)
     if admin:
-        mapping: Dict[str, str] = getattr(cmd_cfg, "bash_os_admin_system_users", {}) or {}
-        name = (mapping.get(key) or "").strip()
+        name = resolve_admin_system_user(cmd_cfg, source=source, user_id=user_id)
         if not name:
             logger.warning(
                 "bash_os_user_enabled: admin Core %s has no bash_os_admin_system_users entry; "
                 "running bash as service UID",
-                key,
+                memory_owner_key(source, user_id),
             )
             return None, "admin_not_mapped"
         return name, "ok"

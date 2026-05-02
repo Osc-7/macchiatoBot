@@ -12,21 +12,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from agent_core.agent.session_capabilities import (
+    resolve_session_capabilities_from_exec_ctx,
+)
 from agent_core.config import Config, FileToolsConfig, get_config
 from agent_core.agent.session_paths import expand_user_path_str_for_session
 
 
 def resolve_workspace_root_for_exec_ctx(exec_ctx: dict, config: Config) -> Path:
     """当前 frontend/user 的工作区根目录（与 file_tools / bash 笼一致）。"""
-    from agent_core.agent.memory_paths import (
-        effective_memory_namespace_from_execution_context,
-    )
-    from agent_core.agent.workspace_paths import resolve_workspace_owner_dir
-
-    src, uid = effective_memory_namespace_from_execution_context(exec_ctx)
-    return Path(
-        resolve_workspace_owner_dir(config.command_tools, uid, source=src)
-    ).expanduser().resolve()
+    return resolve_session_capabilities_from_exec_ctx(config, exec_ctx).owner_root
 
 
 def resolve_path_string_for_tool(

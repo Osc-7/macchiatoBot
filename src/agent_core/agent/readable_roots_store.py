@@ -44,19 +44,7 @@ def load_user_readable_prefixes(
     for p in prefixes:
         if isinstance(p, str) and p.strip():
             try:
-                if config is not None:
-                    from agent_core.agent.session_paths import (
-                        expand_user_path_str_for_session,
-                    )
-
-                    exp = expand_user_path_str_for_session(
-                        p.strip(),
-                        config,
-                        exec_ctx={"source": source, "user_id": user_id},
-                    )
-                    out.append(str(Path(exp).resolve()))
-                else:
-                    out.append(str(Path(p).expanduser().resolve()))
+                out.append(str(Path(p).expanduser().resolve()))
             except OSError:
                 continue
     return out
@@ -84,7 +72,7 @@ def append_user_readable_prefix(
         )
     else:
         norm = str(Path(prefix_abs).expanduser().resolve())
-    existing = load_user_readable_prefixes(acl_base_dir, source, user_id, config=config)
+    existing = load_user_readable_prefixes(acl_base_dir, source, user_id, config=None)
     if norm in existing:
         return
     merged = sorted(set(existing + [norm]))

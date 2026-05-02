@@ -16,10 +16,7 @@ from typing import Any, Optional
 from agent_core.config import Config
 
 from agent_core.agent.memory_paths import effective_memory_namespace_from_execution_context
-from agent_core.agent.workspace_paths import (
-    is_bash_workspace_admin,
-    resolve_workspace_owner_dir,
-)
+from agent_core.agent.session_capabilities import resolve_session_capabilities
 
 
 def session_home_path(
@@ -33,17 +30,13 @@ def session_home_path(
     """
     当前逻辑会话的「家目录」：隔离且非管理员时为工作区单元格；否则为 ``Path.home()``。
     """
-    cmd = getattr(config, "command_tools", None)
-    if cmd is None:
-        return Path.home().resolve()
-    use_cell = bool(getattr(cmd, "workspace_isolation_enabled", False))
-    if bash_workspace_admin is not None:
-        is_admin = bash_workspace_admin
-    else:
-        is_admin = is_bash_workspace_admin(cmd, source, user_id, profile)
-    if not use_cell or is_admin:
-        return Path.home().resolve()
-    return Path(resolve_workspace_owner_dir(cmd, user_id, source=source)).resolve()
+    return resolve_session_capabilities(
+        config,
+        source=source,
+        user_id=user_id,
+        profile=profile,
+        bash_workspace_admin=bash_workspace_admin,
+    ).session_home
 
 
 def session_home_path_from_exec_context(
@@ -82,15 +75,13 @@ def _use_isolated_tilde_semantics(
 ) -> bool:
     ctx = dict(exec_ctx or {})
     src, uid = effective_memory_namespace_from_execution_context(ctx)
-    cmd = getattr(config, "command_tools", None)
-    if cmd is None:
-        return False
-    if not bool(getattr(cmd, "workspace_isolation_enabled", False)):
-        return False
-    bash_adm = ctx.get("bash_workspace_admin")
-    if bash_adm is not None:
-        return not bool(bash_adm)
-    return not is_bash_workspace_admin(cmd, src, uid, profile)
+    return resolve_session_capabilities(
+        config,
+        source=src,
+        user_id=uid,
+        profile=profile,
+        bash_workspace_admin=ctx.get("bash_workspace_admin"),
+    ).workspace_isolated
 
 
 def remap_tilde_path_str(

@@ -13,6 +13,9 @@ modify_file 支持三种模式：search_replace（局部替换）、append（追
 from pathlib import Path
 from typing import Awaitable, Callable, Optional, Tuple
 
+from agent_core.agent.session_capabilities import (
+    resolve_session_capabilities_from_exec_ctx,
+)
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from agent_core.config import Config, FileToolsConfig, get_config
 from agent_core.agent.session_paths import expand_user_path_str_for_session
@@ -20,8 +23,6 @@ from agent_core.agent.tool_path_resolution import (
     resolve_path_string_for_tool,
     resolve_workspace_root_for_exec_ctx,
 )
-from agent_core.agent.readable_ephemeral_grants import list_ephemeral_readable_prefixes
-from agent_core.agent.readable_roots_store import load_user_readable_prefixes
 
 # 工作区隔离下 ``data/memory`` 已嫁接至当前用户的 canonical owner（见 workspace_paths），
 # 相对工作区应使用此路径，勿再写 ``data/memory/{frontend}/{user}/...`` 以免路径重复一层。
@@ -63,15 +64,7 @@ def _sub_mode_forbids_file_mutation(exec_ctx: dict) -> bool:
 
 def _resolve_workspace_tmp_root_for_exec_ctx(exec_ctx: dict, config: Config) -> Path:
     """当前 frontend/user 的临时目录根。"""
-    from agent_core.agent.memory_paths import (
-        effective_memory_namespace_from_execution_context,
-    )
-    from agent_core.agent.workspace_paths import resolve_workspace_tmp_dir
-
-    src, uid = effective_memory_namespace_from_execution_context(exec_ctx)
-    return Path(
-        resolve_workspace_tmp_dir(config.command_tools, uid, source=src)
-    ).expanduser().resolve()
+    return resolve_session_capabilities_from_exec_ctx(config, exec_ctx).tmp_root
 
 
 def _is_path_within_root(candidate: Path, root: Path) -> bool:
@@ -97,21 +90,8 @@ def _resolve_mutation_path_for_file_tool(
     if err or resolved is None:
         return resolved, err
     if getattr(config.command_tools, "workspace_isolation_enabled", False):
-        workspace_root = resolve_workspace_root_for_exec_ctx(exec_ctx, config)
-        tmp_root = _resolve_workspace_tmp_root_for_exec_ctx(exec_ctx, config)
-        from agent_core.agent.memory_paths import (
-            effective_memory_namespace_from_execution_context,
-        )
-        from agent_core.agent.workspace_paths import merged_bash_write_root_paths
-
-        src, uid = effective_memory_namespace_from_execution_context(exec_ctx)
-        extras = merged_bash_write_root_paths(
-            config.command_tools,
-            src,
-            uid,
-            app_config=config,
-        )
-        allowed = [workspace_root, tmp_root] + extras
+        caps = resolve_session_capabilities_from_exec_ctx(config, exec_ctx)
+        allowed = list(caps.writable_roots)
         if not any(_is_path_within_root(resolved, r) for r in allowed):
             return None, (
                 "文件写入/修改仅允许在当前工作区、临时目录或可写白名单内（含 canonical memory）"
@@ -133,36 +113,8 @@ def _resolve_read_path_for_file_tool(
         return resolved, err
     if not getattr(config.command_tools, "workspace_isolation_enabled", False):
         return resolved, None
-    if bool(exec_ctx.get("bash_workspace_admin")):
-        return resolved, None
-
-    workspace_root = resolve_workspace_root_for_exec_ctx(exec_ctx, config)
-    tmp_root = _resolve_workspace_tmp_root_for_exec_ctx(exec_ctx, config)
-    from agent_core.agent.memory_paths import (
-        effective_memory_namespace_from_execution_context,
-    )
-    from agent_core.agent.workspace_paths import merged_bash_write_root_paths
-
-    src, uid = effective_memory_namespace_from_execution_context(exec_ctx)
-    write_roots = merged_bash_write_root_paths(
-        config.command_tools,
-        src,
-        uid,
-        app_config=config,
-    )
-    readable_roots = [
-        Path(p).resolve()
-        for p in load_user_readable_prefixes(
-            config.command_tools.acl_base_dir,
-            src,
-            uid,
-            config=config,
-        )
-    ]
-    ephemeral_readable_roots = [
-        Path(p).resolve() for p in list_ephemeral_readable_prefixes(src, uid)
-    ]
-    allowed = [workspace_root, tmp_root] + write_roots + readable_roots + ephemeral_readable_roots
+    caps = resolve_session_capabilities_from_exec_ctx(config, exec_ctx)
+    allowed = list(caps.readable_roots)
     if not any(_is_path_within_root(resolved, r) for r in allowed):
         return None, (
             "文件读取仅允许在当前用户根目录、临时目录、canonical memory 或已批准白名单内；"

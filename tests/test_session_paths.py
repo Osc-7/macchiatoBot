@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 
 from agent_core.config import CommandToolsConfig, Config, LLMConfig
-from agent_core.agent.session_paths import expand_user_path_str_for_session
+from agent_core.agent.session_paths import (
+    expand_user_path_str_for_session,
+    session_home_path,
+)
+from agent_core.kernel_interface.profile import CoreProfile
 
 
 @pytest.fixture
@@ -39,3 +43,24 @@ def test_tilde_uses_os_home_when_no_isolation(tmp_path) -> None:
     )
     out = expand_user_path_str_for_session("~/x", cfg, exec_ctx={"source": "cli", "user_id": "root"})
     assert Path(out).resolve() == (Path.home() / "x").resolve()
+
+
+def test_admin_session_home_uses_mapped_linux_home(tmp_path) -> None:
+    cfg = Config(
+        llm=LLMConfig(api_key="k", model="m"),
+        command_tools=CommandToolsConfig(
+            base_dir=str(tmp_path),
+            workspace_base_dir=str(tmp_path / "ws"),
+            workspace_isolation_enabled=True,
+            bash_os_user_enabled=True,
+            bash_os_user_home_base_dir=str(tmp_path / "homes"),
+            bash_os_admin_system_users={"cli:root": "mac_admin"},
+        ),
+    )
+    home = session_home_path(
+        cfg,
+        source="cli",
+        user_id="root",
+        profile=CoreProfile(bash_workspace_admin=True),
+    )
+    assert home == (tmp_path / "homes" / "mac_admin").resolve()

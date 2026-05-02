@@ -13,6 +13,7 @@ from agent_core.bash_user_env import render_terminal_like_bootstrap_bash
 from agent_core.config import CommandToolsConfig
 from agent_core.bash_os_user import (
     logic_os_user_name,
+    resolve_admin_system_user,
     resolve_os_user_home,
     should_use_os_home_for_logic_user,
 )
@@ -164,10 +165,15 @@ def resolve_workspace_owner_dir(
     user_id: str,
     *,
     source: str = "cli",
+    profile: Optional[Any] = None,
 ) -> str:
     """返回 {workspace_base_dir}/{frontend}/{user_id}/ 目录路径字符串。"""
     fe = validate_logic_namespace_segment(_ns_segment(source, "cli"), what="frontend")
     uid = validate_logic_namespace_segment(_ns_segment(user_id, "root"), what="user_id")
+    if is_bash_workspace_admin(cmd_cfg, fe, uid, profile):
+        admin_user = resolve_admin_system_user(cmd_cfg, source=fe, user_id=uid)
+        if admin_user:
+            return str(resolve_os_user_home(cmd_cfg, admin_user))
     if should_use_os_home_for_logic_user(cmd_cfg, source=fe, user_id=uid, profile=None):
         posix_name = logic_os_user_name(
             fe,
@@ -197,6 +203,7 @@ def ensure_workspace_owner_layout(
     *,
     source: str = "cli",
     app_config: Optional["Config"] = None,
+    profile: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     在 {workspace_base_dir}/{frontend}/{user}/ 与 /tmp/macchiato/{frontend}/{user}/
@@ -206,7 +213,9 @@ def ensure_workspace_owner_layout(
     """
     fe = validate_logic_namespace_segment(_ns_segment(source, "cli"), what="frontend")
     uid = validate_logic_namespace_segment(_ns_segment(user_id, "root"), what="user_id")
-    owner = Path(resolve_workspace_owner_dir(cmd_cfg, uid, source=fe)).resolve()
+    owner = Path(
+        resolve_workspace_owner_dir(cmd_cfg, uid, source=fe, profile=profile)
+    ).resolve()
     tmp_dir = _TMP_BASE_DIR / fe / uid
     created_paths: List[str] = []
     for path_obj, label in ((owner, "工作区路径"), (tmp_dir, "临时目录路径")):
@@ -391,13 +400,13 @@ def resolve_bash_working_dir(
     """
     解析 BashRuntime 应使用的初始 cwd。
 
-    - 开启隔离且当前 Core 非管理员：{workspace_base_dir}/{frontend}/{user}/
-    - 管理员或未开隔离：command_tools.base_dir（通常为项目根 ``.``）
+    开启隔离时，无论租户还是管理员都进入各自 canonical owner root；
+    未开启隔离时回落到 ``command_tools.base_dir``。
     """
-    if cmd_cfg.workspace_isolation_enabled and not is_bash_workspace_admin(
-        cmd_cfg, source, user_id, profile
-    ):
-        layout = ensure_workspace_owner_layout(cmd_cfg, user_id, source=source)
+    if cmd_cfg.workspace_isolation_enabled:
+        layout = ensure_workspace_owner_layout(
+            cmd_cfg, user_id, source=source, profile=profile
+        )
         return layout["owner_dir"]
     return (cmd_cfg.base_dir or ".").strip() or "."
 

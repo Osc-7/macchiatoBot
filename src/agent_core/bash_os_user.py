@@ -260,6 +260,42 @@ def _user_in_group(username: str, group_name: str) -> bool:
     return username in set(gr.gr_mem or [])
 
 
+def _sudoers_dropin_path(cmd_cfg: "CommandToolsConfig", username: str) -> Path:
+    base = Path(
+        (getattr(cmd_cfg, "bash_os_admin_sudoers_dir", "/etc/sudoers.d") or "/etc/sudoers.d").strip()
+    ).expanduser()
+    safe_user = re.sub(r"[^a-zA-Z0-9_.-]+", "_", username).strip("._") or "user"
+    return base / f"macchiato-{safe_user}"
+
+
+def _ensure_admin_home_owned(cmd_cfg: "CommandToolsConfig", username: str) -> None:
+    home = resolve_os_user_home(cmd_cfg, username)
+    home.mkdir(parents=True, exist_ok=True)
+    chown_tree_to_user([home], username)
+
+
+def _write_admin_sudoers_dropin(cmd_cfg: "CommandToolsConfig", username: str) -> None:
+    path = _sudoers_dropin_path(cmd_cfg, username)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = f"{username} ALL=(ALL) NOPASSWD:ALL\n"
+    path.write_text(content, encoding="utf-8")
+    os.chmod(path, 0o440)
+
+
+def _remove_admin_sudoers_dropin(cmd_cfg: "CommandToolsConfig", username: str) -> None:
+    path = _sudoers_dropin_path(cmd_cfg, username)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning(
+            "reconcile_admin_linux_users: failed to remove sudoers drop-in %s: %s",
+            path,
+            exc,
+        )
+
+
 def reconcile_admin_sudo_group(cmd_cfg: "CommandToolsConfig") -> None:
     """root daemon 启动时按管理员映射对账 sudo group 成员。"""
     if not getattr(cmd_cfg, "bash_os_user_enabled", False):
@@ -319,6 +355,53 @@ def reconcile_admin_sudo_group(cmd_cfg: "CommandToolsConfig") -> None:
                     group_name,
                     err,
                 )
+
+
+def reconcile_admin_linux_users(cmd_cfg: "CommandToolsConfig") -> None:
+    """root daemon 启动时统一对账管理员用户的 home / sudo group / sudoers drop-in。"""
+    if not getattr(cmd_cfg, "bash_os_user_enabled", False):
+        return
+    if os.geteuid() != 0:
+        logger.debug("skip reconcile_admin_linux_users: not running as root")
+        return
+
+    managed = {
+        owner.strip(): user.strip()
+        for owner, user in (getattr(cmd_cfg, "bash_os_admin_system_users", {}) or {}).items()
+        if owner and owner.strip() and user and user.strip()
+    }
+    desired_admins = {
+        owner.strip()
+        for owner in (getattr(cmd_cfg, "workspace_admin_memory_owners", []) or [])
+        if owner and owner.strip()
+    }
+
+    for owner, username in managed.items():
+        if owner in desired_admins:
+            try:
+                _ensure_admin_home_owned(cmd_cfg, username)
+            except Exception as exc:
+                logger.warning(
+                    "reconcile_admin_linux_users: failed to fix home ownership for %s: %s",
+                    username,
+                    exc,
+                )
+
+            if getattr(cmd_cfg, "bash_os_admin_manage_sudo_nopasswd", True):
+                try:
+                    _write_admin_sudoers_dropin(cmd_cfg, username)
+                except Exception as exc:
+                    logger.warning(
+                        "reconcile_admin_linux_users: failed to write sudoers drop-in for %s: %s",
+                        username,
+                        exc,
+                    )
+            continue
+
+        if getattr(cmd_cfg, "bash_os_admin_manage_sudo_nopasswd", True):
+            _remove_admin_sudoers_dropin(cmd_cfg, username)
+
+    reconcile_admin_sudo_group(cmd_cfg)
 
 
 def resolve_bash_run_as_user(

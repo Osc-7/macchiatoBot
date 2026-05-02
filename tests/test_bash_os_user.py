@@ -9,6 +9,7 @@ import pytest
 from agent_core.bash_os_user import (
     logic_os_user_name,
     memory_owner_key,
+    reconcile_admin_linux_users,
     reconcile_admin_sudo_group,
     resolve_admin_system_user,
     resolve_os_user_home,
@@ -186,3 +187,59 @@ def test_reconcile_admin_sudo_group(monkeypatch) -> None:
 
     assert ["usermod", "-aG", "sudo", "mac_admin"] in called
     assert ["gpasswd", "-d", "old_admin", "sudo"] in called
+
+
+def test_reconcile_admin_linux_users_repairs_home_and_sudoers(tmp_path, monkeypatch) -> None:
+    cfg = CommandToolsConfig(
+        bash_os_user_enabled=True,
+        bash_os_user_home_base_dir=str(tmp_path / "homes"),
+        bash_os_admin_manage_sudo_group=False,
+        bash_os_admin_manage_sudo_nopasswd=True,
+        bash_os_admin_sudoers_dir=str(tmp_path / "sudoers.d"),
+        workspace_admin_memory_owners=["cli:root"],
+        bash_os_admin_system_users={"cli:root": "mac_admin"},
+    )
+
+    home = tmp_path / "homes" / "mac_admin"
+    chowned: list[str] = []
+
+    monkeypatch.setattr("agent_core.bash_os_user.os.geteuid", lambda: 0)
+    monkeypatch.setattr(
+        "agent_core.bash_os_user.pwd.getpwnam",
+        lambda user: SimpleNamespace(
+            pw_gid=1000,
+            pw_uid=1000,
+            pw_dir=str(home),
+        ),
+    )
+    monkeypatch.setattr(
+        "agent_core.bash_os_user.chown_tree_to_user",
+        lambda paths, username: chowned.extend(str(p) for p in paths),
+    )
+
+    reconcile_admin_linux_users(cfg)
+
+    assert str(home) in chowned
+    sudoers = tmp_path / "sudoers.d" / "macchiato-mac_admin"
+    assert sudoers.read_text(encoding="utf-8") == "mac_admin ALL=(ALL) NOPASSWD:ALL\n"
+    assert oct(sudoers.stat().st_mode & 0o777) == "0o440"
+
+
+def test_reconcile_admin_linux_users_removes_stale_sudoers(tmp_path, monkeypatch) -> None:
+    cfg = CommandToolsConfig(
+        bash_os_user_enabled=True,
+        bash_os_admin_manage_sudo_group=False,
+        bash_os_admin_manage_sudo_nopasswd=True,
+        bash_os_admin_sudoers_dir=str(tmp_path / "sudoers.d"),
+        workspace_admin_memory_owners=[],
+        bash_os_admin_system_users={"cli:root": "mac_admin"},
+    )
+    sudoers = tmp_path / "sudoers.d" / "macchiato-mac_admin"
+    sudoers.parent.mkdir(parents=True, exist_ok=True)
+    sudoers.write_text("stale\n", encoding="utf-8")
+
+    monkeypatch.setattr("agent_core.bash_os_user.os.geteuid", lambda: 0)
+
+    reconcile_admin_linux_users(cfg)
+
+    assert not sudoers.exists()

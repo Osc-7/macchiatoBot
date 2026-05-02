@@ -656,6 +656,14 @@ class CommandToolsConfig(BaseModel):
         default="sudo",
         description="管理员自动加入/移除的 sudo group 名称",
     )
+    bash_os_admin_manage_sudo_nopasswd: bool = Field(
+        default=True,
+        description="root daemon 启动时是否为管理员映射用户自动维护 sudoers.d NOPASSWD drop-in",
+    )
+    bash_os_admin_sudoers_dir: str = Field(
+        default="/etc/sudoers.d",
+        description="管理员 NOPASSWD drop-in 目录",
+    )
     bash_os_auto_provision_users: bool = Field(
         default=True,
         description=(

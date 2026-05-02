@@ -31,7 +31,7 @@ from system.automation.config_sync import sync_job_definitions_from_config
 from system.automation.agent_task import TaskStatus
 from system.automation.logging_utils import AutomationTaskLogger
 from system.automation.repositories import JobDefinitionRepository, JobRunRepository
-from agent_core.bash_os_user import reconcile_admin_sudo_group
+from agent_core.bash_os_user import reconcile_admin_linux_users
 from agent_core.config import get_config
 from agent_core import AgentCore, CoreSessionAdapter
 from agent_core.interfaces import AgentHooks
@@ -362,7 +362,7 @@ async def _maybe_notify_feishu_activity(record: dict[str, Any]) -> None:
 
 async def _main() -> None:
     cfg = get_config()
-    reconcile_admin_sudo_group(cfg.command_tools)
+    reconcile_admin_linux_users(cfg.command_tools)
     install_feishu_permission_notify_hook()
     install_feishu_ask_user_notify_hook()
     owner_id = (sys.argv[1].strip() if len(sys.argv) > 1 else "root") or "root"

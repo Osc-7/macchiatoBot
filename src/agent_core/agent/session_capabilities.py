@@ -49,10 +49,10 @@ def resolve_session_capabilities(
     bash_workspace_admin: Optional[bool] = None,
 ) -> SessionCapabilities:
     from agent_core.agent.memory_paths import resolve_memory_owner_paths
-    from agent_core.agent.readable_ephemeral_grants import (
-        list_ephemeral_readable_prefixes,
+    from agent_core.agent.path_grants import (
+        list_ephemeral_path_prefixes,
+        load_user_path_prefixes,
     )
-    from agent_core.agent.readable_roots_store import load_user_readable_prefixes
     from agent_core.agent.workspace_paths import (
         is_bash_workspace_admin,
         merged_bash_write_root_paths,
@@ -139,15 +139,20 @@ def resolve_session_capabilities(
 
     readable_roots.extend(
         Path(p).resolve()
-        for p in load_user_readable_prefixes(
+        for p in load_user_path_prefixes(
             cmd_cfg.acl_base_dir,
             source,
             user_id,
-            config=None,
+            access_mode="read",
         )
     )
     readable_roots.extend(
-        Path(p).resolve() for p in list_ephemeral_readable_prefixes(source, user_id)
+        Path(p).resolve()
+        for p in list_ephemeral_path_prefixes(
+            source,
+            user_id,
+            access_mode="read",
+        )
     )
 
     can_access_project_root = bool(is_admin and workspace_isolated)

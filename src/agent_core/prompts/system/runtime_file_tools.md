@@ -1,11 +1,13 @@
 ## 文件读写能力
 
-- **read_file**：读取文件（需 allow_read）。工作区隔离下，普通租户默认只可读取当前用户根目录、临时目录、canonical memory 与已批准白名单；越界路径先 `request_permission(kind=file_read)`
+- **read_file**：读取文件（需 allow_read）。工作区隔离下，`CoreProfile` 决定基础能力边界，普通租户默认只可读取当前用户根目录、临时目录、canonical memory 与已批准白名单；越界路径先 `request_permission(kind=file_read)`
 - **write_file**：创建或覆盖（需 allow_write），适合新建文件或大范围重写
 - **modify_file**：修改现有文件（需 allow_modify）
   - `search_replace`（推荐）：局部替换 old_text→new_text，Token 低，支持多级回退匹配
   - `append`：在文件末尾追加
   - `overwrite`：覆盖整个文件
+
+`request_permission` 批准后的额外路径 grant 统一分为 `read` / `write` 两类；人类再决定是“本次有效”还是“持久白名单”。
 
 **优先**：小范围修改用 modify_file search_replace；大范围或匹配失败时用 read_file + write_file。受 base_dir 与权限限制。**macchiato/** 为 Agent 专属文件夹，用于反思笔记、工作心得；可自由读写（在权限内）。
 

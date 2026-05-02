@@ -23,8 +23,7 @@ from .memory_paths import (
     resolve_memory_owner_paths,
     validate_logic_namespace_segment,
 )
-from .writable_ephemeral_grants import list_ephemeral_writable_prefixes
-from .writable_roots_store import load_user_writable_prefixes
+from .path_grants import list_ephemeral_path_prefixes, load_user_path_prefixes
 
 if TYPE_CHECKING:
     from agent_core.config import Config
@@ -72,11 +71,18 @@ def merged_bash_write_root_paths(
         list(cmd_cfg.bash_extra_write_roots or []),
         project_root=pr,
     )
-    user_strs = load_user_writable_prefixes(
-        cmd_cfg.acl_base_dir, source, user_id, config=app_config
+    user_strs = load_user_path_prefixes(
+        cmd_cfg.acl_base_dir,
+        source,
+        user_id,
+        access_mode="write",
     )
     user_paths = [Path(p).resolve() for p in user_strs]
-    ephemeral_strs = list_ephemeral_writable_prefixes(source, user_id)
+    ephemeral_strs = list_ephemeral_path_prefixes(
+        source,
+        user_id,
+        access_mode="write",
+    )
     ephemeral_paths = [Path(p).resolve() for p in ephemeral_strs]
     mem_paths: List[Path] = []
     if include_canonical_memory_owner and app_config is not None:

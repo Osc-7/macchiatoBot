@@ -9,7 +9,7 @@
 
 ## pinned_tools
 
-- **read_file** / **write_file** / **modify_file**：读、新建/覆盖、修改（search_replace 局部替换 | append 追加 | overwrite 覆盖）。**工作区隔离时 `~/` 与 bash 相同**，解析为该用户数据根（与 `$HOME` 一致）；主进程内同类语义统一在 `agent_core.agent.session_paths`（技能目录、ACL 前缀、`attach_image_to_reply` / 下一轮 `attach_media` 媒体解析等均走同一套规则）。要访问**真实**宿主机用户主目录请用绝对路径或 `$MACCHIATO_REAL_HOME`。普通租户的 **read_file** 默认只允许读取用户根、临时目录、canonical memory 和已批准白名单；若要读取其他宿主机路径，先 `request_permission(kind=file_read)`。写入除用户根/临时目录外，还允许当前用户的 canonical memory 目录（传统模式下可能是仓库内 `data/memory/{前端}/{用户}/`，Linux home 模式下则是 `~/data/memory/`）；**不要**用相对路径再建一套多余的 `data/workspace/.../data/workspace` 嵌套。长期记忆请写裸文件名 **MEMORY.md**（会映射到正确 long_term）或使用 **MACCHIATO_MEMORY_LONG_TERM**（bash 已注入）。
+- **read_file** / **write_file** / **modify_file**：读、新建/覆盖、修改（search_replace 局部替换 | append 追加 | overwrite 覆盖）。**工作区隔离时 `~/` 与 bash 相同**，解析为该用户数据根（与 `$HOME` 一致）；主进程内同类语义统一在 `agent_core.agent.session_paths` / `agent_core.agent.session_capabilities`（技能目录、ACL 前缀、`attach_image_to_reply` / 下一轮 `attach_media` 媒体解析等均走同一套规则）。要访问**真实**宿主机用户主目录请用绝对路径或 `$MACCHIATO_REAL_HOME`。普通租户的 **read_file** 默认只允许读取用户根、临时目录、canonical memory 和已批准白名单；若要读取其他宿主机路径，先 `request_permission(kind=file_read)`。写入除用户根/临时目录外，还允许当前用户的 canonical memory 目录（传统模式下可能是仓库内 `data/memory/{前端}/{用户}/`，Linux home 模式下则是 `~/data/memory/`）。额外路径 grant 统一分为 `read` / `write` 两类，由人类决定是一次性放行还是持久白名单。**不要**用相对路径再建一套多余的 `data/workspace/.../data/workspace` 嵌套。长期记忆请写裸文件名 **MEMORY.md**（会映射到正确 long_term）或使用 **MACCHIATO_MEMORY_LONG_TERM**（bash 已注入）。
 - **web_search**：联网搜索公开信息，返回结构化结果（标题/链接/摘要）
 - **extract_web_content**：抓取网页内容
 - **memory_search_long_term** / **memory_search_content** / **memory_store** / **memory_ingest**：记忆检索与写入；用户偏好写 MEMORY.md 用 write_file/modify_file

@@ -12,10 +12,10 @@ from agent_core.permissions.wait_registry import (
     notify_permission_pending,
     register_permission_wait,
 )
-from agent_core.agent.readable_ephemeral_grants import add_ephemeral_readable_prefix
-from agent_core.agent.readable_roots_store import append_user_readable_prefix
-from agent_core.agent.writable_ephemeral_grants import add_ephemeral_writable_prefix
-from agent_core.agent.writable_roots_store import append_user_writable_prefix
+from agent_core.agent.path_grants import (
+    add_ephemeral_path_prefix,
+    append_user_path_prefix,
+)
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from agent_core.tools.permission_path_infer import (
     infer_readable_prefix_from_details,
@@ -207,23 +207,33 @@ class RequestPermissionTool(BaseTool):
             try:
                 src = str(exec_ctx.get("source") or "cli").strip() or "cli"
                 uid = str(exec_ctx.get("user_id") or "root").strip() or "root"
-                is_read = kind_l in ("file_read", "file_read_outside_workspace")
-                if persist and is_read:
-                    append_user_readable_prefix(
-                        cmd_cfg.acl_base_dir, src, uid, pfx, config=cfg
+                access_mode = (
+                    "read"
+                    if kind_l in ("file_read", "file_read_outside_workspace")
+                    else "write"
+                )
+                if persist:
+                    append_user_path_prefix(
+                        cmd_cfg.acl_base_dir,
+                        src,
+                        uid,
+                        pfx,
+                        access_mode=access_mode,
+                        config=cfg,
                     )
-                    prefix_msg = f" 已持久化只读前缀: {pfx}"
-                elif persist:
-                    append_user_writable_prefix(
-                        cmd_cfg.acl_base_dir, src, uid, pfx, config=cfg
-                    )
-                    prefix_msg = f" 已持久化可写前缀: {pfx}"
-                elif is_read:
-                    add_ephemeral_readable_prefix(src, uid, pfx, config=cfg)
-                    prefix_msg = f" 本次进程内允许该前缀只读访问（未写入永久白名单）: {pfx}"
+                    prefix_msg = f" 已持久化{'只读' if access_mode == 'read' else '可写'}前缀: {pfx}"
                 else:
-                    add_ephemeral_writable_prefix(src, uid, pfx, config=cfg)
-                    prefix_msg = f" 本次进程内允许该前缀写入（未写入永久白名单）: {pfx}"
+                    add_ephemeral_path_prefix(
+                        src,
+                        uid,
+                        pfx,
+                        access_mode=access_mode,
+                        config=cfg,
+                    )
+                    prefix_msg = (
+                        f" 本次进程内允许该前缀{'只读访问' if access_mode == 'read' else '写入'}"
+                        f"（未写入永久白名单）: {pfx}"
+                    )
             except Exception as exc:
                 return ToolResult(
                     success=False,

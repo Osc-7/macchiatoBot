@@ -1,36 +1,27 @@
-# Schedule Agent 配置示例（复制为同目录下 config.yaml 后按需填写）
-#
-# LLM：每个 provider 独立声明连接参数与能力（Capabilities）。
-# 运行时 `/model <name>` 里的 name 是 **配置名**（providers 的 key）；`/model` 列表会列出 **API 模型 ID（标准名）**（即 model 字段）。
-# recognize_image 工具固定走 vision_provider。
-# vendor_params 会原样作为 extra_body 传给 OpenAI SDK（DeepSeek thinking、百炼 / 智谱 / MiniMax / Kimi 等各家扩展不同，见各厂文档）。
-# 支持 ${ENV_VAR} 语法从环境变量展开；LLM 密钥请写在仓库根 .env（参考 .env.example），勿写入仓库。
-# 推荐：全部 LLM provider 放在本文件同目录下 llm/providers.d/*.yaml（与主配置分离）。
-# 亦可使用 provider_include 按文件顺序合并；路径相对主配置目录，且若主配置在仓库根，
-# 会再尝试 ./config/<路径>（便于使用 config/llm/providers.d/）。
-# 内联 llm.providers 可与目录合并，同名以后加载的为准。
+# Example config: copy to config.yaml beside this file and customize.
+# Put secrets in repo-root .env; use ${ENV_VAR} in values where noted.
+# LLM: set llm.active to a provider key; add entries under llm.providers and/or files in llm.providers.d.
+# CLI /model lists providers; switch using the same label or key shown in the list.
+# Optional provider_include merges YAML after providers_dir; duplicate keys use the later file.
 
 llm:
-  active: "default"            # 默认主对话 provider 名（须与某 provider 片段名一致）
-  vision_provider: null        # 识图 provider；null 时自动挑首个 capabilities.vision=true
-  summary_model: null          # 轻量总结；null 时复用主模型
+  active: "default"            # default chat provider key
+  vision_provider: null        # recognize_image; null picks first provider with vision: true
+  summary_model: null          # light summarization; null uses active provider model
   temperature: 0.7
   max_tokens: 4096
   request_timeout_seconds: 120
   stream: true
   providers_dir: llm/providers.d
-  # 可选：额外按文件合并（在 providers_dir 之后执行则覆盖同名）
   # provider_include: []
 
-  # 若尚未创建 llm/providers.d，至少保留一个内联 provider，否则无法加载。
-  # 目录中存在同名 key 时会覆盖下列条目。
+  # Keep at least one inline provider if providers_dir is empty; directory entries override same keys here.
   providers:
     default:
       base_url: "https://api.openai.com/v1"
       api_key: "${OPENAI_API_KEY}"
       model: "gpt-4o-mini"
-      # 可选：该 provider/model 的价格表，单位均为“每 1M token”。
-      # cost_yuan = 价格 * cny_per_currency_unit；官方价格/促销/汇率变化时，只需更新这里。
+      # Optional pricing per 1M tokens; cost_yuan uses cny_per_currency_unit.
       pricing:
         currency: "USD"
         cny_per_currency_unit: 7.25
@@ -42,80 +33,66 @@ llm:
         function_calling: true
         parallel_tool_calls: true
 
-# 多模态识图配置（调用多模态大模型，不依赖本地 OCR 模型）
-# 推荐使用 attach_media 工具声明需要在下一轮附带的图片/视频，
-# 由运行时在下一次 LLM 调用前，将这些媒体编码为多模态 messages 的一部分。
+# Multimodal: use attach_media so images attach on the next LLM turn.
 multimodal:
   enabled: false
-  model: null   # 例如: "qwen-vl-max-latest"；null 表示复用 llm.model
+  model: null   # e.g. qwen-vl-max-latest; null uses active provider model id
   max_image_size_mb: 8
   request_timeout_seconds: 120
 
-# Canvas 集成配置
 canvas:
   enabled: false
-  api_key: null  # 推荐使用环境变量 CANVAS_API_KEY
+  api_key: null  # or CANVAS_API_KEY in .env
   base_url: "https://oc.sjtu.edu.cn/api/v1"
   default_days_ahead: 60
   include_submitted: false
 
-# 上海交通大学教学信息服务网课表同步配置
-# 使用方式：
-# 1. 在浏览器或 Playwright 中访问 https://i.sjtu.edu.cn/jaccountlogin 并完成 jAccount 登录
-# 2. 将当前会话的 Cookie 导出为 JSON 文件（推荐使用 Playwright cookies.json 格式）
-# 3. 将 cookies_path 指向该 JSON 文件
+# SJTU jAccount: log in, export session cookies JSON, set path below.
 sjtu_jw:
   cookies_path: "./data/sjtu_jw_cookies.json"
 
-# 水源社区（上海交通大学 Discourse 论坛）配置
-# 获取 User-Api-Key：运行 python -m shuiyuan_integration.user_api_key，按提示在水源授权
-# 环境变量：SHUIYUAN_USER_API_KEY
+# Shuiyuan Discourse: set user_api_key or SHUIYUAN_USER_API_KEY in .env.
+# Key helper: uv run python -m frontend.shuiyuan_integration.user_api_key
+# Connector for notifications: uv run python -m frontend.shuiyuan_integration.connector
 shuiyuan:
-  owner_username: null  # 主人水源用户名，必须 @ 此用户且消息含 invocation_trigger 才触发
-  invocation_trigger: ""  # 消息中必须包含此字符串才触发回复
-  # 为空：通知模式 — connector 轮询 user_actions（filter=7 他人 @、filter=5 自发帖/自 @）与 notifications.json
-  # 非空：topic 监控 — 轮询指定话题的 get_topic_recent_posts（流量大，易 429）
+  owner_username: null  # bot only responds when @this user and invocation_trigger matches
+  invocation_trigger: ""
+  # Empty allowed_topic_ids: notify mode. Non-empty: poll listed topics only, higher rate-limit risk.
   allowed_topic_ids: []
-  # 需同时运行 connector 轮询通知：python -m shuiyuan_integration.connector
   enabled: false
   user_api_key: null
   site_url: "https://shuiyuan.sjtu.edu.cn"
-  # 通知模式 connector 会写入 {db_base_dir}/connector_notify_stream.json（已见 post_id 水位，避免重启后把旧帖当新帖）
-  db_base_dir: "./data/shuiyuan"  # 每用户 DB: {base}/users/{username}/shuiyuan.db
+  # Connector notify cursor: db_base_dir/connector_notify_stream.json
+  db_base_dir: "./data/shuiyuan"  # per-user DB under users/<username>/
   memory:
     chat_limit_per_user: 100
     thread_posts_count: 50
-    tool_max_posts: 50  # 水源工具 search/get_topic 返回的最大帖子数
+    tool_max_posts: 50  # max posts returned by Shuiyuan search tools
   rate_limit:
     replies_per_minute: 5
 
-# 自动化定时任务配置（可选）
-# 这里提供一个高层的“任务描述 + 时间间隔”入口，运行时会被转换为 automation 子系统的 JobDefinition，
-# 由 automation_daemon 在后台统一调度并周期性执行。
+# Declarative jobs; automation_daemon maps them to JobDefinition entries.
 automation:
   jobs:
-    # 示例：每天 15:00 同步记忆
-    # 同步生成的 JobDefinition.job_type 固定为 human（与 Agent 工具创建的 agent 相对）
     - name: "daily_memory_sync"
-      description: "这是自动化定时任务。请查看反思文件和记忆文件，将尚未同步过的核心、长期的理解存到记忆中，然后仅输出“操作 + 结果”。"
+      description: "Scheduled task: review reflection and memory files, persist important long-term facts to memory, reply with actions and outcome only."
       daily_time: "15:00"
       memory_owner: "cli:root"
       enabled: true
 
-# 时间配置
 time:
   timezone: "Asia/Shanghai"
   sleep_start: "23:00"
   sleep_end: "08:00"
 
-# 任务规划配置（plan_tasks 必需）
+# Required for plan_tasks.
 planning:
   timezone: "Asia/Shanghai"
   lookahead_days: 7
   min_block_minutes: 30
-  break_minutes_after_task: 15   # 任务间休息时间（分钟），避免连轴转
-  prefer_weekday_slots: true     # 优先工作日排程，周末作为补充
-  # weekday: 1-7（周一到周日）
+  break_minutes_after_task: 15   # minutes between tasks
+  prefer_weekday_slots: true
+  # weekday: 1 = Monday through 7 = Sunday
   working_hours:
     - weekday: 1
       start: "09:00"
@@ -144,86 +121,71 @@ planning:
     importance: 0.3
     overdue_bonus: 0.2
 
-# 存储配置
 storage:
   type: "json"
   data_dir: "./data"
   events_file: "events.json"
   tasks_file: "tasks.json"
 
-# 文件读写工具配置
-# 读取默认启用，写入和修改需显式启用
+# Read is on by default; enable write/modify explicitly for safety.
 file_tools:
-  enabled: true       # 是否启用文件读写工具
-  allow_read: true    # 允许读取文件
-  allow_write: false  # 允许写入/创建文件（建议按需启用）
-  allow_modify: false # 允许修改/追加文件（建议按需启用）
-  base_dir: "."       # 相对路径的基准目录；绝对路径可访问任意位置（/etc、~/.config 等）
+  enabled: true
+  allow_read: true
+  allow_write: false
+  allow_modify: false
+  base_dir: "."       # relative paths resolve here; absolute paths bypass the jail root
 
-# 命令执行工具配置
 command_tools:
-  enabled: true       # 是否启用 bash 工具
-  allow_run: true     # 是否允许执行终端命令
-  # Linux 生产可选：隔离 bash 以专用系统用户运行（须 root + util-linux runuser；租户自动 useradd/chown）
-  # 开启后普通租户的 canonical workspace 与 memory 都会迁入其 Linux home（默认 /home/<user>/）
+  enabled: true
+  allow_run: true
+  # Optional Linux per-tenant OS user for bash; needs root and util-linux runuser.
   # bash_os_user_enabled: false
   # bash_runuser_path: "/sbin/runuser"
   # bash_os_tenant_user_prefix: "m_"
   # bash_os_user_home_base_dir: "/home"
   # bash_os_auto_provision_users: true
-  # 管理员 memory_owner → 预先创建的 Linux 用户名（须加入项目组等）；未映射则回退为服务 UID
   # bash_os_admin_system_users:
   #   "cli:root": "macchiato_admin"
-  # 受限模式（subagent、tool_mode=sub）是否允许 bash；开启后仅可执行 subagent_command_whitelist 内命令
   allow_run_for_subagent: false
-  # 受限模式命令白名单（默认含 find 等只读命令；可在此追加）
   # subagent_command_whitelist: ["ls", "pwd", "cat", "head", "tail", "grep", "find", "echo", "which", "file", "stat", "wc", "date", "whoami", "id", "env", "printenv"]
-  # 未启用 Linux home 隔离时，bash 工作区父目录（{base}/{frontend}/{user}/）
-  # 启用 bash_os_user_enabled 后，普通租户改为直接使用各自 Linux home，此项仅保留给 legacy 数据迁移/兼容
   workspace_base_dir: "./data/workspace"
-  workspace_isolation_enabled: true   # false 时所有 Core 均用 base_dir 作为初始 cwd，且不注入 cd 防护
-  # 具有「全盘」bash 工作目录的管理员（memory_owner 形如 cli:root）；亦可对单个 Core 设 CoreProfile.bash_workspace_admin
+  workspace_isolation_enabled: true   # false: shared cwd, weaker cd guard
   # workspace_admin_memory_owners: ["cli:root"]
-  # 全局额外可写路径前缀（bash / file_tools 与工作区 jail 合并）；相对路径相对仓库根
   # bash_extra_write_roots: []
-  # 每用户批准后持久化的可写前缀（JSON），勿放在 data/workspace 下
   # acl_base_dir: "./data/acl"
-  # base_dir: "."                      # 管理员或未开隔离时 bash 的初始目录（通常为项目根）
-  # 隔离 bash 内 PATH 额外包含的、相对「服务进程真实家目录」(MACCHIATO_REAL_HOME) 的路径（目录存在才加入）
+  # base_dir: "."
   # bash_real_home_path_suffixes: [".local/share/pnpm"]
 
-# Agent 配置
 agent:
   max_iterations: 10
-  # 子 Agent 限制（防止卡住、无限循环）
-  subagent_max_seconds: 600      # 单次运行最大时长（秒），超时强制终止
-  subagent_max_tokens: 500000    # 累计 token 上限，超限强制结束；null 表示不限制
-  # subagent 上下文压缩阈值（profile 层）；null 表示不设该上限，仅受 working memory 约束（与旧版硬编码 40000 不同）
+  subagent_max_seconds: 600
+  subagent_max_tokens: 500000
   # subagent_max_context_tokens: null
-  subagent_max_iterations: 15    # 默认最大迭代次数（工具未传 max_iterations 时使用）
+  subagent_max_iterations: 15
   enable_debug: true
-  # 工具工作集大小（search_tools 会把命中的工具加入该 LRU 集合）
   working_set_size: 6
 
 tools:
-  # 所有 Core 固定带的核心工具
   core_tools:
     - "search_tools"
     - "call_tool"
     - "bash"
     - "request_permission"
-  # 当模板 exposure=pinned 时，除 core_tools 外还会默认暴露这些工具
+    - "ask_user"
   pinned_tools:
     - "load_skill"
     - "web_search"
     - "read_file"
     - "write_file"
+    - "modify_file"
     - "extract_web_content"
     - "attach_media"
     - "memory_search_long_term"
     - "memory_search_content"
     - "memory_store"
     - "memory_ingest"
+    - "list_scheduled_jobs"
+    - "delete_scheduled_job"
   templates:
     default:
       exposure: "pinned"
@@ -261,21 +223,17 @@ tools:
         - "configure_automation_policy"
         - "get_automation_activity"
         - "create_scheduled_job"
+        - "list_scheduled_jobs"
+        - "delete_scheduled_job"
         - "notify_owner"
 
-# MCP 客户端配置（可选）
-# 用于接入外部 MCP Server，并将远程工具自动注册到 Agent。
-# 日程等内置工具已由进程内 ToolRegistry 提供，默认不再为每个 AgentCore 拉起 mcp_server.py。
-# 若需给 Claude Desktop 等「纯 MCP 宿主」暴露日程工具：将 inject_builtin_schedule_mcp 设为 true，
-# 或在 servers 中自行配置一条指向 mcp_server.py 的 stdio（仍按进程数各起一份，且不参与连接池）。
-# 外部 stdio MCP（如 Tavily）在进程内按「启动命令等价」自动复用同一子进程。
+# External MCP servers register tools into the agent. Built-in schedule tools use the in-process registry unless inject_builtin_schedule_mcp is true.
 mcp:
   enabled: true
   inject_builtin_schedule_mcp: false
   call_timeout_seconds: 30
   servers:
-    # Tavily 联网搜索 MCP（本地 stdio，推荐：避免 mcp-remote 远程握手在国内易超时）
-    # 在 .env 中配置 TAVILY_API_KEY=tvly-xxx 后启用；从 https://tavily.com 获取 Key
+    # Tavily: set TAVILY_API_KEY in .env, then enable this server.
     - name: "tavily"
       enabled: false
       transport: "stdio"
@@ -289,77 +247,49 @@ mcp:
       init_timeout_seconds: 20
       call_timeout_seconds: 45
 
-# 技能配置（仅从 cli_dir 读取，与 npx skills 统一）
 skills:
-  enabled: []  # 为空展示全部；可填 [find-skills, coding] 仅展示指定
-  cli_dir: "~/.agents/skills"  # Skills CLI 默认目录
+  enabled: []  # empty lists all skills under cli_dir; non-empty filters the index
+  cli_dir: "~/.agents/skills"
 
-# 飞书集成配置（可选）
-# 若要在飞书中使用 Schedule Agent，请在飞书开放平台创建企业自建应用并填写下列字段。
-# 推荐使用环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_VERIFICATION_TOKEN / FEISHU_ENCRYPT_KEY 覆盖敏感信息。
-# 权限申请「批准/拒绝」按钮依赖：开发配置 — 事件与回调 — 订阅「卡片回传交互」(card.action.trigger)，回调 URL 与本入口一致。
 feishu:
   enabled: false
-  # App ID 与 App Secret 建议通过环境变量配置，这里仅作占位示例
-  app_id: ""              # 飞书应用 App ID（可留空，使用 FEISHU_APP_ID）
-  app_secret: ""          # 飞书应用 App Secret（可留空，使用 FEISHU_APP_SECRET）
-  verification_token: ""  # 飞书事件订阅 Verification Token（可留空，使用 FEISHU_VERIFICATION_TOKEN）
-  encrypt_key: ""         # 与开放平台「Encrypt Key」一致；启用加密时 HTTP 回调体为 {"encrypt":...}，须配置否则卡片按钮会报 200671
-  base_url: "https://open.feishu.cn"  # 国际版可改为 https://open.larksuite.com
-  domain: "feishu"        # feishu(中国大陆版) | lark(国际版)
-  # 飞书网关 ↔ automation_daemon（run_turn_stream 每读一行 JSON）的超时；长工具静默期间须足够大。与 llm.request_timeout_seconds 无关。
+  app_id: ""
+  app_secret: ""
+  verification_token: ""
+  encrypt_key: ""         # required when payload encryption is on; card buttons need matching setup
+  base_url: "https://open.feishu.cn"  # Lark international: https://open.larksuite.com
+  domain: "feishu"        # feishu or lark
   automation_ipc_timeout_seconds: 1800
-  # 可选：将 automation Daemon 写入的 automation_activity.jsonl 活动简报同步到指定飞书会话
-  # 建议填写一个专门用于接收系统通知的群聊/单聊 chat_id，而不是普通对话窗口。
   automation_activity_enabled: false
-  automation_activity_chat_id: ""  # 目标 chat_id；也可通过环境变量 FEISHU_AUTOMATION_CHAT_ID 覆盖
-  # 飞书对话体验：工具 trace 卡片（Input/Result）；最终回复用交互卡片内 Markdown（标题/列表/链接等）
+  automation_activity_chat_id: ""  # or FEISHU_AUTOMATION_CHAT_ID
   tool_trace_cards_enabled: true
-  # plain=助手输出均为纯文本（含中间轮次，会经 filter_markdown_for_feishu）；
-  # markdown_card=中间轮次与最终回复均用交互卡片内 Markdown（不经该过滤）
   reply_format: markdown_card
-  # markdown_card 时是否对同一条助手卡片 PATCH 流式更新内容；false=整段生成完再发一条
   assistant_reply_stream: true
-  # 与上一项同时为 true 时优先 CardKit 官方流式（需 cardkit:card:write）；失败则回退消息 PATCH
   assistant_cardkit_stream: true
 
-# 记忆系统配置
 memory:
   enabled: true
-  # 工作记忆
-  max_working_tokens: 8000        # 工作记忆窗口最大 token 数
-  working_summary_threshold: 0.8  # 软阈值：tokens 达此比例且消息数 > keep_recent*2 时总结
-  working_summary_hard_ratio: null  # 硬阈值：设为数字(如 5)则 tokens >= max_working_tokens*此值时强制总结，不受条数限制
-  working_keep_recent: 4          # 总结时保留最近几轮原始消息
-  # 按当前活跃模型 context_window 的比例计算压缩阈值，与 max_working_tokens 取较小值；
-  # 运行时切换模型（/model）会自动适配——例如从 1M 模型切到 200k 模型时会按 200k*ratio 收紧。
-  # 设为 null 关闭按比例计算，仅按 max_working_tokens 触发。
+  max_working_tokens: 8000
+  working_summary_threshold: 0.8
+  working_summary_hard_ratio: null
+  working_keep_recent: 4
   context_window_ratio: 0.75
-  # 单个 tool result 的 token 上限。超出时 messages 中只保留 head N tokens 与显式截断标记，
-  # 完整内容自动转储到工作区 .tool_results/，AI 可用 read_file/cat 按需检索。
-  # 防止 web_search、file_read 等单条工具结果一次性撑爆模型上下文窗口。设为 null/0 关闭。
   max_tool_result_tokens: 30000
   tool_result_overflow_dir: ".tool_results"
-  # 记忆库路径（统一按 frontend/user 划分）
-  memory_base_dir: "./data/memory"  # 各 owner: {base}/{frontend}/{user}/ 含 content/、long_term/、chat_history.db
-  # 检索策略
+  memory_base_dir: "./data/memory"
   recall_top_n: 5
   recall_score_threshold: 0.3
-  force_recall: false             # 默认关闭；由 memory skill 引导 Agent 按需检索长期记忆
-  # QMD 集成（可选）
+  force_recall: false
   qmd_enabled: false
   qmd_command: "qmd"
 
-# 日志配置
 logging:
   session_log_dir: "./logs/sessions"
   enable_session_log: true
-  # 行为追踪需开启：记录完整 system_prompt 与 messages 到 session JSONL
   enable_detailed_log: true
-  max_system_prompt_log_len: 2000  # -1 表示不截断
+  max_system_prompt_log_len: 2000  # max chars stored per system prompt when detailed log is on; raise to keep more
 
-# CLI 可视化配置
 ui:
-  show_draft: "summary"  # 草稿显示: off | summary | full
-  draft_max_chars: 500   # summary 模式下草稿最大显示字符数
-  dim_draft: true        # 草稿是否使用暗色显示
+  show_draft: "summary"  # off | summary | full
+  draft_max_chars: 500
+  dim_draft: true

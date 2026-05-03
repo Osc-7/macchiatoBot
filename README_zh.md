@@ -87,6 +87,9 @@ CLI 与飞书都支持一组常用斜杠命令（通过 IPC）：
 - `/session new [id]`：创建并切换新会话
 - `/session switch <id>`：切换到已有会话
 - `/session delete <id>`：删除会话记录（不删除历史日志文件）
+- `/remote-use <login> [path]`：将当前会话切换到远程工作区模式
+- `/remote-status`：查看当前会话远程工作区状态
+- `/remote-release` / `/cloud-use`：释放远程工作区，恢复云端工作区
 
 示例：
 
@@ -97,7 +100,96 @@ CLI 与飞书都支持一组常用斜杠命令（通过 IPC）：
 /session switch cli:root
 ```
 
-说明：
+## 远程工作区（Remote Workspace）
+
+远程工作区用于让部署在云服务器上的 macchiatoBot 会话操作另一台机器上由用户授权的目录，例如你的电脑。云端仍负责 LLM、记忆、飞书、调度和权限流；本机只运行一个轻量的 `macchiato-remote` worker，负责暴露本机工作区、bash/file 能力和本机确认。
+
+当前分支状态：
+
+- 已新增独立的 `macchiato-remote` CLI 入口。
+- 已接入 `/remote-use`、`/remote-status`、`/remote-release` 到 daemon IPC 与飞书斜杠命令。
+- 当某个 session 启用 remote mode 时，会在 system prompt 末尾追加远程工作区说明，让 agent 明确知道当前工作区后端已切换。
+- 真实远程 `bash` 与文件工具路由尚未实现；当前切片先建立包边界、会话状态和 prompt 行为。
+
+### 在本机安装 worker
+
+开发阶段可以从本仓库安装轻量 worker：
+
+```bash
+cd /path/to/macchiatoBot
+uv tool install ".[remote]"
+```
+
+也可以直接从 checkout 运行：
+
+```bash
+uv run macchiato-remote status
+```
+
+如果你不想在本机保留完整仓库，可以在任意有仓库的机器上构建 wheel，把 wheel 拷到本机再安装：
+
+```bash
+uv build --wheel
+uv tool install dist/macchiato_bot-*.whl
+```
+
+本机 worker 不需要 `config/config.yaml`、`.env`、飞书配置、LLM key 或 automation daemon。这些仍然只需要放在云服务器上。
+
+### 配置本机登录别名
+
+`login` 是 `/remote-use` 使用的可变登录别名，不需要固定成设备名。你可以使用 `personal`、`work-mbp`、`studio-linux` 等名字。
+
+```bash
+macchiato-remote login \
+  --server https://your-macchiato-server.example.com \
+  --login personal
+```
+
+查看本机配置：
+
+```bash
+macchiato-remote status
+```
+
+启动 worker：
+
+```bash
+macchiato-remote start
+```
+
+在当前开发切片中，`start` 只验证命令入口与本机配置，随后会提示 transport 尚未实现。
+
+### 在飞书或 CLI 中使用
+
+等 worker transport 接入、且本机 worker 在线后，在当前会话中切换到远程工作区：
+
+```text
+/remote-use personal ~/Project
+/remote-use personal ~/Project --profile dev --ttl 30m
+```
+
+常用配套命令：
+
+```text
+/remote-status
+/remote-release
+/cloud-use
+```
+
+remote mode 是按 session 生效的，不会全局替换所有 core。启用后，agent 会被告知当前 `bash`、`read_file`、`write_file`、`modify_file` 应当视为在远程工作区运行；`/workspace`、`~` 和相对路径都指向本机授权目录。
+
+权限档位设计：
+
+| 档位 | 用途 |
+| ---- | ---- |
+| `strict` | 只暴露显式授权工作区，尽量减少宿主机暴露 |
+| `dev` | 默认开发档位，允许项目目录和常见工具链/cache 挂载 |
+| `host-user` | 短时、本机确认后，以本机用户权限操作 |
+| `host-admin` | 最高风险档位，仅用于逐条确认的管理员动作 |
+
+默认档位是 `dev`。更高权限应当短时、显式、可审计，不作为默认工作区使用。
+
+CLI / 飞书说明：
 
 - 推荐通过 `uv run automation_daemon.py` 运行，跨终端共享会话视图。
 - 会话列表通过共享注册表跨终端可见（同一 `SCHEDULE_USER_ID` + `SCHEDULE_SOURCE`）。

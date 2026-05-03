@@ -29,6 +29,12 @@ dependencies = [
     "rich>=14.0",
 ]
 
+[project.scripts]
+macchiato-remote = "macchiato_remote.cli:main"
+
+[project.optional-dependencies]
+remote = []
+
 [dependency-groups]
 dev = [
     "pytest>=7.0",

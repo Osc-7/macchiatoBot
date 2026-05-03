@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import shlex
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -62,7 +63,102 @@ def _help_text() -> str:
 /session new [id] - 创建并切换到新会话
 /session delete <id> - 删除会话记录
 /new [id] - 快速新开 core 对话（等价 /session new [id]）
+/remote-use <login> [path] [--profile dev] - 将当前会话切换到远程工作区模式
+/remote-status - 查看当前会话远程工作区状态
+/remote-release 或 /cloud-use - 释放远程工作区，恢复云端工作区
 /help - 显示此帮助"""
+
+
+def _parse_ttl_seconds(value: str) -> Optional[int]:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return None
+    unit = raw[-1]
+    number = raw[:-1] if unit in {"s", "m", "h"} else raw
+    try:
+        n = int(number)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    if unit == "h":
+        return n * 3600
+    if unit == "m":
+        return n * 60
+    return n
+
+
+def _parse_remote_use_args(
+    cmd_text: str,
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    try:
+        tokens = shlex.split(cmd_text)
+    except ValueError as exc:
+        return None, f"解析失败: {exc}"
+    if len(tokens) < 2:
+        return (
+            None,
+            "用法: /remote-use <login> [path] [--profile strict|dev|host-user|host-admin] [--ttl 30m]",
+        )
+    login = tokens[1].strip()
+    path = "~"
+    profile = "dev"
+    ttl_seconds: Optional[int] = None
+    i = 2
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--profile":
+            if i + 1 >= len(tokens):
+                return None, "缺少 --profile 的值"
+            profile = tokens[i + 1].strip()
+            i += 2
+            continue
+        if tok.startswith("--profile="):
+            profile = tok.split("=", 1)[1].strip()
+            i += 1
+            continue
+        if tok == "--ttl":
+            if i + 1 >= len(tokens):
+                return None, "缺少 --ttl 的值"
+            ttl_seconds = _parse_ttl_seconds(tokens[i + 1])
+            if ttl_seconds is None:
+                return None, "ttl 格式应为正整数秒，或 30m / 2h"
+            i += 2
+            continue
+        if tok.startswith("--ttl="):
+            ttl_seconds = _parse_ttl_seconds(tok.split("=", 1)[1])
+            if ttl_seconds is None:
+                return None, "ttl 格式应为正整数秒，或 30m / 2h"
+            i += 1
+            continue
+        if tok.startswith("--"):
+            return None, f"未知参数: {tok}"
+        path = tok
+        i += 1
+    if profile not in {"strict", "dev", "host-user", "host-admin"}:
+        return None, "profile 必须是 strict、dev、host-user 或 host-admin"
+    return {
+        "login": login,
+        "path": path,
+        "profile": profile,
+        "ttl_seconds": ttl_seconds,
+    }, None
+
+
+def _format_remote_state(state: Dict[str, Any]) -> str:
+    if not state:
+        return "远程工作区未启用。"
+    path = state.get("resolved_path") or state.get("requested_path") or "—"
+    mount = state.get("workspace_mount") or "/workspace"
+    login = state.get("login") or "—"
+    profile = state.get("profile") or "—"
+    return (
+        "远程工作区已启用\n"
+        f"登录: {login}\n"
+        f"权限档位: {profile}\n"
+        f"工作区: {mount} -> {path}\n"
+        "提示: 当前版本已注入 remote system prompt；实际 bash/file 路由将在下一开发切片接入。"
+    )
 
 
 def _format_compress_result(res: Dict[str, Any]) -> str:
@@ -156,6 +252,35 @@ async def try_handle_slash_command(
                 "call_count": 0,
             }
         return True, "本会话 Token 用量：\n" + _format_token_usage(u)
+
+    if cmd_lower in ("remote-status", "remote status"):
+        try:
+            res = await client.remote_workspace_status()
+        except Exception as exc:
+            return True, f"远程工作区状态读取失败: {exc}"
+        state = res.get("state") if isinstance(res, dict) else None
+        return True, _format_remote_state(state if isinstance(state, dict) else {})
+
+    if cmd_lower in ("remote-release", "cloud-use", "remote release"):
+        try:
+            res = await client.remote_workspace_release()
+        except Exception as exc:
+            return True, f"释放远程工作区失败: {exc}"
+        released = bool(res.get("released")) if isinstance(res, dict) else False
+        if released:
+            return True, "已释放远程工作区，当前会话将恢复云端工作区模式。"
+        return True, "当前会话未启用远程工作区。"
+
+    if cmd_lower.startswith("remote-use"):
+        parsed, err = _parse_remote_use_args(cmd_text)
+        if err:
+            return True, err
+        assert parsed is not None
+        try:
+            state = await client.remote_workspace_use(**parsed)
+        except Exception as exc:
+            return True, f"切换远程工作区失败: {exc}"
+        return True, _format_remote_state(state)
 
     # /model — 与 CLI 一致：list 或按 label/配置名切换（走 IPC model_list / model_switch）
     if cmd_lower == "model":

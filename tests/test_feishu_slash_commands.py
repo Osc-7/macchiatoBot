@@ -21,6 +21,7 @@ def test_help_text():
     assert "/model" in h
     assert "/session" in h
     assert "/new" in h
+    assert "/remote-use" in h
     assert "/help" in h
 
 
@@ -213,9 +214,7 @@ async def test_try_handle_slash_command_model_switch():
             "vision_provider": "qwen_dashscope",
         }
     )
-    handled, reply = await try_handle_slash_command(
-        client, "/model Kimi K2.5"
-    )
+    handled, reply = await try_handle_slash_command(client, "/model Kimi K2.5")
     assert handled is True
     assert reply is not None
     assert "kimi_k25" in reply
@@ -230,3 +229,51 @@ async def test_try_handle_slash_command_new_alias():
     assert handled is True
     assert "已创建并切换到新会话" in (reply or "")
     client.switch_session.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_remote_use():
+    client = MagicMock()
+    client.remote_workspace_use = AsyncMock(
+        return_value={
+            "login": "personal",
+            "requested_path": "~/Project",
+            "profile": "dev",
+            "workspace_mount": "/workspace",
+        }
+    )
+    handled, reply = await try_handle_slash_command(
+        client, "/remote-use personal ~/Project --profile dev --ttl 30m"
+    )
+    assert handled is True
+    assert reply is not None
+    assert "远程工作区已启用" in reply
+    assert "personal" in reply
+    client.remote_workspace_use.assert_awaited_once_with(
+        login="personal",
+        path="~/Project",
+        profile="dev",
+        ttl_seconds=1800,
+    )
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_remote_status_inactive():
+    client = MagicMock()
+    client.remote_workspace_status = AsyncMock(
+        return_value={"active": False, "state": None}
+    )
+    handled, reply = await try_handle_slash_command(client, "/remote-status")
+    assert handled is True
+    assert "未启用" in (reply or "")
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_remote_release():
+    client = MagicMock()
+    client.remote_workspace_release = AsyncMock(
+        return_value={"released": True, "state": {"login": "personal"}}
+    )
+    handled, reply = await try_handle_slash_command(client, "/remote-release")
+    assert handled is True
+    assert "已释放" in (reply or "")

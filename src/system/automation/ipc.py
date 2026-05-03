@@ -24,6 +24,7 @@ from agent_core.permissions.ask_user_registry import ask_user_ipc_stream_notify_
 from agent_core.permissions.wait_registry import permission_ipc_stream_notify_scope
 
 from .core_gateway import AutomationCoreGateway
+
 # base64 图片可能数 MB，默认 64KB readline limit 远远不够
 _STREAM_LIMIT = 32 * 1024 * 1024  # 32 MB
 logger = logging.getLogger(__name__)
@@ -200,6 +201,7 @@ class AutomationIPCServer:
             on_assistant_delta=_on_assistant_delta,
             on_reasoning_delta=_on_reasoning_delta,
         )
+
         async def _forward_ask_user_stream(
             batch_id: str, payload: Dict[str, Any]
         ) -> None:
@@ -226,7 +228,9 @@ class AutomationIPCServer:
                     [str(i.get("type")) for i in _ci[:3]],
                 )
             async with ask_user_ipc_stream_notify_scope(_forward_ask_user_stream):
-                async with permission_ipc_stream_notify_scope(_forward_permission_stream):
+                async with permission_ipc_stream_notify_scope(
+                    _forward_permission_stream
+                ):
                     result = await self._gateway.inject_message(
                         InjectMessageCommand(
                             session_id=active_session,
@@ -321,7 +325,9 @@ class AutomationIPCServer:
             ok = await self._gateway.delete_session(session_id)
             # 如果客户端当前活跃会话被删除，则回退到默认会话标识；实际 CoreSession 需按需显式切换。
             if ok and self._client_active_session.get(client_id) == session_id:
-                self._client_active_session[client_id] = f"{self._source}:{self._owner_id}"
+                self._client_active_session[client_id] = (
+                    f"{self._source}:{self._owner_id}"
+                )
             return {
                 "deleted": ok,
                 "active_session_id": self._client_active_session.get(client_id),
@@ -357,14 +363,43 @@ class AutomationIPCServer:
             info = self._gateway.switch_model(name, session_id=active_session)
             return {"ok": True, "info": info}
 
+        if method == "remote_workspace_use":
+            login = str(params.get("login") or "").strip()
+            if not login:
+                raise ValueError("login 不能为空")
+            requested_path = str(
+                params.get("path") or params.get("requested_path") or "~"
+            ).strip()
+            profile = str(params.get("profile") or "dev").strip() or "dev"
+            ttl_raw = params.get("ttl_seconds")
+            ttl_seconds: Optional[int]
+            try:
+                ttl_seconds = int(ttl_raw) if ttl_raw is not None else None
+            except (TypeError, ValueError):
+                ttl_seconds = None
+            state = self._gateway.remote_workspace_use(
+                session_id=active_session,
+                login=login,
+                requested_path=requested_path,
+                profile=profile,
+                ttl_seconds=ttl_seconds,
+            )
+            return {"ok": True, "state": state}
+
+        if method == "remote_workspace_status":
+            return self._gateway.remote_workspace_status(active_session)
+
+        if method == "remote_workspace_release":
+            return self._gateway.remote_workspace_release(active_session)
+
         if method == "get_turn_count":
             turn_count = self._gateway.get_turn_count(session_id=active_session)
             return {"turn_count": turn_count}
 
         if method == "resolve_permission":
             # 卡片批准/拒绝由 feishu_ws_gateway 等独立进程触发，须在 daemon 内唤醒 Future
+            from agent_core.permissions.wait_registry import PermissionDecision
             from agent_core.permissions.wait_registry import (
-                PermissionDecision,
                 resolve_permission as _resolve_permission_wait,
             )
 
@@ -393,19 +428,23 @@ class AutomationIPCServer:
         if method == "resolve_ask_user":
             from agent_core.permissions.ask_user_registry import (
                 parse_answers_from_ipc_params,
+            )
+            from agent_core.permissions.ask_user_registry import (
                 resolve_ask_user as _resolve_ask_user_wait,
             )
 
             bid = str(params.get("batch_id") or params.get("ask_user_id") or "").strip()
             if not bid:
                 raise ValueError("batch_id 不能为空")
-            decision = parse_answers_from_ipc_params(params if isinstance(params, dict) else {})
+            decision = parse_answers_from_ipc_params(
+                params if isinstance(params, dict) else {}
+            )
             ok = _resolve_ask_user_wait(bid, decision)
             return {"ok": bool(ok)}
 
         if method == "submit_ask_user_fragment":
+            from agent_core.permissions.ask_user_registry import AskUserAnswer
             from agent_core.permissions.ask_user_registry import (
-                AskUserAnswer,
                 submit_ask_user_fragment as _submit_au_fragment,
             )
 
@@ -717,6 +756,34 @@ class AutomationIPCClient:
         info = data.get("info")
         return dict(info) if isinstance(info, dict) else {}
 
+    async def remote_workspace_use(
+        self,
+        *,
+        login: str,
+        path: str = "~",
+        profile: str = "dev",
+        ttl_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Enable remote workspace mode for the current daemon session."""
+        payload: Dict[str, Any] = {
+            "login": login,
+            "path": path,
+            "profile": profile,
+        }
+        if ttl_seconds is not None:
+            payload["ttl_seconds"] = int(ttl_seconds)
+        data = await self._request("remote_workspace_use", payload)
+        state = data.get("state")
+        return dict(state) if isinstance(state, dict) else {}
+
+    async def remote_workspace_status(self) -> Dict[str, Any]:
+        """Return remote workspace state for the current daemon session."""
+        return await self._request("remote_workspace_status", {})
+
+    async def remote_workspace_release(self) -> Dict[str, Any]:
+        """Release remote workspace mode for the current daemon session."""
+        return await self._request("remote_workspace_release", {})
+
     async def get_token_usage(self) -> dict:
         data = await self._request("get_token_usage", {})
         usage = data.get("usage")
@@ -869,7 +936,11 @@ class AutomationIPCClient:
                 if event_type == "feishu_ask_user_notify":
                     bid = str(payload.get("batch_id") or "").strip()
                     pl = payload.get("payload")
-                    fn = getattr(hooks, "on_feishu_ask_user_notify", None) if hooks else None
+                    fn = (
+                        getattr(hooks, "on_feishu_ask_user_notify", None)
+                        if hooks
+                        else None
+                    )
                     if fn and bid and isinstance(pl, dict):
                         maybe = fn(bid, pl)
                         if inspect.isawaitable(maybe):
@@ -916,9 +987,7 @@ class AutomationIPCClient:
         output_text = str(data.get("output_text") or "")
         # 对端提前断开或网络中断时可能收不到 final 事件，避免飞书等前端完全无反馈
         if final_result is None and not output_text.strip():
-            output_text = (
-                "连接已中断，未收到完整回复，请稍后重试。"
-            )
+            output_text = "连接已中断，未收到完整回复，请稍后重试。"
             meta_dict = {**meta_dict, "_ipc_error": "stream_incomplete"}
         return AgentRunResult(
             output_text=output_text,

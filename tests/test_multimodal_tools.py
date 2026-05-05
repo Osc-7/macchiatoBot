@@ -4,11 +4,28 @@
 
 import pytest
 
-from system.tools.media_tools import (
-    AttachMediaTool,
-    AttachImageToReplyTool,
-    AttachFileToReplyTool,
+from agent_core.config import CommandToolsConfig, Config, FileToolsConfig, LLMConfig
+from agent_core.remote.workspace_state import (
+    activate_remote_workspace,
+    clear_remote_workspace_state,
 )
+from system.tools.media_tools import (
+    AttachFileToReplyTool,
+    AttachImageToReplyTool,
+    AttachMediaTool,
+)
+
+
+def _workspace_config(tmp_path):
+    return Config(
+        llm=LLMConfig(api_key="k", model="m"),
+        file_tools=FileToolsConfig(base_dir=str(tmp_path)),
+        command_tools=CommandToolsConfig(
+            base_dir=str(tmp_path),
+            workspace_base_dir=str(tmp_path / "workspace_parent"),
+            workspace_isolation_enabled=True,
+        ),
+    )
 
 
 class TestAttachMediaTool:
@@ -71,6 +88,22 @@ class TestAttachImageToReplyTool:
         assert "path" in result.data and result.data["type"] == "image"
 
     @pytest.mark.asyncio
+    async def test_execute_with_workspace_relative_path(self, tmp_path):
+        cfg = _workspace_config(tmp_path)
+        img = tmp_path / "workspace_parent" / "feishu" / "u1" / "pic.png"
+        img.parent.mkdir(parents=True)
+        img.write_bytes(b"\x89PNG\r\n\x1a\n")
+        tool = AttachImageToReplyTool(config=cfg)
+
+        result = await tool.execute(
+            image_path="pic.png",
+            __execution_context__={"source": "feishu", "user_id": "u1"},
+        )
+
+        assert result.success is True
+        assert result.data["path"] == str(img.resolve())
+
+    @pytest.mark.asyncio
     async def test_execute_with_url_returns_outgoing_attachment(self):
         tool = AttachImageToReplyTool()
         result = await tool.execute(image_url="https://example.com/diagram.png")
@@ -107,6 +140,51 @@ class TestAttachFileToReplyTool:
             "type": "file",
             "path": str(p.resolve()),
         }
+
+    @pytest.mark.asyncio
+    async def test_execute_with_workspace_relative_path(self, tmp_path):
+        cfg = _workspace_config(tmp_path)
+        p = tmp_path / "workspace_parent" / "feishu" / "u1" / "report.txt"
+        p.parent.mkdir(parents=True)
+        p.write_text("ok", encoding="utf-8")
+        tool = AttachFileToReplyTool(config=cfg)
+
+        result = await tool.execute(
+            file_path="report.txt",
+            __execution_context__={"source": "feishu", "user_id": "u1"},
+        )
+
+        assert result.success is True
+        assert result.data["path"] == str(p.resolve())
+
+    @pytest.mark.asyncio
+    async def test_execute_with_remote_workspace_path_is_explicitly_unsupported(
+        self, tmp_path
+    ):
+        cfg = _workspace_config(tmp_path)
+        tool = AttachFileToReplyTool(config=cfg)
+        clear_remote_workspace_state()
+        try:
+            activate_remote_workspace(
+                session_id="feishu:u1",
+                login="local-dev",
+                requested_path="~/proj",
+                resolved_path=str(tmp_path / "remote-proj"),
+            )
+            result = await tool.execute(
+                file_path="report.txt",
+                __execution_context__={
+                    "source": "feishu",
+                    "user_id": "u1",
+                    "session_id": "feishu:u1",
+                },
+            )
+        finally:
+            clear_remote_workspace_state()
+
+        assert result.success is False
+        assert result.error == "INVALID_PATH"
+        assert "远程工作区" in result.message
 
     @pytest.mark.asyncio
     async def test_execute_with_url_returns_outgoing_attachment(self):

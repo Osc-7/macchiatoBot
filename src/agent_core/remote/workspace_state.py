@@ -96,7 +96,7 @@ def format_remote_workspace_prompt_suffix(
     return f"""
 # 当前远程工作区模式
 
-本会话的 bash 与文件工具当前运行在用户授权的远程机器上，而不是云服务器。
+本会话的 bash、文件工具与 load_skill 当前运行在用户授权的远程机器上，而不是云服务器。
 远程登录: {state.login}
 远程机器: {device}
 权限档位: {state.profile}

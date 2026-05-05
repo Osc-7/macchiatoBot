@@ -70,6 +70,18 @@ def _should_skip_path_string(s: str) -> bool:
     return False
 
 
+def _remote_workspace_active(exec_ctx: dict) -> bool:
+    sid = str((exec_ctx or {}).get("session_id") or "").strip()
+    if not sid:
+        return False
+    try:
+        from agent_core.remote.workspace_state import get_remote_workspace_state
+
+        return get_remote_workspace_state(sid) is not None
+    except Exception:
+        return False
+
+
 def apply_workspace_path_resolution_to_tool_args(
     tool_name: str,
     arguments: Dict[str, Any],
@@ -89,6 +101,7 @@ def apply_workspace_path_resolution_to_tool_args(
         exec_ctx = {}
 
     out = dict(arguments)
+    remote_active = _remote_workspace_active(exec_ctx)
 
     if tool_name == "call_tool":
         inner_name = out.get("name")
@@ -108,6 +121,10 @@ def apply_workspace_path_resolution_to_tool_args(
 
     def _resolve_value(val: Any) -> Any:
         if not isinstance(val, str) or _should_skip_path_string(val):
+            return val
+        if remote_active:
+            # 远程工作区的 ~ / /workspace 语义由远程工具层处理；这里若预解析，
+            # 会把路径改成 daemon 本地绝对路径。
             return val
         resolved, err = resolve_path_string_for_tool(val.strip(), cfg, exec_ctx)
         if err or resolved is None:

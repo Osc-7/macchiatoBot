@@ -7,13 +7,18 @@ from pathlib import Path
 import pytest
 
 from agent_core.config import CommandToolsConfig, Config, LLMConfig, SkillsConfig
-from system.tools.load_skill_tool import LoadSkillTool
 from agent_core.prompts.loader import (
     _format_skills_index,
     _parse_skill_frontmatter,
     build_system_prompt,
     load_skill_content,
 )
+from agent_core.remote.workspace_state import (
+    activate_remote_workspace,
+    clear_remote_workspace_state,
+)
+from macchiato_remote.protocol import RemoteFileReadResult
+from system.tools.load_skill_tool import LoadSkillTool
 
 
 class TestParseSkillFrontmatter:
@@ -161,6 +166,116 @@ class TestLoadSkillTool:
         )
         assert r.success is True
         assert "隔离体" in r.message
+
+    @pytest.mark.asyncio
+    async def test_execute_loads_from_linux_home_when_os_user_isolated(self, tmp_path):
+        """Linux 用户隔离下 load_skill 与 bash 的 HOME 一致，不回落到 legacy workspace。"""
+        homes = tmp_path / "homes"
+        linux_skills = homes / "m_feishu_u9" / ".agents" / "skills" / "example"
+        linux_skills.mkdir(parents=True)
+        (linux_skills / "SKILL.md").write_text(
+            "---\nname: 示例技能\ndescription: d\n---\n\nLinux home 版本\n",
+            encoding="utf-8",
+        )
+        legacy_skills = (
+            tmp_path
+            / "workspace_parent"
+            / "feishu"
+            / "u9"
+            / ".agents"
+            / "skills"
+            / "example"
+        )
+        legacy_skills.mkdir(parents=True)
+        (legacy_skills / "SKILL.md").write_text(
+            "---\nname: 示例技能\ndescription: d\n---\n\nlegacy workspace 版本\n",
+            encoding="utf-8",
+        )
+        cfg = Config(
+            llm=LLMConfig(api_key="k", model="m"),
+            skills=SkillsConfig(enabled=["example"]),
+            command_tools=CommandToolsConfig(
+                base_dir=str(tmp_path),
+                workspace_base_dir=str(tmp_path / "workspace_parent"),
+                workspace_isolation_enabled=True,
+                bash_os_user_enabled=True,
+                bash_os_user_home_base_dir=str(homes),
+            ),
+        )
+        tool = LoadSkillTool(config=cfg)
+        r = await tool.execute(
+            skill_name="example",
+            __execution_context__={
+                "source": "feishu",
+                "user_id": "u9",
+                "bash_workspace_admin": False,
+            },
+        )
+        assert r.success is True
+        assert "Linux home 版本" in r.message
+        assert "legacy workspace 版本" not in r.message
+
+    @pytest.mark.asyncio
+    async def test_execute_loads_from_remote_workspace_when_active(
+        self, tmp_path, monkeypatch
+    ):
+        """远程工作区下 load_skill 读取远程 ~/.agents/skills，而不是 daemon 本地路径。"""
+        pytest.importorskip("agent_core.remote.pathmap")
+        pytest.importorskip("agent_core.remote.worker_registry")
+
+        class FakeRemoteRegistry:
+            def __init__(self):
+                self.calls = []
+
+            async def file_read(self, **kwargs):
+                self.calls.append(kwargs)
+                return RemoteFileReadResult(
+                    request_id="r1",
+                    path=kwargs["path"],
+                    content="---\nname: 远程技能\ndescription: d\n---\n\nremote body",
+                    encoding="utf-8",
+                )
+
+        fake = FakeRemoteRegistry()
+        monkeypatch.setattr(
+            "agent_core.remote.worker_registry.get_remote_worker_registry",
+            lambda: fake,
+        )
+        clear_remote_workspace_state()
+        try:
+            activate_remote_workspace(
+                session_id="feishu:u9",
+                login="local-dev",
+                requested_path="~/proj",
+                resolved_path=str(tmp_path / "remote-proj"),
+            )
+            cfg = Config(
+                llm=LLMConfig(api_key="k", model="m"),
+                skills=SkillsConfig(enabled=["example"]),
+                command_tools=CommandToolsConfig(
+                    base_dir=str(tmp_path),
+                    workspace_base_dir=str(tmp_path / "workspace_parent"),
+                    workspace_isolation_enabled=True,
+                ),
+            )
+            tool = LoadSkillTool(config=cfg)
+            r = await tool.execute(
+                skill_name="example",
+                __execution_context__={
+                    "source": "feishu",
+                    "user_id": "u9",
+                    "session_id": "feishu:u9",
+                    "bash_workspace_admin": False,
+                },
+            )
+        finally:
+            clear_remote_workspace_state()
+
+        assert r.success is True
+        assert "remote body" in r.message
+        assert fake.calls[0]["login"] == "local-dev"
+        assert fake.calls[0]["session_id"] == "feishu:u9"
+        assert fake.calls[0]["path"] == ".agents/skills/example/SKILL.md"
 
 
 class TestBuildSystemPromptSkills:

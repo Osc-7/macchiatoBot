@@ -1770,7 +1770,15 @@ class AgentCore:
             else False,
             "source": self._source,
             "user_id": self._user_id,
+            "session_id": self._session_id,
         }
+        from agent_core.agent.tool_path_resolution import (
+            apply_workspace_path_resolution_to_tool_args,
+        )
+
+        kwargs = apply_workspace_path_resolution_to_tool_args(
+            tool_call.name, kwargs, self._config
+        )
 
         # 执行工具
         return await self._tool_registry.execute(tool_call.name, **kwargs)
@@ -1781,6 +1789,7 @@ class AgentCore:
         media_ctx = {
             "source": self._source,
             "user_id": self._user_id,
+            "session_id": self._session_id,
             "bash_workspace_admin": bool(getattr(prof, "bash_workspace_admin", False))
             if prof is not None
             else False,

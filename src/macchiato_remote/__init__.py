@@ -10,6 +10,10 @@ from .protocol import (
     RemoteFileWriteResult,
     RemoteGrant,
     RemotePermissionProfile,
+    RemoteWorkspaceCloseRequest,
+    RemoteWorkspaceCloseResult,
+    RemoteWorkspaceOpenRequest,
+    RemoteWorkspaceOpenResult,
     RemoteWorkspaceState,
     RemoteWorkspaceStatus,
 )
@@ -24,6 +28,10 @@ __all__ = [
     "RemoteFileWriteResult",
     "RemoteGrant",
     "RemotePermissionProfile",
+    "RemoteWorkspaceCloseRequest",
+    "RemoteWorkspaceCloseResult",
+    "RemoteWorkspaceOpenRequest",
+    "RemoteWorkspaceOpenResult",
     "RemoteWorkspaceState",
     "RemoteWorkspaceStatus",
 ]

@@ -772,7 +772,7 @@ class AutomationCoreGateway:
                 return 0
         return 0
 
-    def remote_workspace_use(
+    async def remote_workspace_use(
         self,
         *,
         session_id: Optional[str] = None,
@@ -787,6 +787,7 @@ class AutomationCoreGateway:
         consume the same state when the remote worker transport lands.
         """
         from agent_core.remote.workspace_state import activate_remote_workspace
+        from agent_core.remote.worker_registry import get_remote_worker_registry
 
         sid = session_id or self._active_session_id
         prof = (
@@ -794,12 +795,20 @@ class AutomationCoreGateway:
             if profile in {"strict", "dev", "host-user", "host-admin"}
             else "dev"
         )
+        opened = await get_remote_worker_registry().open_workspace(
+            login=login,
+            session_id=sid,
+            requested_path=requested_path,
+            profile=prof,  # type: ignore[arg-type]
+        )
         state = activate_remote_workspace(
             session_id=sid,
             login=login,
             requested_path=requested_path,
             profile=prof,  # type: ignore[arg-type]
             ttl_seconds=ttl_seconds,
+            resolved_path=opened.resolved_path,
+            device_label=opened.device_label,
         )
         self.mark_activity(sid)
         return state.model_dump()
@@ -816,13 +825,27 @@ class AutomationCoreGateway:
             "state": state.model_dump() if state is not None else None,
         }
 
-    def remote_workspace_release(
+    async def remote_workspace_release(
         self, session_id: Optional[str] = None
     ) -> Dict[str, Any]:
         from agent_core.remote.workspace_state import release_remote_workspace
+        from agent_core.remote.worker_registry import get_remote_worker_registry
 
         sid = session_id or self._active_session_id
         old = release_remote_workspace(sid)
+        if old is not None:
+            try:
+                await get_remote_worker_registry().close_workspace(
+                    login=old.login,
+                    session_id=sid,
+                )
+            except Exception:
+                logger.warning(
+                    "remote workspace close failed session_id=%s login=%s",
+                    sid,
+                    old.login,
+                    exc_info=True,
+                )
         self.mark_activity(sid)
         return {
             "released": old is not None,

@@ -124,6 +124,38 @@ class BashTool(BaseTool):
 
         restart = kwargs.get("restart", False)
         if restart:
+            session_id = str(exec_ctx.get("session_id") or "").strip()
+            if session_id:
+                from agent_core.remote.workspace_state import (
+                    get_remote_workspace_state,
+                )
+                from agent_core.remote.worker_registry import (
+                    get_remote_worker_registry,
+                )
+
+                remote_state = get_remote_workspace_state(session_id)
+                if remote_state is not None:
+                    try:
+                        res = await get_remote_worker_registry().reset_remote_shell(
+                            login=remote_state.login,
+                            session_id=session_id,
+                        )
+                    except Exception as exc:
+                        return ToolResult(
+                            success=False,
+                            error="REMOTE_SHELL_RESET_FAILED",
+                            message=f"远程 bash 重启失败: {exc}",
+                        )
+                    if not res.success:
+                        return ToolResult(
+                            success=False,
+                            error="REMOTE_SHELL_RESET_FAILED",
+                            message=res.error or res.message or "远程 bash 重启失败",
+                        )
+                    return ToolResult(
+                        success=True,
+                        message="远程 bash 会话已重启，环境变量与工作目录已清除",
+                    )
             await self._bash.restart()
             return ToolResult(
                 success=True,
@@ -147,9 +179,7 @@ class BashTool(BaseTool):
 
         perm_id = kwargs.get("permission_id")
         perm_str = str(perm_id).strip() if perm_id is not None else ""
-        confirmed = (
-            bool(perm_str) and consume_bash_danger_grant(perm_str, command)
-        )
+        confirmed = bool(perm_str) and consume_bash_danger_grant(perm_str, command)
 
         if self._security and getattr(self._security, "_workspace_jail_root", None):
             self._security.refresh_write_roots_from_config(
@@ -206,6 +236,16 @@ class BashTool(BaseTool):
                     message="timeout 必须是数字（秒）",
                 )
 
+        remote_result = await self._try_execute_remote(
+            command=command,
+            timeout=timeout,
+            confirmed=confirmed,
+            profile=profile,
+            exec_ctx=exec_ctx,
+        )
+        if remote_result is not None:
+            return remote_result
+
         result = await self._bash.execute(command, timeout=timeout)
 
         data = {
@@ -243,6 +283,117 @@ class BashTool(BaseTool):
         allow_dangerous = bool(exec_ctx.get("allow_dangerous_commands", False))
 
         return CoreProfile(
-            mode=profile_mode if profile_mode in {"full", "sub", "background"} else "full",
+            mode=(
+                profile_mode
+                if profile_mode in {"full", "sub", "background"}
+                else "full"
+            ),
             allow_dangerous_commands=allow_dangerous,
+        )
+
+    async def _try_execute_remote(
+        self,
+        *,
+        command: str,
+        timeout: Optional[float],
+        confirmed: bool,
+        profile: Optional["CoreProfile"],
+        exec_ctx: dict,
+    ) -> Optional[ToolResult]:
+        """Route bash to a connected remote worker when this session is remote."""
+        session_id = str(exec_ctx.get("session_id") or "").strip()
+        if not session_id:
+            return None
+        from agent_core.remote.workspace_state import get_remote_workspace_state
+
+        remote_state = get_remote_workspace_state(session_id)
+        if remote_state is None:
+            return None
+
+        from agent_core.config import get_config
+        from agent_core.remote.worker_registry import get_remote_worker_registry
+
+        cfg = get_config()
+        remote_security = type(self._security)(
+            restricted_whitelist=list(
+                cfg.command_tools.subagent_command_whitelist or []
+            ),
+            allow_run_for_restricted=cfg.command_tools.allow_run_for_subagent,
+        )
+        verdict = remote_security.check(
+            command,
+            profile=profile,
+            confirmed=confirmed,
+        )
+        if verdict.denied:
+            return ToolResult(
+                success=False,
+                error=verdict.error_code,
+                message=verdict.reason,
+            )
+        if verdict.needs_confirmation:
+            import json as _json
+
+            return ToolResult(
+                success=False,
+                error=verdict.error_code,
+                message=verdict.reason,
+                data={
+                    "suggested_tool": "request_permission",
+                    "permission_kind": "bash_dangerous_command",
+                    "details_json": _json.dumps(
+                        {"command": command}, ensure_ascii=False
+                    ),
+                },
+            )
+
+        try:
+            result = await get_remote_worker_registry().execute_command(
+                login=remote_state.login,
+                session_id=session_id,
+                command=command,
+                timeout_seconds=timeout,
+                output_limit=cfg.command_tools.default_output_limit,
+            )
+        except Exception as exc:
+            return ToolResult(
+                success=False,
+                error="REMOTE_WORKER_ERROR",
+                message=f"远程 worker 执行失败: {exc}",
+                data={"login": remote_state.login, "session_id": session_id},
+            )
+
+        data = {
+            "command": result.command,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "return_code": result.exit_code,
+            "timed_out": result.timed_out,
+            "truncated": result.truncated,
+            "remote": True,
+            "remote_login": remote_state.login,
+            "remote_cwd": result.cwd,
+        }
+        metadata = {"workspace_backend": "remote", "remote_login": remote_state.login}
+        if result.timed_out:
+            return ToolResult(
+                success=False,
+                data=data,
+                error="COMMAND_TIMEOUT",
+                message="远程命令执行超时，远程 shell 会话已重启",
+                metadata=metadata,
+            )
+        if result.exit_code == 0:
+            return ToolResult(
+                success=True,
+                data=data,
+                message="远程命令执行成功",
+                metadata=metadata,
+            )
+        return ToolResult(
+            success=False,
+            data=data,
+            error="NON_ZERO_EXIT",
+            message=f"远程命令执行结束，返回码为 {result.exit_code}",
+            metadata=metadata,
         )

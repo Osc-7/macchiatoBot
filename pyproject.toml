@@ -33,7 +33,9 @@ dependencies = [
 macchiato-remote = "macchiato_remote.cli:main"
 
 [project.optional-dependencies]
-remote = []
+remote = [
+    "websockets>=12.0",
+]
 
 [dependency-groups]
 dev = [

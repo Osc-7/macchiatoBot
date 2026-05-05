@@ -377,7 +377,7 @@ class AutomationIPCServer:
                 ttl_seconds = int(ttl_raw) if ttl_raw is not None else None
             except (TypeError, ValueError):
                 ttl_seconds = None
-            state = self._gateway.remote_workspace_use(
+            state = await self._gateway.remote_workspace_use(
                 session_id=active_session,
                 login=login,
                 requested_path=requested_path,
@@ -390,7 +390,7 @@ class AutomationIPCServer:
             return self._gateway.remote_workspace_status(active_session)
 
         if method == "remote_workspace_release":
-            return self._gateway.remote_workspace_release(active_session)
+            return await self._gateway.remote_workspace_release(active_session)
 
         if method == "get_turn_count":
             turn_count = self._gateway.get_turn_count(session_id=active_session)

@@ -98,6 +98,15 @@ def test_switch_model_rejects_unknown():
         client.switch_model("unknown-provider")
 
 
+def test_constructor_model_override_resolves_to_active_provider():
+    """AgentCore 的 summary 客户端：model_override 为另一 provider 名时 chat() 走该端点。"""
+    cfg = _make_config()
+    with patch("agent_core.llm.providers.openai_compat.AsyncOpenAI"):
+        client = LLMClient(config=cfg, model_override="qwen3vl")
+    assert client.active_provider_name == "qwen3vl"
+    assert client.model == "qwen3-vl"
+
+
 def test_vision_provider_autopick_when_missing():
     cfg = Config(
         llm=LLMConfig(

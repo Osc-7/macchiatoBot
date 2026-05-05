@@ -53,6 +53,10 @@ from frontend.feishu.permission_notify import install_feishu_permission_notify_h
 from frontend.feishu.reply_dispatch import send_feishu_agent_reply
 
 from system.tools import get_default_tools
+from system.automation.remote_worker_server import (
+    remote_server_enabled,
+    run_remote_worker_server_until_stopped,
+)
 
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -408,6 +412,12 @@ async def _main() -> None:
         _consume_loop(queue, scheduler_runtime, stop_event),
         name="automation-consumer",
     )
+    remote_server_task: asyncio.Task[Any] | None = None
+    if remote_server_enabled():
+        remote_server_task = asyncio.create_task(
+            run_remote_worker_server_until_stopped(stop_event),
+            name="remote-worker-server",
+        )
 
     # IPC core session and gateway (interactive frontends)
     async with AgentCore(
@@ -500,6 +510,9 @@ async def _main() -> None:
             await asyncio.gather(mcp_task, return_exceptions=True)
             consumer_task.cancel()
             await asyncio.gather(consumer_task, return_exceptions=True)
+            if remote_server_task is not None:
+                remote_server_task.cancel()
+                await asyncio.gather(remote_server_task, return_exceptions=True)
             await ipc.stop()
             await scheduler.stop()
             await scheduler_runtime.stop()

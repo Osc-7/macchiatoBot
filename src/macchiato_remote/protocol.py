@@ -70,6 +70,36 @@ class RemoteWorkspaceState(BaseModel):
         return (now if now is not None else time.time()) >= self.expires_at
 
 
+class RemoteWorkspaceOpenRequest(BaseModel):
+    request_id: str
+    session_id: str
+    requested_path: str
+    profile: RemotePermissionProfile = "dev"
+
+
+class RemoteWorkspaceOpenResult(BaseModel):
+    request_id: str
+    session_id: str
+    success: bool
+    resolved_path: Optional[str] = None
+    device_label: Optional[str] = None
+    message: str = ""
+    error: Optional[str] = None
+
+
+class RemoteWorkspaceCloseRequest(BaseModel):
+    request_id: str
+    session_id: str
+
+
+class RemoteWorkspaceCloseResult(BaseModel):
+    request_id: str
+    session_id: str
+    success: bool
+    message: str = ""
+    error: Optional[str] = None
+
+
 class RemoteCommandRequest(BaseModel):
     request_id: str
     session_id: str
@@ -105,6 +135,7 @@ class RemoteFileReadResult(BaseModel):
     content: str
     encoding: str = "utf-8"
     truncated: bool = False
+    error: Optional[str] = None
 
 
 class RemoteFileWriteRequest(BaseModel):
@@ -119,5 +150,19 @@ class RemoteFileWriteRequest(BaseModel):
 class RemoteFileWriteResult(BaseModel):
     request_id: str
     path: str
-    bytes_written: int
+    bytes_written: int = 0
     encoding: str = "utf-8"
+    error: Optional[str] = None
+
+
+class RemoteShellResetRequest(BaseModel):
+    request_id: str
+    session_id: str
+
+
+class RemoteShellResetResult(BaseModel):
+    request_id: str
+    session_id: str
+    success: bool
+    message: str = ""
+    error: Optional[str] = None

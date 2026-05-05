@@ -31,6 +31,16 @@ from agent_core.llm.response import LLMResponse, ToolCall, TokenUsage
 logger = logging.getLogger(__name__)
 
 
+def _preview_image_url_for_log(url: str, *, max_len: int = 72) -> str:
+    """日志里缩短 data URL / 长 http URL，避免刷屏。"""
+    u = url or ""
+    if u.startswith("data:"):
+        return f"data:<{len(u)} chars>"
+    if len(u) > max_len:
+        return u[:max_len] + "…"
+    return u
+
+
 def _build_provider_from_entry(
     name: str,
     entry: Any,
@@ -158,6 +168,21 @@ class LLMClient:
             self._active: str = str(active_name)
         else:
             self._active = next(iter(self._providers.keys()))
+
+        # summary_model 等场景：构造参数 model_override 若为已注册 provider 名（或 label/model slug），
+        # 将对话路由到该 provider；否则保留 _model_override 仅用于 .model 属性（chat() 仍走 llm.active）。
+        if model_override:
+            try:
+                ov_key = resolve_llm_provider_key(llm_cfg, model_override)
+            except ValueError:
+                ov_key = ""
+            if ov_key in self._providers:
+                self._active = ov_key
+                self._model_override = None
+                logger.info(
+                    "LLMClient 构造：model_override 解析为 provider=%s，作为本客户端的 active",
+                    ov_key,
+                )
 
         self._vision_provider_name: Optional[str] = self._resolve_vision_provider(
             getattr(llm_cfg, "vision_provider", None)
@@ -313,6 +338,13 @@ class LLMClient:
         if chosen not in self._providers:
             raise ValueError(f"未知 provider: {chosen}")
         provider = self._providers[chosen]
+        eff_model = model_override or provider.model
+        logger.info(
+            "LLMClient chat_with_image: provider=%s model=%s image=%s",
+            chosen,
+            eff_model,
+            _preview_image_url_for_log(image_url),
+        )
         return await provider.chat_with_image(
             prompt=prompt,
             image_url=image_url,

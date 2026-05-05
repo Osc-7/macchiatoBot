@@ -194,13 +194,16 @@ cloud daemon keeps the LLM, memory, Feishu, scheduler, and permission flow.
 
 Current branch status:
 
-- `macchiato-remote` is packaged as an independent CLI entrypoint.
-- `/remote-use`, `/remote-status`, and `/remote-release` are available through
-  the daemon IPC and Feishu slash-command path.
+- `macchiato-remote` is packaged as an independent CLI entrypoint (WebSocket client;
+  install optional extra: `uv tool install ".[remote]"` or `uv sync --extra remote`).
+- The automation daemon exposes a WebSocket gateway (default `0.0.0.0:9380`, overridable
+  via `MACCHIATO_REMOTE_HOST` / `MACCHIATO_REMOTE_PORT`; set `MACCHIATO_REMOTE_TOKEN`
+  for a shared secret sent as `?token=`).
+- `/remote-use`, `/remote-status`, and `/remote-release` open or release a remote
+  workspace over IPC / Feishu; when active, `bash`, `read_file`, `write_file`, and
+  `modify_file` are routed to the connected worker.
 - When remote mode is active, the system prompt gets a remote workspace note at
   the very end, so the agent knows the current workspace backend changed.
-- Actual remote `bash` and file-tool routing is not implemented yet. The current
-  slice establishes package boundaries, session state, and prompt behavior.
 
 ### Install the Local Worker
 
@@ -234,10 +237,23 @@ LLM keys, or the automation daemon. Those stay on the cloud server.
 Choose a login alias. This is the value used by `/remote-use`; it is intentionally
 not hard-coded to a device name.
 
+Generate a shared secret for the daemon (`MACCHIATO_REMOTE_TOKEN`) and this CLI
+(`--token`); you do not need to invent one by hand:
+
+```bash
+macchiato-remote gen-token
+# optional: macchiato-remote gen-token --bytes 48
+```
+
+Use the first line of output on the server as `MACCHIATO_REMOTE_TOKEN`, and pass
+the same value to `login --token`. Point `--server` at your daemon host including
+the WebSocket port (default **9380**, e.g. `http://203.0.113.10:9380` or behind TLS).
+
 ```bash
 macchiato-remote login \
-  --server https://your-macchiato-server.example.com \
-  --login personal
+  --server http://your-macchiato-server.example.com:9380 \
+  --login personal \
+  --token '<paste gen-token output>'
 ```
 
 Check local configuration:
@@ -246,19 +262,86 @@ Check local configuration:
 macchiato-remote status
 ```
 
-Start the worker:
+Start the worker in the foreground while debugging:
 
 ```bash
 macchiato-remote start
 ```
 
-In the current development slice, `start` only verifies the packaged command
-surface and reports that transport is not implemented yet.
+For daily use, run it as a lightweight background process (pid + log file, no
+launchd/systemd required):
+
+```bash
+macchiato-remote start --background
+macchiato-remote status
+macchiato-remote stop
+```
+
+Background logs are written to `~/.local/state/macchiato/remote-worker.log`; the
+pid file is `~/.local/state/macchiato/remote-worker.pid`.
+
+If public WebSocket access is unreliable in your network, save an SSH tunnel
+configuration once and let the worker manage the tunnel automatically (no daily
+manual `ssh -L`):
+
+```bash
+macchiato-remote login \
+  --server http://110.40.171.96:9380 \
+  --login macbook \
+  --token '<same token as daemon>' \
+  --ssh-tunnel ubuntu@110.40.171.96
+
+macchiato-remote start --background
+```
+
+With `--ssh-tunnel` configured, `start`, `start --background`, and `probe` open
+`127.0.0.1:19380 -> SSH_HOST:127.0.0.1:9380` automatically, and the worker
+connects through that local tunnel. Tune it with `--ssh-local-port`,
+`--ssh-remote-host`, and `--ssh-remote-port`; remove it with `--clear-ssh-tunnel`.
+
+If you see `InvalidMessage('did not receive a valid HTTP response')`, run:
+
+```bash
+macchiato-remote probe
+```
+
+This sends the same WebSocket upgrade over a **stdlib blocking socket** (no
+`asyncio`, no `HTTP_PROXY`). If the first line is `HTTP/1.1 101 Switching Protocols`,
+the path to the server is fine and the failure is specific to the `websockets`
+stack or your environment. If `probe` shows garbage/HTML or hangs, check **Clash
+TUN / VPN** (turning off **TUN mode** or bypassing the server IP often fixes it;
+empty `http_proxy` in the shell is **not** enough when TUN captures all IP traffic).
+The `start` command also prints the **underlying `__cause__`** of handshake errors
+after upgrading the package.
+
+If Clash is off but you only see **`TimeoutError`** (and `probe` also times out) while
+`nc -zv` used to work, suspect **stale routes or utun leftovers after VPN/TUN** — reboot
+the Mac, try another network (e.g. phone hotspot), and re-check `nc -zv` plus the cloud
+security group for TCP **9380**.
+
+If **`nc` works only while Clash is on and fails after quitting**, the TUN exit likely
+**did not restore the default gateway**. Reboot the Mac or use Clash’s normal quit path
+that restores routes; killing the app alone often leaves a broken routing table.
+
+#### Keeping TUN on (recommended for daily use)
+
+Add a **high-priority** rule so traffic to your daemon’s **public IP** uses `DIRECT`
+(still inside TUN, but not steered into a broken proxy chain). Place it **before** the
+catch-all `MATCH` rule, and replace the IP with yours:
+
+```yaml
+rules:
+  - IP-CIDR,110.40.171.96/32,DIRECT,no-resolve
+```
+
+`no-resolve` makes the rule match by IP without DNS quirks. Reload Clash, then
+`macchiato-remote probe` should show `HTTP/1.1 101 Switching Protocols`. If handshakes
+still flake, try switching the **TUN stack** (`gvisor` vs `system`) in Clash Meta / Verge.
 
 ### Use From Feishu Or CLI
 
-Once the worker transport is implemented and the local worker is online, switch
-the current session into remote workspace mode:
+With the daemon reachable from your machine at the `--server` URL and the worker
+running, switch the current session into remote workspace mode:
 
 ```text
 /remote-use personal ~/Project

@@ -11,11 +11,14 @@ modify_file 支持三种模式：search_replace（局部替换）、append（追
 """
 
 from pathlib import Path
-from typing import Awaitable, Callable, Optional, Tuple
+from typing import Any, Awaitable, Callable, Optional, Tuple
 
 from agent_core.agent.session_capabilities import (
     resolve_session_capabilities_from_exec_ctx,
 )
+from agent_core.remote.pathmap import normalize_remote_workspace_relative_path
+from agent_core.remote.worker_registry import get_remote_worker_registry
+from agent_core.remote.workspace_state import get_remote_workspace_state
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from agent_core.config import Config, FileToolsConfig, get_config
 from agent_core.agent.session_paths import expand_user_path_str_for_session
@@ -27,6 +30,19 @@ from agent_core.agent.tool_path_resolution import (
 # 工作区隔离下 ``data/memory`` 已嫁接至当前用户的 canonical owner（见 workspace_paths），
 # 相对工作区应使用此路径，勿再写 ``data/memory/{frontend}/{user}/...`` 以免路径重复一层。
 _MEMORY_MD_WORKSPACE_RELATIVE = "data/memory/long_term/MEMORY.md"
+
+
+def _remote_workspace_session_if_active(
+    exec_ctx: dict,
+) -> Optional[Tuple[str, Any]]:
+    """若当前会话处于远程工作区，返回 (session_id, remote_state)。"""
+    sid = str(exec_ctx.get("session_id") or "").strip()
+    if not sid:
+        return None
+    state = get_remote_workspace_state(sid)
+    if state is None:
+        return None
+    return sid, state
 
 
 def _redirect_memory_md_if_needed(path_str: str, exec_ctx: dict, config: Config) -> str:
@@ -228,35 +244,6 @@ class ReadFileTool(BaseTool):
                 message="文件读取功能未启用，请在配置中设置 file_tools.allow_read: true",
             )
 
-        resolved, err = _resolve_read_path_for_file_tool(
-            path_str, exec_ctx, self._ft_config, self._config
-        )
-        if err:
-            return ToolResult(
-                success=False,
-                error=(
-                    "FORBIDDEN_PATH"
-                    if "request_permission(kind=file_read)" in err
-                    or "当前用户根目录" in err
-                    or "已批准白名单" in err
-                    else "INVALID_PATH"
-                ),
-                message=err,
-                metadata={
-                    "suggested_tool": "request_permission",
-                    "permission_kind": "file_read",
-                    "permission_details": {"path": path_str, "reason": "read outside allowed roots"},
-                }
-                if "request_permission(kind=file_read)" in err
-                else {},
-            )
-        if resolved is None:
-            return ToolResult(
-                success=False,
-                error="INVALID_PATH",
-                message=f"无效路径: {path_str}",
-            )
-
         encoding = kwargs.get("encoding", "utf-8")
         start_line = kwargs.get("start_line")
         max_lines = kwargs.get("max_lines")
@@ -294,6 +281,111 @@ class ReadFileTool(BaseTool):
                     message="max_lines 必须为正整数",
                 )
 
+        remote_sess = _remote_workspace_session_if_active(exec_ctx)
+        if remote_sess is not None:
+            session_id, remote_state = remote_sess
+            rel, verr = normalize_remote_workspace_relative_path(path_str)
+            if verr:
+                return ToolResult(
+                    success=False,
+                    error="INVALID_PATH",
+                    message=verr,
+                )
+            sl: Optional[int] = None
+            el: Optional[int] = None
+            if start_line is not None:
+                sl = int(start_line)
+            if max_lines is not None:
+                ml = int(max_lines)
+                if sl is not None:
+                    el = sl + ml - 1
+                else:
+                    sl = 1
+                    el = ml
+            try:
+                fr = await get_remote_worker_registry().file_read(
+                    login=remote_state.login,
+                    session_id=session_id,
+                    path=rel,
+                    encoding=str(encoding),
+                    start_line=sl,
+                    end_line=el,
+                )
+            except Exception as exc:
+                return ToolResult(
+                    success=False,
+                    error="REMOTE_FILE_ERROR",
+                    message=f"远程读取失败: {exc}",
+                )
+            if fr.error:
+                err_code = fr.error
+                if err_code == "FILE_NOT_FOUND":
+                    return ToolResult(
+                        success=False,
+                        error="FILE_NOT_FOUND",
+                        message=f"文件不存在: {path_str}",
+                    )
+                if err_code == "ENCODING_ERROR":
+                    return ToolResult(
+                        success=False,
+                        error="ENCODING_ERROR",
+                        message=f"无法以 {encoding} 编码读取文件，可能是二进制文件",
+                    )
+                return ToolResult(
+                    success=False,
+                    error="REMOTE_FILE_ERROR",
+                    message=fr.error,
+                )
+            data: dict = {
+                "path": f"{path_str} (remote:{remote_state.login})",
+                "content": fr.content,
+                "remote": True,
+                "truncated": fr.truncated,
+            }
+            if start_line is not None:
+                data["start_line"] = int(start_line)
+            if max_lines is not None:
+                data["max_lines"] = int(max_lines)
+            return ToolResult(
+                success=True,
+                data=data,
+                message="成功读取远程文件",
+            )
+
+        resolved, err = _resolve_read_path_for_file_tool(
+            path_str, exec_ctx, self._ft_config, self._config
+        )
+        if err:
+            return ToolResult(
+                success=False,
+                error=(
+                    "FORBIDDEN_PATH"
+                    if "request_permission(kind=file_read)" in err
+                    or "当前用户根目录" in err
+                    or "已批准白名单" in err
+                    else "INVALID_PATH"
+                ),
+                message=err,
+                metadata=(
+                    {
+                        "suggested_tool": "request_permission",
+                        "permission_kind": "file_read",
+                        "permission_details": {
+                            "path": path_str,
+                            "reason": "read outside allowed roots",
+                        },
+                    }
+                    if "request_permission(kind=file_read)" in err
+                    else {}
+                ),
+            )
+        if resolved is None:
+            return ToolResult(
+                success=False,
+                error="INVALID_PATH",
+                message=f"无效路径: {path_str}",
+            )
+
         try:
             content = resolved.read_text(encoding=encoding)
             # 若未指定行范围，保持向后兼容：返回完整内容
@@ -325,9 +417,9 @@ class ReadFileTool(BaseTool):
                     "path": str(resolved),
                     "content": sliced_content,
                     "start_line": start,
-                    "max_lines": max_lines
-                    if max_lines is not None
-                    else total_lines - start_idx,
+                    "max_lines": (
+                        max_lines if max_lines is not None else total_lines - start_idx
+                    ),
                     "total_lines": total_lines,
                     "has_more": end_idx < total_lines,
                 },
@@ -461,6 +553,56 @@ class WriteFileTool(BaseTool):
                 success=False,
                 error="PERMISSION_DENIED",
                 message="文件写入功能未启用。请在配置中设置 file_tools.allow_write: true",
+            )
+
+        remote_sess = _remote_workspace_session_if_active(exec_ctx)
+        if remote_sess is not None:
+            session_id, remote_state = remote_sess
+            rel, verr = normalize_remote_workspace_relative_path(path_str)
+            if verr:
+                return ToolResult(
+                    success=False,
+                    error="INVALID_PATH",
+                    message=verr,
+                )
+            if self._permission_provider:
+                summary = f"写入(远程) {path_str}，共 {len(content)} 字符"
+                allowed = await self._permission_provider("write", path_str, summary)
+                if not allowed:
+                    return ToolResult(
+                        success=False,
+                        error="USER_DENIED",
+                        message="用户拒绝了写入操作",
+                    )
+            encoding = kwargs.get("encoding", "utf-8")
+            try:
+                fw = await get_remote_worker_registry().file_write(
+                    login=remote_state.login,
+                    session_id=session_id,
+                    path=rel,
+                    content=str(content),
+                    encoding=str(encoding),
+                    mode="overwrite",
+                )
+            except Exception as exc:
+                return ToolResult(
+                    success=False,
+                    error="REMOTE_FILE_ERROR",
+                    message=f"远程写入失败: {exc}",
+                )
+            if fw.error:
+                return ToolResult(
+                    success=False,
+                    error="REMOTE_FILE_ERROR",
+                    message=fw.error,
+                )
+            return ToolResult(
+                success=True,
+                data={
+                    "path": f"{path_str} (remote:{remote_state.login})",
+                    "remote": True,
+                },
+                message="成功写入远程文件",
             )
 
         resolved, err = _resolve_mutation_path_for_file_tool(
@@ -742,6 +884,168 @@ class ModifyFileTool(BaseTool):
         path_str = _redirect_memory_md_if_needed(path_str, exec_ctx, self._config)
         kwargs["path"] = path_str
 
+        mode = kwargs.get("mode", "search_replace")
+        if mode not in ("search_replace", "append", "overwrite"):
+            return ToolResult(
+                success=False,
+                error="INVALID_MODE",
+                message="mode 必须为 search_replace、append 或 overwrite",
+            )
+
+        encoding = kwargs.get("encoding", "utf-8")
+        replace_all = bool(kwargs.get("replace_all", False))
+
+        remote_sess = _remote_workspace_session_if_active(exec_ctx)
+        if remote_sess is not None:
+            session_id, remote_state = remote_sess
+            rel, verr = normalize_remote_workspace_relative_path(path_str)
+            if verr:
+                return ToolResult(
+                    success=False,
+                    error="INVALID_PATH",
+                    message=verr,
+                )
+            registry = get_remote_worker_registry()
+
+            if mode == "search_replace":
+                old_text = kwargs.get("old_text")
+                new_text = kwargs.get("new_text")
+                if old_text is None or new_text is None:
+                    return ToolResult(
+                        success=False,
+                        error="MISSING_PARAMS",
+                        message="search_replace 模式需要 old_text 和 new_text",
+                    )
+                try:
+                    fr = await registry.file_read(
+                        login=remote_state.login,
+                        session_id=session_id,
+                        path=rel,
+                        encoding=str(encoding),
+                    )
+                except Exception as exc:
+                    return ToolResult(
+                        success=False,
+                        error="REMOTE_FILE_ERROR",
+                        message=f"远程读取失败: {exc}",
+                    )
+                if fr.error:
+                    if fr.error == "FILE_NOT_FOUND":
+                        return ToolResult(
+                            success=False,
+                            error="FILE_NOT_FOUND",
+                            message=f"文件不存在: {path_str}，search_replace 只能修改已存在的文件",
+                        )
+                    return ToolResult(
+                        success=False,
+                        error="REMOTE_FILE_ERROR",
+                        message=fr.error,
+                    )
+                new_content, err_msg = _search_replace_with_fallbacks(
+                    fr.content, old_text, new_text, replace_all
+                )
+                if err_msg:
+                    return ToolResult(
+                        success=False,
+                        error="SEARCH_REPLACE_FAILED",
+                        message=err_msg,
+                    )
+                assert new_content is not None
+                if self._permission_provider:
+                    summary = (
+                        f"search_replace(远程) {path_str}，替换 1 处"
+                        if not replace_all
+                        else f"search_replace(远程) {path_str}，替换多处"
+                    )
+                    allowed = await self._permission_provider(
+                        "modify", path_str, summary
+                    )
+                    if not allowed:
+                        return ToolResult(
+                            success=False,
+                            error="USER_DENIED",
+                            message="用户拒绝了修改操作",
+                        )
+                try:
+                    fw = await registry.file_write(
+                        login=remote_state.login,
+                        session_id=session_id,
+                        path=rel,
+                        content=new_content,
+                        encoding=str(encoding),
+                        mode="overwrite",
+                    )
+                except Exception as exc:
+                    return ToolResult(
+                        success=False,
+                        error="REMOTE_FILE_ERROR",
+                        message=f"远程写入失败: {exc}",
+                    )
+                if fw.error:
+                    return ToolResult(
+                        success=False,
+                        error="REMOTE_FILE_ERROR",
+                        message=fw.error,
+                    )
+                return ToolResult(
+                    success=True,
+                    data={
+                        "path": f"{path_str} (remote:{remote_state.login})",
+                        "mode": "search_replace",
+                        "remote": True,
+                    },
+                    message="成功在远程文件上完成局部替换",
+                )
+
+            content = kwargs.get("content")
+            if content is None:
+                return ToolResult(
+                    success=False,
+                    error="MISSING_CONTENT",
+                    message="append 和 overwrite 模式需要 content 参数",
+                )
+            action_cn = "追加" if mode == "append" else "覆盖"
+            if self._permission_provider:
+                summary = f"{action_cn}(远程) {path_str}，共 {len(content)} 字符"
+                allowed = await self._permission_provider("modify", path_str, summary)
+                if not allowed:
+                    return ToolResult(
+                        success=False,
+                        error="USER_DENIED",
+                        message="用户拒绝了修改操作",
+                    )
+            wmode = "append" if mode == "append" else "overwrite"
+            try:
+                fw = await registry.file_write(
+                    login=remote_state.login,
+                    session_id=session_id,
+                    path=rel,
+                    content=str(content),
+                    encoding=str(encoding),
+                    mode=wmode,
+                )
+            except Exception as exc:
+                return ToolResult(
+                    success=False,
+                    error="REMOTE_FILE_ERROR",
+                    message=f"远程修改失败: {exc}",
+                )
+            if fw.error:
+                return ToolResult(
+                    success=False,
+                    error="REMOTE_FILE_ERROR",
+                    message=fw.error,
+                )
+            return ToolResult(
+                success=True,
+                data={
+                    "path": f"{path_str} (remote:{remote_state.login})",
+                    "mode": mode,
+                    "remote": True,
+                },
+                message=f"成功{action_cn}远程文件",
+            )
+
         resolved, err = _resolve_mutation_path_for_file_tool(
             path_str, exec_ctx, self._ft_config, self._config
         )
@@ -766,17 +1070,6 @@ class ModifyFileTool(BaseTool):
                 error="INVALID_PATH",
                 message=f"无效路径: {path_str}",
             )
-
-        mode = kwargs.get("mode", "search_replace")
-        if mode not in ("search_replace", "append", "overwrite"):
-            return ToolResult(
-                success=False,
-                error="INVALID_MODE",
-                message="mode 必须为 search_replace、append 或 overwrite",
-            )
-
-        encoding = kwargs.get("encoding", "utf-8")
-        replace_all = bool(kwargs.get("replace_all", False))
 
         # search_replace 模式
         if mode == "search_replace":

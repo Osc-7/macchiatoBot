@@ -319,6 +319,7 @@ def _collect_from_topic_watch(
                 continue
             # 带 raw 的完整帖子（单帖 403 时尝试话题内 posts.json 回退）。
             full_raw = ""
+            post_full: Optional[dict] = None
             try:
                 post_full = client.get_post_with_read_fallback(topic_id, int(pid))
             except Exception:
@@ -335,7 +336,9 @@ def _collect_from_topic_watch(
 
             ok, _ = is_invocation_valid_from_raw(full_raw, config=config)
             if ok:
-                out.append((int(topic_id), int(pn), int(pid), p))
+                # 优先使用单帖 JSON，含 reply_to_post_number 等，供提示词展示回复链
+                effective_post = post_full if isinstance(post_full, dict) else p
+                out.append((int(topic_id), int(pn), int(pid), effective_post))
         stream_map[topic_id] = seen
 
     out.sort(key=lambda x: x[2], reverse=True)
@@ -549,6 +552,7 @@ async def _poll_topic_watch(
                     user_message=raw,
                     reply_to_post_number=int(post_number) if post_number else None,
                     reply_to_post_id=int(post_id) if post_id else None,
+                    invocation_post=post,
                     config=config,
                     thread_posts=thread_posts,
                 )
@@ -684,6 +688,7 @@ async def _poll_once(
                     user_message=raw,
                     reply_to_post_number=int(post_number) if post_number else None,
                     reply_to_post_id=int(post_id) if post_id else None,
+                    invocation_post=post,
                     config=config,
                 )
                 if result:

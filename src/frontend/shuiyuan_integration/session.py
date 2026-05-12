@@ -389,6 +389,7 @@ async def run_shuiyuan_reply(
     reply_to_post_number: Optional[int] = None,
     reply_to_post_id: Optional[int] = None,
     *,
+    invocation_post: Optional[dict] = None,
     config: Optional[Config] = None,
     extra_tools: Optional[List[Any]] = None,
     thread_posts: Optional[List[dict]] = None,
@@ -402,6 +403,7 @@ async def run_shuiyuan_reply(
         user_message: 用户发来的消息内容
         reply_to_post_number: 要回复的楼层号（可选）
         reply_to_post_id: 触发帖的真实 post_id（可选；connector 传入后可注入供贴表情工具使用，避免 post_number≠post_id 导致 404）
+        invocation_post: 触发帖的 Discourse JSON（connector 已拉单帖时可传，避免重复 GET；缺省时用 reply_to_post_id 再拉取）
         config: 配置对象，默认 get_config()
         extra_tools: 额外工具列表，可与 get_default_tools 合并
         thread_posts: 可选，该楼最近 N 条帖子（connector 已抓取时可传入，避免重复 API 请求导致 429）
@@ -494,13 +496,31 @@ async def run_shuiyuan_reply(
         )
 
     # 在前端层按业务语气拼装完整上下文 prompt，Core 视为普通 user 输入。
-    from .prompt import build_shuiyuan_prompt_from_context
+    from .prompt import (
+        build_shuiyuan_prompt_from_context,
+        invocation_reply_target_from_post,
+    )
+
+    resolved_invocation_post: Optional[dict] = None
+    if invocation_post is not None and isinstance(invocation_post, dict):
+        resolved_invocation_post = invocation_post
+    elif reply_to_post_id:
+        try:
+            resolved_invocation_post = client.get_post_with_read_fallback(
+                int(topic_id), int(reply_to_post_id)
+            )
+        except Exception:
+            resolved_invocation_post = None
+
+    chain_pn, chain_uname = invocation_reply_target_from_post(resolved_invocation_post)
 
     shuiyuan_ctx: dict = {
         "username": username,
         "topic_id": int(topic_id),
         "reply_to_post_number": reply_to_post_number,
         "reply_to_post_id": reply_to_post_id,
+        "invocation_reply_to_post_number": chain_pn,
+        "invocation_reply_to_username": chain_uname,
         "topic_op": topic_op,
         "thread_posts": posts,
         # 旧版会话记忆（基于 ShuiyuanDB）已弃用，聊天上下文交由主 Agent 的

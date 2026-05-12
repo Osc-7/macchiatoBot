@@ -41,17 +41,17 @@ flowchart LR
 | `create_parallel_subagents` | 派生多个并行后台子任务；谁先完成谁先通知                                                                                 |
 | `list_agents`               | **进程表**：按 `scope` 列出可见会话（含 `session_id`、父指针、状态）；寻址 P2P 前优先调用，避免猜 id                                  |
 | `get_subagent_status`       | **只读**查看子任务状态；`include_full_result=true` 时拉取完整输出（不收割、不删盘）；**仅创建该子的父会话**可查询                           |
-| `reap_subagent`             | **父侧必做**：子任务已结束（含 cancel）且你已不再需要其工作区时 **必须** 调用；回收 zombie、删盘、释放内存；**仅父会话**可调用                        |
+| `reap_subagent`             | **父侧必做**：子任务已结束（含 cancel）且你已不再需要其工作区时 **必须** 调用；回收 zombie、删除对应隔离工作区（legacy 目录或 Linux home）、释放内存；**仅父会话**可调用                        |
 | `send_message_to_agent`     | 向任意 session 发送 P2P 消息；**子 Agent 仅用于向父询问**，不用于汇报完成                                                    |
 | `reply_to_message`          | 回复收到的 query 消息（correlation_id 关联）                                                                    |
-| `cancel_subagent`           | **终止**正在运行的子 Agent（不可逆；**不删盘**；释放目录与 completed 相同，需另调 `reap_subagent`）；**仅父会话**可调用                   |
+| `cancel_subagent`           | **终止**正在运行的子 Agent（不可逆；**不删盘**；无论 legacy 或 Linux home 工作区都需另调 `reap_subagent` 才会删除）；**仅父会话**可调用                   |
 | `wait_subagent`             | 父会话等待子终态：`**subagent_ids` 一次多个**；`wait_mode` 为 any 或 all；`wnohang=true` 为 **WNOHANG** 快照不阻塞；不代替 reap |
 | `wait_for_agent_message`    | 子 Agent **阻塞**等待下一条 P2P 消息发往本会话                                                                      |
 
 
 ### 收割义务（必做）
 
-- 每创建一个 `subagent_id`，在父会话侧**处理完该子任务**（已用预览或 `get` 拿到所需内容、不再需要其隔离目录下的文件）后，**必须**调用 `reap_subagent(subagent_id=...)`。
+- 每创建一个 `subagent_id`，在父会话侧**处理完该子任务**（已用预览或 `get` 拿到所需内容、不再需要其隔离工作区下的文件，无论是 legacy 目录还是 Linux home）后，**必须**调用 `reap_subagent(subagent_id=...)`。
 - **不要**依赖「系统会自动清理」：zombie 在内存中**不会**随会话 TTL 自动回收；不 reap 会长期占用 zombie 表与磁盘工作区。
 - 典型顺序：**按需** `get_subagent_status`（只读全文）→ **务必** `reap_subagent`（收尾）。并行多路：对**每一个**已结束的分支分别 reap（含已 `cancel_subagent` 的分支，若不再需要其目录）。
 - 若仍需从子工作区 `read_file` 拷贝文件，**先拷贝再 reap**；reap 后无法再查询该 id。
@@ -124,9 +124,10 @@ reply_to_message(correlation_id="msg-001", sender_session_id="cli:root", content
 - 父 Agent 指定 `allowed_tools` 时，系统会自动合并上述通信工具
 - **完成信号**：子 Agent 完成后由系统自动推送，子 Agent **切勿**用 send_message_to_agent 汇报完成，否则重复通知
 - **send_message_to_agent**（子 Agent）：仅用于向父**询问**任务细节、实现要求、澄清歧义；**默认会阻塞等待**父侧 `reply_to_message`，仅单向通知时须显式 `require_reply=false`
+- **权限审批走父会话 Broker**：子 Agent 不应直接 `request_permission`；遇到权限不足时，必须先 `send_message_to_agent(require_reply=true)` 向父会话提交审批请求，由父会话统一决定是否调用 `request_permission` 并回传执行指令
 - **get** 与 **reap** 分工：`get_subagent_status` 只读；`reap_subagent` 才是 `waitpid/reap`（回收 zombie、删子工作区）
 - `**reap` 是父侧义务**：每个子任务在结束前都应 reap；未完成则勿 reap（会失败）。
-- `**cancel_subagent` 不删盘**：被取消的子任务终态仍为 `cancelled`，**仍须**按需 `reap_subagent` 释放目录（与完成/失败分支一致）
+- `**cancel_subagent` 不删盘**：被取消的子任务终态仍为 `cancelled`，**仍须**按需 `reap_subagent` 释放隔离工作区目录（legacy 或 Linux home，规则与完成/失败分支一致）
 
 ### 消息来源区分（重要）
 
@@ -144,5 +145,5 @@ reply_to_message(correlation_id="msg-001", sender_session_id="cli:root", content
 
 - 通知中的「结果预览」只是前 200 字符，**不是完整输出**
 - 若需要完整输出才能继续，必须主动调用 `get_subagent_status(include_full_result=True)` 只读拉取
-- 收割（删 zombie PCB、删 `data/workspace/subagent/<id>/` 等）**必须**通过 `reap_subagent` 完成，与只读 `get` 分开
+- 收割（删 zombie PCB、删对应隔离工作区：legacy `data/workspace/subagent/<id>/` 或 Linux home 子目录）**必须**通过 `reap_subagent` 完成，与只读 `get` 分开
 - 若预览已足够、无需 `get` 全文，**仍须在收尾时对对应 `subagent_id` 调用 `reap_subagent`**（除非你还在使用该子工作区内的文件）

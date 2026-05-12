@@ -334,6 +334,8 @@ class CoreSessionAdapter:
             return CoreEvent(name="llm_request", payload=event)
         if event_type in {"tool_call", "tool_result"}:
             return CoreEvent(name=event_type, payload=event)
+        if event_type == "chat_history_summarized":
+            return CoreEvent(name="chat_history_summarized", payload=event)
         return None
 
     async def _emit_event(self, hooks: AgentHooks, event: CoreEvent) -> None:

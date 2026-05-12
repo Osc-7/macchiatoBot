@@ -18,6 +18,7 @@ AgentKernel — 纯 IO 调度器（工具执行 + 生命周期管理）。
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
@@ -42,6 +43,17 @@ if TYPE_CHECKING:
     from system.tools import VersionedToolRegistry
 
 logger = logging.getLogger(__name__)
+
+
+async def _emit_trace_hooks(
+    hooks: Optional[AgentHooks], event: Dict[str, Any]
+) -> None:
+    """与 AgentCore._emit_trace 一致：触发 on_trace_event（支持 sync/async）。"""
+    if hooks is None or hooks.on_trace_event is None:
+        return
+    maybe = hooks.on_trace_event(event)
+    if inspect.isawaitable(maybe):
+        await maybe
 
 
 class AgentKernel:
@@ -173,6 +185,23 @@ class AgentKernel:
                 else:
                     # 注入执行上下文：让 bash / file_tools 等能感知当前 CoreProfile。
                     profile_mode = getattr(profile, "mode", "full") if profile is not None else "full"
+                    source = getattr(agent, "_source", "")
+                    user_id = getattr(agent, "_user_id", "")
+                    bash_workspace_admin = bool(
+                        getattr(profile, "bash_workspace_admin", False)
+                    )
+                    cfg = getattr(agent, "_config", None)
+                    if cfg is not None:
+                        from agent_core.agent.workspace_paths import (
+                            is_bash_workspace_admin,
+                        )
+
+                        bash_workspace_admin = is_bash_workspace_admin(
+                            cfg.command_tools,
+                            source,
+                            user_id,
+                            profile,
+                        )
                     _ctx = {
                         "profile_mode": profile_mode,
                         "tool_template": getattr(profile, "tool_template", "default")
@@ -183,14 +212,11 @@ class AgentKernel:
                         )
                         if profile is not None
                         else False,
-                        "bash_workspace_admin": bool(
-                            getattr(profile, "bash_workspace_admin", False)
-                        )
-                        if profile is not None
-                        else False,
-                        "source": getattr(agent, "_source", ""),
-                        "user_id": getattr(agent, "_user_id", ""),
+                        "bash_workspace_admin": bash_workspace_admin,
+                        "source": source,
+                        "user_id": user_id,
                         "session_id": getattr(agent, "_session_id", ""),
+                        "parent_session_id": getattr(agent, "_parent_session_id", ""),
                     }
                     _jmo = getattr(agent, "_job_memory_owner", None)
                     if _jmo:
@@ -201,7 +227,6 @@ class AgentKernel:
                             if _v is not None and str(_v).strip():
                                 _ctx[_k] = str(_v).strip()
                     parsed_args["__execution_context__"] = _ctx
-                    cfg = getattr(agent, "_config", None)
                     if cfg is not None:
                         parsed_args = apply_workspace_path_resolution_to_tool_args(
                             action.tool_name, parsed_args, cfg
@@ -230,6 +255,21 @@ class AgentKernel:
                 from agent_core.kernel_interface import ContextCompressedEvent
 
                 compressed_summary, messages_kept = await self.compress_context(agent)
+                await _emit_trace_hooks(
+                    hooks,
+                    {
+                        "type": "chat_history_summarized",
+                        "message": "Chat History Summarized.",
+                        "session_id": getattr(agent, "_session_id", "")
+                        or action.session_id,
+                        "messages_kept": messages_kept,
+                        "current_tokens": action.current_tokens,
+                        "threshold_tokens": action.threshold_tokens,
+                        "had_summary": bool(
+                            (compressed_summary or "").strip()
+                        ),
+                    },
+                )
                 action = await gen.asend(
                     ContextCompressedEvent(
                         compressed_summary=compressed_summary,

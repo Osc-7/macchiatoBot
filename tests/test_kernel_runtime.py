@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -609,6 +610,57 @@ async def test_kernel_run_no_metadata_when_no_tools_executed() -> None:
     result = await kernel.run(agent, turn_id=1)
     assert result.output_text == "仅文本"
     assert result.metadata == {}
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_after_compress_emits_chat_history_summarized_trace() -> None:
+    """上下文触顶压缩后应通过 on_trace_event 通知各前端（IPC trace / 飞书 / CLI）。"""
+    from agent_core.interfaces import AgentHooks
+    from agent_core.kernel_interface import (
+        ContextCompressedEvent,
+        ContextOverflowAction,
+        ReturnAction,
+    )
+
+    traces: list[dict[str, Any]] = []
+
+    async def on_trace(evt: dict[str, Any]) -> None:
+        traces.append(dict(evt))
+
+    class _OverflowAgent:
+        _session_id = "cli:test-overflow"
+
+        async def run_loop(self, turn_id: int = 0, hooks=None):
+            received = yield ContextOverflowAction(
+                current_tokens=900_000,
+                threshold_tokens=800_000,
+                session_id=self._session_id,
+            )
+            assert isinstance(received, ContextCompressedEvent)
+            yield ReturnAction(message="done")
+
+    registry = VersionedToolRegistry()
+    kernel = AgentKernel(tool_registry=registry)
+    hooks = AgentHooks(on_trace_event=on_trace)
+
+    with patch.object(
+        AgentKernel,
+        "compress_context",
+        new_callable=AsyncMock,
+        return_value=("folded summary text", 5),
+    ):
+        result = await kernel.run(_OverflowAgent(), turn_id=2, hooks=hooks)
+
+    assert result.output_text == "done"
+    summarized = [t for t in traces if t.get("type") == "chat_history_summarized"]
+    assert len(summarized) == 1
+    ev = summarized[0]
+    assert ev["message"] == "Chat History Summarized."
+    assert ev["messages_kept"] == 5
+    assert ev["current_tokens"] == 900_000
+    assert ev["threshold_tokens"] == 800_000
+    assert ev["had_summary"] is True
+    assert ev["session_id"] == "cli:test-overflow"
 
 
 def test_kernel_task_exception_detail_preserves_message() -> None:

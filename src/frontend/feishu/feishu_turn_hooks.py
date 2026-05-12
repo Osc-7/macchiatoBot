@@ -435,6 +435,14 @@ class FeishuTurnHooksController:
                 await self._end_assistant_segment_before_tools()
             return
 
+        if evt_type == "chat_history_summarized":
+            note = str(evt.get("message") or "").strip() or "Chat History Summarized."
+            try:
+                await fc.send_text_message(chat_id=chat_id, text=note)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("feishu chat_history_summarized notify failed: %s", exc)
+            return
+
     async def finalize_after_run(self, result: AgentRunResult) -> AgentRunResult:
         """关闭流式壳或 PATCH 终态，并设置 feishu_skip_final_reply 供 poll_push 跳过重复发送。"""
         await self._cancel_assistant_debounce()

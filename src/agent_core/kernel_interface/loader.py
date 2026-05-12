@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any, Dict, List
 if TYPE_CHECKING:
     from agent_core.agent.agent import AgentCore
 
+from agent_core.context.conversation import repair_incomplete_assistant_tool_call_sequence
+
 
 def _strip_orphan_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
@@ -68,6 +70,8 @@ class InternalLoader:
         每次 LLM 调用前调用，确保 Prompt/Context/Tools 都是最新状态。
         若 agent._core_profile 不为 None，则对工具列表进行用户态过滤（双重防御的第一层）。
         """
+        # 与 prepare_turn / _finalize_turn 一致：打断后可能残留「有 tool_calls 无 tool」
+        repair_incomplete_assistant_tool_call_sequence(agent._context.messages)
         system_prompt = agent._build_system_prompt()
         messages = list(agent._context.get_messages())
         messages = _strip_orphan_tool_messages(messages)

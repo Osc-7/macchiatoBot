@@ -53,6 +53,7 @@ def _format_token_usage(u: Dict[str, Any]) -> str:
 def _help_text() -> str:
     return """可用指令：
 /clear - 清空对话历史
+/interrupt 或 /cancel 或 /stop - 中断当前正在执行的内核任务（等同 CLI 中 Ctrl+C 正在处理时）
 /compress [N] - 主动折叠上下文为摘要（可选 N 指定保留最近几轮）
 /usage 或 /stats - 本会话 token 用量
 /model 或 /model list - 列出可用 LLM（★ 为当前主对话）
@@ -222,6 +223,25 @@ async def try_handle_slash_command(
     if cmd_lower == "clear":
         await client.clear_context()
         return True, "对话历史已清空。"
+
+    # /interrupt | /cancel | /stop — 对齐 CLI 在处理中按 Ctrl+C：取消内核 inflight，不销毁会话
+    if cmd_lower in ("interrupt", "cancel", "stop"):
+        sid = str(getattr(client, "active_session_id", "") or "").strip()
+        if not sid:
+            return True, "无法解析当前会话 ID，请先发一条普通消息再试。"
+        try:
+            cancelled = await client.terminal_cancel(sid)
+        except Exception as exc:
+            return True, f"中断失败: {exc}"
+        if cancelled:
+            return (
+                True,
+                "Chat session interrupted.",
+            )
+        return (
+            True,
+            "No active chat session.",
+        )
 
     # /compress [N]
     if cmd_lower == "compress":

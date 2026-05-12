@@ -8,6 +8,76 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+_SYNTH_INTERRUPTED_TOOL = "（该工具调用被中断或未在当轮执行完毕，无有效输出。）"
+
+
+def _tool_call_ids_from_assistant_message(msg: Dict[str, Any]) -> List[str]:
+    """OpenAI-format assistant.tool_calls -> stable list of string ids."""
+    raw = msg.get("tool_calls")
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    for tc in raw:
+        if isinstance(tc, dict):
+            tid = tc.get("id")
+            if tid is not None and str(tid).strip():
+                out.append(str(tid).strip())
+    return out
+
+
+def repair_incomplete_assistant_tool_call_sequence(
+    messages: List[Dict[str, Any]],
+) -> int:
+    """
+    就地修复：紧跟在带 ``tool_calls`` 的 assistant 之后，为每个尚未回应的
+    ``tool_call_id`` 插入一条合成 ``role=tool`` 消息。
+
+    典型场景：内核任务被 ``terminal_cancel`` / IPC 断开 / 异常打断，assistant
+    已写入上下文但工具结果未全部落库；下一轮 LLM 会 400（如 DeepSeek
+    ``insufficient tool messages following tool_calls``）。
+
+    Returns:
+        插入的合成 tool 消息条数。
+    """
+    inserted = 0
+    i = 0
+    n = len(messages)
+    while i < n:
+        msg = messages[i]
+        if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+            i += 1
+            continue
+        required = _tool_call_ids_from_assistant_message(msg)
+        if not required:
+            i += 1
+            continue
+        j = i + 1
+        found: set[str] = set()
+        while j < n and messages[j].get("role") == "tool":
+            tid = messages[j].get("tool_call_id")
+            if tid is not None and str(tid).strip():
+                found.add(str(tid).strip())
+            j += 1
+        missing = [tid for tid in required if tid not in found]
+        if missing:
+            insert_pos = j
+            for tid in missing:
+                messages.insert(
+                    insert_pos,
+                    {
+                        "role": "tool",
+                        "tool_call_id": tid,
+                        "content": _SYNTH_INTERRUPTED_TOOL,
+                    },
+                )
+                insert_pos += 1
+                inserted += 1
+                n += 1
+            i = insert_pos
+        else:
+            i = j
+    return inserted
+
 
 @dataclass
 class ConversationContext:
@@ -122,6 +192,10 @@ class ConversationContext:
     def clear(self) -> None:
         """清空消息历史"""
         self.messages.clear()
+
+    def repair_dangling_assistant_tool_calls(self) -> int:
+        """见 `repair_incomplete_assistant_tool_call_sequence`；就地修改 ``messages``。"""
+        return repair_incomplete_assistant_tool_call_sequence(self.messages)
 
     def _add_message(self, message: Dict[str, Any]) -> None:
         self.messages.append(message)

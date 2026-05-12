@@ -1,5 +1,6 @@
 """Tests for InternalLoader message assembly."""
 
+from agent_core.context.conversation import repair_incomplete_assistant_tool_call_sequence
 from agent_core.kernel_interface.loader import _strip_orphan_tool_messages
 
 
@@ -36,3 +37,22 @@ def test_strip_orphan_skips_tool_after_user_between_results():
     ]
     out = _strip_orphan_tool_messages(msgs)
     assert [m.get("role") for m in out] == ["assistant", "tool", "user"]
+
+
+def test_repair_then_strip_handles_interrupt_mid_parallel_tools():
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "a", "type": "function", "function": {"name": "x", "arguments": "{}"}},
+                {"id": "b", "type": "function", "function": {"name": "x", "arguments": "{}"}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "a", "content": "{}"},
+    ]
+    repair_incomplete_assistant_tool_call_sequence(msgs)
+    out = _strip_orphan_tool_messages(msgs)
+    assert [m.get("role") for m in out] == ["user", "assistant", "tool", "tool"]
+    assert out[-1].get("tool_call_id") == "b"

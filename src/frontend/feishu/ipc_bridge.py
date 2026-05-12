@@ -20,7 +20,7 @@ from .slash_commands import try_handle_slash_command
 Automation IPC Bridge for Feishu.
 
 封装 AutomationIPCClient，提供面向飞书前端的简单消息发送接口。
-支持斜杠指令（/clear、/usage、/session、/help）与 CLI 对齐。
+支持斜杠指令（/clear、/interrupt、/usage、/session、/help）与 CLI 对齐。
 
 FeishuPushForwarder：后台轮询 [out] 队列，将 inject_turn 等推送结果发回飞书。
 """

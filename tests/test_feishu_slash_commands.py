@@ -16,6 +16,7 @@ from frontend.feishu.slash_commands import (
 def test_help_text():
     h = _help_text()
     assert "/clear" in h
+    assert "/interrupt" in h
     assert "/compress" in h
     assert "/usage" in h
     assert "/model" in h
@@ -80,6 +81,27 @@ async def test_try_handle_slash_command_clear():
     assert handled is True
     assert "清空" in (reply or "")
     client.clear_context.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_interrupt():
+    client = MagicMock()
+    client.active_session_id = "feishu:ou_test"
+    client.terminal_cancel = AsyncMock(return_value=True)
+    handled, reply = await try_handle_slash_command(client, "/interrupt")
+    assert handled is True
+    assert "Chat session interrupted." in (reply or "")
+    client.terminal_cancel.assert_awaited_once_with("feishu:ou_test")
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_cancel_idle():
+    client = MagicMock()
+    client.active_session_id = "feishu:ou_x"
+    client.terminal_cancel = AsyncMock(return_value=False)
+    handled, reply = await try_handle_slash_command(client, "/cancel")
+    assert handled is True
+    assert "No active chat session." in (reply or "")
 
 
 @pytest.mark.asyncio

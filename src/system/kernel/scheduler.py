@@ -35,6 +35,39 @@ logger = logging.getLogger(__name__)
 
 _IN_QUEUE_WARN_THRESHOLD = 500
 
+# 调度器兜底捕获：部分异常（如某些 ReadTimeout）str(exc) 为空，需拼装可读说明
+_KERNEL_TASK_ERR_HINTS: dict[str, str] = {
+    "ReadTimeout": "多为等待远端 HTTP 响应超时（如 LLM/API 较慢），可重试或调大 read timeout。",
+    "ConnectTimeout": "连接远端超时，请检查网络与代理。",
+    "WriteTimeout": "发送请求超时，可检查上行网络。",
+    "PoolTimeout": "连接池耗尽或获取连接超时。",
+}
+
+
+def _kernel_task_exception_detail(exc: BaseException) -> str:
+    """生成写入用户端/会话日志的异常说明，避免 str(exc) 为空时无处可查。"""
+    text = (str(exc) or "").strip()
+    if not text:
+        args = getattr(exc, "args", ()) or ()
+        arg_bits = [str(a) for a in args if str(a).strip()]
+        if arg_bits:
+            text = f"{type(exc).__name__}: {', '.join(arg_bits)}"
+        else:
+            text = type(exc).__name__
+
+    req = getattr(exc, "request", None)
+    if req is not None:
+        url = getattr(req, "url", None)
+        if url:
+            method = (getattr(req, "method", None) or "HTTP").upper()
+            text = f"{text}（{method} {url}）"
+
+    hint = _KERNEL_TASK_ERR_HINTS.get(type(exc).__name__, "")
+    if hint:
+        text = f"{text} {hint}"
+    return text
+
+
 # 子任务完成/失败通知：CorePool._inject_to_parent 使用此前端标签（与 P2P 的 agent_msg 区分）
 _SUBAGENT_LIFECYCLE_FRONTEND_ID = "subagent"
 
@@ -551,6 +584,13 @@ class KernelScheduler:
                     task_set.discard(t)
                     if not task_set:
                         self._session_active_tasks.pop(sid, None)
+                        # 仅「跳过派发」类任务不会走 _run_and_route 的 inflight finally；
+                        # 在全部路由任务结束后清除 cancel 标记，避免会话永久拒收新请求。
+                        if (
+                            sid in self._cancelled_sessions
+                            and self.session_inflight_request_count(sid) == 0
+                        ):
+                            self.clear_cancelled(sid)
 
             task.add_done_callback(_cleanup)
             # task_done() 使 queue.join() 能正确追踪完成状态
@@ -717,6 +757,12 @@ class KernelScheduler:
                     fcid = str(request.metadata.get("feishu_chat_id") or "").strip()
                     if fcid:
                         entry.feishu_chat_id = fcid
+                if entry is not None:
+                    setattr(
+                        agent,
+                        "_parent_session_id",
+                        str(getattr(entry, "parent_session_id", "") or "").strip(),
+                    )
                 core_logger = getattr(entry, "logger", None) if entry is not None else None
                 if core_logger is not None and agent._session_logger is None:
                     agent._session_logger = core_logger  # type: ignore[assignment]
@@ -810,6 +856,7 @@ class KernelScheduler:
                 )
                 raise
             except Exception as exc:
+                err_detail = _kernel_task_exception_detail(exc)
                 # 异常时也写 checkpoint，保证 daemon 重启后可从未完成状态恢复
                 if agent is not None:
                     try:
@@ -821,11 +868,14 @@ class KernelScheduler:
                 core_logger = getattr(entry, "logger", None) if entry is not None else None
                 if core_logger is not None:
                     try:
-                        err_output = f"[后台任务处理出错] {exc}"
+                        err_output = f"[后台任务处理出错] {err_detail}"
                         core_logger.on_turn_end(
                             turn_id,
                             output_text=err_output,
-                            metadata={"error": str(exc), "error_type": type(exc).__name__},
+                            metadata={
+                                "error": err_detail,
+                                "error_type": type(exc).__name__,
+                            },
                             request_id=request.request_id,
                         )
                     except Exception:
@@ -842,8 +892,8 @@ class KernelScheduler:
                     await self._out_bus.publish_error(request.request_id, exc)
                 else:
                     err_result = AgentRunResult(
-                        output_text=f"[后台任务处理出错] {exc}",
-                        metadata={"_push_error": str(exc)},
+                        output_text=f"[后台任务处理出错] {err_detail}",
+                        metadata={"_push_error": err_detail},
                     )
                     await self._out_bus.publish(session_id, request.request_id, err_result)
             finally:
@@ -863,6 +913,8 @@ class KernelScheduler:
                             session_id,
                             exc,
                         )
+                    # 一轮内核路由完全结束后允许该 session 再次入队（与 terminal_cancel 配对）
+                    self.clear_cancelled(session_id)
 
     def session_inflight_request_count(self, session_id: str) -> int:
         """已为该 session 派发且尚未在 finally 中结案的 _run_and_route 数量（可能含等 session 锁的任务）。"""

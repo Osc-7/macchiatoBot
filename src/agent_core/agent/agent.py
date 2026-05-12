@@ -938,6 +938,7 @@ class AgentCore:
         不再在 prepare_turn 阶段启动并行总结任务。
         """
         await self._sync_external_session_updates()
+        self._context.repair_dangling_assistant_tool_calls()
         self._current_turn_id += 1
         turn_id = self._current_turn_id
 
@@ -1589,6 +1590,7 @@ class AgentCore:
         检查点存 last_active_at（本 turn 结束时间）；是否过期由 kernel 下次启动时
         用「kernel 关闭时间戳 - last_active_at」计算 elapsed 判断。
         """
+        self._context.repair_dangling_assistant_tool_calls()
         # 每轮结束后写入检查点（last_active_at = now）；过期判断在 kernel 启动时用关闭时间戳计算
         if self._checkpoint_manager is not None:
             try:

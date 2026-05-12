@@ -13,7 +13,6 @@ from agent_core.bash_user_env import render_terminal_like_bootstrap_bash
 from agent_core.config import CommandToolsConfig
 from agent_core.bash_os_user import (
     logic_os_user_name,
-    resolve_admin_system_user,
     resolve_os_user_home,
     should_use_os_home_for_logic_user,
 )
@@ -30,7 +29,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_TMP_BASE_DIR = Path("/tmp/macchiato")
+
+def tmp_macchiato_base_dir() -> Path:
+    """飞书/CLI 等使用的共享临时根目录；测试可通过 ``MACCHIATO_TMP_BASE`` 覆写。"""
+    raw = (os.environ.get("MACCHIATO_TMP_BASE") or "").strip()
+    return Path(raw) if raw else Path("/tmp/macchiato")
 
 # workspace_paths.py -> agent/ -> agent_core/ -> src/ -> 仓库根
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -176,10 +179,6 @@ def resolve_workspace_owner_dir(
     """返回 {workspace_base_dir}/{frontend}/{user_id}/ 目录路径字符串。"""
     fe = validate_logic_namespace_segment(_ns_segment(source, "cli"), what="frontend")
     uid = validate_logic_namespace_segment(_ns_segment(user_id, "root"), what="user_id")
-    if is_bash_workspace_admin(cmd_cfg, fe, uid, profile):
-        admin_user = resolve_admin_system_user(cmd_cfg, source=fe, user_id=uid)
-        if admin_user:
-            return str(resolve_os_user_home(cmd_cfg, admin_user))
     if should_use_os_home_for_logic_user(cmd_cfg, source=fe, user_id=uid, profile=None):
         posix_name = logic_os_user_name(
             fe,
@@ -200,7 +199,7 @@ def resolve_workspace_tmp_dir(
     """返回 /tmp/macchiato/{frontend}/{user_id}/ 目录路径字符串。"""
     fe = validate_logic_namespace_segment(_ns_segment(source, "cli"), what="frontend")
     uid = validate_logic_namespace_segment(_ns_segment(user_id, "root"), what="user_id")
-    return str(_TMP_BASE_DIR / fe / uid)
+    return str(tmp_macchiato_base_dir() / fe / uid)
 
 
 def ensure_workspace_owner_layout(
@@ -222,7 +221,7 @@ def ensure_workspace_owner_layout(
     owner = Path(
         resolve_workspace_owner_dir(cmd_cfg, uid, source=fe, profile=profile)
     ).resolve()
-    tmp_dir = _TMP_BASE_DIR / fe / uid
+    tmp_dir = tmp_macchiato_base_dir() / fe / uid
     created_paths: List[str] = []
     for path_obj, label in ((owner, "工作区路径"), (tmp_dir, "临时目录路径")):
         if path_obj.exists():
@@ -563,7 +562,8 @@ def remove_subagent_workspace_trees(
     """
     删除 subagent 在隔离工作区下的目录（与 Bash 初始 cwd / ensure_workspace_owner_layout 一致）。
 
-    - ``{workspace_base_dir}/subagent/{subagent_id}/``
+    - legacy: ``{workspace_base_dir}/subagent/{subagent_id}/``
+    - os-home: ``{bash_os_user_home_base_dir}/{logic_user}/``（启用 Linux 用户隔离时）
     - ``/tmp/macchiato/subagent/{subagent_id}/``
 
     路径经 ``relative_to`` 校验，防止误删；目录不存在则跳过。
@@ -588,20 +588,37 @@ def remove_subagent_workspace_trees(
     base_data = Path((cmd_cfg.workspace_base_dir or "./data/workspace").strip()).resolve() / "subagent"
     owner_str = resolve_workspace_owner_dir(cmd_cfg, uid, source="subagent")
     owner_p = Path(owner_str).resolve()
+
+    owner_safe = False
     try:
         owner_p.relative_to(base_data)
+        owner_safe = True
     except ValueError:
+        owner_safe = False
+
+    if not owner_safe and should_use_os_home_for_logic_user(
+        cmd_cfg, source="subagent", user_id=uid, profile=None
+    ):
+        posix_name = logic_os_user_name(
+            "subagent",
+            uid,
+            prefix=str(getattr(cmd_cfg, "bash_os_tenant_user_prefix", "m_")),
+        )
+        expected_home = resolve_os_user_home(cmd_cfg, posix_name).resolve()
+        # os-home 模式下 owner 应该精确落在该 logic 用户 home，避免误删其他目录。
+        owner_safe = owner_p == expected_home
+
+    if not owner_safe:
         logger.warning(
-            "remove_subagent_workspace_trees: refused path outside subagent workspace base owner=%s base=%s",
+            "remove_subagent_workspace_trees: refused unexpected owner path owner=%s base=%s",
             owner_p,
             base_data,
         )
-        return
-    if owner_p.is_dir():
+    elif owner_p.is_dir():
         shutil.rmtree(owner_p)
         logger.info("removed subagent workspace dir %s", owner_p)
 
-    tmp_base = _TMP_BASE_DIR.resolve() / "subagent"
+    tmp_base = tmp_macchiato_base_dir().resolve() / "subagent"
     tmp_str = resolve_workspace_tmp_dir(cmd_cfg, uid, source="subagent")
     tmp_p = Path(tmp_str).resolve()
     try:
@@ -612,7 +629,7 @@ def remove_subagent_workspace_trees(
             tmp_p,
             tmp_base,
         )
-        return
-    if tmp_p.is_dir():
-        shutil.rmtree(tmp_p)
-        logger.info("removed subagent tmp workspace dir %s", tmp_p)
+    else:
+        if tmp_p.is_dir():
+            shutil.rmtree(tmp_p)
+            logger.info("removed subagent tmp workspace dir %s", tmp_p)

@@ -1,8 +1,8 @@
 """
-Bash 会话以 Linux 系统用户（runuser）运行：租户 / 管理员与 config 对齐。
+Bash 会话以 Linux 系统用户（runuser）运行：每个逻辑用户对应一个稳定 Linux 用户。
 
-- 租户：稳定可读 POSIX 名（过长时用短 hash 保证唯一与长度上限）。
-- 管理员：由 ``bash_os_admin_system_users`` 将 memory_owner（如 cli:root）映射到已有系统账号。
+管理员能力是该逻辑 Linux 用户上的权限（sudoers / sudo group），而不是切换到另一个
+共享管理员账号；这样同一个 Core 的 HOME、技能目录、文件工具与 bash 用户保持一致。
 """
 
 from __future__ import annotations
@@ -237,16 +237,8 @@ def should_use_os_home_for_logic_user(
     user_id: str,
     profile: Optional[Any] = None,
 ) -> bool:
-    """
-    租户是否以 Linux home 作为 canonical workspace/memory 根。
-
-    管理员 Core 不走租户 home 逻辑，改由显式映射的管理员系统用户 home 承载。
-    """
-    if not getattr(cmd_cfg, "bash_os_user_enabled", False):
-        return False
-    from agent_core.agent.workspace_paths import is_bash_workspace_admin
-
-    return not is_bash_workspace_admin(cmd_cfg, source, user_id, profile)
+    """启用 Linux 用户隔离时，逻辑用户的 Linux home 即 canonical workspace/memory 根。"""
+    return bool(getattr(cmd_cfg, "bash_os_user_enabled", False))
 
 
 def _user_in_group(username: str, group_name: str) -> bool:
@@ -296,8 +288,24 @@ def _remove_admin_sudoers_dropin(cmd_cfg: "CommandToolsConfig", username: str) -
         )
 
 
+def _admin_logic_usernames(cmd_cfg: "CommandToolsConfig") -> Dict[str, str]:
+    """Return workspace-admin memory owners mapped to their own logic Linux usernames."""
+    out: Dict[str, str] = {}
+    prefix = str(getattr(cmd_cfg, "bash_os_tenant_user_prefix", "m_"))
+    for owner in getattr(cmd_cfg, "workspace_admin_memory_owners", []) or []:
+        key = (owner or "").strip()
+        if not key or ":" not in key:
+            continue
+        source, user_id = key.split(":", 1)
+        try:
+            out[key] = logic_os_user_name(source, user_id, prefix=prefix)
+        except Exception as exc:
+            logger.warning("invalid workspace admin owner %s: %s", key, exc)
+    return out
+
+
 def reconcile_admin_sudo_group(cmd_cfg: "CommandToolsConfig") -> None:
-    """root daemon 启动时按管理员映射对账 sudo group 成员。"""
+    """root daemon 启动时按管理员逻辑用户对账 sudo group 成员。"""
     if not getattr(cmd_cfg, "bash_os_user_enabled", False):
         return
     if not getattr(cmd_cfg, "bash_os_admin_manage_sudo_group", True):
@@ -312,20 +320,16 @@ def reconcile_admin_sudo_group(cmd_cfg: "CommandToolsConfig") -> None:
     if not group_name:
         return
 
-    managed = {
-        owner.strip(): user.strip()
-        for owner, user in (getattr(cmd_cfg, "bash_os_admin_system_users", {}) or {}).items()
-        if owner and owner.strip() and user and user.strip()
-    }
-    desired_admins = {
-        owner.strip()
-        for owner in (getattr(cmd_cfg, "workspace_admin_memory_owners", []) or [])
-        if owner and owner.strip()
+    desired_usernames = set(_admin_logic_usernames(cmd_cfg).values())
+    legacy_usernames = {
+        user.strip()
+        for user in (getattr(cmd_cfg, "bash_os_admin_system_users", {}) or {}).values()
+        if user and user.strip()
     }
 
-    for owner, username in managed.items():
+    for username in sorted(desired_usernames):
         in_group = _user_in_group(username, group_name)
-        if owner in desired_admins and not in_group:
+        if not in_group:
             proc = subprocess.run(
                 ["usermod", "-aG", group_name, username],
                 capture_output=True,
@@ -340,7 +344,9 @@ def reconcile_admin_sudo_group(cmd_cfg: "CommandToolsConfig") -> None:
                     group_name,
                     err,
                 )
-        if owner not in desired_admins and in_group:
+
+    for username in sorted(legacy_usernames - desired_usernames):
+        if _user_in_group(username, group_name):
             proc = subprocess.run(
                 ["gpasswd", "-d", username, group_name],
                 capture_output=True,
@@ -358,47 +364,50 @@ def reconcile_admin_sudo_group(cmd_cfg: "CommandToolsConfig") -> None:
 
 
 def reconcile_admin_linux_users(cmd_cfg: "CommandToolsConfig") -> None:
-    """root daemon 启动时统一对账管理员用户的 home / sudo group / sudoers drop-in。"""
+    """root daemon 启动时统一对账管理员逻辑用户的 home / sudo group / sudoers drop-in。"""
     if not getattr(cmd_cfg, "bash_os_user_enabled", False):
         return
     if os.geteuid() != 0:
         logger.debug("skip reconcile_admin_linux_users: not running as root")
         return
 
-    managed = {
-        owner.strip(): user.strip()
-        for owner, user in (getattr(cmd_cfg, "bash_os_admin_system_users", {}) or {}).items()
-        if owner and owner.strip() and user and user.strip()
-    }
-    desired_admins = {
-        owner.strip()
-        for owner in (getattr(cmd_cfg, "workspace_admin_memory_owners", []) or [])
-        if owner and owner.strip()
-    }
+    desired_usernames = set(_admin_logic_usernames(cmd_cfg).values())
 
-    for owner, username in managed.items():
-        if owner in desired_admins:
+    for username in sorted(desired_usernames):
+        try:
+            home = resolve_os_user_home(cmd_cfg, username)
+            if getattr(cmd_cfg, "bash_os_auto_provision_users", True):
+                provision_system_user(
+                    username,
+                    system=True,
+                    comment="macchiato bash admin",
+                    home_dir=home,
+                )
+            _ensure_admin_home_owned(cmd_cfg, username)
+        except Exception as exc:
+            logger.warning(
+                "reconcile_admin_linux_users: failed to ensure admin logic user %s: %s",
+                username,
+                exc,
+            )
+
+        if getattr(cmd_cfg, "bash_os_admin_manage_sudo_nopasswd", True):
             try:
-                _ensure_admin_home_owned(cmd_cfg, username)
+                _write_admin_sudoers_dropin(cmd_cfg, username)
             except Exception as exc:
                 logger.warning(
-                    "reconcile_admin_linux_users: failed to fix home ownership for %s: %s",
+                    "reconcile_admin_linux_users: failed to write sudoers drop-in for %s: %s",
                     username,
                     exc,
                 )
 
-            if getattr(cmd_cfg, "bash_os_admin_manage_sudo_nopasswd", True):
-                try:
-                    _write_admin_sudoers_dropin(cmd_cfg, username)
-                except Exception as exc:
-                    logger.warning(
-                        "reconcile_admin_linux_users: failed to write sudoers drop-in for %s: %s",
-                        username,
-                        exc,
-                    )
-            continue
-
-        if getattr(cmd_cfg, "bash_os_admin_manage_sudo_nopasswd", True):
+    if getattr(cmd_cfg, "bash_os_admin_manage_sudo_nopasswd", True):
+        legacy_usernames = {
+            user.strip()
+            for user in (getattr(cmd_cfg, "bash_os_admin_system_users", {}) or {}).values()
+            if user and user.strip()
+        }
+        for username in sorted(legacy_usernames - desired_usernames):
             _remove_admin_sudoers_dropin(cmd_cfg, username)
 
     reconcile_admin_sudo_group(cmd_cfg)
@@ -429,18 +438,7 @@ def resolve_bash_run_as_user(
         return None, "runuser_missing"
 
     admin = is_bash_workspace_admin(cmd_cfg, source, user_id, profile)
-    if admin:
-        name = resolve_admin_system_user(cmd_cfg, source=source, user_id=user_id)
-        if not name:
-            logger.warning(
-                "bash_os_user_enabled: admin Core %s has no bash_os_admin_system_users entry; "
-                "running bash as service UID",
-                memory_owner_key(source, user_id),
-            )
-            return None, "admin_not_mapped"
-        return name, "ok"
-
-    if not ws_restricted:
+    if not ws_restricted and not admin:
         return None, "not_isolated"
 
     prefix = getattr(cmd_cfg, "bash_os_tenant_user_prefix", "m_")

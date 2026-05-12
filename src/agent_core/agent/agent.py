@@ -1755,6 +1755,14 @@ class AgentCore:
         # 注入执行上下文（供 bash/file_tools 等做来源与权限鉴权）
         kwargs = dict(kwargs)
         profile = getattr(self, "_core_profile", None)
+        from agent_core.agent.workspace_paths import is_bash_workspace_admin
+
+        bash_workspace_admin = is_bash_workspace_admin(
+            self._config.command_tools,
+            self._source,
+            self._user_id,
+            profile,
+        )
         kwargs["__execution_context__"] = {
             "profile_mode": getattr(profile, "mode", "full") if profile is not None else "full",
             "tool_template": getattr(profile, "tool_template", "default")
@@ -1765,11 +1773,7 @@ class AgentCore:
             )
             if profile is not None
             else False,
-            "bash_workspace_admin": bool(
-                getattr(profile, "bash_workspace_admin", False)
-            )
-            if profile is not None
-            else False,
+            "bash_workspace_admin": bash_workspace_admin,
             "source": self._source,
             "user_id": self._user_id,
             "session_id": self._session_id,
@@ -1788,13 +1792,18 @@ class AgentCore:
     def _queue_media_for_next_call(self, result: ToolResult) -> None:
         """将工具结果中声明的媒体挂载到下一次 LLM 调用。"""
         prof = getattr(self, "_core_profile", None)
+        from agent_core.agent.workspace_paths import is_bash_workspace_admin
+
         media_ctx = {
             "source": self._source,
             "user_id": self._user_id,
             "session_id": self._session_id,
-            "bash_workspace_admin": bool(getattr(prof, "bash_workspace_admin", False))
-            if prof is not None
-            else False,
+            "bash_workspace_admin": is_bash_workspace_admin(
+                self._config.command_tools,
+                self._source,
+                self._user_id,
+                prof,
+            ),
         }
 
         def _resolver(p: str):
@@ -2247,7 +2256,7 @@ class AgentCore:
             posix_run_as = caps.run_as_user
             os_user_bash = bool(posix_run_as)
             jail_cd = not (os_user_bash and ws_restricted)
-            if os_user_bash and ws_restricted:
+            if os_user_bash and caps.workspace_isolated:
                 if getattr(cmd_cfg, "bash_os_auto_provision_users", True):
                     provision_system_user(
                         posix_run_as,

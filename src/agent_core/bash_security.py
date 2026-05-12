@@ -2,7 +2,7 @@
 BashSecurity -- 命令安全校验模块。
 
 三层校验架构：
-  Layer 1 -- 规则快速路径：受限模式白名单 + shell 运算符禁止
+  Layer 1 -- 规则快速路径：受限模式白名单 + 高危 shell 运算符禁止（子 agent 允许 ``|``/``;``/``&&``/``||`` 链）
   Layer 2 -- 危险模式检测：正则匹配破坏性命令（rm -rf、sudo 等）
   Layer 3 -- 交互审批：危险命令返回 ASK_USER，须经 request_permission 人类批准后方可执行
 
@@ -78,8 +78,12 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\binit\s+[0-6]\b", re.I), "init 运行级别变更"),
 ]
 
-# shell 运算符：受限模式下禁止，全量模式下不阻止
-_SHELL_OPERATORS = ("|", "&", ";", "`", "$(", ">", ">>", "<", "&&", "||")
+# shell 运算符分类：受限模式（sub）下禁止子命令/重定向等；允许 ``|`` / ``;`` / ``&&`` / ``||``
+# 链式组合，便于子 agent 串联白名单内只读命令（仍逐段校验白名单与危险模式）。
+_RESTRICTED_DENIED_SHELL_OPERATORS = ("`", "$(", ">", ">>", "<")
+
+# 禁止 shell job control 的单独 ``&``（``&&`` / ``||`` 不受此条匹配）。
+_RESTRICTED_JOB_CONTROL_AMPERSAND = re.compile(r"(?<![&|])&(?!&)")
 
 # 默认受限模式白名单（从 CommandToolsConfig.subagent_command_whitelist 迁移）
 _DEFAULT_RESTRICTED_WHITELIST = frozenset([
@@ -148,7 +152,7 @@ class BashSecurity:
     命令安全校验器。
 
     根据 CoreProfile.mode 和配置决定校验严格程度：
-    - sub 模式：Layer 1 白名单 + 禁止 shell 运算符（最严格）
+    - sub 模式：白名单 + 禁止子命令/重定向/单独后台 ``&``；允许 ``|`` / ``;`` / ``&&`` / ``||`` 串联白名单命令
     - full/background 模式：Layer 2 危险模式 → Layer 3 审批
     """
 
@@ -430,32 +434,47 @@ class BashSecurity:
     # ── Layer 1 实现 ──────────────────────────────────────────
 
     def _check_restricted(self, command: str) -> SecurityVerdict:
-        """受限模式：白名单 + 禁止 shell 运算符。"""
-        for op in _SHELL_OPERATORS:
+        """受限模式：白名单 + 禁止高危 shell 运算符（子命令、重定向、单独后台 ``&`` 等）。
+
+        允许 ``|`` / ``;`` / ``&&`` / ``||`` 串联命令；各段须落在白名单内，且整体仍过危险模式检测。
+        """
+        for op in _RESTRICTED_DENIED_SHELL_OPERATORS:
             if op in command:
                 return SecurityVerdict(
                     SecurityAction.DENY,
-                    reason=f"受限模式下禁止使用 shell 运算符（如 {op}），仅允许单条非破坏性命令",
+                    reason=f"受限模式下禁止使用 shell 运算符（如 {op}），仅允许白名单只读命令链",
                     error_code="SHELL_OPERATOR_DENIED",
                 )
 
-        parts = command.split()
-        if not parts:
+        if _RESTRICTED_JOB_CONTROL_AMPERSAND.search(command):
+            return SecurityVerdict(
+                SecurityAction.DENY,
+                reason="受限模式下禁止使用后台运行符 &（可使用 && / || 作逻辑链）",
+                error_code="SHELL_OPERATOR_DENIED",
+            )
+
+        segments = self._split_command_segments(command)
+        if not segments:
             return SecurityVerdict(
                 SecurityAction.DENY,
                 reason="命令为空",
                 error_code="EMPTY_COMMAND",
             )
-
-        base_cmd = Path(parts[0]).name.lower()
-        if base_cmd not in self._restricted_whitelist:
-            allowed_preview = ", ".join(sorted(self._restricted_whitelist)[:10])
-            return SecurityVerdict(
-                SecurityAction.DENY,
-                reason=f"受限模式下命令 '{base_cmd}' 不在白名单内。"
-                       f"允许的命令示例: {allowed_preview}",
-                error_code="COMMAND_NOT_WHITELISTED",
-            )
+        for segment in segments:
+            parts = segment.split()
+            if not parts:
+                continue
+            base_cmd = Path(parts[0]).name.lower()
+            if base_cmd not in self._restricted_whitelist:
+                allowed_preview = ", ".join(sorted(self._restricted_whitelist)[:10])
+                return SecurityVerdict(
+                    SecurityAction.DENY,
+                    reason=(
+                        f"受限模式下命令 '{base_cmd}' 不在白名单内。"
+                        f"允许的命令示例: {allowed_preview}"
+                    ),
+                    error_code="COMMAND_NOT_WHITELISTED",
+                )
 
         danger = self._check_dangerous(command)
         if danger is not None:

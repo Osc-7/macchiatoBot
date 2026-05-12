@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
@@ -67,6 +68,7 @@ async def connect_stdio_mcp_with_retries(
 
         attempt_stack: Optional[AsyncExitStack] = None
         try:
+            t_attempt = time.perf_counter()
             merged_env = {**os.environ, **(server.env or {})}
             merged_env["NODE_NO_WARNINGS"] = "1"
             merged_env["NODE_ENV"] = "production"
@@ -91,6 +93,14 @@ async def connect_stdio_mcp_with_retries(
             read_stream, write_stream = await attempt_stack.enter_async_context(
                 stdio_client(server_params, errlog=errlog)
             )
+            t_after_stdio = time.perf_counter()
+            logger.info(
+                "MCP server %s: stdio_client ready in %.2fs (attempt %s/%s)",
+                server.name,
+                t_after_stdio - t_attempt,
+                attempt + 1,
+                max_attempts,
+            )
             session = await attempt_stack.enter_async_context(
                 ClientSession(read_stream, write_stream)
             )
@@ -98,6 +108,13 @@ async def connect_stdio_mcp_with_retries(
             await asyncio.wait_for(
                 session.initialize(),
                 timeout=server.init_timeout_seconds,
+            )
+            logger.info(
+                "MCP server %s: session.initialize() done in %.2fs after stdio "
+                "(%.2fs total this attempt)",
+                server.name,
+                time.perf_counter() - t_after_stdio,
+                time.perf_counter() - t_attempt,
             )
 
             runtime = MCPServerRuntime(config=server, session=session)

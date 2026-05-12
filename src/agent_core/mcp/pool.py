@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -84,15 +85,23 @@ class SharedMCPPool:
                     return None
                 stack, runtime = connected
                 try:
+                    t_list = time.perf_counter()
                     tool_resp = await asyncio.wait_for(
                         runtime.session.list_tools(),
                         timeout=server.init_timeout_seconds,
                     )
-                except Exception as exc:
-                    logger.warning(
-                        "MCP pool list_tools failed for %s (%s): %s",
+                    logger.info(
+                        "MCP pool list_tools done in %.2fs (server=%s, key=%s…)",
+                        time.perf_counter() - t_list,
                         server.name,
                         key[:12],
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "MCP pool list_tools failed for %s (%s) after %.2fs: %s",
+                        server.name,
+                        key[:12],
+                        time.perf_counter() - t_list,
                         exc,
                     )
                     await stack.aclose()

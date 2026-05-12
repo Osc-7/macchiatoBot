@@ -219,15 +219,26 @@ def resolve_os_user_home(
     cmd_cfg: "CommandToolsConfig",
     posix_name: str,
 ) -> Path:
-    """解析 Linux 用户 home；若系统中尚不存在则回退到配置的 home base。"""
+    """解析 Linux 用户 home；并与 ``bash_os_user_home_base_dir`` 对齐。
+
+    若 passwd 中已有该用户但 ``pw_dir`` 不在配置的 home base 之下（例如旧安装留在
+    ``/home/m_*``，而当前配置为测试或数据盘下的 base），则采用
+    ``{bash_os_user_home_base_dir}/{posix_name}``，避免单测与可重复部署偏离预期。
+    """
+    raw_base = (getattr(cmd_cfg, "bash_os_user_home_base_dir", "/home") or "/home").strip()
+    home_base = Path(raw_base).expanduser().resolve()
+    candidate = (home_base / posix_name).resolve()
     try:
-        return Path(pwd.getpwnam(posix_name).pw_dir).resolve()
+        pw_dir = Path(pwd.getpwnam(posix_name).pw_dir).resolve()
     except KeyError:
-        pass
-    home_base = Path(
-        (getattr(cmd_cfg, "bash_os_user_home_base_dir", "/home") or "/home").strip()
-    ).expanduser()
-    return (home_base / posix_name).resolve()
+        return candidate
+    if pw_dir == candidate:
+        return pw_dir
+    try:
+        pw_dir.relative_to(home_base)
+    except ValueError:
+        return candidate
+    return pw_dir
 
 
 def should_use_os_home_for_logic_user(

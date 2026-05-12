@@ -197,8 +197,8 @@ Current branch status:
 - `macchiato-remote` is packaged as an independent CLI entrypoint (WebSocket client;
   install optional extra: `uv tool install ".[remote]"` or `uv sync --extra remote`).
 - The automation daemon exposes a WebSocket gateway (default `0.0.0.0:9380`, overridable
-  via `MACCHIATO_REMOTE_HOST` / `MACCHIATO_REMOTE_PORT`; set `MACCHIATO_REMOTE_TOKEN`
-  for a shared secret sent as `?token=`).
+  via `MACCHIATO_REMOTE_HOST` / `MACCHIATO_REMOTE_PORT`; set `MACCHIATO_REMOTE_TOKENS`
+  for per-login worker tokens, or `MACCHIATO_REMOTE_TOKEN` for a shared fallback).
 - `/remote-use`, `/remote-status`, and `/remote-release` open or release a remote
   workspace over IPC / Feishu; when active, `bash`, `read_file`, `write_file`, and
   `modify_file` are routed to the connected worker.
@@ -237,17 +237,25 @@ LLM keys, or the automation daemon. Those stay on the cloud server.
 Choose a login alias. This is the value used by `/remote-use`; it is intentionally
 not hard-coded to a device name.
 
-Generate a shared secret for the daemon (`MACCHIATO_REMOTE_TOKEN`) and this CLI
-(`--token`); you do not need to invent one by hand:
+On the cloud server, generate a token for this worker from the repository root;
+you do not need to invent one by hand:
 
 ```bash
-macchiato-remote gen-token
-# optional: macchiato-remote gen-token --bytes 48
+uv run macchiato-remote gen-token --login personal
+# optional: uv run macchiato-remote gen-token --login personal --bytes 48
 ```
 
-Use the first line of output on the server as `MACCHIATO_REMOTE_TOKEN`, and pass
-the same value to `login --token`. Point `--server` at your daemon host including
-the WebSocket port (default **9380**, e.g. `http://203.0.113.10:9380` or behind TLS).
+The command registers a sha256 digest for that `login` in the server-side
+`data/automation/remote_worker_tokens.json` registry. The plaintext token is
+shown only as the first output line; pass that value to the local worker's
+`login --token`. For multiple machines, run the command again with a different
+`login`.
+
+`MACCHIATO_REMOTE_TOKENS='personal=<token1>,work-mbp=<token2>'` and
+`MACCHIATO_REMOTE_TOKEN=<token>` still work as environment override/fallbacks,
+but systemd deploys do not need token environment variables in the common case.
+Point `--server` at your daemon host including the WebSocket port (default
+**9380**, e.g. `http://203.0.113.10:9380` or behind TLS).
 
 ```bash
 macchiato-remote login \

@@ -107,7 +107,7 @@ CLI 与飞书都支持一组常用斜杠命令（通过 IPC）：
 当前分支状态：
 
 - 已新增独立的 `macchiato-remote` CLI（WebSocket 客户端；需 `uv sync --extra remote` 或 `uv tool install ".[remote]"` 安装 `websockets`）。
-- 云上 `automation_daemon` 暴露 WebSocket 网关（默认监听 `0.0.0.0:9380`，可用 `MACCHIATO_REMOTE_HOST` / `MACCHIATO_REMOTE_PORT` 覆盖；建议设置 `MACCHIATO_REMOTE_TOKEN`，与 `login --token` 一致）。
+- 云上 `automation_daemon` 暴露 WebSocket 网关（默认监听 `0.0.0.0:9380`，可用 `MACCHIATO_REMOTE_HOST` / `MACCHIATO_REMOTE_PORT` 覆盖；建议设置按机器区分的 `MACCHIATO_REMOTE_TOKENS`，也可用共享兜底 `MACCHIATO_REMOTE_TOKEN`）。
 - 已接入 `/remote-use`、`/remote-status`、`/remote-release`；启用后 `bash`、`read_file`、`write_file`、`modify_file` 路由到已连接的 worker。
 - 当某个 session 启用 remote mode 时，会在 system prompt 末尾追加远程工作区说明。
 
@@ -139,14 +139,20 @@ uv tool install dist/macchiato_bot-*.whl
 
 `login` 是 `/remote-use` 使用的可变登录别名，不需要固定成设备名。你可以使用 `personal`、`work-mbp`、`studio-linux` 等名字。
 
-生成与云上一致的共享密钥（无需自己编长随机串）：
+在云服务器项目根为这台机器生成 token（无需自己编长随机串）：
 
 ```bash
-macchiato-remote gen-token
-# 可选：macchiato-remote gen-token --bytes 48
+uv run macchiato-remote gen-token --login personal
+# 可选：uv run macchiato-remote gen-token --login personal --bytes 48
 ```
 
-将输出的第一行设到云上的 `MACCHIATO_REMOTE_TOKEN`，本机 `login` 时带上相同 `--token`。
+命令会把该 `login` 的 token 摘要注册到云服务器
+`data/automation/remote_worker_tokens.json`，明文 token 只会作为输出第一行显示一次。
+将第一行保存到本机 worker 的 `login --token`。多台机器重复执行不同 `login` 即可。
+
+`MACCHIATO_REMOTE_TOKENS='personal=<token1>,work-mbp=<token2>'` 和
+`MACCHIATO_REMOTE_TOKEN=<token>` 仍可作为环境变量覆盖/兜底，但 systemd deploy 下
+一般不需要再为 token 配环境变量。本机 `login` 时带上匹配的 `--token`。
 
 ```bash
 macchiato-remote login \

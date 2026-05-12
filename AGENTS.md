@@ -41,7 +41,6 @@ source init.sh
 
 1. **确认工作目录**: `pwd` 应该是项目根目录
 2. **查看 git 历史**: `git log --oneline -10`
-3. **读取进度文件**: `cat claude-progress.txt`
 
 ### Step 3: 实现任务
 

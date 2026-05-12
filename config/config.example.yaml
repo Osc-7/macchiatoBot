@@ -144,8 +144,8 @@ command_tools:
   # bash_os_tenant_user_prefix: "m_"
   # bash_os_user_home_base_dir: "/home"
   # bash_os_auto_provision_users: true
-  # bash_os_admin_system_users:
-  #   "cli:root": "macchiato_admin"
+  # workspace_admin_memory_owners grants sudo/admin capability to the same logic Linux user
+  # (for example cli:root -> m_cli_root), not to a shared admin account.
   allow_run_for_subagent: false
   # subagent_command_whitelist: ["ls", "pwd", "cat", "head", "tail", "grep", "find", "echo", "which", "file", "stat", "wc", "date", "whoami", "id", "env", "printenv"]
   workspace_base_dir: "./data/workspace"

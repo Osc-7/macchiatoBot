@@ -3,11 +3,14 @@
 # 用法:
 #   ./deploy/systemd/install.sh /path/to/macchiatoBot [运行用户]
 #   ./deploy/systemd/install.sh /path/to/macchiatoBot ubuntu --with-proxy
-#   ./deploy/systemd/install.sh /path/to/macchiatoBot ubuntu --automation-root
+#   ./deploy/systemd/install.sh /path/to/macchiatoBot ubuntu --with-resource-limits
+#   ./deploy/systemd/install.sh /path/to/macchiatoBot ubuntu --with-needrestart-guard
 #   ./deploy/systemd/install.sh --dry-run /path/to/macchiatoBot ubuntu
 #
-# --with-proxy       同时安装 50-macchiato-proxy.conf（本机 Clash 等 HTTP 代理 + NO_PROXY 直连国内域名）
-# --automation-root  仅 macchiato-automation 以 root 运行（command_tools.bash_os_user_enabled 时使用 runuser/useradd）
+# --with-proxy            同时安装 50-macchiato-proxy.conf（本机 Clash 等 HTTP 代理 + NO_PROXY 直连国内域名）
+# --with-resource-limits  仅为 macchiato-automation 安装 50-macchiato-resource-limits.conf（cgroup 内存/CPU 兜底）
+# --with-needrestart-guard 安装 needrestart 规则，避免 apt hook 自动重启 macchiato-* 服务
+# --automation-root       仅 macchiato-automation 以 root 运行（command_tools.bash_os_user_enabled 时使用 runuser/useradd）
 #
 # 安装前请在项目根执行: uv sync（或 source init.sh），确保 .venv 存在。
 
@@ -16,19 +19,23 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRY_RUN=0
 WITH_PROXY=0
+WITH_RESOURCE_LIMITS=0
+WITH_NEEDRESTART_GUARD=0
 AUTOMATION_ROOT=0
 RAW_ARGS=()
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY_RUN=1 ;;
     --with-proxy) WITH_PROXY=1 ;;
+    --with-resource-limits) WITH_RESOURCE_LIMITS=1 ;;
+    --with-needrestart-guard) WITH_NEEDRESTART_GUARD=1 ;;
     --automation-root) AUTOMATION_ROOT=1 ;;
     *) RAW_ARGS+=("$a") ;;
   esac
 done
 set -- "${RAW_ARGS[@]}"
 
-ROOT="${1:?用法: $0 [--dry-run] [--with-proxy] [--automation-root] <MACCHIATO_ROOT> [USER]}"
+ROOT="${1:?用法: $0 [--dry-run] [--with-proxy] [--with-resource-limits] [--automation-root] <MACCHIATO_ROOT> [USER]}"
 ROOT="$(cd "$ROOT" && pwd)"
 RUN_USER="${2:-${SUDO_USER:-$USER}}"
 
@@ -107,6 +114,54 @@ if [[ "$WITH_PROXY" -eq 1 ]]; then
   install_proxy_dropins
 fi
 
+install_automation_resource_limits() {
+  local src="$SCRIPT_DIR/50-macchiato-resource-limits.conf"
+  if [[ ! -f "$src" ]]; then
+    echo "缺少 $src" >&2
+    exit 1
+  fi
+  local dir="/etc/systemd/system/macchiato-automation.service.d"
+  local dst="${dir}/50-macchiato-resource-limits.conf"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "===== $dst (copy from 50-macchiato-resource-limits.conf) ====="
+    cat "$src"
+    echo
+  else
+    sudo mkdir -p "$dir"
+    sudo cp "$src" "$dst"
+    echo "已写入 $dst"
+  fi
+}
+
+if [[ "$WITH_RESOURCE_LIMITS" -eq 1 ]]; then
+  install_automation_resource_limits
+fi
+
+install_needrestart_guard() {
+  local src="$SCRIPT_DIR/60-macchiato-needrestart.conf"
+  if [[ ! -f "$src" ]]; then
+    echo "缺少 $src" >&2
+    exit 1
+  fi
+  local dir="/etc/needrestart/conf.d"
+  local dst="${dir}/60-macchiato.conf"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "===== $dst (copy from 60-macchiato-needrestart.conf) ====="
+    cat "$src"
+    echo
+  elif [[ -d /etc/needrestart ]]; then
+    sudo mkdir -p "$dir"
+    sudo cp "$src" "$dst"
+    echo "已写入 $dst"
+  else
+    echo "未检测到 /etc/needrestart，跳过 needrestart guard"
+  fi
+}
+
+if [[ "$WITH_NEEDRESTART_GUARD" -eq 1 ]]; then
+  install_needrestart_guard
+fi
+
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "===== /etc/systemd/system/macchiato.target (copy) ====="
   cat "$SCRIPT_DIR/macchiato.target"
@@ -119,6 +174,12 @@ fi
 echo
 if [[ "$WITH_PROXY" -eq 0 ]]; then
   echo "提示: 若 systemd 内访问 Gemini/OpenAI 超时而 shell 里正常，多半是未继承本机代理；可重装并加 --with-proxy"
+fi
+if [[ "$WITH_RESOURCE_LIMITS" -eq 0 ]]; then
+  echo "提示: 若担心 automation 子进程拖垮整机内存，可重装并加 --with-resource-limits（见 50-macchiato-resource-limits.conf）"
+fi
+if [[ "$WITH_NEEDRESTART_GUARD" -eq 0 ]]; then
+  echo "提示: 若机器安装了 needrestart，apt 可能在装包后自动重启 macchiato 服务；可重装并加 --with-needrestart-guard"
 fi
 if [[ "$AUTOMATION_ROOT" -eq 1 ]]; then
   echo "提示: macchiato-automation.service 已设为 User=root（command_tools.bash_os_user_enabled）；飞书/水源单元仍为 ${RUN_USER}。root 进程面较大，请收紧机器与密钥访问。"

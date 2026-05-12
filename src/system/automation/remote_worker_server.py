@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from typing import Optional
@@ -10,10 +11,11 @@ from typing import Optional
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from agent_core.remote.worker_registry import (
-    RemoteWorkerConnection,
-    get_remote_worker_registry,
-)
+from agent_core.remote.worker_registry import (RemoteWorkerConnection,
+                                               get_remote_worker_registry)
+from macchiato_remote.tokens import (expected_token_matches,
+                                     load_registered_remote_worker_tokens,
+                                     remote_token_registry_path)
 
 logger = logging.getLogger(__name__)
 
@@ -46,22 +48,112 @@ def remote_server_token() -> Optional[str]:
     return token or None
 
 
+def remote_server_token_map() -> dict[str, str]:
+    """Return login-specific worker tokens from registry file and env.
+
+    ``macchiato-remote gen-token --login`` writes a hashed token registry to
+    ``data/automation/remote_worker_tokens.json`` by default. The env var remains
+    useful for container/runtime overrides and wins over the registry when both
+    define the same login.
+
+    Accepted ``MACCHIATO_REMOTE_TOKENS`` formats:
+    - ``work-mbp=tok1,home-mini=tok2``
+    - one entry per line
+    - JSON object, e.g. ``{"work-mbp": "tok1"}``
+    """
+    out = load_registered_remote_worker_tokens()
+    raw = os.environ.get("MACCHIATO_REMOTE_TOKENS", "").strip()
+    if not raw:
+        return out
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("MACCHIATO_REMOTE_TOKENS JSON parse failed; ignoring")
+            return out
+        if not isinstance(data, dict):
+            return out
+        out.update(
+            {
+                str(k).strip(): str(v).strip()
+                for k, v in data.items()
+                if str(k).strip() and str(v).strip()
+            }
+        )
+        return out
+
+    normalized = raw.replace("\n", ",").replace(";", ",")
+    for item in normalized.split(","):
+        entry = item.strip()
+        if not entry:
+            continue
+        sep = "=" if "=" in entry else ":"
+        if sep not in entry:
+            logger.warning("invalid MACCHIATO_REMOTE_TOKENS entry ignored: %s", entry)
+            continue
+        login, tok = entry.split(sep, 1)
+        login_s = login.strip()
+        tok_s = tok.strip()
+        if login_s and tok_s:
+            out[login_s] = tok_s
+    return out
+
+
+def verify_remote_worker_token(
+    *,
+    login: str,
+    supplied_token: str,
+    token_override: Optional[str] = None,
+    token_map: Optional[dict[str, str]] = None,
+) -> tuple[bool, str]:
+    """Validate a worker token.
+
+    Per-login tokens win. ``MACCHIATO_REMOTE_TOKEN`` remains a compatibility
+    fallback. If only per-login tokens are configured, unknown logins are
+    rejected instead of silently becoming unauthenticated.
+    """
+    login_s = (login or "").strip()
+    supplied = (supplied_token or "").strip()
+    tokens = token_map if token_map is not None else remote_server_token_map()
+    fallback = (token_override or remote_server_token() or "").strip()
+
+    expected = tokens.get(login_s)
+    if expected is None and fallback:
+        expected = fallback
+    if expected is None and tokens:
+        return False, "unknown_login"
+    if expected is None:
+        return True, "auth_disabled"
+    if expected_token_matches(supplied, expected):
+        return True, "ok"
+    return False, "token_mismatch"
+
+
 def create_remote_worker_app(*, token: Optional[str] = None) -> FastAPI:
-    if not (token or remote_server_token()):
+    if not (token or remote_server_token() or remote_server_token_map()):
         logger.warning(
-            "MACCHIATO_REMOTE_TOKEN is unset: remote worker WebSocket has no shared-secret auth"
+            "No remote worker token configured: registry=%s, "
+            "MACCHIATO_REMOTE_TOKEN/MACCHIATO_REMOTE_TOKENS unset. "
+            "Run `macchiato-remote gen-token --login <name>` on the server.",
+            remote_token_registry_path(),
         )
     app = FastAPI(title="macchiato remote worker gateway")
 
     @app.websocket("/remote/worker/{login}")
     async def worker_endpoint(websocket: WebSocket, login: str) -> None:
-        expected = token or remote_server_token()
         supplied = str(websocket.query_params.get("token") or "").strip()
-        if expected and supplied != expected:
+        allowed, reason = verify_remote_worker_token(
+            login=login,
+            supplied_token=supplied,
+            token_override=token,
+        )
+        if not allowed:
             logger.warning(
-                "remote worker rejected: login=%s reason=token_mismatch "
-                "(check MACCHIATO_REMOTE_TOKEN vs macchiato-remote login --token)",
+                "remote worker rejected: login=%s reason=%s "
+                "(check token registry, MACCHIATO_REMOTE_TOKENS, or "
+                "MACCHIATO_REMOTE_TOKEN vs macchiato-remote login --token)",
                 (login or "").strip(),
+                reason,
             )
             await websocket.close(code=1008)
             return

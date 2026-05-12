@@ -4,7 +4,45 @@ from __future__ import annotations
 
 import json
 
-from frontend.feishu.content_parser import parse_feishu_message
+from frontend.feishu.content_parser import (
+    feishu_message_should_queue_attachments,
+    parse_feishu_message,
+)
+
+
+def test_feishu_message_should_queue_image_and_file() -> None:
+    img_refs, _ = parse_feishu_message(
+        "m1", "image", '{"image_key":"ik"}'
+    )
+    assert feishu_message_should_queue_attachments("image", img_refs)
+    doc_refs, _ = parse_feishu_message(
+        "m2", "file", '{"file_key":"fk","file_name":"a.pdf"}'
+    )
+    assert feishu_message_should_queue_attachments("file", doc_refs)
+
+
+def test_feishu_message_should_not_queue_media() -> None:
+    refs, text = parse_feishu_message(
+        "m3",
+        "media",
+        '{"file_key":"fv","image_key":"ic","file_name":"v.mp4"}',
+    )
+    assert refs
+    assert not feishu_message_should_queue_attachments("media", refs)
+
+
+def test_feishu_message_post_never_queued() -> None:
+    content_img_only = (
+        '{"zh_cn":{"title":"","content":[[{"tag":"img","image_key":"img_only"}]]}}'
+    )
+    refs, _ = parse_feishu_message("m4", "post", content_img_only)
+    assert refs
+    assert not feishu_message_should_queue_attachments("post", refs)
+
+    content = '{"zh_cn":{"title":"t","content":[[{"tag":"text","text":"说明"},{"tag":"img","image_key":"img_x"}]]}}'
+    refs2, _ = parse_feishu_message("m5", "post", content)
+    assert refs2
+    assert not feishu_message_should_queue_attachments("post", refs2)
 
 
 def test_parse_text_message():
@@ -168,3 +206,41 @@ def test_parse_post_message_content_json_string():
     assert len(refs) == 1
     assert refs[0].key == "img_str"
     assert "line" in text
+
+
+def test_parse_post_message_receive_v1_flat_shape():
+    """接收消息 API：顶层 title + content，无 zh_cn 包裹（与发送 JSON 不同）。"""
+    content = json.dumps(
+        {
+            "title": "诶，原来可以这样",
+            "content": [
+                [{"tag": "img", "image_key": "img_recv_flat"}],
+                [{"tag": "text", "text": "配图说明"}],
+            ],
+        },
+        ensure_ascii=False,
+    )
+    refs, text = parse_feishu_message(
+        message_id="om_recv_flat",
+        message_type="post",
+        content=content,
+    )
+    assert len(refs) == 1
+    assert refs[0].key == "img_recv_flat"
+    assert "诶，原来可以这样" in text
+    assert "配图说明" in text
+
+
+def test_parse_post_message_wrapped_under_post_key():
+    """少数负载在 post 键下再嵌套 zh_cn 或扁平块。"""
+    flat_inner = {
+        "title": "",
+        "content": [[{"tag": "text", "text": "nested"}]],
+    }
+    refs, text = parse_feishu_message(
+        message_id="om_wrap",
+        message_type="post",
+        content=json.dumps({"post": flat_inner}, ensure_ascii=False),
+    )
+    assert refs == []
+    assert "nested" in text

@@ -28,7 +28,13 @@ import lark_oapi as lark
 from agent_core.config import get_config
 
 from .client import FeishuClient
-from .content_parser import parse_feishu_message
+from .content_parser import feishu_message_should_queue_attachments, parse_feishu_message
+from .pending_attachments import (
+    clear_queued_attachments,
+    feishu_slash_clears_attachment_queue,
+    queue_attachments_for_next_turn,
+    take_queued_attachments,
+)
 from .event_models import (
     FeishuMessage,
     FeishuMessageEvent,
@@ -259,11 +265,14 @@ async def _handle_im_message_event_async(data: Any) -> None:
         "feishu_chat_id": feishu_message.chat_id,
         "feishu_chat_type": feishu_message.chat_type,
     }
-    if content_refs:
-        metadata["content_refs"] = [r.to_dict() for r in content_refs]
+    incoming_refs = list(content_refs)
 
-    # 斜杠指令：仅对纯文本消息且以 / 开头时处理
-    if not content_refs and text.strip().startswith("/"):
+    if feishu_message_should_queue_attachments(message_type, incoming_refs):
+        queue_attachments_for_next_turn(session_id, incoming_refs)
+        return
+
+    # 斜杠指令：仅对「本条无附件」的纯文本；须在合并排队附件之前判断
+    if not incoming_refs and text.strip().startswith("/"):
         try:
             reply = await try_handle_slash_command_via_ipc(
                 session_id=session_id,
@@ -276,6 +285,8 @@ async def _handle_im_message_event_async(data: Any) -> None:
                 feishu_user_id=feishu_sender.sender_id.user_id or "",
             )
             if reply is not None:
+                if feishu_slash_clears_attachment_queue(text):
+                    clear_queued_attachments(session_id)
                 feishu_client = FeishuClient(timeout_seconds=feishu_cfg.timeout_seconds)
                 try:
                     await feishu_client.send_text_message(
@@ -296,6 +307,11 @@ async def _handle_im_message_event_async(data: Any) -> None:
             logger.warning("slash command failed, fallback to agent: %s", exc)
             # 非斜杠或处理失败，继续走 Agent
 
+    queued_refs = take_queued_attachments(session_id)
+    merged_refs = list(queued_refs) + list(incoming_refs)
+    if merged_refs:
+        metadata["content_refs"] = [r.to_dict() for r in merged_refs]
+
     ipc = FeishuIPCBridge(
         ipc_timeout_seconds=feishu_cfg.automation_ipc_timeout_seconds,
     )
@@ -308,6 +324,8 @@ async def _handle_im_message_event_async(data: Any) -> None:
             source="feishu",
         )
     except AutomationDaemonUnavailable as exc:
+        if queued_refs:
+            queue_attachments_for_next_turn(session_id, queued_refs)
         logger.warning("automation daemon unavailable for feishu ws message: %s", exc)
         await send_feishu_error_notice(
             chat_id=feishu_message.chat_id,
@@ -316,6 +334,8 @@ async def _handle_im_message_event_async(data: Any) -> None:
         )
         return
     except Exception as exc:  # noqa: BLE001
+        if queued_refs:
+            queue_attachments_for_next_turn(session_id, queued_refs)
         logger.exception(
             "failed to process feishu ws message via automation daemon: %s", exc
         )
@@ -347,6 +367,7 @@ async def _handle_im_message_event_async(data: Any) -> None:
     # 注册 push 转发：subagent 完成等 inject_turn 结果将经 [out] 队列推送到本会话
     chat_id = feishu_message.chat_id
     if chat_id:
+        get_feishu_push_forwarder().start()
         register_feishu_push_session(
             session_id=session_id,
             chat_id=chat_id,

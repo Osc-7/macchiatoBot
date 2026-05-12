@@ -107,9 +107,7 @@ async def send_feishu_error_notice(
         client = FeishuClient(timeout_seconds=timeout_seconds)
         await client.send_text_message(chat_id=cid, text=text)
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "send_feishu_error_notice failed (chat_id=%s): %s", cid, exc
-        )
+        logger.warning("send_feishu_error_notice failed (chat_id=%s): %s", cid, exc)
 
 
 async def try_handle_slash_command_via_ipc(
@@ -269,7 +267,9 @@ class FeishuPushForwarder:
         # 会话注册有效期：subagent 等 inject_turn 可能远超 5 分钟才全部完成，
         # 成功转发推送后会在 _poll_once 内滑动续期，避免后续结果无法送达飞书。
         self._session_ttl_seconds = float(session_ttl_seconds)
-        self._registry: Dict[str, tuple[str, float]] = {}  # session_id -> (chat_id, expiry_ts)
+        self._registry: Dict[str, tuple[str, float]] = (
+            {}
+        )  # session_id -> (chat_id, expiry_ts)
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -280,7 +280,9 @@ class FeishuPushForwarder:
         """注册会话，在 ttl_seconds 内轮询 [out] 队列并转发到 chat_id。"""
         if not session_id or not chat_id:
             return
-        ttl = float(ttl_seconds) if ttl_seconds is not None else self._session_ttl_seconds
+        ttl = (
+            float(ttl_seconds) if ttl_seconds is not None else self._session_ttl_seconds
+        )
         expiry = time.time() + ttl
         with self._lock:
             self._registry[session_id] = (chat_id, expiry)
@@ -322,8 +324,6 @@ class FeishuPushForwarder:
                 for sid, (cid, exp) in self._registry.items()
                 if exp > now
             }
-        if not to_poll:
-            return
         try:
             client = AutomationIPCClient(
                 owner_id="root",
@@ -334,35 +334,77 @@ class FeishuPushForwarder:
             if not await client.ping():
                 return
             feishu_client = FeishuClient(timeout_seconds=self._timeout)
+            recovery_results = await client.poll_stream_recoveries()
+            for pr in recovery_results or []:
+                meta = pr.get("metadata")
+                chat_id = str(
+                    meta.get("feishu_chat_id") if isinstance(meta, dict) else ""
+                ).strip()
+                if not chat_id:
+                    continue
+                sent = await self._send_result_payload(
+                    feishu_client=feishu_client,
+                    chat_id=chat_id,
+                    payload=pr,
+                )
+                if sent:
+                    session_id = str(pr.get("session_id") or "").strip()
+                    if session_id:
+                        self.register(session_id, chat_id)
             for session_id, chat_id in to_poll:
                 await client.switch_session(session_id, create_if_missing=False)
                 results = await client.poll_push()
                 sent_any = False
                 for pr in results or []:
-                    meta = pr.get("metadata")
-                    if isinstance(meta, dict) and meta.get("feishu_skip_final_reply"):
-                        sent_any = True
-                        continue
-                    text = (pr.get("output_text") or "").strip()
-                    if not text:
-                        continue
-                    try:
-                        # 与 send_message 主路径一致：按 reply_format 发 Markdown 卡片或纯文本，
-                        # 避免 poll_push 走 send_text_message 的 Markdown→纯文本过滤。
-                        await send_feishu_agent_final_reply(
-                            client=feishu_client,
+                    sent_any = (
+                        await self._send_result_payload(
+                            feishu_client=feishu_client,
                             chat_id=chat_id,
-                            output_text=text,
+                            payload=pr,
                         )
-                        sent_any = True
-                    except Exception as exc:
-                        logger.warning(
-                            "FeishuPushForwarder send to chat_id=%s failed: %s",
-                            chat_id,
-                            exc,
-                        )
+                        or sent_any
+                    )
                 # 有推送成功则续期，避免长任务在首条用户消息后固定 300s 过期、后续 inject 丢失
                 if sent_any:
                     self.register(session_id, chat_id)
         except Exception as exc:
             logger.debug("FeishuPushForwarder _poll_once: %s", exc)
+
+    async def _send_result_payload(
+        self,
+        *,
+        feishu_client: FeishuClient,
+        chat_id: str,
+        payload: Dict[str, Any],
+    ) -> bool:
+        meta = payload.get("metadata")
+        if isinstance(meta, dict) and meta.get("feishu_skip_final_reply"):
+            return True
+        text = (payload.get("output_text") or "").strip()
+        attachments = payload.get("attachments")
+        if not isinstance(attachments, list):
+            attachments = []
+        if not text and not attachments:
+            return False
+        try:
+            # 与 send_message 主路径一致：按 reply_format 发 Markdown 卡片或纯文本，
+            # 避免 poll_push 走 send_text_message 的 Markdown→纯文本过滤。
+            if text:
+                await send_feishu_agent_final_reply(
+                    client=feishu_client,
+                    chat_id=chat_id,
+                    output_text=text,
+                )
+            if attachments:
+                await feishu_client.send_reply_attachments(
+                    chat_id=chat_id,
+                    attachments=attachments,
+                )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "FeishuPushForwarder send to chat_id=%s failed: %s",
+                chat_id,
+                exc,
+            )
+            return False

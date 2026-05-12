@@ -10,17 +10,19 @@ import argparse
 import asyncio
 import json
 import os
+import secrets
 import shutil
 import signal
 import socket
-import secrets
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Optional
 
-from macchiato_remote.client import RemoteWorkerClient, raw_websocket_handshake_probe
+from macchiato_remote.client import (RemoteWorkerClient,
+                                     raw_websocket_handshake_probe)
+from macchiato_remote.tokens import register_remote_worker_token
 
 CONFIG_PATH = Path.home() / ".config" / "macchiato" / "remote.json"
 STATE_DIR = Path.home() / ".local" / "state" / "macchiato"
@@ -298,13 +300,35 @@ def _cmd_status(_: argparse.Namespace) -> int:
 
 def _cmd_gen_token(args: argparse.Namespace) -> int:
     nbytes = max(16, int(args.bytes))
+    login = str(getattr(args, "login", "") or "").strip()
     token = secrets.token_urlsafe(nbytes)
+    registered_path: Optional[Path] = None
+    if login and not bool(getattr(args, "no_register", False)):
+        registered_path = register_remote_worker_token(
+            login,
+            token,
+            path=str(getattr(args, "token_file", "") or "").strip() or None,
+        )
+
     print(token)
     print()
-    print("# 云上 daemon 与 systemd 环境变量示例：")
-    print(f"#   export MACCHIATO_REMOTE_TOKEN='{token}'")
+    if login:
+        if registered_path is not None:
+            print("# 已注册到服务器 token 文件（只保存 sha256 摘要）：")
+            print(f"#   {registered_path}")
+            print("# daemon 每次 worker 握手都会读取该文件，通常无需改 systemd 环境变量。")
+        else:
+            print("# 未写入服务器 token 文件；可手动配置云上 daemon 环境变量：")
+            print(f"#   export MACCHIATO_REMOTE_TOKENS='{login}={token}'")
+    else:
+        print("# 云上 daemon 与 systemd 环境变量示例（所有机器共用）：")
+        print(f"#   export MACCHIATO_REMOTE_TOKEN='{token}'")
+        print("# 多机器建议指定 --login，让服务器 token registry 自动记录。")
     print("# 本机写入 remote.json 时：")
-    print(f"#   macchiato-remote login --server <URL> --login <别名> --token '{token}'")
+    login_hint = login or "<别名>"
+    print(
+        f"#   macchiato-remote login --server <URL> --login {login_hint} --token '{token}'"
+    )
     return 0
 
 
@@ -472,7 +496,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--token",
         default="",
         help=(
-            "optional shared token; must match MACCHIATO_REMOTE_TOKEN on the daemon "
+            "optional worker token; must match MACCHIATO_REMOTE_TOKENS entry or "
+            "MACCHIATO_REMOTE_TOKEN on the daemon "
             "(generate one: macchiato-remote gen-token)"
         ),
     )
@@ -519,6 +544,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=32,
         metavar="N",
         help="entropy size in bytes before base64-url encoding (default: 32, min: 16)",
+    )
+    gen.add_argument(
+        "--login",
+        default="",
+        help=(
+            "optional login alias; when provided, register this machine token "
+            "in the server token registry"
+        ),
+    )
+    gen.add_argument(
+        "--no-register",
+        action="store_true",
+        help="print only; do not update the server token registry",
+    )
+    gen.add_argument(
+        "--token-file",
+        default="",
+        help=(
+            "server token registry path "
+            "(default: data/automation/remote_worker_tokens.json, or "
+            "MACCHIATO_REMOTE_TOKEN_FILE)"
+        ),
     )
     gen.set_defaults(func=_cmd_gen_token)
 

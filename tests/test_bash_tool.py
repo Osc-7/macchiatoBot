@@ -56,12 +56,28 @@ class TestBashSecurity:
         assert v.denied
         assert v.error_code == "COMMAND_NOT_WHITELISTED"
 
-    def test_restricted_mode_deny_shell_operators(self):
+    def test_restricted_mode_allows_pipe_semicolon_and_logical_and(self):
+        """sub 模式在白名单内允许 |、;、&& 串联只读命令（扩展子 agent 可用组合）。"""
         sec = self._sec(allow_run_for_restricted=True)
-        for cmd in ["ls | grep foo", "echo hi && rm x", "echo $(whoami)", "ls; pwd"]:
+        for cmd in ["ls | grep foo", "ls; pwd", "echo a && echo b"]:
             v = sec.check(cmd, profile=CoreProfile(mode="sub"))
-            assert v.denied, f"should deny: {cmd}"
-            assert v.error_code == "SHELL_OPERATOR_DENIED"
+            assert v.allowed, cmd
+
+    def test_restricted_mode_denies_subshell_redirect_and_background_ampersand(self):
+        sec = self._sec(allow_run_for_restricted=True)
+        v_sub = sec.check("echo $(whoami)", profile=CoreProfile(mode="sub"))
+        assert v_sub.denied and v_sub.error_code == "SHELL_OPERATOR_DENIED"
+        v_rd = sec.check("echo hi > /tmp/x", profile=CoreProfile(mode="sub"))
+        assert v_rd.denied and v_rd.error_code == "SHELL_OPERATOR_DENIED"
+        v_bg = sec.check("sleep 1 &", profile=CoreProfile(mode="sub"))
+        assert v_bg.denied and v_bg.error_code == "SHELL_OPERATOR_DENIED"
+
+    def test_restricted_mode_logical_and_still_enforces_whitelist(self):
+        """&& 仅放宽运算符；各段命令仍须白名单（rm 不在默认白名单）。"""
+        sec = self._sec(allow_run_for_restricted=True)
+        v = sec.check("echo hi && rm -rf /tmp/x", profile=CoreProfile(mode="sub"))
+        assert v.denied
+        assert v.error_code == "COMMAND_NOT_WHITELISTED"
 
     def test_restricted_mode_deny_dangerous_even_whitelisted(self):
         sec = self._sec(

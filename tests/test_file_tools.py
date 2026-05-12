@@ -16,7 +16,10 @@ from agent_core.config import (
 )
 from agent_core.agent.readable_ephemeral_grants import add_ephemeral_readable_prefix
 from agent_core.agent.readable_roots_store import append_user_readable_prefix
-from agent_core.agent.workspace_paths import ensure_workspace_data_memory_symlink
+from agent_core.agent.workspace_paths import (
+    ensure_workspace_data_memory_symlink,
+    tmp_macchiato_base_dir,
+)
 from system.tools.file_tools import ReadFileTool, WriteFileTool, ModifyFileTool
 from agent_core.tools.base import ToolDefinition
 
@@ -211,7 +214,7 @@ class TestReadFileTool:
     @pytest.mark.asyncio
     async def test_read_file_tmp_dir_allowed(self, tmp_path):
         config = _make_workspace_sandbox_config(tmp_path, source="feishu")
-        temp_file = Path("/tmp/macchiato/feishu/r1/allowed.txt")
+        temp_file = tmp_macchiato_base_dir() / "feishu" / "r1" / "allowed.txt"
         temp_file.parent.mkdir(parents=True, exist_ok=True)
         temp_file.write_text("tmp-ok", encoding="utf-8")
         tool = ReadFileTool(config=config)
@@ -283,7 +286,6 @@ class TestReadFileTool:
                 workspace_admin_memory_owners=["cli:root"],
                 bash_os_user_enabled=True,
                 bash_os_user_home_base_dir=str(tmp_path / "homes"),
-                bash_os_admin_system_users={"cli:root": "mac_admin"},
             ),
         )
         tool = ReadFileTool(config=config)
@@ -530,7 +532,7 @@ class TestWriteFileTool:
         """允许写入 frontend/user 专属临时目录。"""
         config = _make_workspace_sandbox_config(tmp_path, source="feishu", allow_write=True)
         tool = WriteFileTool(config=config)
-        temp_file = "/tmp/macchiato/feishu/wbzd/script.py"
+        temp_file = str(tmp_macchiato_base_dir() / "feishu" / "wbzd" / "script.py")
         result = await tool.execute(
             path=temp_file,
             content="print(1)",
@@ -618,7 +620,7 @@ class TestModifyFileTool:
     async def test_modify_file_tmp_dir_allowed(self, tmp_path):
         """允许修改 frontend/user 专属临时目录内文件。"""
         config = _make_workspace_sandbox_config(tmp_path, source="feishu", allow_modify=True)
-        temp_file = Path("/tmp/macchiato/feishu/u2/app.py")
+        temp_file = tmp_macchiato_base_dir() / "feishu" / "u2" / "app.py"
         temp_file.parent.mkdir(parents=True, exist_ok=True)
         temp_file.write_text("old", encoding="utf-8")
         tool = ModifyFileTool(config=config)

@@ -216,6 +216,48 @@ class TestLoadSkillTool:
         assert "legacy workspace 版本" not in r.message
 
     @pytest.mark.asyncio
+    async def test_execute_admin_loads_from_own_logic_linux_home(self, tmp_path):
+        """管理员 Core 仍读取自己的逻辑 Linux home，不切到共享 admin home。"""
+        homes = tmp_path / "homes"
+        logic_skills = homes / "m_feishu_u9" / ".agents" / "skills" / "example"
+        logic_skills.mkdir(parents=True)
+        (logic_skills / "SKILL.md").write_text(
+            "---\nname: 示例技能\ndescription: d\n---\n\nadmin logic home\n",
+            encoding="utf-8",
+        )
+        shared_admin_skills = homes / "mac_admin" / ".agents" / "skills" / "example"
+        shared_admin_skills.mkdir(parents=True)
+        (shared_admin_skills / "SKILL.md").write_text(
+            "---\nname: 示例技能\ndescription: d\n---\n\nshared admin home\n",
+            encoding="utf-8",
+        )
+        cfg = Config(
+            llm=LLMConfig(api_key="k", model="m"),
+            skills=SkillsConfig(enabled=["example"]),
+            command_tools=CommandToolsConfig(
+                base_dir=str(tmp_path),
+                workspace_base_dir=str(tmp_path / "workspace_parent"),
+                workspace_isolation_enabled=True,
+                workspace_admin_memory_owners=["feishu:u9"],
+                bash_os_user_enabled=True,
+                bash_os_user_home_base_dir=str(homes),
+                bash_os_admin_system_users={"feishu:u9": "mac_admin"},
+            ),
+        )
+        tool = LoadSkillTool(config=cfg)
+        r = await tool.execute(
+            skill_name="example",
+            __execution_context__={
+                "source": "feishu",
+                "user_id": "u9",
+                "bash_workspace_admin": True,
+            },
+        )
+        assert r.success is True
+        assert "admin logic home" in r.message
+        assert "shared admin home" not in r.message
+
+    @pytest.mark.asyncio
     async def test_execute_loads_from_remote_workspace_when_active(
         self, tmp_path, monkeypatch
     ):

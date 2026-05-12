@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent_core.config import CommandToolsConfig, Config, LLMConfig
 from agent_core.context import ConversationContext
 from agent_core.kernel_interface import CoreProfile, KernelRequest
 from agent_core.tools import VersionedToolRegistry
@@ -498,6 +499,59 @@ async def test_kernel_run_records_tool_names_called_in_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_kernel_run_injects_configured_workspace_admin(tmp_path) -> None:
+    """Kernel 工具执行上下文应使用 config 解析后的有效 workspace admin 状态。"""
+    from agent_core.kernel_interface import ReturnAction, ToolCallAction
+    from agent_core.tools.base import ToolResult
+
+    cfg = Config(
+        llm=LLMConfig(api_key="k", model="m"),
+        command_tools=CommandToolsConfig(
+            base_dir=str(tmp_path),
+            workspace_base_dir=str(tmp_path / "workspace_parent"),
+            workspace_isolation_enabled=True,
+            bash_os_user_enabled=True,
+            bash_os_user_home_base_dir=str(tmp_path / "homes"),
+            workspace_admin_memory_owners=["feishu:u42"],
+        ),
+    )
+    profile = CoreProfile.full_from_config(
+        cfg,
+        frontend_id="feishu",
+        dialog_window_id="u42",
+    )
+
+    async def fake_run_loop(turn_id: int = 0, hooks=None):
+        await asyncio.sleep(0)
+        yield ToolCallAction(
+            tool_call_id="t1",
+            tool_name="tool_a",
+            arguments="{}",
+        )
+        yield ReturnAction(message="完成")
+
+    agent = SimpleNamespace(
+        run_loop=fake_run_loop,
+        _session_id="feishu:u42",
+        _parent_session_id="",
+        _tool_registry=None,
+        _core_profile=profile,
+        _config=cfg,
+        _source="feishu",
+        _user_id="u42",
+    )
+    registry = MagicMock()
+    registry.execute = AsyncMock(return_value=ToolResult(success=True, message="ok"))
+    kernel = AgentKernel(tool_registry=registry)
+
+    result = await kernel.run(agent, turn_id=1)
+
+    assert result.output_text == "完成"
+    ctx = registry.execute.call_args.kwargs["__execution_context__"]
+    assert ctx["bash_workspace_admin"] is True
+
+
+@pytest.mark.asyncio
 async def test_kernel_run_propagates_delegated_tool_name_from_call_tool() -> None:
     """call_tool 返回的 _delegated_tool_name 应被 kernel 追加到 _tool_names_called。"""
     from agent_core.kernel_interface import ReturnAction, ToolCallAction
@@ -555,3 +609,42 @@ async def test_kernel_run_no_metadata_when_no_tools_executed() -> None:
     result = await kernel.run(agent, turn_id=1)
     assert result.output_text == "仅文本"
     assert result.metadata == {}
+
+
+def test_kernel_task_exception_detail_preserves_message() -> None:
+    from system.kernel.scheduler import _kernel_task_exception_detail
+
+    assert "boom" in _kernel_task_exception_detail(ValueError("boom"))
+
+
+def test_kernel_task_exception_detail_empty_str_falls_back_to_typename() -> None:
+    from system.kernel.scheduler import _kernel_task_exception_detail
+
+    class Silent(RuntimeError):
+        def __str__(self) -> str:
+            return ""
+
+    assert "Silent" in _kernel_task_exception_detail(Silent())
+
+
+def test_kernel_task_exception_detail_read_timeout_named_no_message_gets_hint() -> None:
+    """与某些 HTTP 客户端一致：异常类型为 ReadTimeout 但 str 为空时仍能提示。"""
+    from system.kernel.scheduler import _kernel_task_exception_detail
+
+    exc = type("ReadTimeout", (Exception,), {})()
+    detail = _kernel_task_exception_detail(exc)
+    assert detail.startswith("ReadTimeout")
+    assert "超时" in detail
+
+
+def test_kernel_task_exception_detail_httpx_read_timeout_includes_url() -> None:
+    import httpx
+
+    from system.kernel.scheduler import _kernel_task_exception_detail
+
+    req = httpx.Request("GET", "https://api.example.com/v1/x")
+    exc = httpx.ReadTimeout("timed out", request=req)
+    detail = _kernel_task_exception_detail(exc)
+    assert "timed out" in detail
+    assert "GET https://api.example.com/v1/x" in detail
+    assert "超时" in detail

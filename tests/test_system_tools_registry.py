@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from agent_core.config import AgentConfig, Config, LLMConfig, MemoryConfig
 from agent_core.kernel_interface import CoreProfile
 from system.tools import VersionedToolRegistry, build_tool_registry
 
 
-def test_build_tool_registry_returns_registry() -> None:
+def _isolated_registry_config(tmp_path: Path) -> Config:
+    """避免单测依赖进程全局 ``get_config()`` 中的磁盘路径（CI 上可能不可写）。"""
+    return Config(
+        llm=LLMConfig(api_key="k", model="test-model"),
+        memory=MemoryConfig(memory_base_dir=str(tmp_path / "memory")),
+        agent=AgentConfig(),
+    )
+
+
+def test_build_tool_registry_returns_registry(tmp_path: Path) -> None:
     profile = CoreProfile.default_full()
-    registry = build_tool_registry(profile=profile)
+    registry = build_tool_registry(
+        profile=profile, config=_isolated_registry_config(tmp_path)
+    )
     assert isinstance(registry, VersionedToolRegistry)
 
     names = set(registry.list_names())
@@ -25,14 +39,16 @@ def test_build_tool_registry_returns_registry() -> None:
     assert "ask_user" in names
 
 
-def test_build_tool_registry_respects_profile_allowlist() -> None:
+def test_build_tool_registry_respects_profile_allowlist(tmp_path: Path) -> None:
     profile = CoreProfile(
         mode="sub",
         allowed_tools=["parse_time", "get_events"],
         deny_tools=[],
         allow_dangerous_commands=False,
     )
-    registry = build_tool_registry(profile=profile)
+    registry = build_tool_registry(
+        profile=profile, config=_isolated_registry_config(tmp_path)
+    )
     names = set(registry.list_names())
 
     assert "parse_time" in names

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from agent_core.interfaces import AgentHooks, AgentRunInput, AgentRunResult
 from system.automation import (
     AutomationCoreGateway,
     AutomationIPCClient,
@@ -14,7 +15,6 @@ from system.automation import (
     SessionRegistry,
 )
 from system.kernel import CorePool
-from agent_core.interfaces import AgentHooks, AgentRunInput, AgentRunResult
 
 
 def _make_ipc_mock_scheduler(work_result: AgentRunResult, work_usage: dict):
@@ -74,6 +74,152 @@ def _make_ipc_mock_scheduler(work_result: AgentRunResult, work_usage: dict):
     mock_scheduler.unsubscribe_out = MagicMock()
 
     return mock_scheduler, work_agent
+
+
+@pytest.mark.asyncio
+async def test_run_turn_stream_client_disconnect_does_not_abort_gateway(
+    tmp_path: Path,
+):
+    class DisconnectingWriter:
+        def write(self, _data: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            raise ConnectionResetError("Connection lost")
+
+    class Gateway:
+        completed = False
+
+        async def inject_message(self, command, hooks=None):  # type: ignore[no-untyped-def]
+            assert command.session_id == "cli:root"
+            if hooks and hooks.on_trace_event:
+                await hooks.on_trace_event({"type": "tool_result", "name": "bash"})
+            self.completed = True
+            return AgentRunResult(output_text="done")
+
+        def get_token_usage(self, *, session_id: str) -> dict:
+            assert session_id == "cli:root"
+            return {}
+
+        def get_turn_count(self, *, session_id: str) -> int:
+            assert session_id == "cli:root"
+            return 1
+
+    gateway = Gateway()
+    server = AutomationIPCServer(
+        gateway,  # type: ignore[arg-type]
+        owner_id="root",
+        source="cli",
+        socket_path=str(tmp_path / "automation.sock"),
+    )
+
+    await server._handle_run_turn_stream(
+        "req-1",
+        {"client_id": "client-a", "text": "hello", "metadata": {}},
+        DisconnectingWriter(),  # type: ignore[arg-type]
+    )
+
+    assert gateway.completed is True
+
+
+@pytest.mark.asyncio
+async def test_run_turn_stream_client_disconnect_buffers_recoverable_result(
+    tmp_path: Path,
+):
+    class DisconnectingWriter:
+        def write(self, _data: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            raise ConnectionResetError("Connection lost")
+
+    class Gateway:
+        async def inject_message(self, command, hooks=None):  # type: ignore[no-untyped-def]
+            if hooks and hooks.on_trace_event:
+                await hooks.on_trace_event({"type": "tool_result", "name": "bash"})
+            return AgentRunResult(
+                output_text="done",
+                metadata={"custom": "value"},
+                attachments=[{"type": "file", "path": "/tmp/a.pdf"}],
+            )
+
+        def get_token_usage(self, *, session_id: str) -> dict:
+            return {}
+
+        def get_turn_count(self, *, session_id: str) -> int:
+            return 1
+
+    server = AutomationIPCServer(
+        Gateway(),  # type: ignore[arg-type]
+        owner_id="root",
+        source="cli",
+        socket_path=str(tmp_path / "automation.sock"),
+    )
+
+    await server._handle_run_turn_stream(
+        "req-1",
+        {
+            "client_id": "client-a",
+            "text": "hello",
+            "metadata": {"feishu_chat_id": "oc_test"},
+        },
+        DisconnectingWriter(),  # type: ignore[arg-type]
+    )
+
+    data = await server._dispatch("poll_stream_recoveries", {})
+    assert data["results"] == [
+        {
+            "request_id": "req-1",
+            "session_id": "cli:root",
+            "output_text": "done",
+            "metadata": {
+                "feishu_chat_id": "oc_test",
+                "custom": "value",
+                "_stream_recovery": True,
+            },
+            "attachments": [{"type": "file", "path": "/tmp/a.pdf"}],
+        }
+    ]
+    assert await server._dispatch("poll_stream_recoveries", {}) == {"results": []}
+
+
+@pytest.mark.asyncio
+async def test_run_turn_stream_error_keeps_non_empty_message(tmp_path: Path):
+    class SilentReadTimeout(Exception):
+        def __str__(self) -> str:
+            return ""
+
+    class Gateway:
+        async def inject_message(self, command, hooks=None):  # type: ignore[no-untyped-def]
+            _ = command
+            _ = hooks
+            raise SilentReadTimeout()
+
+        def get_token_usage(self, *, session_id: str) -> dict:
+            _ = session_id
+            return {}
+
+        def get_turn_count(self, *, session_id: str) -> int:
+            _ = session_id
+            return 0
+
+    socket_path = str(tmp_path / "automation.sock")
+    server = AutomationIPCServer(
+        Gateway(),  # type: ignore[arg-type]
+        owner_id="root",
+        source="cli",
+        socket_path=socket_path,
+    )
+    await server.start()
+    client = AutomationIPCClient(owner_id="root", source="cli", socket_path=socket_path)
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            await client.run_turn(AgentRunInput(text="hello"))
+        assert "automation ipc error" not in str(exc_info.value)
+        assert "SilentReadTimeout" in str(exc_info.value)
+    finally:
+        await client.close()
+        await server.stop()
 
 
 @pytest.mark.asyncio

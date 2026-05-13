@@ -294,10 +294,10 @@ manual `ssh -L`):
 
 ```bash
 macchiato-remote login \
-  --server http://110.40.171.96:9380 \
+  --server http://203.0.113.10:9380 \
   --login macbook \
   --token '<same token as daemon>' \
-  --ssh-tunnel ubuntu@110.40.171.96
+  --ssh-tunnel ubuntu@203.0.113.10
 
 macchiato-remote start --background
 ```
@@ -335,11 +335,11 @@ that restores routes; killing the app alone often leaves a broken routing table.
 
 Add a **high-priority** rule so traffic to your daemon’s **public IP** uses `DIRECT`
 (still inside TUN, but not steered into a broken proxy chain). Place it **before** the
-catch-all `MATCH` rule, and replace the IP with yours:
+catch-all `MATCH` rule, and replace the IP with yours (example uses RFC 5737 TEST-NET-3):
 
 ```yaml
 rules:
-  - IP-CIDR,110.40.171.96/32,DIRECT,no-resolve
+  - IP-CIDR,203.0.113.10/32,DIRECT,no-resolve
 ```
 
 `no-resolve` makes the rule match by IP without DNS quirks. Reload Clash, then

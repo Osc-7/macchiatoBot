@@ -199,5 +199,5 @@ def test_default_ssh_remote_port_for_local_tunnel_server() -> None:
 
     assert _default_ssh_remote_port("http://127.0.0.1:19380") == 9380
     assert _default_ssh_remote_port("http://localhost:19380") == 9380
-    assert _default_ssh_remote_port("http://110.40.171.96:9380") == 9380
-    assert _default_ssh_remote_port("http://110.40.171.96:12345") == 12345
+    assert _default_ssh_remote_port("http://203.0.113.10:9380") == 9380
+    assert _default_ssh_remote_port("http://203.0.113.10:12345") == 12345

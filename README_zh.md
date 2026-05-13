@@ -189,10 +189,10 @@ macchiato-remote stop
 
 ```bash
 macchiato-remote login \
-  --server http://110.40.171.96:9380 \
+  --server http://203.0.113.10:9380 \
   --login macbook \
   --token '<与云上相同的串>' \
-  --ssh-tunnel ubuntu@110.40.171.96
+  --ssh-tunnel ubuntu@203.0.113.10
 
 macchiato-remote start --background
 ```
@@ -211,7 +211,7 @@ macchiato-remote probe
 它会用 **标准库阻塞 socket** 发同样的 WebSocket 升级（**不读** `HTTP_PROXY`）。若输出首行是
 `HTTP/1.1 101 Switching Protocols`，说明到服务器的 TCP/握手正常，再查 `websockets` 与运行环境。
 若 `probe` 也是乱码/HTML，多半是 **Clash TUN / 全局 VPN** 劫持了 IP 流量（仅 `echo` 空
-`http_proxy` **不够**）；可暂时关 TUN 或对 `110.40.x.x` 走直连规则。`start` 在升级后也会在
+`http_proxy` **不够**）；可暂时关 TUN 或对 **daemon 所在公网 IP** 写直连规则。`start` 在升级后也会在
 失败时打印握手异常的 **`__cause__`** 便于对照。
 
 若关掉 Clash 后变成 **`TimeoutError` / `probe failed: TimeoutError`**（而以前 `nc` 能通），
@@ -230,7 +230,7 @@ Mac**、或检查 `netstat -rn` / 暂时换网络（手机热点）再试 `nc -z
 
 ```yaml
 rules:
-  - IP-CIDR,110.40.171.96/32,DIRECT,no-resolve
+  - IP-CIDR,203.0.113.10/32,DIRECT,no-resolve
 ```
 
 - `no-resolve`：按 IP 命中，避免 DNS 策略导致规则不生效。

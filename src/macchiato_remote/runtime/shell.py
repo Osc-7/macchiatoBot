@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import os
 import shlex
 import signal
@@ -15,6 +16,7 @@ from macchiato_remote.protocol import RemoteCommandResult
 
 _SENTINEL_TAG = "__MACCHIATO_REMOTE_SENTINEL__"
 _ERR_SENTINEL_TAG = "__MACCHIATO_REMOTE_ERR_SENTINEL__"
+_STREAM_READ_CHUNK_SIZE = 4096
 
 
 @dataclass
@@ -123,47 +125,74 @@ class LocalShellSession:
         truncated = False
         exit_code = -1
 
-        async def _append(buf: list[str], line: str) -> None:
+        async def _append(buf: list[str], text: str) -> None:
             nonlocal total_chars, truncated
             if total_chars >= limit:
                 truncated = True
                 return
             remaining = limit - total_chars
-            if len(line) > remaining:
-                buf.append(line[:remaining])
+            if len(text) > remaining:
+                buf.append(text[:remaining])
                 total_chars += remaining
                 truncated = True
             else:
-                buf.append(line)
-                total_chars += len(line)
+                buf.append(text)
+                total_chars += len(text)
+
+        async def _read_until_marker(
+            reader: asyncio.StreamReader,
+            marker: bytes,
+            buf: list[str],
+        ) -> bytes:
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            pending = b""
+            keep = max(0, len(marker) - 1)
+
+            async def _append_bytes(data: bytes, *, final: bool = False) -> None:
+                text = decoder.decode(data, final=final)
+                if text:
+                    await _append(buf, text)
+
+            while True:
+                chunk = await reader.read(_STREAM_READ_CHUNK_SIZE)
+                if not chunk:
+                    if pending:
+                        await _append_bytes(pending, final=True)
+                    return b""
+
+                pending += chunk
+                marker_index = pending.find(marker)
+                if marker_index >= 0:
+                    await _append_bytes(pending[:marker_index], final=True)
+                    return pending[marker_index + len(marker) :]
+
+                if keep and len(pending) > keep:
+                    emit = pending[:-keep]
+                    pending = pending[-keep:]
+                    await _append_bytes(emit)
+                elif not keep:
+                    await _append_bytes(pending)
+                    pending = b""
 
         async def _read_stdout() -> int:
             assert self._process is not None and self._process.stdout is not None
-            ec = -1
-            while True:
-                raw = await self._process.stdout.readline()
-                if not raw:
+            marker = stdout_sentinel.encode("utf-8")
+            tail = await _read_until_marker(self._process.stdout, marker, stdout_buf)
+            while b"\n" not in tail:
+                chunk = await self._process.stdout.read(_STREAM_READ_CHUNK_SIZE)
+                if not chunk:
                     break
-                line = raw.decode("utf-8", errors="replace")
-                if line.startswith(stdout_sentinel):
-                    try:
-                        ec = int(line.strip().split(":")[-1])
-                    except (ValueError, IndexError):
-                        ec = -1
-                    break
-                await _append(stdout_buf, line)
-            return ec
+                tail += chunk
+            try:
+                code_text = tail.split(b"\n", 1)[0].decode("ascii", errors="replace")
+                return int(code_text.strip())
+            except (ValueError, IndexError):
+                return -1
 
         async def _read_stderr() -> None:
             assert self._process is not None and self._process.stderr is not None
-            while True:
-                raw = await self._process.stderr.readline()
-                if not raw:
-                    break
-                line = raw.decode("utf-8", errors="replace")
-                if stderr_sentinel in line:
-                    break
-                await _append(stderr_buf, line)
+            marker = stderr_sentinel.encode("utf-8")
+            await _read_until_marker(self._process.stderr, marker, stderr_buf)
 
         timed_out = False
         try:

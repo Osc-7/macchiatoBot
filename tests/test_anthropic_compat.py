@@ -240,3 +240,85 @@ def test_convert_user_pdf_file_block_to_anthropic_document():
 async def test_close():
     p = _provider(caps=Capabilities())
     await p.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_with_tools_stream_emits_delta_and_tool_calls():
+    p = AnthropicCompatProvider(
+        name="t",
+        base_url="https://example.com/v1",
+        api_key="sk-x",
+        model="kimi-for-coding",
+        capabilities=Capabilities(reasoning_content=True, function_calling=True),
+        temperature=0.7,
+        max_tokens=4096,
+        request_timeout_seconds=30.0,
+        stream=True,
+        vendor_params={},
+    )
+
+    blocks = [
+        'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":12}}}\n\n',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"先分析"}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"你"}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"好"}}\n\n',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"tool_1","name":"search_tools","input":{}}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\\"query\\": \\"calendar\\"}"}}\n\n',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":2}\n\n',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}\n\n',
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]
+
+    class _FakeStreamResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_bytes(self):
+            for b in blocks:
+                yield b.encode("utf-8")
+
+    class _FakeStreamContext:
+        async def __aenter__(self):
+            return _FakeStreamResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_stream(*args, **kwargs):
+        return _FakeStreamContext()
+
+    p._http_client.stream = _fake_stream  # type: ignore[method-assign]
+
+    deltas: list[str] = []
+    reasoning: list[str] = []
+    out = await p.chat_with_tools(
+        messages=[{"role": "user", "content": "你好"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_tools",
+                    "description": "search",
+                    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+                },
+            }
+        ],
+        on_content_delta=lambda s: deltas.append(s),
+        on_reasoning_delta=lambda s: reasoning.append(s),
+    )
+
+    assert "".join(deltas) == "你好"
+    assert "".join(reasoning) == "先分析"
+    assert out.content == "你好"
+    assert out.reasoning_content == "先分析"
+    assert out.finish_reason == "tool_use"
+    assert out.usage is not None
+    assert out.usage.prompt_tokens == 12
+    assert out.usage.completion_tokens == 7
+    assert len(out.tool_calls) == 1
+    assert out.tool_calls[0].id == "tool_1"
+    assert out.tool_calls[0].name == "search_tools"
+    assert out.tool_calls[0].arguments == {"query": "calendar"}
+    await p.close()

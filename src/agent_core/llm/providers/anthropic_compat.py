@@ -13,6 +13,7 @@ import copy
 import inspect
 import json
 import logging
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 import httpx
@@ -24,6 +25,7 @@ from agent_core.llm.providers.openai_compat import _strip_thinking_content
 from .base import BaseProvider
 
 logger = logging.getLogger(__name__)
+_SSE_LINE_RE = re.compile(r"^(event|data):\s?(.*)")
 
 
 def _convert_openai_user_content_part_to_anthropic(part: Any) -> Any:
@@ -237,6 +239,240 @@ class AnthropicCompatProvider(BaseProvider):
         response = await self._http_client.post(url, headers=headers, json=payload)
         response.raise_for_status()
         return response.json()
+
+    async def _make_stream_request(
+        self,
+        endpoint: str,
+        payload: Dict[str, Any],
+        *,
+        on_content_delta: Optional[Callable[[str], Any]] = None,
+        on_reasoning_delta: Optional[Callable[[str], Any]] = None,
+    ) -> LLMResponse:
+        """发送 Anthropic SSE 流请求并汇总为 LLMResponse。"""
+        url = f"{self._base_url}/{endpoint.lstrip('/')}"
+        headers = self._build_auth_headers()
+        headers["Content-Type"] = "application/json"
+
+        stream_payload = dict(payload)
+        if self._vendor_params:
+            stream_payload.update(self._vendor_params)
+        stream_payload["stream"] = True
+
+        text_parts: List[str] = []
+        thinking_parts: List[str] = []
+        finish_reason = "stop"
+        usage_input_tokens = 0
+        usage_output_tokens = 0
+
+        tool_calls_map: Dict[int, Dict[str, Any]] = {}
+
+        async def _emit_delta(
+            cb: Optional[Callable[[str], Any]],
+            delta: str,
+        ) -> None:
+            if not cb or not delta:
+                return
+            maybe = cb(delta)
+            if inspect.isawaitable(maybe):
+                await maybe
+
+        def _tool_entry(index: int) -> Dict[str, Any]:
+            if index not in tool_calls_map:
+                tool_calls_map[index] = {
+                    "id": "",
+                    "name": "",
+                    "input": {},
+                    "json_fragments": [],
+                }
+            return tool_calls_map[index]
+
+        def _finalize_tool_input(entry: Dict[str, Any]) -> None:
+            fragments = entry.get("json_fragments") or []
+            if not fragments:
+                return
+            raw = "".join(str(x) for x in fragments if isinstance(x, str)).strip()
+            if not raw:
+                entry["json_fragments"] = []
+                return
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    entry["input"] = parsed
+            except json.JSONDecodeError:
+                logger.warning("Anthropic stream tool_use input_json_delta 解析失败: %s", raw[:300])
+            finally:
+                entry["json_fragments"] = []
+
+        async def _handle_sse_block(block: str) -> None:
+            nonlocal finish_reason, usage_input_tokens, usage_output_tokens
+            if not block.strip():
+                return
+
+            data_lines: List[str] = []
+            event_type: Optional[str] = None
+            for line in block.splitlines():
+                line = line.rstrip("\r")
+                if not line or line.startswith(":"):
+                    continue
+                m = _SSE_LINE_RE.match(line)
+                if not m:
+                    continue
+                field, value = m.group(1), m.group(2)
+                if field == "event":
+                    event_type = value
+                elif field == "data":
+                    data_lines.append(value)
+
+            if not data_lines:
+                return
+            data_str = "\n".join(data_lines).strip()
+            if not data_str or data_str == "[DONE]":
+                return
+
+            try:
+                data = json.loads(data_str)
+            except json.JSONDecodeError:
+                logger.debug("忽略无法解析的 Anthropic SSE data: %r", data_str[:300])
+                return
+
+            evt_type = data.get("type", event_type or "")
+            if evt_type == "message_start":
+                msg = data.get("message")
+                if isinstance(msg, dict):
+                    usage = msg.get("usage")
+                    if isinstance(usage, dict):
+                        usage_input_tokens = int(usage.get("input_tokens") or usage_input_tokens)
+                return
+
+            if evt_type == "content_block_start":
+                idx = int(data.get("index", 0) or 0)
+                block_obj = data.get("content_block")
+                if not isinstance(block_obj, dict):
+                    return
+                btype = block_obj.get("type")
+                if btype == "thinking":
+                    t = block_obj.get("thinking")
+                    if isinstance(t, str) and t:
+                        thinking_parts.append(t)
+                        await _emit_delta(on_reasoning_delta, t)
+                elif btype == "text":
+                    t = block_obj.get("text")
+                    if isinstance(t, str) and t:
+                        text_parts.append(t)
+                        await _emit_delta(on_content_delta, t)
+                elif btype == "tool_use":
+                    entry = _tool_entry(idx)
+                    entry["id"] = str(block_obj.get("id") or entry.get("id") or "")
+                    entry["name"] = str(block_obj.get("name") or entry.get("name") or "")
+                    if isinstance(block_obj.get("input"), dict):
+                        entry["input"] = block_obj.get("input")
+                return
+
+            if evt_type == "content_block_delta":
+                idx = int(data.get("index", 0) or 0)
+                delta = data.get("delta")
+                if not isinstance(delta, dict):
+                    return
+                dtype = delta.get("type")
+                if dtype == "text_delta":
+                    txt = delta.get("text")
+                    if isinstance(txt, str) and txt:
+                        text_parts.append(txt)
+                        await _emit_delta(on_content_delta, txt)
+                elif dtype == "thinking_delta":
+                    thinking = delta.get("thinking")
+                    if isinstance(thinking, str) and thinking:
+                        thinking_parts.append(thinking)
+                        await _emit_delta(on_reasoning_delta, thinking)
+                elif dtype == "input_json_delta":
+                    partial = delta.get("partial_json")
+                    if isinstance(partial, str):
+                        _tool_entry(idx)["json_fragments"].append(partial)
+                return
+
+            if evt_type == "content_block_stop":
+                idx = int(data.get("index", 0) or 0)
+                entry = tool_calls_map.get(idx)
+                if entry:
+                    _finalize_tool_input(entry)
+                return
+
+            if evt_type == "message_delta":
+                delta = data.get("delta")
+                if isinstance(delta, dict):
+                    sr = delta.get("stop_reason")
+                    if isinstance(sr, str) and sr.strip():
+                        finish_reason = sr.strip()
+                usage = data.get("usage")
+                if isinstance(usage, dict):
+                    usage_output_tokens = int(
+                        usage.get("output_tokens") or usage_output_tokens
+                    )
+                return
+
+            if evt_type == "message_stop":
+                for entry in tool_calls_map.values():
+                    _finalize_tool_input(entry)
+                return
+
+            if evt_type == "error":
+                err = data.get("error")
+                if isinstance(err, dict):
+                    raise RuntimeError(str(err.get("message") or "Anthropic stream error"))
+                raise RuntimeError(f"Anthropic stream error: {data}")
+
+        async with self._http_client.stream(
+            "POST",
+            url,
+            headers=headers,
+            json=stream_payload,
+        ) as response:
+            response.raise_for_status()
+            buffer = ""
+            async for chunk in response.aiter_bytes():
+                if not chunk:
+                    continue
+                try:
+                    buffer += chunk.decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                buffer = buffer.replace("\r\n", "\n")
+                while "\n\n" in buffer:
+                    block, buffer = buffer.split("\n\n", 1)
+                    await _handle_sse_block(block)
+            if buffer.strip():
+                await _handle_sse_block(buffer)
+
+        tool_calls: List[ToolCall] = []
+        for idx in sorted(tool_calls_map.keys()):
+            entry = tool_calls_map[idx]
+            tid = str(entry.get("id") or "").strip()
+            tname = str(entry.get("name") or "").strip()
+            if not tid or not tname:
+                continue
+            args = entry.get("input")
+            if not isinstance(args, dict):
+                args = {}
+            tool_calls.append(ToolCall(id=tid, name=tname, arguments=args))
+
+        content = "".join(text_parts).strip() or None
+        reasoning = "".join(thinking_parts).strip() or None
+        if content and self._capabilities.thinking_tag_inline:
+            content = _strip_thinking_content(content)
+
+        usage = TokenUsage(
+            prompt_tokens=usage_input_tokens,
+            completion_tokens=usage_output_tokens,
+            total_tokens=usage_input_tokens + usage_output_tokens,
+        )
+        return LLMResponse(
+            content=content,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            raw_response=None,
+            usage=usage,
+            reasoning_content=reasoning,
+        )
 
     def _convert_messages(
         self,
@@ -536,6 +772,8 @@ class AnthropicCompatProvider(BaseProvider):
         if system:
             payload["system"] = system
         
+        if self._stream:
+            return await self._make_stream_request("/messages", payload)
         response_data = await self._make_request("/messages", payload)
         return self._parse_response(response_data)
 
@@ -581,6 +819,13 @@ class AnthropicCompatProvider(BaseProvider):
                 # 指定具体工具
                 payload["tool_choice"] = {"type": "tool", "name": tool_choice}
         
+        if self._stream:
+            return await self._make_stream_request(
+                "/messages",
+                payload,
+                on_content_delta=on_content_delta,
+                on_reasoning_delta=on_reasoning_delta,
+            )
         response_data = await self._make_request("/messages", payload)
         return self._parse_response(response_data)
 

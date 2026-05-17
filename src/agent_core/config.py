@@ -105,18 +105,30 @@ class ProviderEntry(BaseModel):
     一个 LLM provider 的完整连接与能力声明。
 
     对应 config.yaml 里 llm.providers.<name> 的一段。运行期由
-    agent_core.llm.client.LLMClient 构造为 OpenAICompatProvider 或 AnthropicCompatProvider。
+    agent_core.llm.client.LLMClient 构造为 OpenAICompatProvider、
+    AnthropicCompatProvider 或 CodexOAuthProvider。
     """
 
     base_url: str = Field(..., description="API base URL")
-    api_key: str = Field(..., description="API 密钥（可用 ${ENV} 形式引用环境变量）")
+    api_key: str = Field(
+        default="",
+        description="API 密钥（可用 ${ENV} 形式引用环境变量）；codex_oauth 协议下可为空",
+    )
     model: str = Field(
         ...,
         description="厂商 API 请求的模型 ID（标准名，如 kimi-k2.5、gpt-4o）",
     )
     protocol: Optional[str] = Field(
         default=None,
-        description="API 协议类型：'openai'（默认）或 'anthropic'。Kimi Code 需设为 'anthropic'",
+        description="API 协议类型：'openai'（默认）、'anthropic' 或 'codex_oauth'",
+    )
+    auth_file: Optional[str] = Field(
+        default=None,
+        description="仅 codex_oauth 协议：OAuth token 存储文件路径，如 ./data/oauth/chatgpt-plus.json",
+    )
+    reasoning_effort: Optional[str] = Field(
+        default=None,
+        description="仅 codex_oauth 协议：GPT-5.5 推理档位（none|low|medium|high|xhigh），默认 medium",
     )
     label: Optional[str] = Field(
         default=None,

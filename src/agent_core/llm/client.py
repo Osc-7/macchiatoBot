@@ -22,6 +22,7 @@ from agent_core.llm.providers import (
     BaseProvider,
     OpenAICompatProvider,
 )
+from agent_core.llm.providers.codex_oauth_provider import CodexOAuthProvider
 from agent_core.llm.providers.openai_compat import (
     _strip_thinking_content,
     get_context_window_tokens_for_model,
@@ -52,6 +53,7 @@ def _build_provider_from_entry(
     根据 entry.protocol 字段选择 provider 类型：
     - "openai" 或未指定：OpenAICompatProvider
     - "anthropic": AnthropicCompatProvider
+    - "codex_oauth": CodexOAuthProvider（ChatGPT Plus/Pro 订阅 OAuth）
     """
     caps_src = getattr(entry, "capabilities", None)
     caps = Capabilities(
@@ -112,6 +114,27 @@ def _build_provider_from_entry(
             vendor_params=vendor_params,
             headers=headers,
         )
+    elif protocol == "codex_oauth":
+        auth_file = getattr(entry, "auth_file", None)
+        if not auth_file:
+            raise ValueError(
+                f"Provider {name}: codex_oauth protocol 需要 auth_file 字段"
+            )
+        reasoning_effort = getattr(entry, "reasoning_effort", None) or "medium"
+        return CodexOAuthProvider(
+            name=name,
+            base_url=str(entry.base_url),
+            auth_file=str(auth_file),
+            model=str(entry.model),
+            capabilities=caps,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            request_timeout_seconds=request_timeout_seconds,
+            stream=stream,
+            vendor_params=vendor_params,
+            headers=headers,
+            reasoning_effort=reasoning_effort,
+        )
     else:
         # 默认使用 OpenAI 兼容协议
         return OpenAICompatProvider(
@@ -136,7 +159,7 @@ class LLMClient:
     用法：
         client = LLMClient(config=cfg)
         await client.chat_with_tools(messages, tools=tools)   # 主 provider
-        client.switch_model("qwen3vl")
+        client.switch_model("qwen")
         await client.chat_with_image(prompt, image_url)       # 走 vision_provider
     """
 

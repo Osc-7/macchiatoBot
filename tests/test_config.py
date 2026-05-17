@@ -495,7 +495,7 @@ llm:
     qwen3vl:
       base_url: "https://example.com/v1"
       api_key: "b"
-      model: "qwen3-vl"
+      model: "qwen"
       capabilities:
         vision: true
 """

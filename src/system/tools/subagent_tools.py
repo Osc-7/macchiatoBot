@@ -438,6 +438,7 @@ class CreateSubagentTool(BaseTool):
                         "- 常用组合示例：[\"read_file\", \"search_tools\"] 用于代码/文档分析；[\"read_file\", \"bash\"] 需配置开启子 Agent 命令行后使用"
                     ),
                     required=False,
+                    items={"type": "string"},
                 ),
                 ToolParameter(
                     name="context",
@@ -605,6 +606,29 @@ class CreateParallelSubagentsTool(BaseTool):
                         "  - max_iterations (integer, 可选): 最大迭代次数（默认从 config.yaml 的 agent.subagent_max_iterations 读取，配置未设置时默认 50）"
                     ),
                     required=True,
+                    items={
+                        "type": "object",
+                        "properties": {
+                            "task": {
+                                "type": "string",
+                                "description": "任务描述",
+                            },
+                            "allowed_tools": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "工具列表（可选）",
+                            },
+                            "context": {
+                                "type": "string",
+                                "description": "背景信息（可选）",
+                            },
+                            "max_iterations": {
+                                "type": "integer",
+                                "description": "最大迭代次数（可选）",
+                            },
+                        },
+                        "required": ["task"],
+                    },
                 ),
             ],
             examples=[
@@ -1200,6 +1224,7 @@ class WaitSubagentTool(BaseTool):
                     type="array",
                     description="多个 subagent_id（字符串数组）；与 subagent_id 二选一；可同时等待并行子任务",
                     required=False,
+                    items={"type": "string"},
                 ),
                 ToolParameter(
                     name="wait_mode",

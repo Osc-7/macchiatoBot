@@ -107,6 +107,7 @@ class AttachMediaTool(BaseTool):
                     type="array",
                     description="多个媒体路径列表，与 path 二选一；两者同时提供时会合并去重。",
                     required=False,
+                    items={"type": "string"},
                 ),
             ],
             examples=[

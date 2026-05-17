@@ -18,6 +18,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from system.kernel.summary_prompt import SUMMARY_USER_APPEND
+
 if TYPE_CHECKING:
     from agent_core.kernel_interface.action import CoreStatsAction
     from agent_core.llm import LLMClient
@@ -51,6 +53,7 @@ class SessionSummarizer:
         long_term_memory: Any,
         messages: Optional[List[Dict[str, Any]]] = None,
         owner_id: Optional[str] = None,
+        system_message: Optional[str] = None,
     ) -> Optional[str]:
         """
         生成摘要并写入长期记忆。
@@ -60,12 +63,15 @@ class SessionSummarizer:
             long_term_memory:  LongTermMemory 实例，具有 add_recent_topic() 方法
             messages:          该 session 的完整对话消息列表（可选，有则生成语义摘要）
             owner_id:          记忆所有者 ID（水源等多用户场景需要）
+            system_message:    与该 Core 正常对话一致的 system prompt，用于提高 prefix cache 命中率
 
         Returns:
             生成的摘要文本，若跳过则返回 None。
         """
         try:
-            summary_text = await self._generate_summary(stats, messages)
+            summary_text = await self._generate_summary(
+                stats, messages, system_message=system_message
+            )
             if summary_text and long_term_memory is not None:
                 add_recent = getattr(long_term_memory, "add_recent_topic", None)
                 if callable(add_recent):
@@ -92,6 +98,8 @@ class SessionSummarizer:
         self,
         stats: "CoreStatsAction",
         messages: Optional[List[Dict[str, Any]]],
+        *,
+        system_message: Optional[str] = None,
     ) -> str:
         """调用 LLM 生成摘要，无 LLM 则退化为结构化文本摘要。"""
         if stats.turn_count == 0:
@@ -100,33 +108,20 @@ class SessionSummarizer:
         if not messages or self._llm_client is None:
             return self._fallback_summary(stats)
 
-        # 过滤出 user/assistant 消息，避免把大量 tool_result 全部送入摘要 LLM
-        dialogue = [
-            m
-            for m in messages
-            if m.get("role") in ("user", "assistant")
-            and isinstance(m.get("content"), str)
-            and m["content"].strip()
-        ]
-
-        if not dialogue:
+        chat_messages = [dict(m) for m in messages]
+        if not chat_messages:
             return self._fallback_summary(stats)
-
-        dialogue_text = "\n".join(
-            f"[{m['role']}]: {m['content'][:500]}"
-            for m in dialogue[-30:]  # 最多取最近 30 条，控制摘要 LLM 输入
-        )
-
-        prompt = (
-            f"请完整概括以下对话的核心内容、达成的决定和待跟进事项。"
-            f"对话共 {stats.turn_count} 轮，token 消耗 {stats.token_usage.get('total_tokens', 0)}。\n\n"
-            f"{dialogue_text}"
+        chat_messages.append(
+            {
+                "role": "user",
+                "content": SUMMARY_USER_APPEND,
+            }
         )
 
         try:
             response = await self._llm_client.chat(
-                system_message="你是一个高效的会话摘要助手，输出详细的中文摘要。",
-                messages=[{"role": "user", "content": prompt}],
+                system_message=(system_message or "").strip(),
+                messages=chat_messages,
             )
             return (
                 response.content.strip()

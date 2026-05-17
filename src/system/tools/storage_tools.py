@@ -106,6 +106,7 @@ class AddEventTool(BaseTool):
                     type="array",
                     description='标签列表，用于分类（可选，如: ["工作", "会议"]）',
                     required=False,
+                    items={"type": "string"},
                 ),
                 ToolParameter(
                     name="source",
@@ -356,6 +357,7 @@ class AddTaskTool(BaseTool):
                     type="array",
                     description='标签列表，用于分类（可选，如: ["工作", "学习"]）',
                     required=False,
+                    items={"type": "string"},
                 ),
                 ToolParameter(
                     name="difficulty",
@@ -988,6 +990,7 @@ class UpdateEventTool(BaseTool):
                     type="array",
                     description='新的标签列表（可选，如 ["工作", "会议"]）',
                     required=False,
+                    items={"type": "string"},
                 ),
             ],
             examples=[
@@ -1495,6 +1498,7 @@ class DeleteScheduleDataTool(BaseTool):
                     type="array",
                     description="要删除的 ID 列表（单条或批量删除使用）",
                     required=False,
+                    items={"type": "string"},
                 ),
                 ToolParameter(
                     name="delete_all",

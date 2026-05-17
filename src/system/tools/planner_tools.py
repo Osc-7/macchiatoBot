@@ -365,6 +365,7 @@ Planner 会：
                     type="array",
                     description="指定任务 ID 列表（可选）",
                     required=False,
+                    items={"type": "string"},
                 ),
                 ToolParameter(
                     name="prefer_morning",

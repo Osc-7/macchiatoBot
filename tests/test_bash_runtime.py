@@ -220,6 +220,34 @@ class TestTruncation:
         assert len(r.stdout) <= 100
         await rt.close()
 
+    async def test_long_single_line_stdout_is_truncated_without_breaking_shell(self):
+        rt = _make_runtime(default_output_limit=100)
+        await rt.start()
+        r = await rt.execute("head -c 70000 /dev/zero | tr '\\0' x; echo")
+        assert r.exit_code == 0
+        assert r.truncated is True
+        assert len(r.stdout) <= 100
+        assert r.stdout == "x" * 100
+
+        follow_up = await rt.execute("echo still-alive")
+        assert follow_up.exit_code == 0
+        assert "still-alive" in follow_up.stdout
+        await rt.close()
+
+    async def test_long_single_line_stderr_is_truncated_without_breaking_shell(self):
+        rt = _make_runtime(default_output_limit=100)
+        await rt.start()
+        r = await rt.execute("head -c 70000 /dev/zero | tr '\\0' e >&2")
+        assert r.exit_code == 0
+        assert r.truncated is True
+        assert len(r.stderr) <= 100
+        assert r.stderr == "e" * 100
+
+        follow_up = await rt.execute("echo still-alive")
+        assert follow_up.exit_code == 0
+        assert "still-alive" in follow_up.stdout
+        await rt.close()
+
 
 # ── 初始化命令 ────────────────────────────────────────────────
 

@@ -416,8 +416,11 @@ class BashTool(BaseTool):
                     message=verdict.reason or "远程 bash 权限检查未通过",
                 )
 
+        registry = get_remote_worker_registry()
+        reopen_attempted = False
+        reopen_succeeded = False
         try:
-            result = await get_remote_worker_registry().execute_command(
+            result = await registry.execute_command(
                 login=remote_state.login,
                 session_id=session_id,
                 command=command,
@@ -431,6 +434,41 @@ class BashTool(BaseTool):
                 message=f"远程 worker 执行失败: {exc}",
                 data={"login": remote_state.login, "session_id": session_id},
             )
+        if self._is_remote_session_not_open_result(result):
+            reopen_attempted = True
+            try:
+                open_result = await registry.open_workspace(
+                    login=remote_state.login,
+                    session_id=session_id,
+                    requested_path=(
+                        remote_state.requested_path or remote_state.resolved_path or "~"
+                    ),
+                    profile=remote_state.profile,
+                )
+                reopen_succeeded = bool(open_result.success)
+            except Exception:
+                reopen_succeeded = False
+            if reopen_succeeded:
+                try:
+                    result = await registry.execute_command(
+                        login=remote_state.login,
+                        session_id=session_id,
+                        command=command,
+                        timeout_seconds=timeout,
+                        output_limit=cfg.command_tools.default_output_limit,
+                    )
+                except Exception as exc:
+                    return ToolResult(
+                        success=False,
+                        error="REMOTE_WORKER_ERROR",
+                        message=f"远程会话重连后执行失败: {exc}",
+                        data={
+                            "login": remote_state.login,
+                            "session_id": session_id,
+                            "remote_reopen_attempted": True,
+                            "remote_reopen_succeeded": True,
+                        },
+                    )
 
         data = {
             "command": result.command,
@@ -444,6 +482,9 @@ class BashTool(BaseTool):
             "remote_cwd": result.cwd,
         }
         metadata = {"workspace_backend": "remote", "remote_login": remote_state.login}
+        if reopen_attempted:
+            metadata["remote_reopen_attempted"] = True
+            metadata["remote_reopen_succeeded"] = reopen_succeeded
         if result.timed_out:
             return ToolResult(
                 success=False,
@@ -466,6 +507,11 @@ class BashTool(BaseTool):
             message=f"远程命令执行结束，返回码为 {result.exit_code}",
             metadata=metadata,
         )
+
+    @staticmethod
+    def _is_remote_session_not_open_result(result: object) -> bool:
+        err = str(getattr(result, "stderr", "") or "").lower()
+        return "remote session is not open" in err
 
     async def _request_remote_bash_permission(
         self,

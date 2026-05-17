@@ -63,6 +63,11 @@ def make_cron_task(
     memory_owner: str | None = None,
     core_mode: str | None = None,
     tool_template: str | None = None,
+    remote_login: str | None = None,
+    remote_path: str | None = None,
+    remote_profile: str | None = None,
+    remote_ttl_seconds: int | None = None,
+    remote_required: bool | None = None,
 ) -> AgentTask:
     """构造定时任务 AgentTask（ephemeral，session_id 含日期保证唯一性）。"""
     today = date.today().isoformat()
@@ -74,6 +79,15 @@ def make_cron_task(
         metadata["core_mode"] = core_mode
     if tool_template:
         metadata["tool_template"] = tool_template
+    if remote_login:
+        metadata["remote_login"] = remote_login
+        metadata["remote_path"] = (remote_path or "~").strip() or "~"
+        metadata["remote_profile"] = (remote_profile or "dev").strip() or "dev"
+        metadata["remote_required"] = (
+            True if remote_required is None else bool(remote_required)
+        )
+        if remote_ttl_seconds is not None:
+            metadata["remote_ttl_seconds"] = int(remote_ttl_seconds)
 
     return AgentTask(
         source=source,

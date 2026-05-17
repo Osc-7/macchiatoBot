@@ -1156,6 +1156,32 @@ class AutomationJobConfig(BaseModel):
         default=None,
         description="可选：工具模板名，例如 default / shuiyuan / cron；未配置时按 Core 创建入口自动推导。",
     )
+    remote_login: Optional[str] = Field(
+        default=None,
+        description="可选：远程工作区登录别名（等同 /remote-use 的 login）。配置后任务执行前会尝试绑定远程 worker。",
+    )
+    remote_path: Optional[str] = Field(
+        default="~",
+        description="可选：远程工作区路径（等同 /remote-use 的 path），默认 ~。",
+    )
+    remote_profile: Optional[Literal["strict", "dev", "host-user", "host-admin"]] = (
+        Field(
+            default="dev",
+            description="可选：远程权限档位，默认 dev。",
+        )
+    )
+    remote_ttl_seconds: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="可选：远程工作区租约 TTL（秒），为空表示使用远程状态默认 TTL。",
+    )
+    remote_required: bool = Field(
+        default=True,
+        description=(
+            "远程绑定失败时是否直接让任务失败。默认 true（避免悄悄回落到本机执行）；"
+            "设为 false 时会记录告警并回落本地执行。"
+        ),
+    )
     enabled: bool = Field(
         default=True,
         description="是否启用该任务。",

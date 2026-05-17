@@ -20,13 +20,19 @@ from system.tools.automation_tools import (
     ListScheduledJobsTool,
     SyncSourcesTool,
 )
+from agent_core.remote.workspace_state import (
+    activate_remote_workspace,
+    clear_remote_workspace_state,
+)
 
 
 @pytest.fixture(autouse=True)
 def _isolate_runtime(monkeypatch, tmp_path):
     monkeypatch.setenv("SCHEDULE_AGENT_TEST_DATA_DIR", str(tmp_path))
     reset_runtime()
+    clear_remote_workspace_state()
     yield
+    clear_remote_workspace_state()
     reset_runtime()
 
 
@@ -197,6 +203,52 @@ async def test_create_scheduled_job_uses_job_name(tmp_path):
     job = result.data["job"]
     assert job["job_type"] == "agent"
     assert job["job_name"] == "ping-every-10m"
+
+
+@pytest.mark.asyncio
+async def test_create_scheduled_job_supports_remote_binding_payload(tmp_path):
+    tool = CreateScheduledJobTool(base_dir=str(tmp_path / "automation"))
+    result = await tool.execute(
+        instruction="远程检查训练状态",
+        interval_minutes=15,
+        job_name="remote-train-check",
+        remote_login="g3",
+        remote_path="~/train",
+        remote_profile="dev",
+        remote_ttl_seconds=1800,
+        remote_required=True,
+    )
+    assert result.success is True
+    payload = result.data["job"]["payload_template"]
+    assert payload["remote_login"] == "g3"
+    assert payload["remote_path"] == "~/train"
+    assert payload["remote_profile"] == "dev"
+    assert payload["remote_ttl_seconds"] == 1800
+    assert payload["remote_required"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_scheduled_job_inherits_remote_workspace_from_session(tmp_path):
+    activate_remote_workspace(
+        session_id="cli:root",
+        login="g3",
+        requested_path="~/remote-project",
+        profile="dev",
+        ttl_seconds=1800,
+    )
+    tool = CreateScheduledJobTool(base_dir=str(tmp_path / "automation"))
+    result = await tool.execute(
+        instruction="远程状态继承测试",
+        interval_minutes=20,
+        job_name="remote-inherit",
+        __execution_context__={"session_id": "cli:root"},
+    )
+    assert result.success is True
+    payload = result.data["job"]["payload_template"]
+    assert payload["remote_login"] == "g3"
+    assert payload["remote_path"] == "~/remote-project"
+    assert payload["remote_profile"] == "dev"
+    assert payload["remote_required"] is True
 
 
 @pytest.mark.asyncio

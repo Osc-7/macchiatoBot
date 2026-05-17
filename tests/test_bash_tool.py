@@ -32,6 +32,7 @@ from agent_core.permissions.wait_registry import (
     set_permission_notify_hook,
 )
 from agent_core.tools.bash_tool import BashTool
+from macchiato_remote.protocol import RemoteCommandResult, RemoteWorkspaceState
 
 pytestmark = pytest.mark.asyncio
 
@@ -646,3 +647,111 @@ class TestBashToolDefinition:
         assert "timeout" in param_names
         assert "permission_id" not in param_names
         assert "confirm" not in param_names
+
+
+class _FakeRemoteRegistry:
+    def __init__(self, results: list[RemoteCommandResult], open_success: bool = True) -> None:
+        self._results = list(results)
+        self.open_workspace_calls = 0
+        self.execute_calls = 0
+        self.open_success = open_success
+
+    async def execute_command(self, **kwargs) -> RemoteCommandResult:
+        self.execute_calls += 1
+        if not self._results:
+            raise RuntimeError("unexpected execute_command call")
+        return self._results.pop(0)
+
+    async def open_workspace(self, **kwargs):
+        self.open_workspace_calls += 1
+        if not self.open_success:
+            raise RuntimeError("open failed")
+        return type("OpenResult", (), {"success": True})()
+
+
+class TestBashToolRemoteRecover:
+    async def test_remote_session_not_open_reopen_and_retry_success(self, monkeypatch):
+        tool, rt = _make_tool()
+        state = RemoteWorkspaceState(
+            session_id="sid-1",
+            login="g3",
+            requested_path="/home/osc7",
+            profile="dev",
+            status="active",
+        )
+        first = RemoteCommandResult(
+            request_id="r1",
+            command="pwd",
+            stderr="remote session is not open: sid-1",
+            exit_code=127,
+            cwd="/workspace",
+        )
+        second = RemoteCommandResult(
+            request_id="r2",
+            command="pwd",
+            stdout="/workspace\n",
+            exit_code=0,
+            cwd="/workspace",
+        )
+        fake_registry = _FakeRemoteRegistry([first, second], open_success=True)
+
+        import agent_core.remote.workspace_state as state_mod
+        import agent_core.remote.worker_registry as worker_mod
+
+        monkeypatch.setattr(state_mod, "get_remote_workspace_state", lambda sid: state)
+        monkeypatch.setattr(worker_mod, "get_remote_worker_registry", lambda: fake_registry)
+        await rt.start()
+        try:
+            result = await tool.execute(
+                command="pwd",
+                __execution_context__={"session_id": "sid-1", "profile_mode": "full"},
+            )
+            assert result.success
+            assert result.data["stdout"].strip() == "/workspace"
+            assert fake_registry.open_workspace_calls == 1
+            assert fake_registry.execute_calls == 2
+            assert result.metadata.get("remote_reopen_attempted") is True
+            assert result.metadata.get("remote_reopen_succeeded") is True
+        finally:
+            await rt.close()
+
+    async def test_remote_session_not_open_reopen_failed_keep_original_error(
+        self, monkeypatch
+    ):
+        tool, rt = _make_tool()
+        state = RemoteWorkspaceState(
+            session_id="sid-2",
+            login="g3",
+            requested_path="/home/osc7",
+            profile="dev",
+            status="active",
+        )
+        first = RemoteCommandResult(
+            request_id="r1",
+            command="pwd",
+            stderr="remote session is not open: sid-2",
+            exit_code=127,
+            cwd="/workspace",
+        )
+        fake_registry = _FakeRemoteRegistry([first], open_success=False)
+
+        import agent_core.remote.workspace_state as state_mod
+        import agent_core.remote.worker_registry as worker_mod
+
+        monkeypatch.setattr(state_mod, "get_remote_workspace_state", lambda sid: state)
+        monkeypatch.setattr(worker_mod, "get_remote_worker_registry", lambda: fake_registry)
+        await rt.start()
+        try:
+            result = await tool.execute(
+                command="pwd",
+                __execution_context__={"session_id": "sid-2", "profile_mode": "full"},
+            )
+            assert not result.success
+            assert result.error == "NON_ZERO_EXIT"
+            assert "remote session is not open" in result.data["stderr"]
+            assert fake_registry.open_workspace_calls == 1
+            assert fake_registry.execute_calls == 1
+            assert result.metadata.get("remote_reopen_attempted") is True
+            assert result.metadata.get("remote_reopen_succeeded") is False
+        finally:
+            await rt.close()

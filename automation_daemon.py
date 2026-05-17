@@ -165,7 +165,78 @@ async def _consume_loop(
         )
         activity_record: dict[str, Any] | None = None
         outcome = "interrupted"
+        remote_bound = False
+        remote_login = ""
         try:
+            if isinstance(task.metadata, dict):
+                remote_login = str(task.metadata.get("remote_login") or "").strip()
+                if remote_login:
+                    from agent_core.remote.workspace_state import (
+                        activate_remote_workspace,
+                    )
+                    from agent_core.remote.worker_registry import (
+                        get_remote_worker_registry,
+                    )
+
+                    remote_path = (
+                        str(task.metadata.get("remote_path") or "~").strip() or "~"
+                    )
+                    remote_profile = (
+                        str(task.metadata.get("remote_profile") or "dev").strip()
+                        or "dev"
+                    )
+                    if remote_profile not in {
+                        "strict",
+                        "dev",
+                        "host-user",
+                        "host-admin",
+                    }:
+                        remote_profile = "dev"
+                    ttl_raw = task.metadata.get("remote_ttl_seconds")
+                    remote_ttl_seconds: int | None = None
+                    if ttl_raw is not None:
+                        try:
+                            remote_ttl_seconds = int(ttl_raw)
+                        except (TypeError, ValueError):
+                            remote_ttl_seconds = None
+                    remote_required = bool(task.metadata.get("remote_required", True))
+                    try:
+                        opened = await get_remote_worker_registry().open_workspace(
+                            login=remote_login,
+                            session_id=task.session_id,
+                            requested_path=remote_path,
+                            profile=remote_profile,  # type: ignore[arg-type]
+                        )
+                        activate_remote_workspace(
+                            session_id=task.session_id,
+                            login=remote_login,
+                            requested_path=remote_path,
+                            profile=remote_profile,  # type: ignore[arg-type]
+                            ttl_seconds=remote_ttl_seconds,
+                            resolved_path=opened.resolved_path,
+                            device_label=opened.device_label,
+                        )
+                        remote_bound = True
+                        logger.info(
+                            "consume: task_id=%s bound remote workspace login=%s path=%s profile=%s",
+                            task.task_id,
+                            remote_login,
+                            remote_path,
+                            remote_profile,
+                        )
+                    except Exception as exc:
+                        if remote_required:
+                            raise RuntimeError(
+                                f"绑定远程工作区失败（login={remote_login}, path={remote_path}）: {exc}"
+                            ) from exc
+                        logger.warning(
+                            "consume: task_id=%s remote workspace bind failed, fallback local "
+                            "(login=%s path=%s): %s",
+                            task.task_id,
+                            remote_login,
+                            remote_path,
+                            exc,
+                        )
 
             async def on_trace_event(event: dict) -> None:
                 task_logger.log_trace_event(event)
@@ -292,6 +363,24 @@ async def _consume_loop(
             )
             queue.update_status(task.task_id, TaskStatus.FAILED, error=str(exc))
         finally:
+            if remote_bound:
+                from agent_core.remote.workspace_state import release_remote_workspace
+                from agent_core.remote.worker_registry import get_remote_worker_registry
+
+                old = release_remote_workspace(task.session_id)
+                if old is not None:
+                    try:
+                        await get_remote_worker_registry().close_workspace(
+                            login=old.login,
+                            session_id=task.session_id,
+                        )
+                    except Exception as close_exc:  # noqa: BLE001
+                        logger.warning(
+                            "consume: task_id=%s release remote workspace failed login=%s: %s",
+                            task.task_id,
+                            old.login,
+                            close_exc,
+                        )
             elapsed = time.perf_counter() - started
             log_fn = logger.warning if elapsed >= _CONSUME_SLOW_SECONDS else logger.info
             log_fn(

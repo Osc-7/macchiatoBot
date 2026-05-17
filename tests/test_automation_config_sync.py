@@ -44,6 +44,35 @@ def test_sync_supports_one_shot_run_at(tmp_path: Path) -> None:
     assert job.job_type == "human"
 
 
+def test_sync_preserves_remote_workspace_fields(tmp_path: Path) -> None:
+    repo = JobDefinitionRepository(base_dir=str(tmp_path / "automation"))
+    cfg = _make_base_config(tmp_path)
+    cfg.automation.jobs = [
+        AutomationJobConfig(
+            name="remote_sync",
+            description="远程同步日志",
+            interval_minutes=30,
+            user_id="default",
+            remote_login="g3",
+            remote_path="~/project",
+            remote_profile="dev",
+            remote_ttl_seconds=1200,
+            remote_required=True,
+            enabled=True,
+        ),
+    ]
+
+    count = sync_job_definitions_from_config(config=cfg, job_def_repo=repo)
+    assert count == 1
+    job = repo.get_all()[0]
+    payload = job.payload_template
+    assert payload["remote_login"] == "g3"
+    assert payload["remote_path"] == "~/project"
+    assert payload["remote_profile"] == "dev"
+    assert payload["remote_ttl_seconds"] == 1200
+    assert payload["remote_required"] is True
+
+
 @pytest.mark.asyncio
 async def test_sync_creates_and_disables_config_jobs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

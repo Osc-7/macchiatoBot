@@ -406,6 +406,17 @@ class AutomationScheduler:
         memory_owner = str(payload.get("memory_owner") or "").strip()
         core_mode = str(payload.get("core_mode") or "").strip() or None
         tool_template = str(payload.get("tool_template") or "").strip() or None
+        remote_login = str(payload.get("remote_login") or "").strip() or None
+        remote_path = str(payload.get("remote_path") or "").strip() or "~"
+        remote_profile = str(payload.get("remote_profile") or "").strip() or "dev"
+        remote_ttl_raw = payload.get("remote_ttl_seconds")
+        remote_ttl_seconds: Optional[int] = None
+        if remote_ttl_raw is not None:
+            try:
+                remote_ttl_seconds = int(remote_ttl_raw)
+            except (TypeError, ValueError):
+                remote_ttl_seconds = None
+        remote_required = bool(payload.get("remote_required", True))
 
         task = make_cron_task(
             job.job_name,
@@ -414,5 +425,10 @@ class AutomationScheduler:
             memory_owner=memory_owner or None,
             core_mode=core_mode,
             tool_template=tool_template,
+            remote_login=remote_login,
+            remote_path=remote_path,
+            remote_profile=remote_profile,
+            remote_ttl_seconds=remote_ttl_seconds,
+            remote_required=remote_required,
         )
         self._task_queue.push(task)  # type: ignore[union-attr]

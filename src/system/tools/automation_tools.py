@@ -559,12 +559,42 @@ class CreateScheduledJobTool(BaseTool):
                     description="可选：工具模板名，例如 default / cron / shuiyuan。不提供时由调度端按 Core 类型推导。",
                     required=False,
                 ),
+                ToolParameter(
+                    name="remote_login",
+                    type="string",
+                    description="可选：远程工作区登录别名（等同 /remote-use 的 login）。配置后任务执行前会尝试绑定远程 worker。",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="remote_path",
+                    type="string",
+                    description="可选：远程工作区路径（等同 /remote-use 的 path），默认 ~。",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="remote_profile",
+                    type="string",
+                    description="可选：远程权限档位 strict/dev/host-user/host-admin，默认 dev。",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="remote_ttl_seconds",
+                    type="integer",
+                    description="可选：远程工作区租约 TTL（秒）。",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="remote_required",
+                    type="boolean",
+                    description="远程绑定失败时是否直接失败。默认 true；false 时回落到本地执行。",
+                    required=False,
+                ),
             ],
             tags=["自动化", "定时任务", "调度"],
         )
 
     async def execute(self, **kwargs: Any) -> ToolResult:
-        kwargs.pop("__execution_context__", None)
+        exec_ctx = kwargs.pop("__execution_context__", None) or {}
 
         instruction = str(kwargs.get("instruction") or "").strip()
         if not instruction:
@@ -693,6 +723,55 @@ class CreateScheduledJobTool(BaseTool):
         tool_template = (
             str(kwargs.get("tool_template") or "").strip() or self._default_tool_template
         )
+        remote_login = str(kwargs.get("remote_login") or "").strip() or None
+        remote_path = str(kwargs.get("remote_path") or "").strip() or "~"
+        remote_profile = str(kwargs.get("remote_profile") or "").strip().lower() or "dev"
+        if remote_login is None:
+            session_id = str(exec_ctx.get("session_id") or "").strip()
+            if session_id:
+                try:
+                    from agent_core.remote.workspace_state import (
+                        get_remote_workspace_state,
+                    )
+
+                    remote_state = get_remote_workspace_state(session_id)
+                except Exception:
+                    remote_state = None
+                if remote_state is not None:
+                    remote_login = (remote_state.login or "").strip() or None
+                    if remote_login:
+                        remote_path = (
+                            (remote_state.requested_path or remote_state.resolved_path or "~")
+                            .strip()
+                            or "~"
+                        )
+                        remote_profile = (
+                            str(remote_state.profile or "dev").strip().lower() or "dev"
+                        )
+        if remote_profile not in {"strict", "dev", "host-user", "host-admin"}:
+            return ToolResult(
+                success=False,
+                error="INVALID_REMOTE_PROFILE",
+                message="remote_profile 必须是 strict/dev/host-user/host-admin 之一。",
+            )
+        remote_ttl_raw = kwargs.get("remote_ttl_seconds")
+        remote_ttl_seconds: Optional[int] = None
+        if remote_ttl_raw is not None:
+            try:
+                remote_ttl_seconds = int(remote_ttl_raw)
+            except (TypeError, ValueError):
+                return ToolResult(
+                    success=False,
+                    error="INVALID_REMOTE_TTL",
+                    message="remote_ttl_seconds 必须是正整数秒。",
+                )
+            if remote_ttl_seconds <= 0:
+                return ToolResult(
+                    success=False,
+                    error="INVALID_REMOTE_TTL",
+                    message="remote_ttl_seconds 必须是正整数秒。",
+                )
+        remote_required = bool(kwargs.get("remote_required", True))
 
         try:
             cfg = get_config()
@@ -718,6 +797,15 @@ class CreateScheduledJobTool(BaseTool):
                 **({"memory_owner": memory_owner} if memory_owner is not None else {}),
                 **({"core_mode": core_mode} if core_mode is not None else {}),
                 **({"tool_template": tool_template} if tool_template is not None else {}),
+                **({"remote_login": remote_login} if remote_login else {}),
+                **({"remote_path": remote_path} if remote_login else {}),
+                **({"remote_profile": remote_profile} if remote_login else {}),
+                **(
+                    {"remote_ttl_seconds": remote_ttl_seconds}
+                    if remote_login and remote_ttl_seconds is not None
+                    else {}
+                ),
+                **({"remote_required": remote_required} if remote_login else {}),
             },
         )
 

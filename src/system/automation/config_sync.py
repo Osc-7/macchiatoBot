@@ -34,6 +34,13 @@ def _config_job_to_definition(cfg: Config, job_config: Any) -> JobDefinition:
     memory_owner = getattr(job_config, "memory_owner", None) or ""
     core_mode = getattr(job_config, "core_mode", None)
     tool_template = getattr(job_config, "tool_template", None) or ""
+    remote_login = (getattr(job_config, "remote_login", None) or "").strip()
+    remote_path = (getattr(job_config, "remote_path", None) or "~").strip() or "~"
+    remote_profile = (
+        getattr(job_config, "remote_profile", None) or "dev"
+    )
+    remote_ttl_seconds = getattr(job_config, "remote_ttl_seconds", None)
+    remote_required = bool(getattr(job_config, "remote_required", True))
     timezone = cfg.time.timezone
 
     run_at: Optional[datetime] = None
@@ -67,6 +74,13 @@ def _config_job_to_definition(cfg: Config, job_config: Any) -> JobDefinition:
         payload["core_mode"] = core_mode
     if tool_template:
         payload["tool_template"] = tool_template
+    if remote_login:
+        payload["remote_login"] = remote_login
+        payload["remote_path"] = remote_path
+        payload["remote_profile"] = str(remote_profile).strip() or "dev"
+        payload["remote_required"] = remote_required
+        if remote_ttl_seconds is not None:
+            payload["remote_ttl_seconds"] = int(remote_ttl_seconds)
     if job_config.daily_time:
         payload["daily_time"] = job_config.daily_time
     if job_config.times:

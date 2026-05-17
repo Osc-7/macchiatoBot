@@ -405,6 +405,48 @@ class TestSchedulerQueueDispatch:
         assert "sync_canvas" in tasks[0].instruction
 
     @pytest.mark.asyncio
+    async def test_dispatch_via_queue_preserves_remote_metadata(self, tmp_path):
+        from system.automation.repositories import (
+            JobDefinitionRepository,
+            JobRunRepository,
+        )
+        from system.automation.scheduler import AutomationScheduler
+        from system.automation.types import JobDefinition
+
+        queue = AgentTaskQueue(db_path=str(tmp_path / "tasks.db"))
+        job_def_repo = JobDefinitionRepository(base_dir=str(tmp_path / "automation"))
+        job_run_repo = JobRunRepository(base_dir=str(tmp_path / "automation"))
+
+        scheduler = AutomationScheduler(
+            job_def_repo=job_def_repo,
+            job_run_repo=job_run_repo,
+            task_queue=queue,
+        )
+
+        job = JobDefinition(
+            job_name="dispatch-remote-job-test",
+            job_type="human",
+            interval_seconds=3600,
+            payload_template={
+                "instruction": "远程任务测试",
+                "remote_login": "g3",
+                "remote_path": "~/workspace",
+                "remote_profile": "dev",
+                "remote_ttl_seconds": 900,
+                "remote_required": True,
+            },
+        )
+        await scheduler.run_job_once(job)
+
+        tasks = queue.list_recent(limit=10)
+        assert len(tasks) == 1
+        assert tasks[0].metadata["remote_login"] == "g3"
+        assert tasks[0].metadata["remote_path"] == "~/workspace"
+        assert tasks[0].metadata["remote_profile"] == "dev"
+        assert tasks[0].metadata["remote_ttl_seconds"] == 900
+        assert tasks[0].metadata["remote_required"] is True
+
+    @pytest.mark.asyncio
     async def test_dispatch_all_default_job_types(self, tmp_path):
         from system.automation.repositories import (
             JobDefinitionRepository,

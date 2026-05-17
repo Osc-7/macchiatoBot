@@ -39,6 +39,26 @@ class AskUserTool(BaseTool):
                         "同一批次内 id 须唯一。"
                     ),
                     required=True,
+                    items={
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "题目 ID（可选，缺省为 q1,q2,…）",
+                            },
+                            "prompt": {
+                                "type": "string",
+                                "description": "题干（必填）",
+                            },
+                            "options": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "选项列表（必填，至少一个非空字符串）",
+                                "minItems": 1,
+                            },
+                        },
+                        "required": ["prompt", "options"],
+                    },
                 ),
                 ToolParameter(
                     name="custom_option_label",

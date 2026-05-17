@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from frontend.feishu import slash_commands as slash_commands_module
 from frontend.feishu.slash_commands import (
     _format_token_usage,
     _help_text,
@@ -244,13 +245,56 @@ async def test_try_handle_slash_command_model_switch():
 
 
 @pytest.mark.asyncio
-async def test_try_handle_slash_command_new_alias():
+async def test_try_handle_slash_command_new_alias(monkeypatch):
     client = MagicMock()
+    client.active_session_id = "feishu:user:ou_test"
+    client.feishu_base_session_id = "feishu:user:ou_test"
+    client.expire_session = AsyncMock(return_value=True)
     client.switch_session = AsyncMock(return_value=True)
+    monkeypatch.setattr(slash_commands_module.time, "time", lambda: 1234)
+
     handled, reply = await try_handle_slash_command(client, "/new")
+
     assert handled is True
     assert "已创建并切换到新会话" in (reply or "")
-    client.switch_session.assert_awaited_once()
+    client.expire_session.assert_awaited_once_with(
+        "feishu:user:ou_test", reason="manual_new"
+    )
+    client.switch_session.assert_awaited_once_with(
+        "feishu:user:ou_test:1234", create_if_missing=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_session_list_scoped_to_feishu_window():
+    client = MagicMock()
+    client.active_session_id = "feishu:legacy-active"
+    client.feishu_base_session_id = "feishu:user:ou_me"
+    client.session_list_limit = 30
+    client.list_sessions = AsyncMock(
+        return_value=[
+            "cli:default",
+            "cron:job-1",
+            "feishu:user:ou_me",
+            "feishu:user:ou_me:123",
+            "feishu:user:ou_other",
+            "feishu:legacy-active",
+            "shuiyuan:alice",
+        ]
+    )
+
+    handled, reply = await try_handle_slash_command(client, "/session list")
+
+    assert handled is True
+    assert reply is not None
+    assert "当前飞书窗口" in reply
+    assert "feishu:user:ou_me" in reply
+    assert "feishu:user:ou_me:123" in reply
+    assert "feishu:legacy-active *" in reply
+    assert "cli:default" not in reply
+    assert "cron:job-1" not in reply
+    assert "shuiyuan:alice" not in reply
+    assert "feishu:user:ou_other" not in reply
 
 
 @pytest.mark.asyncio

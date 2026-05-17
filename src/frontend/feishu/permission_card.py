@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,42 @@ def _truncate(s: str, max_len: int) -> str:
     if len(t) <= max_len:
         return t
     return t[: max_len - 1] + "…"
+
+
+def _code_block(s: str, lang: str = "") -> str:
+    text = (s or "").strip()
+    if not text:
+        return ""
+    safe = text.replace("```", "``\u200b`")
+    suffix = lang if lang else ""
+    return f"```{suffix}\n{safe}\n```"
+
+
+def _normalize_path_grants(
+    raw: Any,
+    fallback_prefix: Optional[str] = None,
+    fallback_mode: str = "write",
+) -> List[Dict[str, str]]:
+    grants: List[Dict[str, str]] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            pfx = str(item.get("path_prefix") or "").strip()
+            if not pfx:
+                continue
+            mode = str(item.get("access_mode") or "write").strip().lower()
+            if mode not in ("read", "write"):
+                mode = "write"
+            grant = {"path_prefix": pfx, "access_mode": mode}
+            reason = str(item.get("reason") or "").strip()
+            if reason:
+                grant["reason"] = reason
+            grants.append(grant)
+    if not grants and fallback_prefix:
+        mode = "read" if fallback_mode == "read" else "write"
+        grants.append({"path_prefix": fallback_prefix, "access_mode": mode})
+    return grants
 
 
 def _element_suffix(permission_id: str) -> str:
@@ -93,10 +129,10 @@ def _parse_bool(v: Any, default: bool = False) -> bool:
     return default
 
 
-def parse_permission_card_callback(
+def parse_permission_card_payload(
     raw_val: Any,
     form_value: Optional[Dict[str, Any]] = None,
-) -> Tuple[str, str, Optional[str], str, str, Optional[float], str, bool]:
+) -> Dict[str, Any]:
     """
     解析权限卡片交互（含表单提交的 user_instruction）。
 
@@ -128,7 +164,62 @@ def parse_permission_card_callback(
     persist_acl = _parse_bool(data.get("persist_acl"), default=False)
     if dec != ALLOW:
         persist_acl = False
-    return pid, dec, pfx, sum_e, kind_e, timeout_echo, user_instruction, persist_acl
+    return {
+        "permission_id": pid,
+        "decision": dec,
+        "path_prefix": pfx,
+        "summary_echo": sum_e,
+        "kind_echo": kind_e,
+        "timeout_echo": timeout_echo,
+        "user_instruction": user_instruction,
+        "persist_acl": persist_acl,
+        "path_grants": _normalize_path_grants(
+            data.get("path_grants"),
+            pfx,
+            (
+                "read"
+                if kind_e in ("file_read", "file_read_outside_workspace")
+                else "write"
+            ),
+        ),
+        "tool_name": str(
+            data.get("tool_name") or data.get("tool_name_echo") or ""
+        ).strip(),
+        "command": str(data.get("command") or data.get("command_echo") or "").strip(),
+        "cwd": str(data.get("cwd") or data.get("cwd_echo") or "").strip(),
+        "risk_reasons": [
+            str(x).strip() for x in (data.get("risk_reasons") or []) if str(x).strip()
+        ],
+        "auto_execute_after_approval": _parse_bool(
+            data.get("auto_execute_after_approval"), default=False
+        ),
+    }
+
+
+def parse_permission_card_callback(
+    raw_val: Any,
+    form_value: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, str, Optional[str], str, str, Optional[float], str, bool]:
+    """
+    解析权限卡片交互（含表单提交的 user_instruction）。
+
+    返回：
+    (permission_id, decision, path_prefix, summary_echo, kind_echo, timeout_echo,
+     user_instruction, persist_acl)
+
+    persist_acl 仅在 decision==allow 时有意义：来自**人类点击**的按钮（「加白名单」为 True，「本次有效」为 False），非 Agent 生成。
+    """
+    p = parse_permission_card_payload(raw_val, form_value)
+    return (
+        p["permission_id"],
+        p["decision"],
+        p["path_prefix"],
+        p["summary_echo"],
+        p["kind_echo"],
+        p["timeout_echo"],
+        p["user_instruction"],
+        p["persist_acl"],
+    )
 
 
 def parse_card_action_value(
@@ -145,6 +236,12 @@ def build_permission_request_card(
     kind: str = "",
     timeout_seconds: float | None = None,
     path_prefix: Optional[str] = None,
+    tool_name: str = "",
+    command: str = "",
+    cwd: str = "",
+    risk_reasons: Optional[List[str]] = None,
+    path_grants: Optional[List[Dict[str, str]]] = None,
+    auto_execute_after_approval: bool = False,
     resolved: ResolvedDecision = None,
     resolved_user_instruction: Optional[str] = None,
     resolved_persist_acl: Optional[bool] = None,
@@ -167,13 +264,44 @@ def build_permission_request_card(
         except (TypeError, ValueError):
             timeout_s = ""
 
+    grants = _normalize_path_grants(
+        path_grants,
+        path_prefix,
+        "read" if kind_t in ("file_read", "file_read_outside_workspace") else "write",
+    )
+    risk_list = [str(r).strip() for r in (risk_reasons or []) if str(r).strip()]
+    tool_t = _truncate(tool_name, 80)
+    command_t = command.strip()
+    cwd_t = _truncate(cwd, 500)
+
     md_lines = [f"**{summary_t}**"]
+    if tool_t:
+        md_lines.append(f"`tool: {tool_t}`")
     if kind_t:
         md_lines.append(f"`{kind_t}`")
     if timeout_s:
         md_lines.append(f"`{timeout_s}`")
-    if path_prefix:
+    if cwd_t:
+        md_lines.append(f"`cwd: {cwd_t}`")
+    if command_t:
+        md_lines.append("**Command**")
+        md_lines.append(_code_block(command_t, "bash" if tool_t == "bash" else ""))
+    if risk_list:
+        md_lines.append("**Risk**")
+        md_lines.extend(f"- {r}" for r in risk_list)
+    if grants:
+        md_lines.append("**Path Grants**")
+        for g in grants:
+            mode = g.get("access_mode", "write")
+            reason = g.get("reason", "")
+            line = f"- `{mode}` `{g.get('path_prefix', '')}`"
+            if reason:
+                line += f" — {reason}"
+            md_lines.append(line)
+    elif path_prefix:
         md_lines.append(f"`{path_prefix}`")
+    if auto_execute_after_approval:
+        md_lines.append("批准后将自动继续执行原操作。")
     md_lines.append(f"`{permission_id}`")
 
     if resolved == ALLOW:
@@ -223,8 +351,19 @@ def build_permission_request_card(
                 "summary_echo": echo_summary,
                 "kind_echo": echo_kind,
                 "persist_acl": persist_acl,
+                "tool_name_echo": tool_t,
+                "auto_execute_after_approval": auto_execute_after_approval,
             }
-            if path_prefix:
+            if command_t:
+                d["command_echo"] = command_t
+            if cwd_t:
+                d["cwd_echo"] = cwd_t
+            if risk_list:
+                d["risk_reasons"] = risk_list
+            if grants:
+                d["path_grants"] = grants
+                d["path_prefix"] = grants[0]["path_prefix"]
+            elif path_prefix:
                 d["path_prefix"] = path_prefix
             if timeout_seconds is not None:
                 try:
@@ -240,6 +379,7 @@ def build_permission_request_card(
             "permission_id": permission_id,
             "summary_echo": echo_summary,
             "kind_echo": echo_kind,
+            "tool_name_echo": tool_t,
         }
         value_clarify: Dict[str, Any] = {
             VALUE_KEY: CLARIFY,
@@ -247,10 +387,21 @@ def build_permission_request_card(
             "summary_echo": echo_summary,
             "kind_echo": echo_kind,
             "persist_acl": False,
+            "tool_name_echo": tool_t,
         }
-        if path_prefix:
-            value_deny["path_prefix"] = path_prefix
-            value_clarify["path_prefix"] = path_prefix
+        for d in (value_deny, value_clarify):
+            if command_t:
+                d["command_echo"] = command_t
+            if cwd_t:
+                d["cwd_echo"] = cwd_t
+            if risk_list:
+                d["risk_reasons"] = risk_list
+            if grants:
+                d["path_grants"] = grants
+                d["path_prefix"] = grants[0]["path_prefix"]
+            elif path_prefix:
+                d["path_prefix"] = path_prefix
+            d["auto_execute_after_approval"] = auto_execute_after_approval
         if timeout_seconds is not None:
             try:
                 te = float(timeout_seconds)
@@ -259,7 +410,7 @@ def build_permission_request_card(
             except (TypeError, ValueError):
                 pass
 
-        if path_prefix:
+        if grants:
             approve_columns = [
                 {
                     "tag": "column",

@@ -2,20 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import agent_core.config as _config_mod
-from agent_core.permissions.wait_registry import (
-    PermissionDecision,
-    notify_permission_pending,
-    register_permission_wait,
-)
-from agent_core.agent.path_grants import (
-    add_ephemeral_path_prefix,
-    append_user_path_prefix,
-)
+from agent_core.permissions.broker import PathGrant, PermissionBroker, PermissionRequest
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from agent_core.tools.permission_path_infer import (
     infer_readable_prefix_from_details,
@@ -44,6 +35,24 @@ def _bash_command_from_details(details: Any) -> Optional[str]:
     return None
 
 
+def _path_grants_from_details(details: Any) -> list[PathGrant]:
+    if isinstance(details, str):
+        try:
+            raw = json.loads(details)
+        except json.JSONDecodeError:
+            raw = None
+    else:
+        raw = details
+    if not isinstance(raw, dict):
+        return []
+    grants: list[PathGrant] = []
+    for item in raw.get("path_grants") or []:
+        grant = PathGrant.from_payload(item)
+        if grant is not None:
+            grants.append(grant)
+    return grants
+
+
 class RequestPermissionTool(BaseTool):
     """挂起当前 turn，直到 resolve_permission 或超时。"""
 
@@ -54,17 +63,20 @@ class RequestPermissionTool(BaseTool):
     def get_definition(self) -> ToolDefinition:
         return ToolDefinition(
             name=self.name,
-            description="""当 bash / 文件写入因工作区隔离或缺少可写路径被拒绝时，请求人类批准。
+            description="""少数复杂场景下，主动请求人类批准权限。
 
 用于：
 - 需要写入全局配置目录（如 ~/.agents/skills）
 - 需要读取工作区外的宿主机目录（如指定的共享只读目录）
 - 需要一次性或长期扩展可写路径前缀
-- 危险 bash（rm -rf、sudo 等）：kind=bash_dangerous_command，details 为 JSON，必须含 command 字段（与将执行的命令完全一致）。人类批准后，用返回的 data.permission_id 与同一 command 再调 bash（一次性）
+- 对复杂权限需求先向人类解释原因
 
 调用后进程会等待人类在前端选择允许/拒绝；超时默认视为拒绝。
 
-**是否把路径加入持久白名单仅由人类决定**（飞书卡片上「本次有效」vs「加白名单」）。本工具**没有**「是否持久化」类参数；你只能在 summary/details 里说明需求，**不得**在对话里假装已获永久白名单。批准后请看返回的 data.persist_acl（人类选择结果）。""",
+注意：bash、read_file、write_file、modify_file 已能在命中权限边界时自动申请并在批准后继续执行。
+优先直接调用目标工具；只有当你需要先解释一组复杂授权或没有具体目标工具可调用时，才使用本工具。
+
+**是否把路径加入持久白名单仅由人类决定**（飞书卡片上 Once vs Always）。本工具**没有**「是否持久化」类参数；你只能在 summary/details 里说明需求，**不得**在对话里假装已获永久白名单。批准后请看返回的 data.persist_acl（人类选择结果）。""",
             parameters=[
                 ToolParameter(
                     name="summary",
@@ -81,7 +93,7 @@ class RequestPermissionTool(BaseTool):
                 ToolParameter(
                     name="details",
                     type="string",
-                    description='可选 JSON：path、path_prefix、reason 等；用于推断待审批路径前缀。`file_read` 会登记到只读白名单，`file_write` / `bash_write_outside_workspace` 会登记到可写白名单。**是否持久加入白名单不由本字段决定**，由人类在飞书卡片上选择（返回 data.persist_acl）',
+                    description="可选 JSON：path、path_prefix、path_grants、reason 等；用于推断待审批路径前缀。`file_read` 会登记到只读白名单，`file_write` / `bash_write_outside_workspace` 会登记到可写白名单。**是否持久加入白名单不由本字段决定**，由人类在飞书卡片上选择（返回 data.persist_acl）",
                     required=False,
                 ),
                 ToolParameter(
@@ -93,8 +105,8 @@ class RequestPermissionTool(BaseTool):
             ],
             examples=[],
             usage_notes=[
-                "仅在工具返回 WORKSPACE_WRITE_DENIED、CONFIRMATION_REQUIRED 等且需要人类决策时调用",
-                "bash_dangerous_command：details 必须含 command，与后续 bash 的 command 逐字一致",
+                "优先直接调用 bash/read_file/write_file/modify_file；这些工具会在需要时自动申请权限",
+                "仅在需要先解释复杂授权或没有具体目标工具可调用时主动使用",
                 "file_read：适用于 read_file 读取用户根外路径被拒绝时申请只读前缀，不会附带写权限",
                 "持久白名单 / 仅本次放行：仅人类在飞书卡片上选；Agent 无 persist 参数，以工具返回 data.persist_acl 为准",
             ],
@@ -146,76 +158,94 @@ class RequestPermissionTool(BaseTool):
             timeout = 300.0
 
         cfg = _config_mod.get_config()
-        cmd_cfg = cfg.command_tools
-
-        pid, fut = register_permission_wait()
-        feishu_cid = str(exec_ctx.get("feishu_chat_id") or "").strip()
-        payload: Dict[str, Any] = {
-            "summary": summary,
-            "kind": kind,
-            "details": details,
-            "timeout_seconds": timeout,
-            "memory_owner": exec_ctx.get("memory_owner"),
-            "session_id": exec_ctx.get("session_id"),
-            "source": exec_ctx.get("source"),
-            "user_id": exec_ctx.get("user_id"),
-        }
-        if feishu_cid:
-            payload["feishu_chat_id"] = feishu_cid
         kind_l = kind.strip().lower().replace("-", "_")
-        infer = (
-            infer_readable_prefix_from_details
-            if kind_l in ("file_read", "file_read_outside_workspace")
-            else infer_writable_prefix_from_details
+        grants = _path_grants_from_details(details)
+        if not grants:
+            infer = (
+                infer_readable_prefix_from_details
+                if kind_l in ("file_read", "file_read_outside_workspace")
+                else infer_writable_prefix_from_details
+            )
+            inferred = infer(details, config=cfg, exec_ctx=dict(exec_ctx))
+            if inferred:
+                grants.append(
+                    PathGrant(
+                        path_prefix=inferred,
+                        access_mode=(
+                            "read"
+                            if kind_l in ("file_read", "file_read_outside_workspace")
+                            else "write"
+                        ),
+                        reason="explicit request_permission",
+                    )
+                )
+
+        bc = _bash_command_from_details(details)
+        broker = PermissionBroker(cfg)
+        broker_result = await broker.request(
+            PermissionRequest(
+                tool_name="request_permission",
+                kind=kind_l,
+                summary=summary,
+                details=details,
+                command=bc,
+                risk_reasons=(
+                    ["危险 bash 命令"]
+                    if kind_l in ("bash_dangerous_command", "bash_dangerous")
+                    else []
+                ),
+                path_grants=grants,
+                timeout_seconds=timeout,
+                auto_execute_after_approval=False,
+                exec_ctx=dict(exec_ctx),
+            )
         )
-        inferred = infer(details, config=cfg, exec_ctx=dict(exec_ctx))
-        if inferred:
-            payload["path_prefix"] = inferred
-        notify_permission_pending(pid, payload)
 
-        try:
-            decision: PermissionDecision = await asyncio.wait_for(fut, timeout=timeout)
-        except asyncio.TimeoutError:
-            return ToolResult(
-                success=False,
-                error="PERMISSION_TIMEOUT",
-                message="等待人类批准超时，视为拒绝",
-                data={"permission_id": pid},
-            )
-        except asyncio.CancelledError as exc:
-            return ToolResult(
-                success=False,
-                error="PERMISSION_CANCELLED",
-                message=str(exc),
-                data={"permission_id": pid},
-            )
-
-        if getattr(decision, "clarify_requested", False):
-            ui = str(getattr(decision, "user_instruction", None) or "").strip()
-            if ui:
+        if not broker_result.allowed:
+            if broker_result.error == "PERMISSION_TIMEOUT":
+                return ToolResult(
+                    success=False,
+                    error="PERMISSION_TIMEOUT",
+                    message=broker_result.message,
+                    data={"permission_id": broker_result.permission_id},
+                )
+            if broker_result.error == "PERMISSION_CANCELLED":
+                return ToolResult(
+                    success=False,
+                    error="PERMISSION_CANCELLED",
+                    message=broker_result.message,
+                    data={"permission_id": broker_result.permission_id},
+                )
+            if broker_result.error == "PERMISSION_CLARIFY":
+                ui = broker_result.user_instruction
                 msg = (
                     "用户未批准本次权限。飞书卡片补充说明：\n"
                     + ui
                     + "\n请据此澄清后再次调用 request_permission。"
+                    if ui
+                    else "用户未批准本次权限（飞书卡片未填写说明）。请结合对话澄清后再次调用 request_permission。"
                 )
-            else:
-                msg = (
-                    "用户未批准本次权限（飞书卡片未填写说明）。"
-                    "请结合对话澄清后再次调用 request_permission。"
+                return ToolResult(
+                    success=False,
+                    error="PERMISSION_CLARIFY",
+                    message=msg,
+                    data={
+                        "permission_id": broker_result.permission_id,
+                        "user_instruction": ui,
+                    },
+                )
+            if broker_result.error == "ACL_PERSIST_FAILED":
+                return ToolResult(
+                    success=False,
+                    error="ACL_PERSIST_FAILED",
+                    message=broker_result.message,
+                    data={"permission_id": broker_result.permission_id},
                 )
             return ToolResult(
                 success=False,
-                error="PERMISSION_CLARIFY",
-                message=msg,
-                data={"permission_id": pid, "user_instruction": ui},
-            )
-
-        if not decision.allowed:
-            return ToolResult(
-                success=False,
-                error="PERMISSION_DENIED",
-                message=decision.note or "人类拒绝了该权限请求",
-                data={"permission_id": pid},
+                error=broker_result.error or "PERMISSION_DENIED",
+                message=broker_result.message,
+                data={"permission_id": broker_result.permission_id},
             )
 
         if kind_l in ("bash_dangerous_command", "bash_dangerous"):
@@ -223,60 +253,41 @@ class RequestPermissionTool(BaseTool):
                 register_bash_danger_grant,
             )
 
-            bc = _bash_command_from_details(details)
             if bc:
-                register_bash_danger_grant(pid, bc)
+                register_bash_danger_grant(broker_result.permission_id, bc)
 
+        grants_payload = [g.to_payload() for g in broker_result.applied_grants]
         prefix_msg = ""
-        persist = bool(getattr(decision, "persist_acl", False))
-        if decision.path_prefix and str(decision.path_prefix).strip():
-            pfx = str(decision.path_prefix).strip()
-            try:
-                src = str(exec_ctx.get("source") or "cli").strip() or "cli"
-                uid = str(exec_ctx.get("user_id") or "root").strip() or "root"
-                access_mode = (
-                    "read"
-                    if kind_l in ("file_read", "file_read_outside_workspace")
-                    else "write"
-                )
-                if persist:
-                    append_user_path_prefix(
-                        cmd_cfg.acl_base_dir,
-                        src,
-                        uid,
-                        pfx,
-                        access_mode=access_mode,
-                        config=cfg,
-                    )
-                    prefix_msg = f" 已持久化{'只读' if access_mode == 'read' else '可写'}前缀: {pfx}"
-                else:
-                    add_ephemeral_path_prefix(
-                        src,
-                        uid,
-                        pfx,
-                        access_mode=access_mode,
-                        config=cfg,
-                    )
-                    prefix_msg = (
-                        f" 本次进程内允许该前缀{'只读访问' if access_mode == 'read' else '写入'}"
-                        f"（未写入永久白名单）: {pfx}"
-                    )
-            except Exception as exc:
-                return ToolResult(
-                    success=False,
-                    error="ACL_PERSIST_FAILED",
-                    message=f"批准但应用可写路径失败: {exc}",
-                    data={"permission_id": pid},
-                )
+        if broker_result.applied_grants:
+            label = "已持久化" if broker_result.persist_acl else "本次进程内允许"
+            prefix_msg = (
+                " "
+                + label
+                + "路径前缀: "
+                + ", ".join(g.path_prefix for g in broker_result.applied_grants)
+            )
 
         return ToolResult(
             success=True,
             message="已批准。" + prefix_msg,
             data={
-                "permission_id": pid,
-                "path_prefix": decision.path_prefix,
-                "note": decision.note,
-                "persist_acl": persist,
-                "access_mode": "read" if kind_l in ("file_read", "file_read_outside_workspace") else "write",
+                "permission_id": broker_result.permission_id,
+                "path_prefix": (
+                    broker_result.applied_grants[0].path_prefix
+                    if broker_result.applied_grants
+                    else None
+                ),
+                "path_grants": grants_payload,
+                "note": broker_result.note,
+                "persist_acl": broker_result.persist_acl,
+                "access_mode": (
+                    broker_result.applied_grants[0].access_mode
+                    if broker_result.applied_grants
+                    else (
+                        "read"
+                        if kind_l in ("file_read", "file_read_outside_workspace")
+                        else "write"
+                    )
+                ),
             },
         )

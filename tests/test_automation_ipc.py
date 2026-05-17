@@ -300,6 +300,42 @@ async def test_ipc_server_client_run_turn_and_session_commands(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_ipc_client_expire_session_calls_gateway_evict(tmp_path: Path):
+    default_core = AsyncMock()
+    default_core.get_session_state = MagicMock(return_value=MagicMock(turn_count=0))
+    default_core.close = AsyncMock()
+
+    scheduler, _work_agent = _make_ipc_mock_scheduler(
+        AgentRunResult(output_text="work-ok"),
+        {"total_tokens": 0, "call_count": 0},
+    )
+    gateway = AutomationCoreGateway(
+        default_core,
+        kernel_scheduler=scheduler,
+        session_id="cli:root",
+        session_registry=SessionRegistry(str(tmp_path / "sessions.db")),
+    )
+    socket_path = str(tmp_path / "automation.sock")
+    server = AutomationIPCServer(
+        gateway, owner_id="root", source="cli", socket_path=socket_path
+    )
+    await server.start()
+    client = AutomationIPCClient(owner_id="root", source="cli", socket_path=socket_path)
+    try:
+        await client.connect()
+        await client.switch_session("cli:work", create_if_missing=True)
+
+        expired = await client.expire_session("cli:work", reason="manual_new")
+
+        assert expired is True
+        scheduler.core_pool.evict.assert_awaited_once_with("cli:work")
+    finally:
+        await client.close()
+        await server.stop()
+        await gateway.close()
+
+
+@pytest.mark.asyncio
 async def test_ipc_session_delete_rejected_when_session_is_active_for_any_client(
     tmp_path: Path,
 ):

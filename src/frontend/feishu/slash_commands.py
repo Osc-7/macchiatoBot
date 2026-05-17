@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import inspect
 import shlex
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -14,6 +15,115 @@ if TYPE_CHECKING:
     from system.automation.ipc import AutomationIPCClient
 
 logger = __import__("logging").getLogger(__name__)
+
+_DEFAULT_SESSION_LIST_LIMIT = 30
+
+
+def _string_attr(obj: Any, name: str, default: str = "") -> str:
+    value = getattr(obj, name, default)
+    return value.strip() if isinstance(value, str) else default
+
+
+def _int_attr(obj: Any, name: str, default: int) -> int:
+    value = getattr(obj, name, default)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _infer_feishu_base_session_id(session_id: str) -> str:
+    sid = (session_id or "").strip()
+    if sid.startswith(("feishu:user:", "feishu:chat:")):
+        parts = sid.split(":")
+        if len(parts) >= 3:
+            return ":".join(parts[:3])
+    return ""
+
+
+def _feishu_base_session_id(client: Any) -> str:
+    explicit = _string_attr(client, "feishu_base_session_id")
+    if explicit:
+        return explicit
+    return _infer_feishu_base_session_id(_string_attr(client, "active_session_id"))
+
+
+def _new_session_id(client: Any) -> str:
+    base = _feishu_base_session_id(client)
+    if base:
+        return f"{base}:{int(time.time())}"
+    return f"feishu:{int(time.time())}"
+
+
+def _session_in_scope(session_id: str, *, base_session_id: str, active: str) -> bool:
+    sid = (session_id or "").strip()
+    if not sid:
+        return False
+    if active and sid == active:
+        return True
+    if base_session_id:
+        return sid == base_session_id or sid.startswith(f"{base_session_id}:")
+    return sid.startswith("feishu:")
+
+
+def _scoped_sessions_for_display(
+    client: Any, sessions: List[str]
+) -> tuple[List[str], int, bool]:
+    active = _string_attr(client, "active_session_id")
+    base_session_id = _feishu_base_session_id(client)
+    source = _string_attr(client, "source")
+    should_scope = bool(base_session_id) or source == "feishu"
+
+    if should_scope:
+        scoped = [
+            sid
+            for sid in sessions
+            if _session_in_scope(sid, base_session_id=base_session_id, active=active)
+        ]
+        if active and active not in scoped:
+            scoped.insert(0, active)
+    else:
+        scoped = list(sessions)
+
+    deduped: List[str] = []
+    seen = set()
+    for sid in scoped:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        deduped.append(sid)
+
+    limit = _int_attr(client, "session_list_limit", _DEFAULT_SESSION_LIST_LIMIT)
+    if len(deduped) <= limit:
+        return deduped, 0, should_scope
+
+    shown = deduped[:limit]
+    if active and active in deduped and active not in shown and shown:
+        shown[-1] = active
+    return shown, len(deduped) - len(shown), should_scope
+
+
+async def _expire_active_session_before_new(
+    client: "AutomationIPCClient", target_session_id: str
+) -> Optional[str]:
+    active = _string_attr(client, "active_session_id")
+    target = (target_session_id or "").strip()
+    if not active or active == target:
+        return None
+    expire = getattr(client, "expire_session", None)
+    if not callable(expire) or not inspect.iscoroutinefunction(expire):
+        return None
+    try:
+        await expire(active, reason="manual_new")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "failed to expire active session before feishu /new (session_id=%s): %s",
+            active,
+            exc,
+        )
+        return str(exc) or type(exc).__name__
+    return None
 
 
 def _format_token_usage(u: Dict[str, Any]) -> str:
@@ -360,8 +470,11 @@ async def try_handle_slash_command(
         session_id = (
             parts[1].strip()
             if len(parts) > 1 and parts[1].strip()
-            else f"feishu:{int(time.time())}"
+            else _new_session_id(client)
         )
+        cut_error = await _expire_active_session_before_new(client, session_id)
+        if cut_error:
+            return True, f"新建会话前保存当前会话记忆失败: {cut_error}"
         created = await client.switch_session(session_id, create_if_missing=True)
         if created:
             return True, f"已创建并切换到新会话: {session_id}"
@@ -386,12 +499,15 @@ async def try_handle_slash_command(
     if sub in ("list", "ls"):
         sessions: List[str] = await client.list_sessions()
         active = getattr(client, "active_session_id", "")
+        sessions, omitted, scoped = _scoped_sessions_for_display(client, sessions)
         if not sessions:
             return True, "当前没有会话。"
-        lines = ["已加载会话:"]
+        lines = ["已加载会话（当前飞书窗口）:" if scoped else "已加载会话:"]
         for sid in sessions:
             marker = " *" if sid == active else ""
             lines.append(f"  - {sid}{marker}")
+        if omitted > 0:
+            lines.append(f"  ... 还有 {omitted} 个会话未显示")
         return True, "\n".join(lines)
 
     if sub == "switch":
@@ -411,8 +527,11 @@ async def try_handle_slash_command(
         session_id = (
             parts[2].strip()
             if len(parts) > 2 and parts[2].strip()
-            else f"feishu:{int(time.time())}"
+            else _new_session_id(client)
         )
+        cut_error = await _expire_active_session_before_new(client, session_id)
+        if cut_error:
+            return True, f"新建会话前保存当前会话记忆失败: {cut_error}"
         created = await client.switch_session(session_id, create_if_missing=True)
         if created:
             return True, f"已创建并切换到新会话: {session_id}"

@@ -188,7 +188,11 @@ class AutomationIPCServer:
                     result = await self._dispatch(method, params)
                     payload = {"id": req_id, "ok": True, "result": result}
                 except Exception as exc:
-                    payload = {"id": req_id, "ok": False, "error": _format_ipc_error(exc)}
+                    payload = {
+                        "id": req_id,
+                        "ok": False,
+                        "error": _format_ipc_error(exc),
+                    }
                 writer.write(
                     (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
                 )
@@ -439,6 +443,19 @@ class AutomationIPCServer:
             self._gateway.mark_activity(session_id)
             return {"created": created, "active_session_id": session_id}
 
+        if method == "session_expire":
+            session_id = str(params.get("session_id") or active_session).strip()
+            if not session_id:
+                raise ValueError("session_id 不能为空")
+            reason = str(params.get("reason") or "manual").strip() or "manual"
+            await self._gateway.expire_session(reason=reason, session_id=session_id)
+            return {
+                "expired": True,
+                "active_session_id": self._client_active_session.get(
+                    client_id, active_session
+                ),
+            }
+
         if method == "session_delete":
             session_id = str(params.get("session_id") or "").strip()
             if not session_id:
@@ -538,6 +555,9 @@ class AutomationIPCServer:
             allowed = bool(params.get("allowed"))
             clarify_requested = bool(params.get("clarify_requested"))
             path_prefix = params.get("path_prefix")
+            path_grants = params.get("path_grants")
+            if not isinstance(path_grants, list):
+                path_grants = None
             note_raw = params.get("note")
             ui_merged: Optional[str] = None
             if clarify_requested:
@@ -546,6 +566,7 @@ class AutomationIPCServer:
             decision = PermissionDecision(
                 allowed=allowed and not clarify_requested,
                 path_prefix=str(path_prefix).strip() if path_prefix else None,
+                path_grants=path_grants,
                 note=None if note_raw is None else str(note_raw),
                 clarify_requested=clarify_requested,
                 user_instruction=ui_merged,
@@ -839,6 +860,18 @@ class AutomationIPCClient:
         self.active_session_id = str(data.get("active_session_id") or session_id)
         return bool(data.get("created", False))
 
+    async def expire_session(
+        self, session_id: Optional[str] = None, *, reason: str = "manual"
+    ) -> bool:
+        payload: Dict[str, Any] = {"reason": reason}
+        if session_id:
+            payload["session_id"] = session_id
+        data = await self._request("session_expire", payload)
+        maybe_active = data.get("active_session_id")
+        if isinstance(maybe_active, str) and maybe_active:
+            self.active_session_id = maybe_active
+        return bool(data.get("expired", False))
+
     async def delete_session(self, session_id: str) -> bool:
         data = await self._request(
             "session_delete",
@@ -933,6 +966,7 @@ class AutomationIPCClient:
         permission_id: str,
         allowed: bool,
         path_prefix: Optional[str] = None,
+        path_grants: Optional[list[dict[str, str]]] = None,
         note: Optional[str] = None,
         clarify_requested: bool = False,
         user_instruction: Optional[str] = None,
@@ -945,6 +979,7 @@ class AutomationIPCClient:
             "permission_id": permission_id,
             "allowed": allowed,
             "path_prefix": path_prefix,
+            "path_grants": path_grants,
             "note": note,
             "clarify_requested": clarify_requested,
             "persist_acl": persist_acl,

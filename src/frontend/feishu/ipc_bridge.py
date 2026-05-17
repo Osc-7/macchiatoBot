@@ -85,6 +85,24 @@ def _extract_override_session_target(text: str) -> tuple[Optional[str], bool]:
     return None, False
 
 
+def _default_feishu_session_id(
+    *,
+    chat_type: str,
+    chat_id: str,
+    open_id: str,
+    user_id: str,
+) -> str:
+    chat_type = (chat_type or "").strip() or "p2p"
+    chat_id = (chat_id or "").strip()
+    open_id = (open_id or "").strip()
+    user_id = (user_id or "").strip()
+    if chat_type == "p2p":
+        key = open_id or user_id or chat_id or "unknown"
+        return f"feishu:user:{key}"
+    key = chat_id or open_id or user_id or "unknown"
+    return f"feishu:chat:{key}"
+
+
 def format_feishu_processing_error(exc: BaseException) -> str:
     """将异常格式化为飞书用户可见的一行说明（避免过长）。"""
     msg = str(exc).strip() or type(exc).__name__
@@ -139,6 +157,12 @@ async def try_handle_slash_command_via_ipc(
         raise AutomationDaemonUnavailable(
             f"automation daemon is not reachable via IPC socket: {socket_path or default_socket_path()}"
         )
+    base_session = _default_feishu_session_id(
+        chat_type=feishu_chat_type,
+        chat_id=feishu_chat_id,
+        open_id=feishu_open_id,
+        user_id=feishu_user_id,
+    )
     effective_session = (
         resolve_session_override(
             chat_type=feishu_chat_type,
@@ -148,6 +172,8 @@ async def try_handle_slash_command_via_ipc(
         )
         or session_id
     )
+    setattr(client, "feishu_base_session_id", base_session or session_id)
+    setattr(client, "session_list_limit", 30)
     await client.switch_session(effective_session, create_if_missing=True)
     handled, reply = await try_handle_slash_command(client, text)
     if handled:

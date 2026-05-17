@@ -17,6 +17,7 @@ from agent_core.agent.readable_ephemeral_grants import (
     clear_ephemeral_readable_grants_for_tests,
 )
 from agent_core.agent.readable_roots_store import load_user_readable_prefixes
+from agent_core.agent.writable_roots_store import load_user_writable_prefixes
 from agent_core.agent.writable_ephemeral_grants import (
     clear_ephemeral_writable_grants_for_tests,
 )
@@ -27,6 +28,17 @@ from agent_core.permissions.bash_danger_approvals import (
 from agent_core.tools.request_permission_tool import RequestPermissionTool
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+def cleanup_permission_hooks():
+    try:
+        yield
+    finally:
+        set_permission_notify_hook(None)
+        clear_ephemeral_readable_grants_for_tests()
+        clear_ephemeral_writable_grants_for_tests()
+        clear_bash_danger_grant_for_tests()
 
 
 @pytest.fixture
@@ -340,6 +352,69 @@ async def test_request_permission_file_read_ephemeral_skips_readable_acl_file(
     assert not acl_file.exists()
     clear_ephemeral_readable_grants_for_tests()
     set_permission_notify_hook(None)
+
+
+async def test_request_permission_applies_multiple_path_grants(
+    patched_get_config,
+):
+    tmp_path, _c = patched_get_config
+    captured: list[str] = []
+
+    def _notify(pid: str, payload: object) -> None:
+        captured.append(pid)
+
+    set_permission_notify_hook(_notify)
+    tool = RequestPermissionTool()
+    exec_ctx = {"source": "cli", "user_id": "alice"}
+    readable = tmp_path / "readable"
+    writable = tmp_path / "writable"
+    readable.mkdir(parents=True, exist_ok=True)
+    writable.mkdir(parents=True, exist_ok=True)
+
+    async def _run():
+        return await tool.execute(
+            summary="read and write outside",
+            kind="other",
+            details=json.dumps(
+                {
+                    "path_grants": [
+                        {
+                            "path_prefix": str(readable),
+                            "access_mode": "read",
+                            "reason": "read shared docs",
+                        },
+                        {
+                            "path_prefix": str(writable),
+                            "access_mode": "write",
+                            "reason": "write generated files",
+                        },
+                    ]
+                }
+            ),
+            timeout_seconds=5.0,
+            __execution_context__=exec_ctx,
+        )
+
+    task = asyncio.create_task(_run())
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if captured:
+            break
+    assert captured
+    ok = resolve_permission(
+        captured[0],
+        PermissionDecision(allowed=True, persist_acl=True),
+    )
+    assert ok
+    result = await task
+    assert result.success
+    assert len(result.data["path_grants"]) == 2
+    assert str(readable.resolve()) in load_user_readable_prefixes(
+        str(tmp_path / "acl"), "cli", "alice", config=_c
+    )
+    assert str(writable.resolve()) in load_user_writable_prefixes(
+        str(tmp_path / "acl"), "cli", "alice", config=_c
+    )
 
 
 async def test_request_permission_clarify_includes_user_instruction_in_data(

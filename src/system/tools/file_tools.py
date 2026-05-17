@@ -19,12 +19,17 @@ from agent_core.agent.session_capabilities import (
 from agent_core.remote.pathmap import normalize_remote_workspace_relative_path
 from agent_core.remote.worker_registry import get_remote_worker_registry
 from agent_core.remote.workspace_state import get_remote_workspace_state
+from agent_core.permissions.broker import PathGrant, PermissionBroker, PermissionRequest
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from agent_core.config import Config, FileToolsConfig, get_config
 from agent_core.agent.session_paths import expand_user_path_str_for_session
 from agent_core.agent.tool_path_resolution import (
     resolve_path_string_for_tool,
     resolve_workspace_root_for_exec_ctx,
+)
+from agent_core.tools.permission_path_infer import (
+    infer_readable_prefix_from_details,
+    infer_writable_prefix_from_details,
 )
 
 # 工作区隔离下 ``data/memory`` 已嫁接至当前用户的 canonical owner（见 workspace_paths），
@@ -137,6 +142,90 @@ def _resolve_read_path_for_file_tool(
             "如需读取其他宿主机路径，请先调用 request_permission(kind=file_read)。"
         )
     return resolved, None
+
+
+def _is_authorizable_path_error(err: Optional[str]) -> bool:
+    if not err:
+        return False
+    return (
+        "request_permission(kind=file_read)" in err
+        or "当前用户根目录" in err
+        or "已批准白名单" in err
+        or "工作区内" in err
+        or "工作区或临时目录内" in err
+        or "可写白名单" in err
+        or "canonical memory" in err
+    )
+
+
+def _infer_path_grant(
+    *,
+    path_str: str,
+    access_mode: str,
+    exec_ctx: dict,
+    config: Config,
+) -> Optional[PathGrant]:
+    details = {"path": path_str}
+    inferred = (
+        infer_readable_prefix_from_details
+        if access_mode == "read"
+        else infer_writable_prefix_from_details
+    )(details, config=config, exec_ctx=dict(exec_ctx))
+    if not inferred:
+        return None
+    return PathGrant(
+        path_prefix=inferred,
+        access_mode="read" if access_mode == "read" else "write",
+        reason=f"{access_mode} outside allowed roots",
+    )
+
+
+async def _request_file_path_permission(
+    *,
+    tool_name: str,
+    kind: str,
+    path_str: str,
+    access_mode: str,
+    summary: str,
+    exec_ctx: dict,
+    config: Config,
+) -> Optional[ToolResult]:
+    grant = _infer_path_grant(
+        path_str=path_str,
+        access_mode=access_mode,
+        exec_ctx=exec_ctx,
+        config=config,
+    )
+    if grant is None:
+        return ToolResult(
+            success=False,
+            error="FORBIDDEN_PATH",
+            message="无法推断可申请的人类授权路径前缀",
+        )
+    broker = PermissionBroker(config)
+    result = await broker.request(
+        PermissionRequest(
+            tool_name=tool_name,
+            kind=kind,
+            summary=summary,
+            details={"path": path_str},
+            path_grants=[grant],
+            auto_execute_after_approval=True,
+            exec_ctx=dict(exec_ctx),
+        )
+    )
+    if result.allowed:
+        return None
+    return ToolResult(
+        success=False,
+        error=result.error or "PERMISSION_DENIED",
+        message=result.message or "人类未批准该文件操作",
+        data={
+            "path": path_str,
+            "permission_id": result.permission_id,
+            "user_instruction": result.user_instruction,
+        },
+    )
 
 
 class ReadFileTool(BaseTool):
@@ -355,6 +444,54 @@ class ReadFileTool(BaseTool):
         resolved, err = _resolve_read_path_for_file_tool(
             path_str, exec_ctx, self._ft_config, self._config
         )
+        if err:
+            if _is_authorizable_path_error(err):
+                permission_result = await _request_file_path_permission(
+                    tool_name="read_file",
+                    kind="file_read",
+                    path_str=path_str,
+                    access_mode="read",
+                    summary=f"读取工作区外文件: {path_str}",
+                    exec_ctx=exec_ctx,
+                    config=self._config,
+                )
+                if permission_result is not None:
+                    return permission_result
+                resolved, err = _resolve_read_path_for_file_tool(
+                    path_str, exec_ctx, self._ft_config, self._config
+                )
+                if err is None and resolved is not None:
+                    pass
+                else:
+                    return ToolResult(
+                        success=False,
+                        error="FORBIDDEN_PATH",
+                        message=err or f"无效路径: {path_str}",
+                    )
+            else:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        "FORBIDDEN_PATH"
+                        if "request_permission(kind=file_read)" in err
+                        or "当前用户根目录" in err
+                        or "已批准白名单" in err
+                        else "INVALID_PATH"
+                    ),
+                    message=err,
+                    metadata=(
+                        {
+                            "suggested_tool": "request_permission",
+                            "permission_kind": "file_read",
+                            "permission_details": {
+                                "path": path_str,
+                                "reason": "read outside allowed roots",
+                            },
+                        }
+                        if "request_permission(kind=file_read)" in err
+                        else {}
+                    ),
+                )
         if err:
             return ToolResult(
                 success=False,
@@ -608,6 +745,43 @@ class WriteFileTool(BaseTool):
         resolved, err = _resolve_mutation_path_for_file_tool(
             path_str, exec_ctx, self._ft_config, self._config
         )
+        if err:
+            if _is_authorizable_path_error(err):
+                permission_result = await _request_file_path_permission(
+                    tool_name="write_file",
+                    kind="file_write",
+                    path_str=path_str,
+                    access_mode="write",
+                    summary=f"写入工作区外文件: {path_str}，共 {len(str(content))} 字符",
+                    exec_ctx=exec_ctx,
+                    config=self._config,
+                )
+                if permission_result is not None:
+                    return permission_result
+                resolved, err = _resolve_mutation_path_for_file_tool(
+                    path_str, exec_ctx, self._ft_config, self._config
+                )
+                if err is not None or resolved is None:
+                    return ToolResult(
+                        success=False,
+                        error="FORBIDDEN_PATH",
+                        message=err or f"无效路径: {path_str}",
+                    )
+            else:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        "FORBIDDEN_PATH"
+                        if (
+                            "工作区内" in err
+                            or "工作区或临时目录内" in err
+                            or "可写白名单" in err
+                            or "canonical memory" in err
+                        )
+                        else "INVALID_PATH"
+                    ),
+                    message=err,
+                )
         if err:
             return ToolResult(
                 success=False,
@@ -1049,6 +1223,43 @@ class ModifyFileTool(BaseTool):
         resolved, err = _resolve_mutation_path_for_file_tool(
             path_str, exec_ctx, self._ft_config, self._config
         )
+        if err:
+            if _is_authorizable_path_error(err):
+                permission_result = await _request_file_path_permission(
+                    tool_name="modify_file",
+                    kind="file_write",
+                    path_str=path_str,
+                    access_mode="write",
+                    summary=f"修改工作区外文件: {path_str}",
+                    exec_ctx=exec_ctx,
+                    config=self._config,
+                )
+                if permission_result is not None:
+                    return permission_result
+                resolved, err = _resolve_mutation_path_for_file_tool(
+                    path_str, exec_ctx, self._ft_config, self._config
+                )
+                if err is not None or resolved is None:
+                    return ToolResult(
+                        success=False,
+                        error="FORBIDDEN_PATH",
+                        message=err or f"无效路径: {path_str}",
+                    )
+            else:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        "FORBIDDEN_PATH"
+                        if (
+                            "工作区内" in err
+                            or "工作区或临时目录内" in err
+                            or "可写白名单" in err
+                            or "canonical memory" in err
+                        )
+                        else "INVALID_PATH"
+                    ),
+                    message=err,
+                )
         if err:
             return ToolResult(
                 success=False,

@@ -10,26 +10,68 @@ BashTool + BashSecurity 测试。
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from agent_core.bash_runtime import BashRuntime, BashRuntimeConfig
+from agent_core.agent.writable_ephemeral_grants import (
+    clear_ephemeral_writable_grants_for_tests,
+)
+from agent_core.agent.writable_roots_store import load_user_writable_prefixes
 from agent_core.bash_security import (
     BashSecurity,
-    SecurityAction,
 )
+from agent_core.config import CommandToolsConfig, Config, LLMConfig
 from agent_core.kernel_interface.profile import CoreProfile
 from agent_core.permissions.bash_danger_approvals import (
     clear_bash_danger_grant_for_tests,
     register_bash_danger_grant,
+)
+from agent_core.permissions.wait_registry import (
+    PermissionDecision,
+    resolve_permission,
+    set_permission_notify_hook,
 )
 from agent_core.tools.bash_tool import BashTool
 
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture
+def permission_config(monkeypatch, tmp_path):
+    cfg = Config(
+        llm=LLMConfig(api_key="test", model="test"),
+        command_tools=CommandToolsConfig(acl_base_dir=str(tmp_path / "acl")),
+    )
+    import agent_core.config as cfg_mod
+    import agent_core.permissions.broker as broker_mod
+
+    monkeypatch.setattr(cfg_mod, "get_config", lambda: cfg)
+    monkeypatch.setattr(broker_mod, "get_config", lambda: cfg)
+    try:
+        yield cfg
+    finally:
+        set_permission_notify_hook(None)
+        clear_ephemeral_writable_grants_for_tests()
+
+
+def _auto_resolve(decision_or_factory):
+    captured: list[tuple[str, object]] = []
+
+    def _notify(pid: str, payload: object) -> None:
+        captured.append((pid, payload))
+        decision = (
+            decision_or_factory(pid, payload)
+            if callable(decision_or_factory)
+            else decision_or_factory
+        )
+        resolve_permission(pid, decision)
+
+    set_permission_notify_hook(_notify)
+    return captured
+
+
 # ── BashSecurity 单元测试 ─────────────────────────────────────
+
 
 class TestBashSecurity:
     """Layer 1/2/3 安全校验。"""
@@ -173,8 +215,9 @@ class TestBashSecurity:
     def test_workspace_jail_denies_touch_outside_workspace(self):
         sec = self._sec(workspace_jail_root="/tmp/ws")
         v = sec.check("touch /tmp/outside.txt", profile=CoreProfile(mode="full"))
-        assert v.denied
+        assert v.needs_confirmation
         assert v.error_code == "WORKSPACE_WRITE_DENIED"
+        assert v.path_grants
 
     def test_workspace_jail_allows_touch_inside_workspace(self):
         sec = self._sec(workspace_jail_root="/tmp/ws")
@@ -189,8 +232,9 @@ class TestBashSecurity:
     def test_workspace_jail_denies_redirect_outside_workspace(self):
         sec = self._sec(workspace_jail_root="/tmp/ws")
         v = sec.check("echo hi > /tmp/outside.txt", profile=CoreProfile(mode="full"))
-        assert v.denied
+        assert v.needs_confirmation
         assert v.error_code == "WORKSPACE_WRITE_DENIED"
+        assert v.path_grants
 
     def test_workspace_jail_allows_redirect_to_dev_null(self):
         sec = self._sec(workspace_jail_root="/tmp/ws")
@@ -219,8 +263,9 @@ class TestBashSecurity:
         v = sec.check(
             "cp /tmp/ws/file.txt /tmp/outside.txt", profile=CoreProfile(mode="full")
         )
-        assert v.denied
+        assert v.needs_confirmation
         assert v.error_code == "WORKSPACE_WRITE_DENIED"
+        assert v.path_grants
 
     def test_workspace_jail_allows_write_to_tmp_root(self):
         sec = self._sec(
@@ -242,8 +287,9 @@ class TestBashSecurity:
             "echo hi > /tmp/macchiato/cli/u2/out.txt",
             profile=CoreProfile(mode="full"),
         )
-        assert v.denied
+        assert v.needs_confirmation
         assert v.error_code == "WORKSPACE_WRITE_DENIED"
+        assert v.path_grants
 
     def test_workspace_jail_allows_extra_write_root(self, tmp_path):
         extra = tmp_path / "extra"
@@ -263,6 +309,7 @@ class TestBashSecurity:
 
 
 # ── BashTool 集成测试 ─────────────────────────────────────────
+
 
 def _make_tool(**rt_overrides) -> tuple[BashTool, BashRuntime]:
     defaults = dict(
@@ -314,26 +361,204 @@ class TestBashToolExecution:
         finally:
             await rt.close()
 
-    async def test_dangerous_command_rejected(self):
+    async def test_dangerous_command_rejected(self, permission_config, tmp_path):
+        touched = tmp_path / "should_not_exist"
+        captured = _auto_resolve(PermissionDecision(allowed=False, note="no"))
         tool, rt = _make_tool()
         await rt.start()
         try:
-            result = await tool.execute(command="rm -rf /tmp/test_dir")
+            result = await tool.execute(command=f"eval 'touch {touched}'")
             assert not result.success
-            assert result.error == "CONFIRMATION_REQUIRED"
+            assert result.error == "PERMISSION_DENIED"
+            assert not touched.exists()
+            assert captured
+            payload = captured[0][1]
+            assert isinstance(payload, dict)
+            assert payload.get("command") == f"eval 'touch {touched}'"
+            assert payload.get("auto_execute_after_approval") is True
         finally:
             await rt.close()
 
-    async def test_dangerous_command_with_permission_grant(self):
+    async def test_dangerous_command_auto_approval_executes_same_call(
+        self, permission_config
+    ):
+        captured = _auto_resolve(PermissionDecision(allowed=True, persist_acl=False))
+        tool, rt = _make_tool()
+        await rt.start()
+        try:
+            result = await tool.execute(command="eval 'echo ok'")
+            assert result.success
+            assert result.data["stdout"].strip() == "ok"
+            assert captured
+            payload = captured[0][1]
+            assert isinstance(payload, dict)
+            assert payload.get("tool_name") == "bash"
+            assert payload.get("command") == "eval 'echo ok'"
+            assert payload.get("cwd")
+            assert payload.get("risk_reasons")
+        finally:
+            await rt.close()
+
+    async def test_dangerous_cd_prefix_auto_approval_executes_original_command(
+        self, permission_config
+    ):
+        _auto_resolve(PermissionDecision(allowed=True, persist_acl=False))
+        tool, rt = _make_tool()
+        await rt.start()
+        try:
+            result = await tool.execute(command="cd /tmp && eval 'echo ok'")
+            assert result.success
+            assert result.data["stdout"].strip() == "ok"
+        finally:
+            await rt.close()
+
+    async def test_workspace_write_auto_permission_once(
+        self, permission_config, tmp_path
+    ):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        outside_dir = tmp_path / "outside-once"
+        outside_dir.mkdir()
+        outside = outside_dir / "note.txt"
+        captured = _auto_resolve(PermissionDecision(allowed=True, persist_acl=False))
+
+        rt = BashRuntime(
+            config=BashRuntimeConfig(
+                shell_path="/bin/bash",
+                base_dir=str(ws),
+                default_timeout_seconds=10,
+                max_timeout_seconds=30,
+                default_output_limit=50_000,
+                max_output_limit=200_000,
+            )
+        )
+        sec = BashSecurity(workspace_jail_root=str(ws))
+        tool = BashTool(bash=rt, security=sec)
+        await rt.start()
+        try:
+            result = await tool.execute(
+                command=f"echo ok > {outside}",
+                __execution_context__={"source": "cli", "user_id": "alice"},
+            )
+            assert result.success
+            assert outside.read_text(encoding="utf-8").strip() == "ok"
+            payload = captured[0][1]
+            assert isinstance(payload, dict)
+            assert payload.get("path_grants")[0]["access_mode"] == "write"
+            acl_file = tmp_path / "acl" / "cli" / "alice" / "writable_roots.json"
+            assert not acl_file.exists()
+        finally:
+            await rt.close()
+
+    async def test_workspace_write_auto_permission_always_persists_acl(
+        self, permission_config, tmp_path
+    ):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        outside_dir = tmp_path / "outside-always"
+        outside_dir.mkdir()
+        outside = outside_dir / "note.txt"
+        _auto_resolve(PermissionDecision(allowed=True, persist_acl=True))
+
+        rt = BashRuntime(
+            config=BashRuntimeConfig(
+                shell_path="/bin/bash",
+                base_dir=str(ws),
+                default_timeout_seconds=10,
+                max_timeout_seconds=30,
+                default_output_limit=50_000,
+                max_output_limit=200_000,
+            )
+        )
+        sec = BashSecurity(workspace_jail_root=str(ws))
+        tool = BashTool(bash=rt, security=sec)
+        await rt.start()
+        try:
+            result = await tool.execute(
+                command=f"echo ok > {outside}",
+                __execution_context__={"source": "cli", "user_id": "alice"},
+            )
+            assert result.success
+            assert outside.read_text(encoding="utf-8").strip() == "ok"
+            prefixes = load_user_writable_prefixes(
+                permission_config.command_tools.acl_base_dir,
+                "cli",
+                "alice",
+                config=permission_config,
+            )
+            assert str(outside_dir.resolve()) in prefixes
+        finally:
+            await rt.close()
+
+    async def test_dangerous_and_workspace_write_share_one_permission_request(
+        self, permission_config, tmp_path
+    ):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        outside_dir = tmp_path / "outside-combined"
+        outside_dir.mkdir()
+        outside = outside_dir / "note.txt"
+        captured = _auto_resolve(PermissionDecision(allowed=True, persist_acl=False))
+
+        rt = BashRuntime(
+            config=BashRuntimeConfig(
+                shell_path="/bin/bash",
+                base_dir=str(ws),
+                default_timeout_seconds=10,
+                max_timeout_seconds=30,
+                default_output_limit=50_000,
+                max_output_limit=200_000,
+            )
+        )
+        sec = BashSecurity(workspace_jail_root=str(ws))
+        tool = BashTool(bash=rt, security=sec)
+        await rt.start()
+        try:
+            result = await tool.execute(
+                command=f"eval echo ok > {outside}",
+                __execution_context__={"source": "cli", "user_id": "alice"},
+            )
+            assert result.success
+            assert outside.read_text(encoding="utf-8").strip() == "ok"
+            assert len(captured) == 1
+            payload = captured[0][1]
+            assert isinstance(payload, dict)
+            assert payload.get("risk_reasons")
+            assert payload.get("path_grants")[0]["path_prefix"] == str(
+                outside_dir.resolve()
+            )
+        finally:
+            await rt.close()
+
+    async def test_dangerous_command_clarify_does_not_execute(
+        self, permission_config, tmp_path
+    ):
+        touched = tmp_path / "clarify_should_not_exist"
+        _auto_resolve(
+            PermissionDecision(
+                allowed=False,
+                clarify_requested=True,
+                user_instruction="只允许 echo",
+            )
+        )
+        tool, rt = _make_tool()
+        await rt.start()
+        try:
+            result = await tool.execute(command=f"eval 'touch {touched}'")
+            assert not result.success
+            assert result.error == "PERMISSION_CLARIFY"
+            assert result.data.get("user_instruction") == "只允许 echo"
+            assert not touched.exists()
+        finally:
+            await rt.close()
+
+    async def test_dangerous_command_with_permission_grant(self, permission_config):
         clear_bash_danger_grant_for_tests()
+        _auto_resolve(PermissionDecision(allowed=False, note="no"))
         tool, rt = _make_tool()
         await rt.start()
         try:
             cmd = "echo 'sudo test'"
-            r0 = await tool.execute(command=cmd)
-            assert not r0.success
-            assert r0.error == "CONFIRMATION_REQUIRED"
-            assert r0.data and r0.data.get("suggested_tool") == "request_permission"
 
             pid = "test-grant-id"
             register_bash_danger_grant(pid, cmd)
@@ -343,28 +568,29 @@ class TestBashToolExecution:
             # 一次性：批准已消费，同 id 不能再用
             r_dup = await tool.execute(command=cmd, permission_id=pid)
             assert not r_dup.success
-            assert r_dup.error == "CONFIRMATION_REQUIRED"
+            assert r_dup.error == "PERMISSION_DENIED"
 
             # 命令与批准时不一致（仍为危险命令）：不消费 grant，拒绝危险执行
             register_bash_danger_grant(pid, cmd)
             r_wrong = await tool.execute(command="sudo ls /", permission_id=pid)
             assert not r_wrong.success
-            assert r_wrong.error == "CONFIRMATION_REQUIRED"
+            assert r_wrong.error == "PERMISSION_DENIED"
             r_ok = await tool.execute(command=cmd, permission_id=pid)
             assert r_ok.success
         finally:
             clear_bash_danger_grant_for_tests()
             await rt.close()
 
-    async def test_confirm_kwarg_is_ignored(self):
+    async def test_confirm_kwarg_is_ignored(self, permission_config):
         """模型自传 confirm=true 不再绕过安全策略。"""
         clear_bash_danger_grant_for_tests()
+        _auto_resolve(PermissionDecision(allowed=False, note="no"))
         tool, rt = _make_tool()
         await rt.start()
         try:
             r = await tool.execute(command="echo 'sudo test'", confirm=True)
             assert not r.success
-            assert r.error == "CONFIRMATION_REQUIRED"
+            assert r.error == "PERMISSION_DENIED"
         finally:
             await rt.close()
 
@@ -418,5 +644,5 @@ class TestBashToolDefinition:
         assert "command" in param_names
         assert "restart" in param_names
         assert "timeout" in param_names
-        assert "permission_id" in param_names
+        assert "permission_id" not in param_names
         assert "confirm" not in param_names

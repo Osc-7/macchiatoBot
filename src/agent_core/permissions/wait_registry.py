@@ -8,7 +8,7 @@ import uuid
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,8 @@ class PermissionDecision:
     """path_prefix 存在时：人类是否选择「加入持久白名单」。
     True=写入 writable_roots；False=仅进程内临时放行。
     **须由人类在前端（如飞书卡片「本次有效 / 加白名单」）决定；Agent/模型不得自行设定此字段。**"""
+    path_grants: Optional[List[Dict[str, str]]] = None
+    """多路径授权列表。每项含 path_prefix / access_mode / reason；未设置时回退到 path_prefix。"""
 
 
 _futures: Dict[str, asyncio.Future[PermissionDecision]] = {}

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import inspect
+import shlex
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -13,6 +15,115 @@ if TYPE_CHECKING:
     from system.automation.ipc import AutomationIPCClient
 
 logger = __import__("logging").getLogger(__name__)
+
+_DEFAULT_SESSION_LIST_LIMIT = 30
+
+
+def _string_attr(obj: Any, name: str, default: str = "") -> str:
+    value = getattr(obj, name, default)
+    return value.strip() if isinstance(value, str) else default
+
+
+def _int_attr(obj: Any, name: str, default: int) -> int:
+    value = getattr(obj, name, default)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _infer_feishu_base_session_id(session_id: str) -> str:
+    sid = (session_id or "").strip()
+    if sid.startswith(("feishu:user:", "feishu:chat:")):
+        parts = sid.split(":")
+        if len(parts) >= 3:
+            return ":".join(parts[:3])
+    return ""
+
+
+def _feishu_base_session_id(client: Any) -> str:
+    explicit = _string_attr(client, "feishu_base_session_id")
+    if explicit:
+        return explicit
+    return _infer_feishu_base_session_id(_string_attr(client, "active_session_id"))
+
+
+def _new_session_id(client: Any) -> str:
+    base = _feishu_base_session_id(client)
+    if base:
+        return f"{base}:{int(time.time())}"
+    return f"feishu:{int(time.time())}"
+
+
+def _session_in_scope(session_id: str, *, base_session_id: str, active: str) -> bool:
+    sid = (session_id or "").strip()
+    if not sid:
+        return False
+    if active and sid == active:
+        return True
+    if base_session_id:
+        return sid == base_session_id or sid.startswith(f"{base_session_id}:")
+    return sid.startswith("feishu:")
+
+
+def _scoped_sessions_for_display(
+    client: Any, sessions: List[str]
+) -> tuple[List[str], int, bool]:
+    active = _string_attr(client, "active_session_id")
+    base_session_id = _feishu_base_session_id(client)
+    source = _string_attr(client, "source")
+    should_scope = bool(base_session_id) or source == "feishu"
+
+    if should_scope:
+        scoped = [
+            sid
+            for sid in sessions
+            if _session_in_scope(sid, base_session_id=base_session_id, active=active)
+        ]
+        if active and active not in scoped:
+            scoped.insert(0, active)
+    else:
+        scoped = list(sessions)
+
+    deduped: List[str] = []
+    seen = set()
+    for sid in scoped:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        deduped.append(sid)
+
+    limit = _int_attr(client, "session_list_limit", _DEFAULT_SESSION_LIST_LIMIT)
+    if len(deduped) <= limit:
+        return deduped, 0, should_scope
+
+    shown = deduped[:limit]
+    if active and active in deduped and active not in shown and shown:
+        shown[-1] = active
+    return shown, len(deduped) - len(shown), should_scope
+
+
+async def _expire_active_session_before_new(
+    client: "AutomationIPCClient", target_session_id: str
+) -> Optional[str]:
+    active = _string_attr(client, "active_session_id")
+    target = (target_session_id or "").strip()
+    if not active or active == target:
+        return None
+    expire = getattr(client, "expire_session", None)
+    if not callable(expire) or not inspect.iscoroutinefunction(expire):
+        return None
+    try:
+        await expire(active, reason="manual_new")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "failed to expire active session before feishu /new (session_id=%s): %s",
+            active,
+            exc,
+        )
+        return str(exc) or type(exc).__name__
+    return None
 
 
 def _format_token_usage(u: Dict[str, Any]) -> str:
@@ -52,6 +163,7 @@ def _format_token_usage(u: Dict[str, Any]) -> str:
 def _help_text() -> str:
     return """可用指令：
 /clear - 清空对话历史
+/interrupt 或 /cancel 或 /stop - 中断当前正在执行的内核任务（等同 CLI 中 Ctrl+C 正在处理时）
 /compress [N] - 主动折叠上下文为摘要（可选 N 指定保留最近几轮）
 /usage 或 /stats - 本会话 token 用量
 /model 或 /model list - 列出可用 LLM（★ 为当前主对话）
@@ -62,7 +174,102 @@ def _help_text() -> str:
 /session new [id] - 创建并切换到新会话
 /session delete <id> - 删除会话记录
 /new [id] - 快速新开 core 对话（等价 /session new [id]）
+/remote-use <login> [path] [--profile dev] - 将当前会话切换到远程工作区模式
+/remote-status - 查看当前会话远程工作区状态
+/remote-release 或 /cloud-use - 释放远程工作区，恢复云端工作区
 /help - 显示此帮助"""
+
+
+def _parse_ttl_seconds(value: str) -> Optional[int]:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return None
+    unit = raw[-1]
+    number = raw[:-1] if unit in {"s", "m", "h"} else raw
+    try:
+        n = int(number)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    if unit == "h":
+        return n * 3600
+    if unit == "m":
+        return n * 60
+    return n
+
+
+def _parse_remote_use_args(
+    cmd_text: str,
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    try:
+        tokens = shlex.split(cmd_text)
+    except ValueError as exc:
+        return None, f"解析失败: {exc}"
+    if len(tokens) < 2:
+        return (
+            None,
+            "用法: /remote-use <login> [path] [--profile strict|dev|host-user|host-admin] [--ttl 30m]",
+        )
+    login = tokens[1].strip()
+    path = "~"
+    profile = "dev"
+    ttl_seconds: Optional[int] = None
+    i = 2
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--profile":
+            if i + 1 >= len(tokens):
+                return None, "缺少 --profile 的值"
+            profile = tokens[i + 1].strip()
+            i += 2
+            continue
+        if tok.startswith("--profile="):
+            profile = tok.split("=", 1)[1].strip()
+            i += 1
+            continue
+        if tok == "--ttl":
+            if i + 1 >= len(tokens):
+                return None, "缺少 --ttl 的值"
+            ttl_seconds = _parse_ttl_seconds(tokens[i + 1])
+            if ttl_seconds is None:
+                return None, "ttl 格式应为正整数秒，或 30m / 2h"
+            i += 2
+            continue
+        if tok.startswith("--ttl="):
+            ttl_seconds = _parse_ttl_seconds(tok.split("=", 1)[1])
+            if ttl_seconds is None:
+                return None, "ttl 格式应为正整数秒，或 30m / 2h"
+            i += 1
+            continue
+        if tok.startswith("--"):
+            return None, f"未知参数: {tok}"
+        path = tok
+        i += 1
+    if profile not in {"strict", "dev", "host-user", "host-admin"}:
+        return None, "profile 必须是 strict、dev、host-user 或 host-admin"
+    return {
+        "login": login,
+        "path": path,
+        "profile": profile,
+        "ttl_seconds": ttl_seconds,
+    }, None
+
+
+def _format_remote_state(state: Dict[str, Any]) -> str:
+    if not state:
+        return "远程工作区未启用。"
+    path = state.get("resolved_path") or state.get("requested_path") or "—"
+    mount = state.get("workspace_mount") or "/workspace"
+    login = state.get("login") or "—"
+    profile = state.get("profile") or "—"
+    return (
+        "远程工作区已启用\n"
+        f"登录: {login}\n"
+        f"权限档位: {profile}\n"
+        f"工作区: {mount} -> {path}\n"
+        "提示: 当前版本已注入 remote system prompt；实际 bash/file 路由将在下一开发切片接入。"
+    )
 
 
 def _format_compress_result(res: Dict[str, Any]) -> str:
@@ -127,6 +334,25 @@ async def try_handle_slash_command(
         await client.clear_context()
         return True, "对话历史已清空。"
 
+    # /interrupt | /cancel | /stop — 对齐 CLI 在处理中按 Ctrl+C：取消内核 inflight，不销毁会话
+    if cmd_lower in ("interrupt", "cancel", "stop"):
+        sid = str(getattr(client, "active_session_id", "") or "").strip()
+        if not sid:
+            return True, "无法解析当前会话 ID，请先发一条普通消息再试。"
+        try:
+            cancelled = await client.terminal_cancel(sid)
+        except Exception as exc:
+            return True, f"中断失败: {exc}"
+        if cancelled:
+            return (
+                True,
+                "Chat session interrupted.",
+            )
+        return (
+            True,
+            "No active chat session.",
+        )
+
     # /compress [N]
     if cmd_lower == "compress":
         keep_arg: Optional[int] = None
@@ -156,6 +382,35 @@ async def try_handle_slash_command(
                 "call_count": 0,
             }
         return True, "本会话 Token 用量：\n" + _format_token_usage(u)
+
+    if cmd_lower in ("remote-status", "remote status"):
+        try:
+            res = await client.remote_workspace_status()
+        except Exception as exc:
+            return True, f"远程工作区状态读取失败: {exc}"
+        state = res.get("state") if isinstance(res, dict) else None
+        return True, _format_remote_state(state if isinstance(state, dict) else {})
+
+    if cmd_lower in ("remote-release", "cloud-use", "remote release"):
+        try:
+            res = await client.remote_workspace_release()
+        except Exception as exc:
+            return True, f"释放远程工作区失败: {exc}"
+        released = bool(res.get("released")) if isinstance(res, dict) else False
+        if released:
+            return True, "已释放远程工作区，当前会话将恢复云端工作区模式。"
+        return True, "当前会话未启用远程工作区。"
+
+    if cmd_lower.startswith("remote-use"):
+        parsed, err = _parse_remote_use_args(cmd_text)
+        if err:
+            return True, err
+        assert parsed is not None
+        try:
+            state = await client.remote_workspace_use(**parsed)
+        except Exception as exc:
+            return True, f"切换远程工作区失败: {exc}"
+        return True, _format_remote_state(state)
 
     # /model — 与 CLI 一致：list 或按 label/配置名切换（走 IPC model_list / model_switch）
     if cmd_lower == "model":
@@ -215,8 +470,11 @@ async def try_handle_slash_command(
         session_id = (
             parts[1].strip()
             if len(parts) > 1 and parts[1].strip()
-            else f"feishu:{int(time.time())}"
+            else _new_session_id(client)
         )
+        cut_error = await _expire_active_session_before_new(client, session_id)
+        if cut_error:
+            return True, f"新建会话前保存当前会话记忆失败: {cut_error}"
         created = await client.switch_session(session_id, create_if_missing=True)
         if created:
             return True, f"已创建并切换到新会话: {session_id}"
@@ -241,12 +499,15 @@ async def try_handle_slash_command(
     if sub in ("list", "ls"):
         sessions: List[str] = await client.list_sessions()
         active = getattr(client, "active_session_id", "")
+        sessions, omitted, scoped = _scoped_sessions_for_display(client, sessions)
         if not sessions:
             return True, "当前没有会话。"
-        lines = ["已加载会话:"]
+        lines = ["已加载会话（当前飞书窗口）:" if scoped else "已加载会话:"]
         for sid in sessions:
             marker = " *" if sid == active else ""
             lines.append(f"  - {sid}{marker}")
+        if omitted > 0:
+            lines.append(f"  ... 还有 {omitted} 个会话未显示")
         return True, "\n".join(lines)
 
     if sub == "switch":
@@ -266,8 +527,11 @@ async def try_handle_slash_command(
         session_id = (
             parts[2].strip()
             if len(parts) > 2 and parts[2].strip()
-            else f"feishu:{int(time.time())}"
+            else _new_session_id(client)
         )
+        cut_error = await _expire_active_session_before_new(client, session_id)
+        if cut_error:
+            return True, f"新建会话前保存当前会话记忆失败: {cut_error}"
         created = await client.switch_session(session_id, create_if_missing=True)
         if created:
             return True, f"已创建并切换到新会话: {session_id}"

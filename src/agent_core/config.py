@@ -105,18 +105,30 @@ class ProviderEntry(BaseModel):
     一个 LLM provider 的完整连接与能力声明。
 
     对应 config.yaml 里 llm.providers.<name> 的一段。运行期由
-    agent_core.llm.client.LLMClient 构造为 OpenAICompatProvider 或 AnthropicCompatProvider。
+    agent_core.llm.client.LLMClient 构造为 OpenAICompatProvider、
+    AnthropicCompatProvider 或 CodexOAuthProvider。
     """
 
     base_url: str = Field(..., description="API base URL")
-    api_key: str = Field(..., description="API 密钥（可用 ${ENV} 形式引用环境变量）")
+    api_key: str = Field(
+        default="",
+        description="API 密钥（可用 ${ENV} 形式引用环境变量）；codex_oauth 协议下可为空",
+    )
     model: str = Field(
         ...,
         description="厂商 API 请求的模型 ID（标准名，如 kimi-k2.5、gpt-4o）",
     )
     protocol: Optional[str] = Field(
         default=None,
-        description="API 协议类型：'openai'（默认）或 'anthropic'。Kimi Code 需设为 'anthropic'",
+        description="API 协议类型：'openai'（默认）、'anthropic' 或 'codex_oauth'",
+    )
+    auth_file: Optional[str] = Field(
+        default=None,
+        description="仅 codex_oauth 协议：OAuth token 存储文件路径，如 ./data/oauth/chatgpt-plus.json",
+    )
+    reasoning_effort: Optional[str] = Field(
+        default=None,
+        description="仅 codex_oauth 协议：GPT-5.5 推理档位（none|low|medium|high|xhigh），默认 medium",
     )
     label: Optional[str] = Field(
         default=None,
@@ -556,7 +568,7 @@ class CommandToolsConfig(BaseModel):
     )
     workspace_isolation_enabled: bool = Field(
         default=True,
-        description="为 True 时各（非管理员）Core 的 bash 初始 cwd 落在 workspace_base_dir 下对应用户目录，并注入 cd 防护",
+        description="为 True 时各 Core 的 bash 初始 cwd 落在对应用户目录，并注入 cd 防护；管理员仅放宽目录权限",
     )
     workspace_admin_memory_owners: List[str] = Field(
         default_factory=list,
@@ -623,7 +635,7 @@ class CommandToolsConfig(BaseModel):
         default=False,
         description=(
             "为 True 且本机为 Linux 且 runuser 可用时，隔离 bash 以对应 Linux 用户运行；"
-            "租户自动 useradd + chown 工作区；管理员须在 bash_os_admin_system_users 中映射到已有系统用户"
+            "每个逻辑用户自动 useradd + chown 工作区；管理员权限通过 workspace_admin_memory_owners 给同一逻辑用户追加 sudo"
         ),
     )
     bash_runuser_path: str = Field(
@@ -644,8 +656,8 @@ class CommandToolsConfig(BaseModel):
     bash_os_admin_system_users: Dict[str, str] = Field(
         default_factory=dict,
         description=(
-            "bash 工作区管理员 memory_owner（如 cli:root）→ 已有 Linux 用户名；"
-            "用于以带管理员组权限的 OS 用户跑 bash（须预先 useradd 并加入相应组）"
+            "[兼容旧配置] 旧版 bash 工作区管理员 memory_owner → 共享 Linux 用户名映射；"
+            "新版不再使用该映射运行 bash，仅用于移除旧 sudoers/group 配置"
         ),
     )
     bash_os_admin_manage_sudo_group: bool = Field(
@@ -658,7 +670,7 @@ class CommandToolsConfig(BaseModel):
     )
     bash_os_admin_manage_sudo_nopasswd: bool = Field(
         default=True,
-        description="root daemon 启动时是否为管理员映射用户自动维护 sudoers.d NOPASSWD drop-in",
+        description="root daemon 启动时是否为管理员逻辑 Linux 用户自动维护 sudoers.d NOPASSWD drop-in",
     )
     bash_os_admin_sudoers_dir: str = Field(
         default="/etc/sudoers.d",
@@ -668,7 +680,7 @@ class CommandToolsConfig(BaseModel):
         default=True,
         description=(
             "为 True 时租户首次会话对 logic 映射的 Linux 用户执行 useradd（不存在则创建）；"
-            "管理员映射的用户不自动创建，须运维预先配置"
+            "管理员使用同一个 logic Linux 用户，并在 root daemon 对账时补齐 sudo/admin 能力"
         ),
     )
 
@@ -745,7 +757,7 @@ class MemoryConfig(BaseModel):
 
     # 工作记忆
     max_working_tokens: int = Field(
-        default=8000,
+        default=80000,
         ge=1000,
         description="工作记忆最大 token 数，超过阈值触发窗口总结",
     )
@@ -861,8 +873,8 @@ class SkillsConfig(BaseModel):
     cli_dir: Optional[str] = Field(
         default="~/.agents/skills",
         description=(
-            "非工作区隔离（或 bash 工作区管理员）时 Skills CLI 根目录；"
-            "开启隔离且非管理员时实际使用 {workspace_base_dir}/{frontend}/{user}/.agents/skills，与此处默认的进程主目录 ~/.agents/skills 脱钩"
+            "Skills CLI 根目录 fallback；开启工作区/OS 用户隔离时实际使用对应 Core HOME 下的 "
+            ".agents/skills，管理员也使用自己的逻辑用户 HOME"
         ),
     )
 

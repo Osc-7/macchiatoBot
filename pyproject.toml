@@ -25,8 +25,17 @@ dependencies = [
     "uvicorn>=0.30.0",
     "lark-oapi>=1.0.0",
     "playwright>=1.49.0",
+    "litellm>=1.80",
     "prompt_toolkit>=3.0",
     "rich>=14.0",
+]
+
+[project.scripts]
+macchiato-remote = "macchiato_remote.cli:main"
+
+[project.optional-dependencies]
+remote = [
+    "websockets>=12.0",
 ]
 
 [dependency-groups]
@@ -36,6 +45,14 @@ dev = [
     "black>=23.0",
     "isort>=5.12",
 ]
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
 
 [tool.setuptools]
 package-dir = {"" = "src"}

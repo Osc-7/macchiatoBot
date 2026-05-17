@@ -74,12 +74,11 @@ def test_resolve_bash_run_as_user_tenant_when_enabled() -> None:
     assert u.startswith("m_")
 
 
-def test_resolve_bash_run_as_user_admin_mapping() -> None:
+def test_resolve_bash_run_as_user_admin_uses_logic_user() -> None:
     cfg = CommandToolsConfig(
         bash_os_user_enabled=True,
         workspace_isolation_enabled=True,
         workspace_admin_memory_owners=["cli:root"],
-        bash_os_admin_system_users={"cli:root": "macchiato_admin"},
     )
     u, reason = resolve_bash_run_as_user(
         cfg,
@@ -94,10 +93,10 @@ def test_resolve_bash_run_as_user_admin_mapping() -> None:
     if reason == "runuser_missing":
         pytest.skip("no /sbin/runuser in environment")
     assert reason == "ok"
-    assert u == "macchiato_admin"
+    assert u == "m_cli_root"
 
 
-def test_resolve_bash_run_as_user_admin_unmapped() -> None:
+def test_resolve_bash_run_as_user_admin_needs_no_legacy_mapping() -> None:
     from agent_core.bash_os_user import runuser_available
 
     if not sys.platform.startswith("linux") or not runuser_available("/sbin/runuser"):
@@ -115,8 +114,8 @@ def test_resolve_bash_run_as_user_admin_unmapped() -> None:
         ws_restricted=False,
         profile=None,
     )
-    assert u is None
-    assert reason == "admin_not_mapped"
+    assert u == "m_cli_root"
+    assert reason == "ok"
 
 
 def test_resolve_bash_run_as_user_profile_admin() -> None:
@@ -124,7 +123,6 @@ def test_resolve_bash_run_as_user_profile_admin() -> None:
         bash_os_user_enabled=True,
         workspace_isolation_enabled=True,
         workspace_admin_memory_owners=[],
-        bash_os_admin_system_users={"cli:alice": "mac_admin"},
     )
     u, reason = resolve_bash_run_as_user(
         cfg,
@@ -139,7 +137,7 @@ def test_resolve_bash_run_as_user_profile_admin() -> None:
     if reason == "runuser_missing":
         pytest.skip("no /sbin/runuser in environment")
     assert reason == "ok"
-    assert u == "mac_admin"
+    assert u == "m_cli_alice"
 
 
 def test_resolve_admin_system_user() -> None:
@@ -167,13 +165,13 @@ def test_reconcile_admin_sudo_group(monkeypatch) -> None:
     monkeypatch.setattr("agent_core.bash_os_user.os.geteuid", lambda: 0)
     monkeypatch.setattr(
         "agent_core.bash_os_user.pwd.getpwnam",
-        lambda user: SimpleNamespace(pw_gid=100 if user == "mac_admin" else 101),
+        lambda user: SimpleNamespace(pw_gid=100 if user == "m_cli_root" else 101),
     )
     monkeypatch.setattr(
         "agent_core.bash_os_user.grp.getgrnam",
         lambda group: SimpleNamespace(
             gr_gid=999,
-            gr_mem=["old_admin"],
+            gr_mem=["mac_admin", "old_admin"],
         ),
     )
 
@@ -185,7 +183,8 @@ def test_reconcile_admin_sudo_group(monkeypatch) -> None:
 
     reconcile_admin_sudo_group(cfg)
 
-    assert ["usermod", "-aG", "sudo", "mac_admin"] in called
+    assert ["usermod", "-aG", "sudo", "m_cli_root"] in called
+    assert ["gpasswd", "-d", "mac_admin", "sudo"] in called
     assert ["gpasswd", "-d", "old_admin", "sudo"] in called
 
 
@@ -200,8 +199,9 @@ def test_reconcile_admin_linux_users_repairs_home_and_sudoers(tmp_path, monkeypa
         bash_os_admin_system_users={"cli:root": "mac_admin"},
     )
 
-    home = tmp_path / "homes" / "mac_admin"
+    home = tmp_path / "homes" / "m_cli_root"
     chowned: list[str] = []
+    provisioned: list[tuple[str, str]] = []
 
     monkeypatch.setattr("agent_core.bash_os_user.os.geteuid", lambda: 0)
     monkeypatch.setattr(
@@ -216,12 +216,19 @@ def test_reconcile_admin_linux_users_repairs_home_and_sudoers(tmp_path, monkeypa
         "agent_core.bash_os_user.chown_tree_to_user",
         lambda paths, username: chowned.extend(str(p) for p in paths),
     )
+    monkeypatch.setattr(
+        "agent_core.bash_os_user.provision_system_user",
+        lambda username, system, comment, home_dir: provisioned.append(
+            (username, str(home_dir))
+        ),
+    )
 
     reconcile_admin_linux_users(cfg)
 
+    assert ("m_cli_root", str(home)) in provisioned
     assert str(home) in chowned
-    sudoers = tmp_path / "sudoers.d" / "macchiato-mac_admin"
-    assert sudoers.read_text(encoding="utf-8") == "mac_admin ALL=(ALL) NOPASSWD:ALL\n"
+    sudoers = tmp_path / "sudoers.d" / "macchiato-m_cli_root"
+    assert sudoers.read_text(encoding="utf-8") == "m_cli_root ALL=(ALL) NOPASSWD:ALL\n"
     assert oct(sudoers.stat().st_mode & 0o777) == "0o440"
 
 

@@ -7,12 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_core.config import AgentConfig, Config, LLMConfig
 from agent_core.agent import AgentCore
-from agent_core.llm import LLMResponse, ToolCall
-from agent_core.orchestrator import ToolWorkingSetManager
+from agent_core.config import AgentConfig, Config, LLMConfig
 from agent_core.kernel_interface.profile import CoreProfile
+from agent_core.llm import LLMResponse, ToolCall
 from agent_core.mcp.proxy_tool import MCPProxyTool
+from agent_core.orchestrator import ToolWorkingSetManager
 from agent_core.tools import (
     BaseTool,
     CallToolTool,
@@ -27,7 +27,9 @@ from agent_core.tools import (
 def test_mcp_openai_safe_local_name():
     from agent_core.mcp.client import mcp_openai_safe_local_name
 
-    assert mcp_openai_safe_local_name("tavily", "tavily_search") == "tavily__tavily_search"
+    assert (
+        mcp_openai_safe_local_name("tavily", "tavily_search") == "tavily__tavily_search"
+    )
     assert mcp_openai_safe_local_name("a.b", "c") == "a_b__c"
 
 
@@ -37,10 +39,12 @@ class DummyTool(BaseTool):
         name: str = "dummy_tool",
         description: str = "dummy",
         tags: Optional[list[str]] = None,
+        examples: Optional[list[dict[str, Any]]] = None,
     ):
         self._name = name
         self._description = description
         self._tags = tags or []
+        self._examples = examples or []
         self.called = False
         self.called_kwargs: Dict[str, Any] = {}
 
@@ -60,6 +64,7 @@ class DummyTool(BaseTool):
                     required=False,
                 )
             ],
+            examples=self._examples,
             tags=self._tags,
         )
 
@@ -93,15 +98,49 @@ class TestVersionedRegistry:
         names = [item["name"] for item in results]
         assert "sync_canvas" in names
 
+    def test_search_tags_expand_common_bilingual_aliases(self):
+        registry = VersionedToolRegistry()
+        registry.register(
+            DummyTool(
+                name="attach_file_to_reply",
+                description="将一个文件随本轮回复一起发给用户",
+                tags=["附件", "回复", "文件", "飞书"],
+            )
+        )
+        registry.register(
+            DummyTool(name="get_tasks", description="查询任务", tags=["任务"])
+        )
+
+        results = registry.search(
+            query="send file upload attachment download share",
+            tags=["file"],
+            limit=5,
+        )
+        names = [item["name"] for item in results]
+        assert "attach_file_to_reply" in names
+        assert "get_tasks" not in names
+
+    def test_search_query_expands_common_bilingual_aliases(self):
+        registry = VersionedToolRegistry()
+        registry.register(
+            DummyTool(
+                name="attach_file_to_reply",
+                description="将一个文件随本轮回复一起发给用户",
+                tags=["附件", "回复", "文件", "飞书"],
+            )
+        )
+
+        results = registry.search(query="upload attachment", limit=5)
+        match = next(item for item in results if item["name"] == "attach_file_to_reply")
+        assert match.get("weak_match") is not True
+
     def test_search_name_prefix(self):
         registry = VersionedToolRegistry()
         registry.register(DummyTool(name="tavily__alpha", description="a"))
         registry.register(DummyTool(name="tavily__beta", description="b"))
         registry.register(DummyTool(name="get_tasks", description="任务"))
 
-        results = registry.search(
-            query="", limit=10, name_prefix="tavily__", tags=None
-        )
+        results = registry.search(query="", limit=10, name_prefix="tavily__", tags=None)
         names = [item["name"] for item in results]
         assert set(names) == {"tavily__alpha", "tavily__beta"}
 
@@ -145,6 +184,25 @@ class TestVersionedRegistry:
         results = registry.search("MCP Server", limit=5)
         names = [item["name"] for item in results]
         assert "discourse__list_topics" in names
+
+    def test_search_matches_examples(self):
+        registry = VersionedToolRegistry()
+        registry.register(
+            DummyTool(
+                name="send_report",
+                description="无关描述",
+                examples=[
+                    {
+                        "description": "把本地 debug log 发给用户",
+                        "params": {"file_path": "reports/debug.log"},
+                    }
+                ],
+            )
+        )
+
+        results = registry.search("debug.log", limit=5)
+        names = [item["name"] for item in results]
+        assert "send_report" in names
 
 
 class TestKernelTools:

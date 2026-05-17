@@ -66,6 +66,33 @@ _BOT_RAW_LIMIT = 100
 _USER_RAW_LIMIT = 500
 
 
+def invocation_reply_target_from_post(
+    post: Optional[Dict[str, Any]],
+) -> tuple[Optional[int], Optional[str]]:
+    """从 Discourse 单帖 JSON 解析「该帖挂在回复哪一楼」及被回复者用户名。
+
+    对应 API 字段 ``reply_to_post_number`` / ``reply_to_user``（用户点击某一楼的「回复」时写入）。
+    若仅为对话题的泛回复或回复主楼，站点可能不填或填 1；无明确链时返回 (None, None)。
+    """
+    if not post or not isinstance(post, dict):
+        return None, None
+    raw_rpn = post.get("reply_to_post_number")
+    if raw_rpn is None or raw_rpn == "":
+        return None, None
+    try:
+        n = int(raw_rpn)
+    except (TypeError, ValueError):
+        return None, None
+    if n < 1:
+        return None, None
+    rtu = post.get("reply_to_user")
+    uname: Optional[str] = None
+    if isinstance(rtu, dict):
+        s = (rtu.get("username") or rtu.get("name") or "").strip()
+        uname = s if s else None
+    return n, uname
+
+
 def _build_thread_section(posts: List[Dict[str, Any]]) -> str:
     """根据最近帖子列表生成「该楼最近帖子」段落。
 
@@ -98,23 +125,38 @@ def _build_trigger_footer(
     reply_to_post_number: Optional[int],
     reply_to_post_id: Optional[int],
     user_message: str,
+    invocation_reply_to_post_number: Optional[int] = None,
+    invocation_reply_to_username: Optional[str] = None,
 ) -> str:
     """生成底部的触发楼描述 + 用户原话说明。"""
     trigger_post_id: Optional[int] = reply_to_post_id
-    user_identity = f"（该层作者用户名为 @{username}）" if username else ""
+    user_identity = f"（用户名为 @{username}）" if username else ""
+
+    chain_hint = ""
+    if invocation_reply_to_post_number is not None:
+        if invocation_reply_to_username:
+            chain_hint = (
+                f"。**该帖回复第 {invocation_reply_to_post_number} 层**"
+                f"（被回复的用户是：@{invocation_reply_to_username}）"
+            )
+        else:
+            chain_hint = (
+                f"。**该帖回复第 {invocation_reply_to_post_number} 层**"
+            )
 
     footer = (
-        f"---\n用户 @了你，在当前话题 {topic_id}"
+        f"---\n用户@了你，在当前话题 {topic_id}"
         + (
             f" 的第 {reply_to_post_number} 层"
             + (f"（post_id={trigger_post_id}）" if trigger_post_id is not None else "")
             if reply_to_post_number is not None
             else ""
         )
+        + chain_hint
         + user_identity
-        + "，说了：\n\n"
+        + "，用户说：\n\n"
         f"{user_message}\n\n"
-        "请根据上文理解语境，直接输出你的回复正文。"
+        "请根据上文进行合适的操作和互动。"
     )
     return footer
 
@@ -134,6 +176,8 @@ def build_shuiyuan_prompt_from_context(
             "topic_id": 346667,
             "reply_to_post_number": 3538,          # 可选
             "reply_to_post_id": 8383407,           # 可选
+            "invocation_reply_to_post_number": 1003,   # 可选；触发帖本身 reply_to 的楼层
+            "invocation_reply_to_username": "foo",      # 可选；被回复层作者
             "topic_op": {...},                     # 可选，话题主楼（如有则优先使用）
             "thread_posts": [ {...}, ... ],        # get_topic_recent_posts 或 connector 传入
         }
@@ -142,6 +186,14 @@ def build_shuiyuan_prompt_from_context(
     topic_id = int(context.get("topic_id") or 0)
     reply_to_post_number = context.get("reply_to_post_number")
     reply_to_post_id = context.get("reply_to_post_id")
+
+    inv_rpn = context.get("invocation_reply_to_post_number")
+    inv_ru = context.get("invocation_reply_to_username")
+    invocation_post = context.get("invocation_post")
+    if (inv_rpn is None or inv_rpn == "") and invocation_post is not None:
+        inv_rpn, inv_ru = invocation_reply_target_from_post(
+            invocation_post if isinstance(invocation_post, dict) else None
+        )
 
     posts = context.get("thread_posts") or []
     if not isinstance(posts, list):
@@ -164,12 +216,30 @@ def build_shuiyuan_prompt_from_context(
     if thread_section:
         parts.append(thread_section)
 
+    # 规范化楼层号为 int，便于模板判断
+    chain_pn: Optional[int] = None
+    if inv_rpn is not None and inv_rpn != "":
+        try:
+            chain_pn = int(inv_rpn)
+        except (TypeError, ValueError):
+            chain_pn = None
+    if chain_pn is not None and chain_pn < 1:
+        chain_pn = None
+
+    chain_uname = (
+        str(inv_ru).strip()
+        if inv_ru is not None and str(inv_ru).strip()
+        else None
+    )
+
     footer = _build_trigger_footer(
         username=username,
         topic_id=topic_id,
         reply_to_post_number=reply_to_post_number,
         reply_to_post_id=reply_to_post_id,
         user_message=user_message,
+        invocation_reply_to_post_number=chain_pn,
+        invocation_reply_to_username=chain_uname,
     )
     parts.append(footer)
 

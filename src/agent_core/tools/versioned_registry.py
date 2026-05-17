@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import threading
@@ -60,6 +61,39 @@ _STOPWORDS = frozenset(
     }
 )
 
+_TAG_ALIAS_GROUPS: Tuple[Tuple[str, ...], ...] = (
+    ("file", "files", "文件", "附件", "attachment", "attachments"),
+    (
+        "image",
+        "images",
+        "picture",
+        "pictures",
+        "photo",
+        "photos",
+        "screenshot",
+        "图片",
+        "图像",
+        "截图",
+        "多模态",
+    ),
+    ("search", "query", "find", "lookup", "搜索", "查询", "查找"),
+    ("read", "readonly", "read-only", "读取", "只读", "浏览"),
+    ("write", "edit", "modify", "update", "写入", "修改", "编辑", "更新"),
+    ("schedule", "calendar", "event", "events", "meeting", "meetings", "日程", "会议"),
+    ("task", "tasks", "todo", "todos", "任务"),
+    ("plan", "planning", "planner", "规划", "计划"),
+    ("automation", "automate", "自动化"),
+    ("notification", "notify", "notice", "通知", "提醒"),
+    ("history", "memory", "context", "记忆", "历史", "上下文"),
+    ("forum", "community", "discourse", "水源", "水源社区"),
+)
+
+_TAG_ALIASES: Dict[str, set[str]] = {}
+for _group in _TAG_ALIAS_GROUPS:
+    _normalized_group = {tag.strip().lower() for tag in _group if tag.strip()}
+    for _tag in _normalized_group:
+        _TAG_ALIASES[_tag] = _normalized_group
+
 
 def _tokenize_query(q: str) -> List[str]:
     q = (q or "").strip().lower()
@@ -91,9 +125,34 @@ def _terms_for_weighted_match(tokens: List[str]) -> List[str]:
     return [t for t in tokens if len(t) >= 2 and t not in _STOPWORDS]
 
 
+def _expand_weighted_terms(tokens: List[str]) -> List[str]:
+    """展开 query 中的常见中英别名，让英文意图能命中文工具标签/描述。"""
+    expanded: List[str] = []
+    seen: set[str] = set()
+    for term in _terms_for_weighted_match(tokens):
+        for variant in sorted(_TAG_ALIASES.get(term, {term})):
+            if len(variant) < 2 or variant in _STOPWORDS or variant in seen:
+                continue
+            expanded.append(variant)
+            seen.add(variant)
+    return expanded
+
+
 def _idf_weight(df: int, n_docs: int) -> float:
     """经典 IDF 变体：log((N+1)/(df+1))+1，df 为含该词的候选工具数。"""
     return math.log((n_docs + 1.0) / (float(df) + 1.0)) + 1.0
+
+
+def _expand_tag_filter(tags: Optional[List[str]]) -> set[str]:
+    """展开常见中英标签别名，避免 tags 过滤把候选工具过早排空。"""
+    expanded: set[str] = set()
+    for raw in tags or []:
+        tag = str(raw).strip().lower()
+        if not tag:
+            continue
+        expanded.add(tag)
+        expanded.update(_TAG_ALIASES.get(tag, set()))
+    return expanded
 
 
 def _tool_params_meta(definition: Any) -> List[Dict[str, Any]]:
@@ -245,6 +304,7 @@ class VersionedToolRegistry:
             return await tool.execute(**kwargs)
         except Exception as exc:
             import logging as _log
+
             _log.getLogger(__name__).exception(
                 "Tool '%s' raised an unhandled exception", tool_name
             )
@@ -291,9 +351,7 @@ class VersionedToolRegistry:
         exclude = set(exclude_names or [])
         q = (query or "").strip().lower()
         tokens = _tokenize_query(q)
-        tag_filter = {
-            str(tag).strip().lower() for tag in (tags or []) if str(tag).strip()
-        }
+        tag_filter = _expand_tag_filter(tags)
         pref = (name_prefix or "").strip()
 
         candidates: List[Tuple[str, BaseTool, Any, set]] = []
@@ -317,6 +375,13 @@ class VersionedToolRegistry:
             text_parts: List[str] = [name, definition.description or ""]
             for note in definition.usage_notes or []:
                 text_parts.append(str(note))
+            for example in definition.examples or []:
+                try:
+                    text_parts.append(
+                        json.dumps(example, ensure_ascii=False, default=str)
+                    )
+                except TypeError:
+                    text_parts.append(str(example))
             for param in definition.parameters:
                 text_parts.extend([param.name, param.description])
             if def_tags:
@@ -326,7 +391,7 @@ class VersionedToolRegistry:
             prepared.append((name, tool, definition, def_tags, corpus, params_meta))
 
         n_docs = max(1, len(prepared))
-        term_set = _terms_for_weighted_match(tokens)
+        term_set = _expand_weighted_terms(tokens)
         token_df: Dict[str, int] = {}
         for _name, _tool, _definition, _def_tags, corpus, _pm in prepared:
             for term in term_set:

@@ -146,3 +146,37 @@ async def test_resolve_feishu_image_keeps_multimodal(monkeypatch, tmp_path: Path
     assert "data:image/png;base64," in item["image_url"]["url"]
     assert item["path"].endswith("x.png")
     assert (tmp_path / "x.png").exists()
+
+
+@pytest.mark.asyncio
+async def test_resolve_feishu_image_does_not_use_generic_attachment_bin_path(
+    monkeypatch, tmp_path: Path
+):
+    """飞书下载常返回 attachment.bin；须按 image_key 落盘，避免多条消息覆盖同一文件。"""
+    resolver = FeishuContentResolver(
+        client=_FakeFeishuClient(
+            payload=b"\x89PNG\r\n\x1a\n",
+            mime="image/png",
+            filename="attachment.bin",
+        )
+    )
+
+    monkeypatch.setattr(
+        FeishuContentResolver,
+        "_workspace_upload_dir",
+        staticmethod(lambda source, user_id: tmp_path),
+    )
+
+    ref = ContentReference(
+        source="feishu",
+        ref_type="image",
+        key="img_calendar_post_9a1",
+        extra={"message_id": "om_post2", "source": "feishu", "user_id": "u1"},
+    )
+    item = await resolver.resolve(ref)
+    assert item is not None
+    assert item["type"] == "image_url"
+    assert "attachment.bin" not in (item.get("path") or "")
+    assert "img_calendar_post_9a1" in (item.get("path") or "")
+    assert "img_calendar_post_9a1" in item["name"]
+    assert (tmp_path / item["name"]).exists()

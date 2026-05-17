@@ -62,7 +62,6 @@ def resolve_session_capabilities(
     )
     from agent_core.bash_os_user import (
         logic_os_user_name,
-        resolve_admin_system_user,
         resolve_os_user_home,
         should_use_os_home_for_logic_user,
     )
@@ -81,9 +80,7 @@ def resolve_session_capabilities(
 
     run_as_user: Optional[str] = None
     if getattr(cmd_cfg, "bash_os_user_enabled", False):
-        if is_admin:
-            run_as_user = resolve_admin_system_user(cmd_cfg, source=source, user_id=user_id)
-        elif workspace_isolated:
+        if workspace_isolated:
             run_as_user = logic_os_user_name(
                 source,
                 user_id,
@@ -92,7 +89,6 @@ def resolve_session_capabilities(
 
     uses_os_home = (
         workspace_isolated
-        and not is_admin
         and should_use_os_home_for_logic_user(
             cmd_cfg, source=source, user_id=user_id, profile=profile
         )

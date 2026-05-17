@@ -33,6 +33,9 @@ class ToolParameter:
     enum: Optional[List[str]] = None
     """枚举值列表（可选）"""
 
+    items: Optional[Dict[str, Any]] = None
+    """数组元素 schema（当 type=array 时使用）。例如 {"type": "string"} 或 {"type": "object", "properties": {...}}"""
+
     default: Optional[Any] = None
     """默认值（可选）"""
 
@@ -50,6 +53,9 @@ class ToolParameter:
 
         if self.enum:
             schema["enum"] = self.enum
+
+        if self.items:
+            schema["items"] = self.items
 
         return schema
 

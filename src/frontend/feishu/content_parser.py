@@ -4,11 +4,27 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from agent_core.content import ContentReference
 
 logger = logging.getLogger(__name__)
+
+
+def feishu_message_should_queue_attachments(
+    message_type: str,
+    content_refs: List[ContentReference],
+) -> bool:
+    """
+    是否应暂缓 Agent，仅把附件排入「下一轮对话」。
+
+    仅独立 ``image`` / ``file`` 消息入队；``post`` 等富文本仍立即解析并走对话。
+    """
+    if not content_refs:
+        return False
+    mt = (message_type or "").strip()
+    return mt in ("image", "file")
+
 
 # message_type -> (ref_type, key_field, resource_type for API)
 _FEISHU_CONTENT_MAP = {
@@ -80,15 +96,157 @@ def parse_feishu_content_to_refs(
     return content_refs, user_text
 
 
+def _normalize_post_content_list(raw: Any) -> Optional[list]:
+    """飞书文档中 content 为段落数组；少数情况下可能是 JSON 字符串。"""
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return None
+        return parsed if isinstance(parsed, list) else None
+    return None
+
+
+def _pick_post_locale_block(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    选取一种语言的富文本块。
+
+    - **接收消息**（im.message.receive_v1 / 消息查询）：post 为顶层 ``title`` + ``content``，
+      无 ``zh_cn`` 包裹，见
+      https://open.feishu.cn/document/server-docs/im-v1/message-content-description/message_content
+    - **发送接口**风格：``{zh_cn: {title, content}, ...}``
+    """
+    # 1) 扁平接收格式：顶层即段落数组
+    if _normalize_post_content_list(data.get("content")) is not None:
+        return data
+
+    # 2) 少数负载把正文包在 post 键下
+    post_wrap = data.get("post")
+    if isinstance(post_wrap, dict):
+        inner = _pick_post_locale_block(post_wrap)
+        if inner is not None:
+            return inner
+
+    for key in ("zh_cn", "en_us"):
+        block = data.get(key)
+        if isinstance(block, dict) and _normalize_post_content_list(block.get("content")):
+            return block
+    for _k, block in data.items():
+        if isinstance(block, dict) and _normalize_post_content_list(block.get("content")):
+            return block
+    for key in ("zh_cn", "en_us"):
+        block = data.get(key)
+        if isinstance(block, dict):
+            return block
+    for _k, block in data.items():
+        if isinstance(block, dict):
+            return block
+    return None
+
+
+def _post_item_to_para_chunks(
+    message_id: str,
+    item: Dict[str, Any],
+    content_refs: List[ContentReference],
+    para_chunks: List[str],
+) -> None:
+    """将单个 post 元素转为段内文本片段，并视情况写入 content_refs（图片/视频）。"""
+    tag = (item.get("tag") or "").strip()
+    if tag == "text":
+        t = item.get("text")
+        if t is not None and str(t) != "":
+            # 保留飞书下发的空白，避免相邻 text 节点 intentional 空格丢失
+            para_chunks.append(str(t))
+        return
+    if tag == "a":
+        text = str(item.get("text") or "").strip()
+        href = str(item.get("href") or "").strip()
+        if text and href:
+            para_chunks.append(f"[{text}]({href})")
+        elif href:
+            para_chunks.append(href)
+        elif text:
+            para_chunks.append(text)
+        return
+    if tag == "at":
+        user_id = str(item.get("user_id") or "").strip()
+        user_name = str(item.get("user_name") or "").strip()
+        if user_id == "all":
+            para_chunks.append("@所有人")
+        elif user_name:
+            para_chunks.append(f"@{user_name}")
+        elif user_id:
+            para_chunks.append(f"@{user_id}")
+        return
+    if tag == "img":
+        key = str(item.get("image_key") or "").strip()
+        if key:
+            content_refs.append(
+                ContentReference(
+                    source="feishu",
+                    ref_type="image",
+                    key=key,
+                    extra={"message_id": message_id},
+                )
+            )
+        return
+    if tag == "media":
+        file_key = str(item.get("file_key") or "").strip()
+        image_key = str(item.get("image_key") or "").strip()
+        extra: Dict[str, str] = {"message_id": message_id}
+        if image_key:
+            extra["cover_image_key"] = image_key
+        if file_key:
+            content_refs.append(
+                ContentReference(
+                    source="feishu",
+                    ref_type="video",
+                    key=file_key,
+                    extra=extra,
+                )
+            )
+            para_chunks.append("[用户发送了一段视频]")
+        return
+    if tag == "emotion":
+        emoji_type = str(item.get("emoji_type") or "").strip()
+        if emoji_type:
+            para_chunks.append(f"[表情:{emoji_type}]")
+        return
+    if tag == "hr":
+        para_chunks.append("\n---\n")
+        return
+    if tag == "code_block":
+        language = str(item.get("language") or "").strip()
+        body = item.get("text")
+        body_s = "" if body is None else str(body)
+        fence_lang = language.lower() if language else ""
+        para_chunks.append(f"\n```{fence_lang}\n{body_s}\n```\n")
+        return
+    if tag == "md":
+        md_text = item.get("text")
+        if md_text is not None and str(md_text) != "":
+            para_chunks.append(str(md_text))
+        return
+    logger.debug("feishu post: unsupported tag=%s keys=%s", tag, list(item.keys()))
+
+
 def parse_feishu_post_to_refs(
     message_id: str,
     content: str,
 ) -> Tuple[List[ContentReference], str]:
     """
-    解析飞书 post 富文本消息中的内嵌图片与文本。
+    解析飞书 post 富文本消息中的内嵌图片/视频与可读文本。
 
-    飞书 post 结构: {"zh_cn": {"title": "...", "content": [[{"tag":"text","text":"..."}], [{"tag":"img","image_key":"img_xxx"}]]}}
-    每段 content 是段落数组，段落内是标签数组；img 标签独占一段。
+    飞书结构见文档「富文本 post」：
+    https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/im-v1/message/create_json
+
+    支持 tag: text, a, at, img, media, emotion, hr, code_block, md
+    （与同段多元素内联拼接；图片/视频按文档应独占段落）
     """
     content_refs: List[ContentReference] = []
     text_parts: List[str] = []
@@ -98,43 +256,45 @@ def parse_feishu_post_to_refs(
         if not isinstance(data, dict):
             return [], ""
 
-        # 优先 zh_cn，fallback en_us
-        lang = data.get("zh_cn") or data.get("en_us") or {}
-        if not isinstance(lang, dict):
+        lang = _pick_post_locale_block(data)
+        if not lang:
             return [], ""
-        title = (lang.get("title") or "").strip()
+
+        title = str(lang.get("title") or "").strip()
         if title:
             text_parts.append(title)
-        raw_content = lang.get("content")
-        if not isinstance(raw_content, list):
+
+        raw_content = _normalize_post_content_list(lang.get("content"))
+        if raw_content is None:
             return content_refs, title or "[用户发送了富文本]"
 
         for para in raw_content:
             if not isinstance(para, list):
                 continue
+            para_chunks: List[str] = []
             for item in para:
                 if not isinstance(item, dict):
                     continue
-                tag = (item.get("tag") or "").strip()
-                if tag == "img":
-                    key = (item.get("image_key") or "").strip()
-                    if key:
-                        content_refs.append(
-                            ContentReference(
-                                source="feishu",
-                                ref_type="image",
-                                key=key,
-                                extra={"message_id": message_id},
-                            )
-                        )
-                elif tag == "text":
-                    t = (item.get("text") or "").strip()
-                    if t:
-                        text_parts.append(t)
+                _post_item_to_para_chunks(
+                    message_id, item, content_refs, para_chunks
+                )
+            line = "".join(para_chunks).strip()
+            if line:
+                text_parts.append(line)
 
         user_text = "\n".join(text_parts).strip()
         if not user_text and content_refs:
-            user_text = "[用户发送了一张图片]"
+            only_images = all(r.ref_type == "image" for r in content_refs)
+            if only_images:
+                user_text = "[用户发送了一张图片]"
+            elif all(r.ref_type == "video" for r in content_refs):
+                user_text = "[用户发送了一段视频]"
+            elif any(r.ref_type == "video" for r in content_refs) and any(
+                r.ref_type == "image" for r in content_refs
+            ):
+                user_text = "[用户发送了图片与视频]"
+            else:
+                user_text = "[用户发送了富媒体]"
         if not user_text:
             user_text = "[用户发送了富文本]"
         return content_refs, user_text
@@ -152,7 +312,7 @@ def parse_feishu_message(
 
     - text: 只返回 text 部分，无 content_refs
     - image/file/media/audio: 返回 content_refs + 占位 user_text
-    - post: 解析富文本内嵌图片（img 标签）及文本
+    - post: 解析富文本（text / a / at / img / media / emotion / hr / code_block / md）
     - interactive 等: 目前不解析，仅返回空
     """
     if message_type == "text":

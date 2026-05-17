@@ -2,7 +2,7 @@
 BashSecurity -- 命令安全校验模块。
 
 三层校验架构：
-  Layer 1 -- 规则快速路径：受限模式白名单 + shell 运算符禁止
+  Layer 1 -- 规则快速路径：受限模式白名单 + 高危 shell 运算符禁止（子 agent 允许 ``|``/``;``/``&&``/``||`` 链）
   Layer 2 -- 危险模式检测：正则匹配破坏性命令（rm -rf、sudo 等）
   Layer 3 -- 交互审批：危险命令返回 ASK_USER，须经 request_permission 人类批准后方可执行
 
@@ -38,6 +38,8 @@ class SecurityVerdict:
     action: SecurityAction
     reason: str = ""
     error_code: str = ""
+    risk_reasons: tuple[str, ...] = ()
+    path_grants: tuple[dict[str, str], ...] = ()
 
     @property
     def allowed(self) -> bool:
@@ -69,7 +71,10 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # 扩展：参考 Claude Code bashSecurity 的部分模式
     (re.compile(r"\bcurl\b.*\|\s*(ba)?sh\b", re.I), "curl pipe to shell"),
     (re.compile(r"\bwget\b.*\|\s*(ba)?sh\b", re.I), "wget pipe to shell"),
-    (re.compile(r"\|\s*(?:env\s+)?(?:ba|da|k|z)?sh(?:\s|$)", re.I), "pipe script to shell"),
+    (
+        re.compile(r"\|\s*(?:env\s+)?(?:ba|da|k|z)?sh(?:\s|$)", re.I),
+        "pipe script to shell",
+    ),
     (re.compile(r"\beval\b", re.I), "eval 动态执行"),
     (re.compile(r">\s*/etc/", re.I), "写入 /etc/ 系统目录"),
     (re.compile(r"\bkill\s+-9\s", re.I), "kill -9 强制终止"),
@@ -78,14 +83,35 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\binit\s+[0-6]\b", re.I), "init 运行级别变更"),
 ]
 
-# shell 运算符：受限模式下禁止，全量模式下不阻止
-_SHELL_OPERATORS = ("|", "&", ";", "`", "$(", ">", ">>", "<", "&&", "||")
+# shell 运算符分类：受限模式（sub）下禁止子命令/重定向等；允许 ``|`` / ``;`` / ``&&`` / ``||``
+# 链式组合，便于子 agent 串联白名单内只读命令（仍逐段校验白名单与危险模式）。
+_RESTRICTED_DENIED_SHELL_OPERATORS = ("`", "$(", ">", ">>", "<")
+
+# 禁止 shell job control 的单独 ``&``（``&&`` / ``||`` 不受此条匹配）。
+_RESTRICTED_JOB_CONTROL_AMPERSAND = re.compile(r"(?<![&|])&(?!&)")
 
 # 默认受限模式白名单（从 CommandToolsConfig.subagent_command_whitelist 迁移）
-_DEFAULT_RESTRICTED_WHITELIST = frozenset([
-    "ls", "pwd", "cat", "head", "tail", "grep", "find", "echo",
-    "which", "file", "stat", "wc", "date", "whoami", "id", "env", "printenv",
-])
+_DEFAULT_RESTRICTED_WHITELIST = frozenset(
+    [
+        "ls",
+        "pwd",
+        "cat",
+        "head",
+        "tail",
+        "grep",
+        "find",
+        "echo",
+        "which",
+        "file",
+        "stat",
+        "wc",
+        "date",
+        "whoami",
+        "id",
+        "env",
+        "printenv",
+    ]
+)
 
 # 工作区隔离：阻止通过特殊 builtin 绕过覆盖后的 cd
 _WORKSPACE_JAIL_BUILTIN_CD = re.compile(r"\bbuiltin\s+cd\b", re.I)
@@ -93,9 +119,7 @@ _WORKSPACE_JAIL_COMMAND_CD = re.compile(r"\bcommand\s+cd\b", re.I)
 _WORKSPACE_WRITE_MUTATING_ALL_PATHS = frozenset(
     {"touch", "mkdir", "rmdir", "truncate", "rm", "unlink"}
 )
-_WORKSPACE_WRITE_MUTATING_LAST_PATH = frozenset(
-    {"mv", "cp", "install", "ln", "rsync"}
-)
+_WORKSPACE_WRITE_MUTATING_LAST_PATH = frozenset({"mv", "cp", "install", "ln", "rsync"})
 _WORKSPACE_SEGMENT_OPERATORS = frozenset({"&&", "||", ";", "|"})
 
 # 重定向等「写」目标视为无害设备，不触发工作区外写入拒绝（对齐常见 shell 用法如 >/dev/null）
@@ -148,7 +172,7 @@ class BashSecurity:
     命令安全校验器。
 
     根据 CoreProfile.mode 和配置决定校验严格程度：
-    - sub 模式：Layer 1 白名单 + 禁止 shell 运算符（最严格）
+    - sub 模式：白名单 + 禁止子命令/重定向/单独后台 ``&``；允许 ``|`` / ``;`` / ``&&`` / ``||`` 串联白名单命令
     - full/background 模式：Layer 2 危险模式 → Layer 3 审批
     """
 
@@ -161,13 +185,17 @@ class BashSecurity:
         workspace_tmp_root: Optional[str] = None,
         workspace_extra_write_roots: Optional[List[Path]] = None,
     ) -> None:
-        self._restricted_whitelist = frozenset(
-            restricted_whitelist
-        ) if restricted_whitelist is not None else _DEFAULT_RESTRICTED_WHITELIST
+        self._restricted_whitelist = (
+            frozenset(restricted_whitelist)
+            if restricted_whitelist is not None
+            else _DEFAULT_RESTRICTED_WHITELIST
+        )
         self._allow_run_for_restricted = allow_run_for_restricted
         self._workspace_jail_root = workspace_jail_root
         self._workspace_tmp_root = workspace_tmp_root
-        self._workspace_extra_write_roots: List[Path] = list(workspace_extra_write_roots or [])
+        self._workspace_extra_write_roots: List[Path] = list(
+            workspace_extra_write_roots or []
+        )
 
     def refresh_write_roots_from_config(
         self,
@@ -189,7 +217,9 @@ class BashSecurity:
         )
         jail = Path(self._workspace_jail_root).resolve()
         tmp_r = (
-            Path(self._workspace_tmp_root).resolve() if self._workspace_tmp_root else None
+            Path(self._workspace_tmp_root).resolve()
+            if self._workspace_tmp_root
+            else None
         )
         self._workspace_extra_write_roots = []
         for p in merged:
@@ -227,9 +257,6 @@ class BashSecurity:
             jail = self._check_workspace_jail_bypass(command)
             if jail is not None:
                 return jail
-            jail = self._check_workspace_write_scope(command)
-            if jail is not None:
-                return jail
 
         mode = (profile.mode if profile else "full").lower()
         is_restricted = mode == "sub"
@@ -244,20 +271,35 @@ class BashSecurity:
                 )
             return self._check_restricted(command)
 
+        path_grants: list[dict[str, str]] = []
+        if self._workspace_jail_root:
+            path_grants = self._collect_workspace_write_grants(command)
+
         # ── Layer 2: 危险模式检测 ────────────────────────
         danger = self._check_dangerous(command)
-        if danger is not None:
-            if confirmed:
+        risk_reasons = [danger] if danger is not None else []
+        if risk_reasons or path_grants:
+            if confirmed and not path_grants:
                 return _VERDICT_ALLOW
             # ── Layer 3: 交互审批 ────────────────────
+            reasons = []
+            if risk_reasons:
+                reasons.append("、".join(risk_reasons))
+            if path_grants:
+                reasons.append("需要写入工作区外路径")
+            reason_s = "；".join(reasons) if reasons else "需要人类批准"
+            error_code = (
+                "CONFIRMATION_REQUIRED" if risk_reasons else "WORKSPACE_WRITE_DENIED"
+            )
             return SecurityVerdict(
                 SecurityAction.ASK_USER,
                 reason=(
-                    f"该命令可能造成不可逆损害（{danger}）。请调用 request_permission，"
-                    f"kind=bash_dangerous_command，details 为 JSON 且含与本次完全相同的 command 字段；"
-                    f"人类批准后，再使用返回的 permission_id 与同一 command 调用 bash（一次性）。"
+                    f"该命令需要人类批准后才能执行（{reason_s}）。"
+                    "bash 工具会自动发起权限申请；人类批准后将继续执行同一条命令。"
                 ),
-                error_code="CONFIRMATION_REQUIRED",
+                error_code=error_code,
+                risk_reasons=tuple(risk_reasons),
+                path_grants=tuple(path_grants),
             )
 
         return _VERDICT_ALLOW
@@ -288,10 +330,23 @@ class BashSecurity:
 
         这是启发式规则，主要覆盖 shell / 常见文件工具的直接写路径。
         """
+        grants = self._collect_workspace_write_grants(command)
+        if grants:
+            return SecurityVerdict(
+                SecurityAction.DENY,
+                reason=f"工作区隔离模式下禁止写入工作区外路径: {grants[0]['path_prefix']}",
+                error_code="WORKSPACE_WRITE_DENIED",
+                path_grants=tuple(grants),
+            )
+        return None
+
+    def _collect_workspace_write_grants(self, command: str) -> list[dict[str, str]]:
         roots = [Path(self._workspace_jail_root or "").resolve()]
         if self._workspace_tmp_root:
             roots.append(Path(self._workspace_tmp_root).resolve())
         roots.extend(self._workspace_extra_write_roots)
+        grants: list[dict[str, str]] = []
+        seen: set[str] = set()
         for segment in self._split_command_segments(command):
             tokens = self._tokenize_segment(segment)
             if not tokens:
@@ -305,12 +360,23 @@ class BashSecurity:
                 if is_workspace_write_exempt_target(str(candidate)):
                     continue
                 if not any(self._path_within_root(candidate, root) for root in roots):
-                    return SecurityVerdict(
-                        SecurityAction.DENY,
-                        reason=f"工作区隔离模式下禁止写入工作区外路径: {candidate}",
-                        error_code="WORKSPACE_WRITE_DENIED",
-                    )
-        return None
+                    pfx = self._path_grant_prefix(candidate)
+                    key = str(pfx)
+                    if key not in seen:
+                        seen.add(key)
+                        grants.append(
+                            {
+                                "path_prefix": key,
+                                "access_mode": "write",
+                                "reason": f"bash 写入目标: {candidate}",
+                            }
+                        )
+        return grants
+
+    @staticmethod
+    def _path_grant_prefix(candidate: Path) -> Path:
+        parent = candidate.parent
+        return parent if str(parent) not in ("", ".") else candidate
 
     @staticmethod
     def _split_command_segments(command: str) -> List[str]:
@@ -430,32 +496,47 @@ class BashSecurity:
     # ── Layer 1 实现 ──────────────────────────────────────────
 
     def _check_restricted(self, command: str) -> SecurityVerdict:
-        """受限模式：白名单 + 禁止 shell 运算符。"""
-        for op in _SHELL_OPERATORS:
+        """受限模式：白名单 + 禁止高危 shell 运算符（子命令、重定向、单独后台 ``&`` 等）。
+
+        允许 ``|`` / ``;`` / ``&&`` / ``||`` 串联命令；各段须落在白名单内，且整体仍过危险模式检测。
+        """
+        for op in _RESTRICTED_DENIED_SHELL_OPERATORS:
             if op in command:
                 return SecurityVerdict(
                     SecurityAction.DENY,
-                    reason=f"受限模式下禁止使用 shell 运算符（如 {op}），仅允许单条非破坏性命令",
+                    reason=f"受限模式下禁止使用 shell 运算符（如 {op}），仅允许白名单只读命令链",
                     error_code="SHELL_OPERATOR_DENIED",
                 )
 
-        parts = command.split()
-        if not parts:
+        if _RESTRICTED_JOB_CONTROL_AMPERSAND.search(command):
+            return SecurityVerdict(
+                SecurityAction.DENY,
+                reason="受限模式下禁止使用后台运行符 &（可使用 && / || 作逻辑链）",
+                error_code="SHELL_OPERATOR_DENIED",
+            )
+
+        segments = self._split_command_segments(command)
+        if not segments:
             return SecurityVerdict(
                 SecurityAction.DENY,
                 reason="命令为空",
                 error_code="EMPTY_COMMAND",
             )
-
-        base_cmd = Path(parts[0]).name.lower()
-        if base_cmd not in self._restricted_whitelist:
-            allowed_preview = ", ".join(sorted(self._restricted_whitelist)[:10])
-            return SecurityVerdict(
-                SecurityAction.DENY,
-                reason=f"受限模式下命令 '{base_cmd}' 不在白名单内。"
-                       f"允许的命令示例: {allowed_preview}",
-                error_code="COMMAND_NOT_WHITELISTED",
-            )
+        for segment in segments:
+            parts = segment.split()
+            if not parts:
+                continue
+            base_cmd = Path(parts[0]).name.lower()
+            if base_cmd not in self._restricted_whitelist:
+                allowed_preview = ", ".join(sorted(self._restricted_whitelist)[:10])
+                return SecurityVerdict(
+                    SecurityAction.DENY,
+                    reason=(
+                        f"受限模式下命令 '{base_cmd}' 不在白名单内。"
+                        f"允许的命令示例: {allowed_preview}"
+                    ),
+                    error_code="COMMAND_NOT_WHITELISTED",
+                )
 
         danger = self._check_dangerous(command)
         if danger is not None:

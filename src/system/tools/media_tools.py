@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import Any, List, Optional
 
 from agent_core.config import Config, get_config
-from agent_core.agent.session_paths import expand_user_path_str_for_session
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 
 
@@ -34,6 +33,37 @@ class _AttachMediaParams:
                     collected.append(item.strip())
 
         return cls(paths=collected)
+
+
+def _remote_workspace_active(exec_ctx: dict) -> bool:
+    sid = str((exec_ctx or {}).get("session_id") or "").strip()
+    if not sid:
+        return False
+    try:
+        from agent_core.remote.workspace_state import get_remote_workspace_state
+
+        return get_remote_workspace_state(sid) is not None
+    except Exception:
+        return False
+
+
+def _resolve_reply_attachment_path(
+    path_str: str,
+    *,
+    config: Config,
+    exec_ctx: dict,
+) -> tuple[Optional[Path], Optional[str]]:
+    if _remote_workspace_active(exec_ctx):
+        return None, (
+            "远程工作区下暂不支持用本地路径发送回复附件；请使用 *_url 参数，"
+            "或先将文件转成可访问的 URL。"
+        )
+    from agent_core.agent.tool_path_resolution import resolve_path_string_for_tool
+
+    resolved, err = resolve_path_string_for_tool(path_str, config, exec_ctx)
+    if err or resolved is None:
+        return None, err or f"无法解析路径: {path_str}"
+    return resolved, None
 
 
 class AttachMediaTool(BaseTool):
@@ -77,6 +107,7 @@ class AttachMediaTool(BaseTool):
                     type="array",
                     description="多个媒体路径列表，与 path 二选一；两者同时提供时会合并去重。",
                     required=False,
+                    items={"type": "string"},
                 ),
             ],
             examples=[
@@ -195,12 +226,17 @@ class AttachImageToReplyTool(BaseTool):
 
         if image_path:
             ctx = kwargs.get("__execution_context__") or {}
-            path_str = expand_user_path_str_for_session(
+            p, err = _resolve_reply_attachment_path(
                 str(image_path).strip(),
-                self._config,
+                config=self._config,
                 exec_ctx=ctx,
             )
-            p = Path(path_str).resolve()
+            if err or p is None:
+                return ToolResult(
+                    success=False,
+                    error="INVALID_PATH",
+                    message=err or f"无法解析图片路径: {image_path}",
+                )
             if not p.exists() or not p.is_file():
                 return ToolResult(
                     success=False,
@@ -299,12 +335,17 @@ class AttachFileToReplyTool(BaseTool):
 
         if file_path:
             ctx = kwargs.get("__execution_context__") or {}
-            path_str = expand_user_path_str_for_session(
+            p, err = _resolve_reply_attachment_path(
                 str(file_path).strip(),
-                self._config,
+                config=self._config,
                 exec_ctx=ctx,
             )
-            p = Path(path_str).resolve()
+            if err or p is None:
+                return ToolResult(
+                    success=False,
+                    error="INVALID_PATH",
+                    message=err or f"无法解析文件路径: {file_path}",
+                )
             if not p.exists() or not p.is_file():
                 return ToolResult(
                     success=False,

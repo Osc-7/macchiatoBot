@@ -45,7 +45,7 @@ def test_tilde_uses_os_home_when_no_isolation(tmp_path) -> None:
     assert Path(out).resolve() == (Path.home() / "x").resolve()
 
 
-def test_admin_session_home_uses_mapped_linux_home(tmp_path) -> None:
+def test_admin_session_home_uses_own_logic_linux_home(tmp_path) -> None:
     cfg = Config(
         llm=LLMConfig(api_key="k", model="m"),
         command_tools=CommandToolsConfig(
@@ -54,7 +54,6 @@ def test_admin_session_home_uses_mapped_linux_home(tmp_path) -> None:
             workspace_isolation_enabled=True,
             bash_os_user_enabled=True,
             bash_os_user_home_base_dir=str(tmp_path / "homes"),
-            bash_os_admin_system_users={"cli:root": "mac_admin"},
         ),
     )
     home = session_home_path(
@@ -63,4 +62,4 @@ def test_admin_session_home_uses_mapped_linux_home(tmp_path) -> None:
         user_id="root",
         profile=CoreProfile(bash_workspace_admin=True),
     )
-    assert home == (tmp_path / "homes" / "mac_admin").resolve()
+    assert home == (tmp_path / "homes" / "m_cli_root").resolve()

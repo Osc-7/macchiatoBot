@@ -961,6 +961,15 @@ async def run_interactive_loop(agent: Any) -> str:
                         _print_with_spinner(
                             hint(f"  → 工具结果: {name} {ok}（{ms}ms） {msg}")
                         )
+                    elif event_type == "chat_history_summarized":
+                        _flush_reasoning_buffer()
+                        if stream_started:
+                            _persist_live_block()
+                        _resume_spinner()
+                        note = str(event.get("message") or "").strip() or (
+                            "Chat History Summarized."
+                        )
+                        _print_with_spinner(hint(f"  {note}"))
 
                 is_processing = True
                 hooks = AgentHooks(

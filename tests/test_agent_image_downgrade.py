@@ -38,7 +38,7 @@ def _make_config(*, vision_provider: str | None = "qwen3vl") -> Config:
         providers[vision_provider] = ProviderEntry(
             base_url="https://example.com/v1",
             api_key="k",
-            model="qwen-vl",
+            model="qwen",
             capabilities=CapabilitiesModel(vision=True),
         )
     return Config(

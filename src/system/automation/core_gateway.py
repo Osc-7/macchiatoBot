@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
-from .session_registry import SessionRegistry
 from agent_core.interfaces import (
     AgentHooks,
     AgentRunInput,
@@ -17,6 +16,8 @@ from agent_core.interfaces import (
     CoreSession,
     InjectMessageCommand,
 )
+
+from .session_registry import SessionRegistry
 
 if TYPE_CHECKING:
     from system.kernel import KernelScheduler
@@ -194,9 +195,8 @@ class AutomationCoreGateway:
             )
         )
         try:
-            existed_any = (
-                existed_any
-                or self._kernel_scheduler.core_pool.has_session(session_id)
+            existed_any = existed_any or self._kernel_scheduler.core_pool.has_session(
+                session_id
             )
         except Exception:
             pass
@@ -222,9 +222,8 @@ class AutomationCoreGateway:
             )
         )
         try:
-            existed_any = (
-                existed_any
-                or self._kernel_scheduler.core_pool.has_session(session_id)
+            existed_any = existed_any or self._kernel_scheduler.core_pool.has_session(
+                session_id
             )
         except Exception:
             pass
@@ -275,9 +274,7 @@ class AutomationCoreGateway:
             len(self._push_buffers[session_id]),
         )
 
-    def poll_push_result(
-        self, session_id: str
-    ) -> Optional[tuple[str, AgentRunResult]]:
+    def poll_push_result(self, session_id: str) -> Optional[tuple[str, AgentRunResult]]:
         """非阻塞：弹出该 session 的下一条推送结果，无则返回 None。
 
         结果来源于 OutputBus subscriber 回调缓冲的 inject_turn 等非 submit 结果。
@@ -340,7 +337,9 @@ class AutomationCoreGateway:
                     for r in _enrich_content_refs_with_context(
                         raw_refs,
                         source=str(metadata.get("source") or self._source or "feishu"),
-                        user_id=str(metadata.get("user_id") or self._owner_id or "unknown"),
+                        user_id=str(
+                            metadata.get("user_id") or self._owner_id or "unknown"
+                        ),
                     )
                 ]
                 content_items = await resolve_content_refs(refs)
@@ -353,8 +352,8 @@ class AutomationCoreGateway:
         frontend_id = self._source
         if profile is None and (session_id or "").startswith("shuiyuan:"):
             username = session_id.split(":", 1)[1] if ":" in session_id else "default"
-            from agent_core.kernel_interface import CoreProfile
             from agent_core.config import get_config
+            from agent_core.kernel_interface import CoreProfile
 
             profile = CoreProfile.for_shuiyuan(
                 dialog_window_id=username,
@@ -375,7 +374,9 @@ class AutomationCoreGateway:
         self._pending_submits.add(request.request_id)
         try:
             submit_handle = await self._kernel_scheduler.submit(request)
-            result: AgentRunResult = await self._kernel_scheduler.wait_result(submit_handle)
+            result: AgentRunResult = await self._kernel_scheduler.wait_result(
+                submit_handle
+            )
         finally:
             self._pending_submits.discard(request.request_id)
         self.mark_activity(session_id)
@@ -635,9 +636,7 @@ class AutomationCoreGateway:
         prov_map = getattr(llm, "providers", None) or {}
         vision_name = self._resolve_vision_provider_name_static(llm, prov_map)
         vision_key = (
-            self._normalize_provider_key(str(vision_name))
-            if vision_name
-            else ""
+            self._normalize_provider_key(str(vision_name)) if vision_name else ""
         )
 
         for m in models:
@@ -684,7 +683,8 @@ class AutomationCoreGateway:
                     ),
                     "context_window": getattr(caps_m, "context_window", None),
                     "is_active": False,
-                    "is_vision_provider": vision_name is not None and name == vision_name,
+                    "is_vision_provider": vision_name is not None
+                    and name == vision_name,
                 }
             )
         sid = (session_id or self._active_session_id or "").strip()
@@ -721,9 +721,7 @@ class AutomationCoreGateway:
         prov_map = getattr(cfg.llm, "providers", {}) or {}
         prov = prov_map.get(name)
         if prov is None:
-            raise ValueError(
-                f"未知 provider: {query}；已注册：{list(prov_map.keys())}"
-            )
+            raise ValueError(f"未知 provider: {query}；已注册：{list(prov_map.keys())}")
         caps_m = getattr(prov, "capabilities", None)
         vision_vp = self._resolve_vision_provider_name_static(cfg.llm, prov_map)
         return {
@@ -773,6 +771,86 @@ class AutomationCoreGateway:
             except Exception:
                 return 0
         return 0
+
+    async def remote_workspace_use(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        login: str,
+        requested_path: str,
+        profile: str = "dev",
+        ttl_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Enable remote workspace mode for a session.
+
+        First slice: stores state and prompt context. Runtime routing will
+        consume the same state when the remote worker transport lands.
+        """
+        from agent_core.remote.workspace_state import activate_remote_workspace
+        from agent_core.remote.worker_registry import get_remote_worker_registry
+
+        sid = session_id or self._active_session_id
+        prof = (
+            profile
+            if profile in {"strict", "dev", "host-user", "host-admin"}
+            else "dev"
+        )
+        opened = await get_remote_worker_registry().open_workspace(
+            login=login,
+            session_id=sid,
+            requested_path=requested_path,
+            profile=prof,  # type: ignore[arg-type]
+        )
+        state = activate_remote_workspace(
+            session_id=sid,
+            login=login,
+            requested_path=requested_path,
+            profile=prof,  # type: ignore[arg-type]
+            ttl_seconds=ttl_seconds,
+            resolved_path=opened.resolved_path,
+            device_label=opened.device_label,
+        )
+        self.mark_activity(sid)
+        return state.model_dump()
+
+    def remote_workspace_status(
+        self, session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        from agent_core.remote.workspace_state import get_remote_workspace_state
+
+        sid = session_id or self._active_session_id
+        state = get_remote_workspace_state(sid)
+        return {
+            "active": state is not None,
+            "state": state.model_dump() if state is not None else None,
+        }
+
+    async def remote_workspace_release(
+        self, session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        from agent_core.remote.workspace_state import release_remote_workspace
+        from agent_core.remote.worker_registry import get_remote_worker_registry
+
+        sid = session_id or self._active_session_id
+        old = release_remote_workspace(sid)
+        if old is not None:
+            try:
+                await get_remote_worker_registry().close_workspace(
+                    login=old.login,
+                    session_id=sid,
+                )
+            except Exception:
+                logger.warning(
+                    "remote workspace close failed session_id=%s login=%s",
+                    sid,
+                    old.login,
+                    exc_info=True,
+                )
+        self.mark_activity(sid)
+        return {
+            "released": old is not None,
+            "state": old.model_dump() if old is not None else None,
+        }
 
     async def delete_session(self, session_id: str) -> bool:
         """删除指定会话。

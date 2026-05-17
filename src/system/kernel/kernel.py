@@ -18,14 +18,15 @@ AgentKernel — 纯 IO 调度器（工具执行 + 生命周期管理）。
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
-from agent_core.interfaces import AgentHooks, AgentRunResult
 from agent_core.agent.tool_path_resolution import (
     apply_workspace_path_resolution_to_tool_args,
 )
+from agent_core.interfaces import AgentHooks, AgentRunResult
 from agent_core.kernel_interface import (
     ContextOverflowAction,
     CoreStatsAction,
@@ -34,6 +35,7 @@ from agent_core.kernel_interface import (
     ToolCallAction,
     ToolResultEvent,
 )
+from system.kernel.summary_prompt import SUMMARY_USER_APPEND
 
 if TYPE_CHECKING:
     from agent_core.agent.agent import AgentCore
@@ -42,6 +44,15 @@ if TYPE_CHECKING:
     from system.tools import VersionedToolRegistry
 
 logger = logging.getLogger(__name__)
+
+
+async def _emit_trace_hooks(hooks: Optional[AgentHooks], event: Dict[str, Any]) -> None:
+    """与 AgentCore._emit_trace 一致：触发 on_trace_event（支持 sync/async）。"""
+    if hooks is None or hooks.on_trace_event is None:
+        return
+    maybe = hooks.on_trace_event(event)
+    if inspect.isawaitable(maybe):
+        await maybe
 
 
 class AgentKernel:
@@ -119,7 +130,9 @@ class AgentKernel:
 
             elif isinstance(action, ToolCallAction):
                 _maybe_touch()
-                visible_tools = set(getattr(agent, "_current_visible_tools", set()) or set())
+                visible_tools = set(
+                    getattr(agent, "_current_visible_tools", set()) or set()
+                )
                 if visible_tools and action.tool_name not in visible_tools:
                     from agent_core.tools.base import ToolResult as _ToolResult
 
@@ -172,25 +185,45 @@ class AgentKernel:
                     )
                 else:
                     # 注入执行上下文：让 bash / file_tools 等能感知当前 CoreProfile。
-                    profile_mode = getattr(profile, "mode", "full") if profile is not None else "full"
+                    profile_mode = (
+                        getattr(profile, "mode", "full")
+                        if profile is not None
+                        else "full"
+                    )
+                    source = getattr(agent, "_source", "")
+                    user_id = getattr(agent, "_user_id", "")
+                    bash_workspace_admin = bool(
+                        getattr(profile, "bash_workspace_admin", False)
+                    )
+                    cfg = getattr(agent, "_config", None)
+                    if cfg is not None:
+                        from agent_core.agent.workspace_paths import (
+                            is_bash_workspace_admin,
+                        )
+
+                        bash_workspace_admin = is_bash_workspace_admin(
+                            cfg.command_tools,
+                            source,
+                            user_id,
+                            profile,
+                        )
                     _ctx = {
                         "profile_mode": profile_mode,
-                        "tool_template": getattr(profile, "tool_template", "default")
-                        if profile is not None
-                        else "default",
-                        "allow_dangerous_commands": getattr(
-                            profile, "allow_dangerous_commands", False
-                        )
-                        if profile is not None
-                        else False,
-                        "bash_workspace_admin": bool(
-                            getattr(profile, "bash_workspace_admin", False)
-                        )
-                        if profile is not None
-                        else False,
-                        "source": getattr(agent, "_source", ""),
-                        "user_id": getattr(agent, "_user_id", ""),
+                        "tool_template": (
+                            getattr(profile, "tool_template", "default")
+                            if profile is not None
+                            else "default"
+                        ),
+                        "allow_dangerous_commands": (
+                            getattr(profile, "allow_dangerous_commands", False)
+                            if profile is not None
+                            else False
+                        ),
+                        "bash_workspace_admin": bash_workspace_admin,
+                        "source": source,
+                        "user_id": user_id,
                         "session_id": getattr(agent, "_session_id", ""),
+                        "parent_session_id": getattr(agent, "_parent_session_id", ""),
                     }
                     _jmo = getattr(agent, "_job_memory_owner", None)
                     if _jmo:
@@ -201,7 +234,6 @@ class AgentKernel:
                             if _v is not None and str(_v).strip():
                                 _ctx[_k] = str(_v).strip()
                     parsed_args["__execution_context__"] = _ctx
-                    cfg = getattr(agent, "_config", None)
                     if cfg is not None:
                         parsed_args = apply_workspace_path_resolution_to_tool_args(
                             action.tool_name, parsed_args, cfg
@@ -230,6 +262,19 @@ class AgentKernel:
                 from agent_core.kernel_interface import ContextCompressedEvent
 
                 compressed_summary, messages_kept = await self.compress_context(agent)
+                await _emit_trace_hooks(
+                    hooks,
+                    {
+                        "type": "chat_history_summarized",
+                        "message": "Chat History Summarized.",
+                        "session_id": getattr(agent, "_session_id", "")
+                        or action.session_id,
+                        "messages_kept": messages_kept,
+                        "current_tokens": action.current_tokens,
+                        "threshold_tokens": action.threshold_tokens,
+                        "had_summary": bool((compressed_summary or "").strip()),
+                    },
+                )
                 action = await gen.asend(
                     ContextCompressedEvent(
                         compressed_summary=compressed_summary,
@@ -340,9 +385,7 @@ class AgentKernel:
         if summary_text.strip():
             summary_msg = {
                 "role": "user",
-                "content": (
-                    f"{cls._SUMMARY_USER_PREFIX}\n{summary_text.strip()}"
-                ),
+                "content": (f"{cls._SUMMARY_USER_PREFIX}\n{summary_text.strip()}"),
             }
             ctx.messages = [summary_msg] + list(new_messages)
             if wm is not None:
@@ -360,31 +403,20 @@ class AgentKernel:
         )
         return summary_text, kept
 
-    _COMPRESS_SYSTEM_APPEND = """\
-# 上下文压缩
-
-当前不是在正常回复用户，而是在上下文触顶后，对 **messages 中的对话** 做折叠摘要。
-对话含 user / assistant / tool 调用与 tool 结果；最后一条 user 是总结指令。
-请输出一段可延续的摘要正文：用户目标、关键事实、工具结果中的数据、待办与未决问题；语言与对话一致。"""
-
-    _SUMMARIZE_USER_APPEND = "请总结以上对话。"
+    _SUMMARIZE_USER_APPEND = SUMMARY_USER_APPEND
 
     @staticmethod
     def _system_message_for_compression(agent: "AgentCore") -> str:
-        """与主对话同一套 build_agent_system_prompt，再追加压缩任务段。"""
+        """使用与主对话完全一致的 system prompt，提高 prefix cache 命中率。"""
         builder = getattr(agent, "_build_system_prompt", None)
-        base = ""
         if callable(builder):
             try:
-                base = (builder() or "").strip()
+                return (builder() or "").strip()
             except Exception as exc:
                 logger.warning(
                     "AgentKernel: _build_system_prompt failed for compression: %s", exc
                 )
-        append = AgentKernel._COMPRESS_SYSTEM_APPEND.strip()
-        if base:
-            return f"{base}\n\n{append}"
-        return append
+        return ""
 
     @staticmethod
     async def _summarize_messages(
@@ -428,6 +460,8 @@ class AgentKernel:
                     return {}, "工具参数必须是 JSON 对象"
                 return parsed, None
             except (json.JSONDecodeError, ValueError):
-                preview = arguments[:500] + ("...(截断)" if len(arguments) > 500 else "")
+                preview = arguments[:500] + (
+                    "...(截断)" if len(arguments) > 500 else ""
+                )
                 return {}, f"工具参数 JSON 解析失败（可能为流式输出截断）: {preview}"
         return {}, "工具参数类型无效"

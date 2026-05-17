@@ -23,7 +23,16 @@ from agent_core.config import get_config
 
 from .client import FeishuClient
 from .config import get_feishu_config
-from .content_parser import parse_feishu_message
+from .content_parser import (
+    feishu_message_should_queue_attachments,
+    parse_feishu_message,
+)
+from .pending_attachments import (
+    clear_queued_attachments,
+    feishu_slash_clears_attachment_queue,
+    queue_attachments_for_next_turn,
+    take_queued_attachments,
+)
 from .event_models import FeishuChallengeRequest, FeishuEventEnvelope
 from .ipc_bridge import (
     AutomationDaemonUnavailable,
@@ -229,11 +238,15 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
     )
     meta["feishu_session_id"] = session_id
     metadata: Dict[str, Any] = {**meta, "feishu_event_id": header.event_id}
-    if content_refs:
-        metadata["content_refs"] = [r.to_dict() for r in content_refs]
+    incoming_refs = list(content_refs)
 
-    # 斜杠指令：仅对纯文本消息且以 / 开头时处理
-    if not content_refs and text.strip().startswith("/"):
+    # 独立 image / file：先入队，下一条用户消息再合并进 run_turn（无飞书侧提示）
+    if feishu_message_should_queue_attachments(msg.message_type, incoming_refs):
+        queue_attachments_for_next_turn(session_id, incoming_refs)
+        return JSONResponse({"code": 0, "msg": "ok"})
+
+    # 斜杠指令：仅对「本条无附件」的纯文本；须在合并排队附件之前判断，避免 /help 误带上待处理图片
+    if not incoming_refs and text.strip().startswith("/"):
         try:
             reply = await try_handle_slash_command_via_ipc(
                 session_id=session_id,
@@ -245,6 +258,8 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
                 feishu_user_id=event.sender.sender_id.user_id or "",
             )
             if reply is not None:
+                if feishu_slash_clears_attachment_queue(text):
+                    clear_queued_attachments(session_id)
                 feishu_client = _build_feishu_client()
                 try:
                     await feishu_client.send_text_message(
@@ -261,6 +276,11 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
         except Exception as exc:  # noqa: BLE001
             logger.warning("slash command failed, fallback to agent: %s", exc)
 
+    queued_refs = take_queued_attachments(session_id)
+    merged_refs = list(queued_refs) + list(incoming_refs)
+    if merged_refs:
+        metadata["content_refs"] = [r.to_dict() for r in merged_refs]
+
     ipc = _build_ipc_bridge()
     try:
         result = await ipc.send_message(
@@ -271,6 +291,8 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
             source="feishu",
         )
     except AutomationDaemonUnavailable as exc:
+        if queued_refs:
+            queue_attachments_for_next_turn(session_id, queued_refs)
         logger.warning("automation daemon unavailable for feishu message: %s", exc)
         await send_feishu_error_notice(
             chat_id=msg.chat_id,
@@ -283,6 +305,8 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
             status_code=503,
         )
     except Exception as exc:  # noqa: BLE001
+        if queued_refs:
+            queue_attachments_for_next_turn(session_id, queued_refs)
         logger.exception(
             "failed to process feishu message via automation daemon: %s", exc
         )

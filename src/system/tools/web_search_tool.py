@@ -63,6 +63,7 @@ class WebSearchTool(BaseTool):
                     type="array",
                     description="可选，仅从指定域名搜索（字符串数组）",
                     required=False,
+                    items={"type": "string"},
                 ),
             ],
             usage_notes=[

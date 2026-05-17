@@ -19,6 +19,7 @@ from frontend.feishu.permission_card import (
     build_permission_request_card,
     interactive_content_string,
     parse_permission_card_callback,
+    parse_permission_card_payload,
 )
 
 
@@ -55,6 +56,51 @@ def test_build_with_path_prefix_three_action_columns() -> None:
     assert "Once" in labels
     assert "Always" in labels
     assert "Deny" in labels
+
+
+def test_build_permission_card_includes_full_bash_details() -> None:
+    card = build_permission_request_card(
+        permission_id="550e8400-e29b-41d4-a716-446655440000",
+        summary="执行 bash 命令需要批准",
+        kind="bash_dangerous_command",
+        timeout_seconds=120.0,
+        tool_name="bash",
+        command="cd /tmp && eval 'echo ok'",
+        cwd="/home/ubuntu/macchiatoBot",
+        risk_reasons=["eval 动态执行"],
+        path_grants=[
+            {
+                "path_prefix": "/tmp/shared",
+                "access_mode": "write",
+                "reason": "bash 写入目标",
+            }
+        ],
+        auto_execute_after_approval=True,
+    )
+    md = card["body"]["elements"][0]["content"]
+    assert "```bash\ncd /tmp && eval 'echo ok'\n```" in md
+    assert "`cwd: /home/ubuntu/macchiatoBot`" in md
+    assert "eval 动态执行" in md
+    assert "`write` `/tmp/shared`" in md
+    assert "批准后将自动继续执行原操作" in md
+
+    allow_value = card["body"]["elements"][1]["columns"][0]["elements"][0]["behaviors"][
+        0
+    ]["value"]
+    parsed = parse_permission_card_payload(allow_value)
+    assert parsed["decision"] == ALLOW
+    assert parsed["tool_name"] == "bash"
+    assert parsed["command"] == "cd /tmp && eval 'echo ok'"
+    assert parsed["cwd"] == "/home/ubuntu/macchiatoBot"
+    assert parsed["risk_reasons"] == ["eval 动态执行"]
+    assert parsed["path_grants"] == [
+        {
+            "path_prefix": "/tmp/shared",
+            "access_mode": "write",
+            "reason": "bash 写入目标",
+        }
+    ]
+    assert parsed["auto_execute_after_approval"] is True
 
 
 def test_build_resolved_clarify_shows_instruction() -> None:
@@ -133,6 +179,10 @@ async def test_card_callback_resolves_wait_registry(monkeypatch) -> None:
                         "macchiato_permission": "allow",
                         "summary_echo": "测试摘要",
                         "kind_echo": "file_write",
+                        "path_grants": [
+                            {"path_prefix": "/tmp/a", "access_mode": "write"},
+                            {"path_prefix": "/tmp/b", "access_mode": "read"},
+                        ],
                     },
                 }
             },
@@ -147,6 +197,10 @@ async def test_card_callback_resolves_wait_registry(monkeypatch) -> None:
         decision = await asyncio.wait_for(fut, timeout=2.0)
         assert decision.allowed is True
         assert decision.persist_acl is False
+        assert decision.path_grants == [
+            {"path_prefix": "/tmp/a", "access_mode": "write"},
+            {"path_prefix": "/tmp/b", "access_mode": "read"},
+        ]
     finally:
         set_permission_notify_hook(None)
 

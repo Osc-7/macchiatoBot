@@ -170,6 +170,12 @@ async def _run_subagent_task(
     """
     from agent_core.config import get_config
     from agent_core.kernel_interface import KernelRequest, CoreProfile
+    from agent_core.remote.workspace_state import (
+        activate_remote_workspace,
+        get_remote_workspace_state,
+        release_remote_workspace,
+    )
+    from agent_core.remote.worker_registry import get_remote_worker_registry
 
     config = get_config()
     agent_cfg = getattr(config, "agent", None)
@@ -262,6 +268,42 @@ async def _run_subagent_task(
         profile=profile,
     )
 
+    remote_bound = False
+    parent_remote = get_remote_workspace_state(parent_session_id)
+    if parent_remote is not None:
+        try:
+            opened = await get_remote_worker_registry().open_workspace(
+                login=parent_remote.login,
+                session_id=sub_session_id,
+                requested_path=parent_remote.requested_path,
+                profile=parent_remote.profile,
+            )
+            activate_remote_workspace(
+                session_id=sub_session_id,
+                login=parent_remote.login,
+                requested_path=parent_remote.requested_path,
+                profile=parent_remote.profile,
+                ttl_seconds=None,
+                resolved_path=opened.resolved_path or parent_remote.resolved_path,
+                device_label=opened.device_label or parent_remote.device_label,
+            )
+            remote_bound = True
+            logger.info(
+                "subagent remote workspace inherited subagent_id=%s parent_session_id=%s login=%s",
+                subagent_id,
+                parent_session_id,
+                parent_remote.login,
+                extra={"subagent_id": subagent_id, "parent_session_id": parent_session_id},
+            )
+        except Exception as exc:
+            logger.warning(
+                "subagent remote workspace inherit failed subagent_id=%s parent_session_id=%s: %s",
+                subagent_id,
+                parent_session_id,
+                exc,
+                extra={"subagent_id": subagent_id, "parent_session_id": parent_session_id},
+            )
+
     try:
         logger.debug(
             "subagent submitting request subagent_id=%s sub_session_id=%s",
@@ -321,6 +363,20 @@ async def _run_subagent_task(
         )
         core_pool.on_sub_fail(sub_session_id, str(exc))
     finally:
+        if remote_bound:
+            released = release_remote_workspace(sub_session_id)
+            if released is not None:
+                try:
+                    await get_remote_worker_registry().close_workspace(
+                        login=released.login,
+                        session_id=sub_session_id,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "_run_subagent_task: remote close failed session %s: %s",
+                        sub_session_id,
+                        exc,
+                    )
         # 清理 subagent session 资源（无论成功/失败/取消）
         try:
             await core_pool.evict(sub_session_id)
@@ -382,6 +438,7 @@ class CreateSubagentTool(BaseTool):
                         "- 常用组合示例：[\"read_file\", \"search_tools\"] 用于代码/文档分析；[\"read_file\", \"bash\"] 需配置开启子 Agent 命令行后使用"
                     ),
                     required=False,
+                    items={"type": "string"},
                 ),
                 ToolParameter(
                     name="context",
@@ -549,6 +606,29 @@ class CreateParallelSubagentsTool(BaseTool):
                         "  - max_iterations (integer, 可选): 最大迭代次数（默认从 config.yaml 的 agent.subagent_max_iterations 读取，配置未设置时默认 50）"
                     ),
                     required=True,
+                    items={
+                        "type": "object",
+                        "properties": {
+                            "task": {
+                                "type": "string",
+                                "description": "任务描述",
+                            },
+                            "allowed_tools": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "工具列表（可选）",
+                            },
+                            "context": {
+                                "type": "string",
+                                "description": "背景信息（可选）",
+                            },
+                            "max_iterations": {
+                                "type": "integer",
+                                "description": "最大迭代次数（可选）",
+                            },
+                        },
+                        "required": ["task"],
+                    },
                 ),
             ],
             examples=[
@@ -1144,6 +1224,7 @@ class WaitSubagentTool(BaseTool):
                     type="array",
                     description="多个 subagent_id（字符串数组）；与 subagent_id 二选一；可同时等待并行子任务",
                     required=False,
+                    items={"type": "string"},
                 ),
                 ToolParameter(
                     name="wait_mode",
@@ -1615,7 +1696,7 @@ class GetSubagentStatusTool(BaseTool):
                 "查询子 Agent（subagent）的当前状态（**只读**，无任何副作用）。\n\n"
                 "默认返回状态摘要和结果预览（前 500 字符）。"
                 "设置 include_full_result=true 时，可返回完整输出文本，**仍不会**回收 zombie 或删除磁盘工作区。\n\n"
-                "对已结束子任务需要 **waitpid/reap**（从 zombie 表移除并删除 data/workspace/subagent/<id>/ 等）时，"
+                "对已结束子任务需要 **waitpid/reap**（从 zombie 表移除并删除对应隔离工作区，如 legacy 目录或 Linux home）时，"
                 "请使用 **reap_subagent**。若需要终止仍在运行的子任务，使用 cancel_subagent。"
             ),
             parameters=[
@@ -1739,7 +1820,7 @@ class ReapSubagentTool(BaseTool):
                 "对已 **结束** 的子 Agent（subagent）执行 **收割（reap）**：\n\n"
                 "- 返回完整 `result` 或 `error`（与 get_subagent_status 全文一致）\n"
                 "- 从 zombie 表移除 PCB\n"
-                "- 删除该 subagent 的隔离工作区目录（data/workspace/subagent/<id>/ 与 /tmp/macchiato/subagent/<id>/）\n\n"
+                "- 删除该 subagent 的隔离工作区目录（兼容 legacy data/workspace 与 Linux home 隔离）\n\n"
                 "仅在子任务状态为 completed / failed / cancelled 时可调用；**仍在运行中**请用 cancel_subagent 或等待完成通知。\n"
                 "若只需**只读**查看全文而不回收，请用 get_subagent_status(include_full_result=true)。"
             ),
@@ -1890,7 +1971,7 @@ class CancelSubagentTool(BaseTool):
                 "取消操作是尽力而为（best-effort），任务可能已完成",
                 "取消后不会再收到该子 Agent 的完成通知",
                 "若任务其实已经结束，cancel_subagent 只会返回当前最终状态，不会报错",
-                "取消不会删 `data/workspace/subagent/<id>/` 等目录；不再需要时对该 id 调用 reap_subagent",
+                "取消不会删除隔离工作区目录（legacy 或 Linux home）；不再需要时对该 id 调用 reap_subagent",
             ],
             tags=["multi-agent", "subagent", "cancel"],
         )

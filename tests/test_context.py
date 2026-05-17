@@ -328,6 +328,57 @@ class TestConversationContext:
         assert messages[2]["role"] == "tool"
         assert messages[3]["role"] == "assistant"
 
+    def test_repair_dangling_inserts_synthetic_tool_messages(self):
+        """打断后仅保留 assistant+tool_calls 时，补齐合成 tool 行以满足 LLM API。"""
+        ctx = ConversationContext()
+        ctx.add_user_message("run pip")
+        ctx.add_assistant_message(
+            content=None,
+            tool_calls=[
+                {
+                    "id": "call_a",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": "{}"},
+                },
+                {
+                    "id": "call_b",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": "{}"},
+                },
+            ],
+        )
+        n = ctx.repair_dangling_assistant_tool_calls()
+        assert n == 2
+        msgs = ctx.get_messages()
+        assert len(msgs) == 4
+        assert msgs[2]["role"] == "tool" and msgs[2]["tool_call_id"] == "call_a"
+        assert msgs[3]["role"] == "tool" and msgs[3]["tool_call_id"] == "call_b"
+        assert "中断" in str(msgs[2].get("content", ""))
+
+    def test_repair_dangling_fills_only_missing_tool_ids(self):
+        ctx = ConversationContext()
+        ctx.add_assistant_message(
+            content="x",
+            tool_calls=[
+                {
+                    "id": "call_a",
+                    "type": "function",
+                    "function": {"name": "t", "arguments": "{}"},
+                },
+                {
+                    "id": "call_b",
+                    "type": "function",
+                    "function": {"name": "t", "arguments": "{}"},
+                },
+            ],
+        )
+        ctx.add_tool_result("call_a", {"ok": True})
+        assert ctx.repair_dangling_assistant_tool_calls() == 1
+        msgs = ctx.get_messages()
+        assert msgs[0]["role"] == "assistant"
+        assert msgs[1]["role"] == "tool" and msgs[1]["tool_call_id"] == "call_a"
+        assert msgs[2]["role"] == "tool" and msgs[2]["tool_call_id"] == "call_b"
+
     def test_clear(self):
         """测试清空上下文"""
         ctx = ConversationContext()

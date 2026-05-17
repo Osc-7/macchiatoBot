@@ -64,6 +64,18 @@ def _resolve_media_path(
     return (root / "user_file" / p).resolve()
 
 
+def _remote_workspace_active(exec_ctx: Optional[dict]) -> bool:
+    sid = str((exec_ctx or {}).get("session_id") or "").strip()
+    if not sid:
+        return False
+    try:
+        from agent_core.remote.workspace_state import get_remote_workspace_state
+
+        return get_remote_workspace_state(sid) is not None
+    except Exception:
+        return False
+
+
 def _file_to_data_url(path: Path) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     将文件编码为 data URL。
@@ -96,9 +108,12 @@ def resolve_media_to_content_item(
     Returns:
         (content_item, error)
     """
-    path = _resolve_media_path(
-        media_path, config=config, exec_ctx=exec_ctx
-    )
+    if config is not None and _remote_workspace_active(exec_ctx):
+        return (
+            None,
+            "远程工作区下暂不支持直接挂载远程媒体路径；请提供 http(s)/data URL，或先把媒体同步到 daemon 可读路径。",
+        )
+    path = _resolve_media_path(media_path, config=config, exec_ctx=exec_ctx)
     data_url, mime, err = _file_to_data_url(path)
     if err:
         return None, err

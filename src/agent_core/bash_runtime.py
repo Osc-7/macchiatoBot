@@ -16,6 +16,7 @@ BashRuntime -- 长驻 bash 进程管理器。
 from __future__ import annotations
 
 import asyncio
+import codecs
 import logging
 import os
 import signal
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 _SENTINEL_TAG = "__MACCHIATO_BASH_SENTINEL__"
 _ERR_SENTINEL_TAG = "__MACCHIATO_BASH_ERR_SENTINEL__"
 _KILL_GRACE_SECONDS = 3
+_STREAM_READ_CHUNK_SIZE = 4096
 
 
 @dataclass
@@ -193,51 +195,71 @@ class BashRuntime:
         async def _read_stdout() -> int:
             nonlocal truncated, total_chars
             assert self._process and self._process.stdout
-            ec = -1
-            while True:
-                line_bytes = await self._process.stdout.readline()
-                if not line_bytes:
+            marker = stdout_sentinel.encode("utf-8")
+            tail = await _read_until_marker(self._process.stdout, marker, stdout_buf)
+            while b"\n" not in tail:
+                chunk = await self._process.stdout.read(_STREAM_READ_CHUNK_SIZE)
+                if not chunk:
                     break
-                line = line_bytes.decode("utf-8", errors="replace")
-                if line.startswith(stdout_sentinel):
-                    parts = line.strip().split(":")
-                    try:
-                        ec = int(parts[-1])
-                    except (ValueError, IndexError):
-                        ec = -1
-                    break
-                if total_chars < output_limit:
-                    remaining = output_limit - total_chars
-                    if len(line) > remaining:
-                        stdout_buf.append(line[:remaining])
-                        truncated = True
-                    else:
-                        stdout_buf.append(line)
-                    total_chars += len(line)
-                else:
-                    truncated = True
-            return ec
+                tail += chunk
+            try:
+                code_text = tail.split(b"\n", 1)[0].decode("ascii", errors="replace")
+                return int(code_text.strip())
+            except (ValueError, IndexError):
+                return -1
 
         async def _read_stderr() -> None:
             nonlocal truncated, total_chars
             assert self._process and self._process.stderr
-            while True:
-                line_bytes = await self._process.stderr.readline()
-                if not line_bytes:
-                    break
-                line = line_bytes.decode("utf-8", errors="replace")
-                if stderr_sentinel in line:
-                    break
-                if total_chars < output_limit:
-                    remaining = output_limit - total_chars
-                    if len(line) > remaining:
-                        stderr_buf.append(line[:remaining])
-                        truncated = True
-                    else:
-                        stderr_buf.append(line)
-                    total_chars += len(line)
-                else:
+            marker = stderr_sentinel.encode("utf-8")
+            await _read_until_marker(self._process.stderr, marker, stderr_buf)
+
+        async def _read_until_marker(
+            reader: asyncio.StreamReader,
+            marker: bytes,
+            buf: list[str],
+        ) -> bytes:
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            pending = b""
+            keep = max(0, len(marker) - 1)
+
+            async def _append_bytes(data: bytes, *, final: bool = False) -> None:
+                nonlocal total_chars, truncated
+                text = decoder.decode(data, final=final)
+                if not text:
+                    return
+                if total_chars >= output_limit:
                     truncated = True
+                    return
+                remaining = output_limit - total_chars
+                if len(text) > remaining:
+                    buf.append(text[:remaining])
+                    total_chars += remaining
+                    truncated = True
+                else:
+                    buf.append(text)
+                    total_chars += len(text)
+
+            while True:
+                chunk = await reader.read(_STREAM_READ_CHUNK_SIZE)
+                if not chunk:
+                    if pending:
+                        await _append_bytes(pending, final=True)
+                    return b""
+
+                pending += chunk
+                marker_index = pending.find(marker)
+                if marker_index >= 0:
+                    await _append_bytes(pending[:marker_index], final=True)
+                    return pending[marker_index + len(marker) :]
+
+                if keep and len(pending) > keep:
+                    emit = pending[:-keep]
+                    pending = pending[-keep:]
+                    await _append_bytes(emit)
+                elif not keep:
+                    await _append_bytes(pending)
+                    pending = b""
 
         try:
             results = await asyncio.wait_for(

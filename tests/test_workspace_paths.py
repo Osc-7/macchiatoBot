@@ -16,6 +16,7 @@ from agent_core.agent.workspace_paths import (
     resolve_bash_working_dir,
     resolve_workspace_owner_dir,
     resolve_workspace_tmp_dir,
+    tmp_macchiato_base_dir,
 )
 from agent_core.config import CommandToolsConfig, Config, LLMConfig, MemoryConfig
 from agent_core.kernel_interface.profile import CoreProfile
@@ -59,7 +60,7 @@ def test_resolve_workspace_owner_dir_uses_linux_home_for_tenant(tmp_path) -> Non
 def test_resolve_workspace_tmp_dir() -> None:
     cfg = CommandToolsConfig()
     p = resolve_workspace_tmp_dir(cfg, "bob", source="feishu")
-    assert p == "/tmp/macchiato/feishu/bob"
+    assert p == str(tmp_macchiato_base_dir() / "feishu" / "bob")
 
 
 def test_resolve_bash_working_dir_isolated(tmp_path) -> None:
@@ -81,10 +82,9 @@ def test_resolve_bash_working_dir_config_admin_list(tmp_path) -> None:
         base_dir="/tmp/project",
         bash_os_user_enabled=True,
         bash_os_user_home_base_dir=str(tmp_path / "homes"),
-        bash_os_admin_system_users={"cli:root": "mac_admin"},
     )
     d = resolve_bash_working_dir(cfg, "root", source="cli", profile=None)
-    assert d == str(tmp_path / "homes" / "mac_admin")
+    assert d == str(tmp_path / "homes" / "m_cli_root")
 
 
 def test_resolve_bash_working_dir_profile_admin(tmp_path) -> None:
@@ -95,11 +95,10 @@ def test_resolve_bash_working_dir_profile_admin(tmp_path) -> None:
         base_dir="/srv/app",
         bash_os_user_enabled=True,
         bash_os_user_home_base_dir=str(tmp_path / "homes"),
-        bash_os_admin_system_users={"cli:alice": "mac_admin"},
     )
     prof = CoreProfile(bash_workspace_admin=True)
     d = resolve_bash_working_dir(cfg, "alice", source="cli", profile=prof)
-    assert d == str(tmp_path / "homes" / "mac_admin")
+    assert d == str(tmp_path / "homes" / "m_cli_alice")
 
 
 def test_resolve_bash_working_dir_isolation_off(tmp_path) -> None:

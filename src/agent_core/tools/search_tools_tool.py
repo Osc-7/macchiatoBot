@@ -58,6 +58,7 @@ class SearchToolsTool(BaseTool):
                     type="array",
                     description="按标签筛选，如 ['日程','查询']、['任务','规划']、['文件','读取'] 等。可与 query 组合使用",
                     required=False,
+                    items={"type": "string"},
                 ),
                 ToolParameter(
                     name="name_prefix",

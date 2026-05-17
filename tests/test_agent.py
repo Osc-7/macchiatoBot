@@ -10,7 +10,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_core.config import AgentConfig, Config, LLMConfig, MCPConfig
+from agent_core.config import (
+    AgentConfig,
+    CommandToolsConfig,
+    Config,
+    FileToolsConfig,
+    LLMConfig,
+    MCPConfig,
+)
 from agent_core.agent import AgentCore
 from agent_core.kernel_interface.profile import CoreProfile
 from agent_core.context import ConversationContext
@@ -388,6 +395,104 @@ class TestToolCallExecution:
 
         assert result.success is True
         assert result.message == "Mock tool executed"
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_call_injects_session_id(self, agent, mock_tools):
+        """直接工具调用也要带 session_id，供远程工作区工具路由。"""
+        agent._source = "feishu"
+        agent._user_id = "u42"
+        agent._session_id = "feishu:u42"
+        tool_call = ToolCall(
+            id="call_123",
+            name="tool_a",
+            arguments={"input": "test_value"},
+        )
+
+        result = await agent._execute_tool_call(tool_call)
+
+        assert result.success is True
+        ctx = mock_tools[0].execute_kwargs["__execution_context__"]
+        assert ctx["source"] == "feishu"
+        assert ctx["user_id"] == "u42"
+        assert ctx["session_id"] == "feishu:u42"
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_call_injects_configured_workspace_admin(self, tmp_path):
+        """config 中的 workspace admin owner 也要进入工具执行上下文。"""
+        cfg = Config(
+            llm=LLMConfig(api_key="k", model="m"),
+            command_tools=CommandToolsConfig(
+                base_dir=str(tmp_path),
+                workspace_base_dir=str(tmp_path / "workspace_parent"),
+                workspace_isolation_enabled=True,
+                bash_os_user_enabled=True,
+                bash_os_user_home_base_dir=str(tmp_path / "homes"),
+                workspace_admin_memory_owners=["feishu:u42"],
+            ),
+        )
+        tool = MockTool(name="tool_a")
+        profile = CoreProfile.full_from_config(
+            cfg,
+            frontend_id="feishu",
+            dialog_window_id="u42",
+        )
+        agent = AgentCore(
+            config=cfg,
+            tools=[tool],
+            max_iterations=5,
+            source="feishu",
+            user_id="u42",
+            core_profile=profile,
+        )
+        agent._session_id = "feishu:u42"
+
+        result = await agent._execute_tool_call(
+            ToolCall(
+                id="call_123",
+                name="tool_a",
+                arguments={"input": "test_value"},
+            )
+        )
+
+        assert result.success is True
+        ctx = tool.execute_kwargs["__execution_context__"]
+        assert ctx["bash_workspace_admin"] is True
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_call_applies_workspace_path_resolution(self, tmp_path):
+        """非 Kernel 直接工具调用也要把文件类参数解析到会话工作区。"""
+        cfg = Config(
+            llm=LLMConfig(api_key="k", model="m"),
+            file_tools=FileToolsConfig(base_dir=str(tmp_path)),
+            command_tools=CommandToolsConfig(
+                base_dir=str(tmp_path),
+                workspace_base_dir=str(tmp_path / "workspace_parent"),
+                workspace_isolation_enabled=True,
+            ),
+        )
+        tool = MockTool(name="memory_ingest")
+        agent = AgentCore(
+            config=cfg,
+            tools=[tool],
+            max_iterations=5,
+            source="feishu",
+            user_id="u42",
+        )
+        agent._session_id = "feishu:u42"
+        expected = tmp_path / "workspace_parent" / "feishu" / "u42" / "doc.pdf"
+        expected.parent.mkdir(parents=True)
+        expected.write_bytes(b"%PDF-1.4")
+
+        result = await agent._execute_tool_call(
+            ToolCall(
+                id="call_123",
+                name="memory_ingest",
+                arguments={"file_path": "doc.pdf"},
+            )
+        )
+
+        assert result.success is True
+        assert tool.execute_kwargs["file_path"] == str(expected.resolve())
 
     @pytest.mark.asyncio
     async def test_execute_tool_call_with_json_args(self, agent):

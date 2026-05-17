@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from frontend.feishu import slash_commands as slash_commands_module
 from frontend.feishu.slash_commands import (
     _format_token_usage,
     _help_text,
@@ -16,11 +17,13 @@ from frontend.feishu.slash_commands import (
 def test_help_text():
     h = _help_text()
     assert "/clear" in h
+    assert "/interrupt" in h
     assert "/compress" in h
     assert "/usage" in h
     assert "/model" in h
     assert "/session" in h
     assert "/new" in h
+    assert "/remote-use" in h
     assert "/help" in h
 
 
@@ -79,6 +82,27 @@ async def test_try_handle_slash_command_clear():
     assert handled is True
     assert "清空" in (reply or "")
     client.clear_context.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_interrupt():
+    client = MagicMock()
+    client.active_session_id = "feishu:ou_test"
+    client.terminal_cancel = AsyncMock(return_value=True)
+    handled, reply = await try_handle_slash_command(client, "/interrupt")
+    assert handled is True
+    assert "Chat session interrupted." in (reply or "")
+    client.terminal_cancel.assert_awaited_once_with("feishu:ou_test")
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_cancel_idle():
+    client = MagicMock()
+    client.active_session_id = "feishu:ou_x"
+    client.terminal_cancel = AsyncMock(return_value=False)
+    handled, reply = await try_handle_slash_command(client, "/cancel")
+    assert handled is True
+    assert "No active chat session." in (reply or "")
 
 
 @pytest.mark.asyncio
@@ -213,9 +237,7 @@ async def test_try_handle_slash_command_model_switch():
             "vision_provider": "qwen_dashscope",
         }
     )
-    handled, reply = await try_handle_slash_command(
-        client, "/model Kimi K2.5"
-    )
+    handled, reply = await try_handle_slash_command(client, "/model Kimi K2.5")
     assert handled is True
     assert reply is not None
     assert "kimi_k25" in reply
@@ -223,10 +245,101 @@ async def test_try_handle_slash_command_model_switch():
 
 
 @pytest.mark.asyncio
-async def test_try_handle_slash_command_new_alias():
+async def test_try_handle_slash_command_new_alias(monkeypatch):
     client = MagicMock()
+    client.active_session_id = "feishu:user:ou_test"
+    client.feishu_base_session_id = "feishu:user:ou_test"
+    client.expire_session = AsyncMock(return_value=True)
     client.switch_session = AsyncMock(return_value=True)
+    monkeypatch.setattr(slash_commands_module.time, "time", lambda: 1234)
+
     handled, reply = await try_handle_slash_command(client, "/new")
+
     assert handled is True
     assert "已创建并切换到新会话" in (reply or "")
-    client.switch_session.assert_awaited_once()
+    client.expire_session.assert_awaited_once_with(
+        "feishu:user:ou_test", reason="manual_new"
+    )
+    client.switch_session.assert_awaited_once_with(
+        "feishu:user:ou_test:1234", create_if_missing=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_session_list_scoped_to_feishu_window():
+    client = MagicMock()
+    client.active_session_id = "feishu:legacy-active"
+    client.feishu_base_session_id = "feishu:user:ou_me"
+    client.session_list_limit = 30
+    client.list_sessions = AsyncMock(
+        return_value=[
+            "cli:default",
+            "cron:job-1",
+            "feishu:user:ou_me",
+            "feishu:user:ou_me:123",
+            "feishu:user:ou_other",
+            "feishu:legacy-active",
+            "shuiyuan:alice",
+        ]
+    )
+
+    handled, reply = await try_handle_slash_command(client, "/session list")
+
+    assert handled is True
+    assert reply is not None
+    assert "当前飞书窗口" in reply
+    assert "feishu:user:ou_me" in reply
+    assert "feishu:user:ou_me:123" in reply
+    assert "feishu:legacy-active *" in reply
+    assert "cli:default" not in reply
+    assert "cron:job-1" not in reply
+    assert "shuiyuan:alice" not in reply
+    assert "feishu:user:ou_other" not in reply
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_remote_use():
+    client = MagicMock()
+    client.remote_workspace_use = AsyncMock(
+        return_value={
+            "login": "personal",
+            "requested_path": "~/Project",
+            "profile": "dev",
+            "workspace_mount": "/workspace",
+        }
+    )
+    handled, reply = await try_handle_slash_command(
+        client, "/remote-use personal ~/Project --profile dev --ttl 30m"
+    )
+    assert handled is True
+    assert reply is not None
+    assert "远程工作区已启用" in reply
+    assert "personal" in reply
+    client.remote_workspace_use.assert_awaited_once_with(
+        login="personal",
+        path="~/Project",
+        profile="dev",
+        ttl_seconds=1800,
+    )
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_remote_status_inactive():
+    client = MagicMock()
+    client.remote_workspace_status = AsyncMock(
+        return_value={"active": False, "state": None}
+    )
+    handled, reply = await try_handle_slash_command(client, "/remote-status")
+    assert handled is True
+    assert "未启用" in (reply or "")
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_remote_release():
+    client = MagicMock()
+    client.remote_workspace_release = AsyncMock(
+        return_value={"released": True, "state": {"login": "personal"}}
+    )
+    handled, reply = await try_handle_slash_command(client, "/remote-release")
+    assert handled is True
+    assert "已释放" in (reply or "")

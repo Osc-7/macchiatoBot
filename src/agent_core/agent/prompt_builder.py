@@ -5,12 +5,9 @@ from __future__ import annotations
 from typing import Any, List
 
 from agent_core.memory import RecallResult
-from agent_core.prompts.loader import (
-    PromptMode,
-    build_system_prompt as build_prompt,
-    get_recipe,
-    resolve_skills_cli_path,
-)
+from agent_core.prompts.loader import PromptMode
+from agent_core.prompts.loader import build_system_prompt as build_prompt
+from agent_core.prompts.loader import get_recipe, resolve_skills_cli_path
 
 
 def _visible_scopes(agent: Any) -> set:
@@ -106,7 +103,9 @@ def build_agent_system_prompt(agent: Any) -> str:
     weekly_digest = None
     if recipe.include_digest and "long_term" in scopes:
         try:
-            from system.automation.repositories import DigestRepository  # type: ignore[import]
+            from system.automation.repositories import (
+                DigestRepository,
+            )  # type: ignore[import]
 
             digest_repo = DigestRepository()
             daily_digest = digest_repo.latest("daily")
@@ -145,5 +144,19 @@ def build_agent_system_prompt(agent: Any) -> str:
 
     if recipe.include_digest and digest_sections:
         prompt += "\n\n# 自动化摘要\n\n" + "\n".join(digest_sections)
+
+    try:
+        from agent_core.remote.workspace_state import (
+            format_remote_workspace_prompt_suffix,
+            get_remote_workspace_state,
+        )
+
+        remote_state = get_remote_workspace_state(getattr(agent, "_session_id", ""))
+        if remote_state is not None:
+            prompt += "\n\n" + format_remote_workspace_prompt_suffix(remote_state)
+    except Exception:
+        # Remote mode is optional infrastructure; prompt construction must never
+        # fail because the sidecar state store is unavailable.
+        pass
 
     return prompt

@@ -24,7 +24,7 @@ from .permission_card import (
     CLARIFY,
     DENY,
     build_permission_request_card,
-    parse_permission_card_callback,
+    parse_permission_card_payload,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,28 +34,29 @@ def _resolved_card_from_value(
     raw_val: Any,
     form_value: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    (
-        pid,
-        dec,
-        pfx,
-        sum_e,
-        kind_e,
-        timeout_echo,
-        ui,
-        persist_acl,
-    ) = parse_permission_card_callback(raw_val, form_value)
+    parsed = parse_permission_card_payload(raw_val, form_value)
+    pid = parsed["permission_id"]
+    dec = parsed["decision"]
     if not pid or dec not in (ALLOW, DENY, CLARIFY):
         return None
-    summary = sum_e or "（无摘要存档）"
-    rp = persist_acl if dec == ALLOW else None
+    summary = parsed["summary_echo"] or "（无摘要存档）"
+    rp = parsed["persist_acl"] if dec == ALLOW else None
     return build_permission_request_card(
         permission_id=pid,
         summary=summary,
-        kind=kind_e,
-        timeout_seconds=timeout_echo,
-        path_prefix=pfx,
+        kind=parsed["kind_echo"],
+        timeout_seconds=parsed["timeout_echo"],
+        path_prefix=parsed["path_prefix"],
+        tool_name=parsed["tool_name"],
+        command=parsed["command"],
+        cwd=parsed["cwd"],
+        risk_reasons=parsed["risk_reasons"],
+        path_grants=parsed["path_grants"],
+        auto_execute_after_approval=parsed["auto_execute_after_approval"],
         resolved=dec,  # type: ignore[arg-type]
-        resolved_user_instruction=ui if dec == CLARIFY else None,
+        resolved_user_instruction=(
+            parsed["user_instruction"] if dec == CLARIFY else None
+        ),
         resolved_persist_acl=rp,
     )
 
@@ -69,16 +70,12 @@ def execute_card_permission_resolution(
 
     飞书网关进程须使用 :func:`resolve_card_via_daemon_ipc`。
     """
-    (
-        pid,
-        dec,
-        pfx,
-        sum_e,
-        kind_e,
-        _timeout_echo,
-        ui,
-        persist_acl,
-    ) = parse_permission_card_callback(raw_val, form_value)
+    parsed = parse_permission_card_payload(raw_val, form_value)
+    pid = parsed["permission_id"]
+    dec = parsed["decision"]
+    pfx = parsed["path_prefix"]
+    ui = parsed["user_instruction"]
+    persist_acl = parsed["persist_acl"]
     if not pid or dec not in (ALLOW, DENY, CLARIFY):
         logger.warning(
             "card.action.trigger: bad value pid=%r dec=%r raw=%r",
@@ -105,6 +102,7 @@ def execute_card_permission_resolution(
             PermissionDecision(
                 allowed=True,
                 path_prefix=pfx if pfx else None,
+                path_grants=parsed["path_grants"],
                 note="飞书卡片批准",
                 persist_acl=persist_acl,
             ),
@@ -201,16 +199,12 @@ async def resolve_card_via_daemon_ipc(
     form_value：表单提交时 event.action.form_value（输入框内容）。
     第三元组为成功时用于更新卡片的 JSON 2.0 对象；失败时为 None。
     """
-    (
-        pid,
-        dec,
-        pfx,
-        _sum_e,
-        _kind_e,
-        _timeout_echo,
-        ui,
-        persist_acl,
-    ) = parse_permission_card_callback(raw_val, form_value)
+    parsed = parse_permission_card_payload(raw_val, form_value)
+    pid = parsed["permission_id"]
+    dec = parsed["decision"]
+    pfx = parsed["path_prefix"]
+    ui = parsed["user_instruction"]
+    persist_acl = parsed["persist_acl"]
     if not pid or dec not in (ALLOW, DENY, CLARIFY):
         logger.warning(
             "card.action.trigger: bad value pid=%r dec=%r raw=%r",
@@ -244,6 +238,7 @@ async def resolve_card_via_daemon_ipc(
         permission_id=pid,
         allowed=allowed,
         path_prefix=pfx if allowed and pfx else None,
+        path_grants=parsed["path_grants"] if allowed else None,
         note=note,
         clarify_requested=clarify_requested,
         user_instruction=ui if clarify_requested else None,

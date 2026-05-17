@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +21,16 @@ def _make_pool():
     scheduler.session_inflight_request_count = MagicMock(return_value=0)
     pool.set_scheduler(scheduler)
     return pool, scheduler
+
+
+def _registry_config(tmp_path: Path):
+    from agent_core.config import AgentConfig, Config, LLMConfig, MemoryConfig
+
+    return Config(
+        llm=LLMConfig(api_key="k", model="test-model"),
+        memory=MemoryConfig(memory_base_dir=str(tmp_path / "mem_build_registry")),
+        agent=AgentConfig(),
+    )
 
 
 def _exec_cli_root() -> dict:
@@ -599,7 +610,7 @@ class TestSendMessageToAgentTool:
         assert result.data["reply_content"] == "answer body"
 
     @pytest.mark.asyncio
-    async def test_send_message_rejected_when_sender_cancelled(self):
+    async def test_send_message_rejected_when_sender_cancelled(self, tmp_path):
         from agent_core.kernel_interface import CoreProfile
         from system.tools import build_tool_registry
 
@@ -612,6 +623,7 @@ class TestSendMessageToAgentTool:
         reg = build_tool_registry(
             profile=CoreProfile(mode="full"),
             core_pool=pool,
+            config=_registry_config(tmp_path),
         )
         tool = reg.get("send_message_to_agent")
         assert tool is not None
@@ -671,11 +683,13 @@ class TestReplyToMessageTool:
 
 
 class TestToolRegistration:
-    def test_no_core_pool_no_subagent_tools(self):
+    def test_no_core_pool_no_subagent_tools(self, tmp_path):
         from agent_core.kernel_interface import CoreProfile
         from system.tools import build_tool_registry
 
-        reg = build_tool_registry(profile=CoreProfile(mode="full"))
+        reg = build_tool_registry(
+            profile=CoreProfile(mode="full"), config=_registry_config(tmp_path)
+        )
         for tool_name in [
             "create_subagent",
             "create_parallel_subagents",
@@ -688,12 +702,16 @@ class TestToolRegistration:
         ]:
             assert not reg.has(tool_name)
 
-    def test_full_mode_with_core_pool(self):
+    def test_full_mode_with_core_pool(self, tmp_path):
         from agent_core.kernel_interface import CoreProfile
         from system.tools import build_tool_registry
 
         pool, _ = _make_pool()
-        reg = build_tool_registry(profile=CoreProfile(mode="full"), core_pool=pool)
+        reg = build_tool_registry(
+            profile=CoreProfile(mode="full"),
+            core_pool=pool,
+            config=_registry_config(tmp_path),
+        )
         assert reg.has("create_subagent")
         assert reg.has("create_parallel_subagents")
         assert reg.has("send_message_to_agent")
@@ -703,12 +721,16 @@ class TestToolRegistration:
         assert reg.has("cancel_subagent")
         assert reg.has("list_agents")
 
-    def test_sub_mode_only_has_communication_tools(self):
+    def test_sub_mode_only_has_communication_tools(self, tmp_path):
         from agent_core.kernel_interface import CoreProfile
         from system.tools import build_tool_registry
 
         pool, _ = _make_pool()
-        reg = build_tool_registry(profile=CoreProfile(mode="sub"), core_pool=pool)
+        reg = build_tool_registry(
+            profile=CoreProfile(mode="sub"),
+            core_pool=pool,
+            config=_registry_config(tmp_path),
+        )
         assert reg.has("send_message_to_agent")
         assert reg.has("reply_to_message")
         assert reg.has("list_agents")
@@ -915,9 +937,7 @@ class TestCreateParallelSubagentsTool:
 
 class TestReapSubagentWorkspace:
     def test_remove_subagent_workspace_trees_deletes_data_and_tmp(self, tmp_path, monkeypatch):
-        import agent_core.agent.workspace_paths as wp
-
-        monkeypatch.setattr(wp, "_TMP_BASE_DIR", tmp_path / "mtmp")
+        monkeypatch.setenv("MACCHIATO_TMP_BASE", str(tmp_path / "mtmp"))
         from agent_core.config import CommandToolsConfig
         from agent_core.agent.workspace_paths import (
             ensure_workspace_owner_layout,
@@ -934,9 +954,7 @@ class TestReapSubagentWorkspace:
         assert not (tmp_path / "mtmp" / "subagent" / "ab-cd-ef").exists()
 
     def test_reap_zombie_removes_workspace_dirs(self, tmp_path, monkeypatch):
-        import agent_core.agent.workspace_paths as wp
-
-        monkeypatch.setattr(wp, "_TMP_BASE_DIR", tmp_path / "mtmp")
+        monkeypatch.setenv("MACCHIATO_TMP_BASE", str(tmp_path / "mtmp"))
         from agent_core.config import get_config
         from agent_core.agent.workspace_paths import ensure_workspace_owner_layout
         from system.kernel import CorePool
@@ -944,7 +962,10 @@ class TestReapSubagentWorkspace:
         cfg = get_config().model_copy(
             update={
                 "command_tools": get_config().command_tools.model_copy(
-                    update={"workspace_base_dir": str(tmp_path / "ws")}
+                    update={
+                        "workspace_base_dir": str(tmp_path / "ws"),
+                        "bash_os_user_enabled": False,
+                    }
                 )
             }
         )
@@ -955,3 +976,28 @@ class TestReapSubagentWorkspace:
         assert "sub:zid01" not in pool._zombies
         assert not (tmp_path / "ws" / "subagent" / "zid01").exists()
         assert not (tmp_path / "mtmp" / "subagent" / "zid01").exists()
+
+    def test_remove_subagent_workspace_trees_deletes_os_home_owner_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MACCHIATO_TMP_BASE", str(tmp_path / "mtmp"))
+        from agent_core.config import CommandToolsConfig
+        from agent_core.agent.workspace_paths import (
+            ensure_workspace_owner_layout,
+            remove_subagent_workspace_trees,
+            resolve_workspace_owner_dir,
+        )
+
+        cmd = CommandToolsConfig(
+            workspace_base_dir=str(tmp_path / "ws"),
+            bash_os_user_enabled=True,
+            bash_os_user_home_base_dir=str(tmp_path / "homes"),
+        )
+        ensure_workspace_owner_layout(cmd, "sub-a01", source="subagent")
+        owner_dir = resolve_workspace_owner_dir(cmd, "sub-a01", source="subagent")
+        assert owner_dir.startswith(str(tmp_path / "homes"))
+        assert (tmp_path / "mtmp" / "subagent" / "sub-a01").is_dir()
+
+        remove_subagent_workspace_trees(cmd, "sub:sub-a01")
+
+        assert not (tmp_path / "mtmp" / "subagent" / "sub-a01").exists()
+        assert not (tmp_path / "ws" / "subagent" / "sub-a01").exists()
+        assert not Path(owner_dir).exists()

@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import os
+from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -24,9 +25,43 @@ from agent_core.permissions.ask_user_registry import ask_user_ipc_stream_notify_
 from agent_core.permissions.wait_registry import permission_ipc_stream_notify_scope
 
 from .core_gateway import AutomationCoreGateway
+
 # base64 图片可能数 MB，默认 64KB readline limit 远远不够
 _STREAM_LIMIT = 32 * 1024 * 1024  # 32 MB
+_STREAM_RECOVERY_MAXLEN = 100
 logger = logging.getLogger(__name__)
+
+
+_IPC_ERROR_HINTS: dict[str, str] = {
+    "ReadTimeout": "多为等待远端 HTTP 响应超时（如 LLM/API 较慢），可重试或稍后再试。",
+    "ConnectTimeout": "连接远端超时，请检查网络与代理。",
+    "WriteTimeout": "发送请求超时，可检查上行网络。",
+    "PoolTimeout": "连接池耗尽或获取连接超时。",
+}
+
+
+def _format_ipc_error(exc: BaseException) -> str:
+    """将异常格式化为可读字符串，避免 str(exc) 为空导致前端只拿到通用报错。"""
+    text = (str(exc) or "").strip()
+    if not text:
+        args = getattr(exc, "args", ()) or ()
+        arg_bits = [str(a) for a in args if str(a).strip()]
+        if arg_bits:
+            text = f"{type(exc).__name__}: {', '.join(arg_bits)}"
+        else:
+            text = type(exc).__name__
+
+    req = getattr(exc, "request", None)
+    if req is not None:
+        url = getattr(req, "url", None)
+        if url:
+            method = (getattr(req, "method", None) or "HTTP").upper()
+            text = f"{text}（{method} {url}）"
+
+    hint = _IPC_ERROR_HINTS.get(type(exc).__name__, "")
+    if hint:
+        text = f"{text} {hint}"
+    return text
 
 
 def default_socket_path() -> str:
@@ -64,6 +99,9 @@ class AutomationIPCServer:
         self._expire_task: Optional[asyncio.Task[Any]] = None
         self._stopped = asyncio.Event()
         self._client_active_session: Dict[str, str] = {}
+        self._stream_recoveries: deque[Dict[str, Any]] = deque(
+            maxlen=_STREAM_RECOVERY_MAXLEN
+        )
 
     @property
     def socket_path(self) -> str:
@@ -150,7 +188,11 @@ class AutomationIPCServer:
                     result = await self._dispatch(method, params)
                     payload = {"id": req_id, "ok": True, "result": result}
                 except Exception as exc:
-                    payload = {"id": req_id, "ok": False, "error": str(exc)}
+                    payload = {
+                        "id": req_id,
+                        "ok": False,
+                        "error": _format_ipc_error(exc),
+                    }
                 writer.write(
                     (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
                 )
@@ -175,11 +217,41 @@ class AutomationIPCServer:
         text = str(params.get("text") or "")
         metadata = params.get("metadata")
         trace_events: list[dict[str, Any]] = []
+        stream_closed = False
+        stream_disconnect_logged = False
+        recovery_sent = False
 
-        async def _send_event(event_type: str, payload: Dict[str, Any]) -> None:
+        def _mark_stream_disconnected(exc: BaseException) -> None:
+            nonlocal stream_closed, stream_disconnect_logged
+            stream_closed = True
+            if stream_disconnect_logged:
+                return
+            stream_disconnect_logged = True
+            logger.info(
+                "automation ipc client disconnected during run_turn_stream "
+                "(session_id=%s, client_id=%s, error=%s)",
+                active_session,
+                client_id,
+                exc,
+            )
+
+        async def _send_event(event_type: str, payload: Dict[str, Any]) -> bool:
+            if stream_closed:
+                return False
             line = {"id": req_id, "stream": True, "event": event_type, **payload}
-            writer.write((json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8"))
-            await writer.drain()
+            try:
+                writer.write(
+                    (json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8")
+                )
+                await writer.drain()
+            except (
+                BrokenPipeError,
+                ConnectionResetError,
+                ConnectionAbortedError,
+            ) as exc:
+                _mark_stream_disconnected(exc)
+                return False
+            return True
 
         async def _on_trace_event(evt: Dict[str, Any]) -> None:
             trace_events.append(evt)
@@ -200,6 +272,7 @@ class AutomationIPCServer:
             on_assistant_delta=_on_assistant_delta,
             on_reasoning_delta=_on_reasoning_delta,
         )
+
         async def _forward_ask_user_stream(
             batch_id: str, payload: Dict[str, Any]
         ) -> None:
@@ -226,7 +299,9 @@ class AutomationIPCServer:
                     [str(i.get("type")) for i in _ci[:3]],
                 )
             async with ask_user_ipc_stream_notify_scope(_forward_ask_user_stream):
-                async with permission_ipc_stream_notify_scope(_forward_permission_stream):
+                async with permission_ipc_stream_notify_scope(
+                    _forward_permission_stream
+                ):
                     result = await self._gateway.inject_message(
                         InjectMessageCommand(
                             session_id=active_session,
@@ -234,9 +309,12 @@ class AutomationIPCServer:
                         ),
                         hooks=hooks,
                     )
+            if stream_closed:
+                recovery_sent = True
+                self._buffer_stream_recovery(active_session, req_id, meta_dict, result)
             usage = self._gateway.get_token_usage(session_id=active_session)
             turn_count = self._gateway.get_turn_count(session_id=active_session)
-            await _send_event(
+            sent_final = await _send_event(
                 "final",
                 {
                     "ok": True,
@@ -250,22 +328,20 @@ class AutomationIPCServer:
                     },
                 },
             )
-        except (BrokenPipeError, ConnectionResetError) as exc:
+            if not sent_final and not recovery_sent:
+                self._buffer_stream_recovery(active_session, req_id, meta_dict, result)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as exc:
             # 客户端在流式对话过程中主动断开连接（例如用户 Ctrl+C 或退出 CLI），
             # writer 已失效，继续写入只会产生噪音日志。此处记录一条调试信息后静默结束。
-            logger.info(
-                "automation ipc client disconnected during run_turn_stream "
-                "(session_id=%s, client_id=%s, error=%s)",
-                active_session,
-                client_id,
-                exc,
-            )
+            _mark_stream_disconnected(exc)
         except Exception as exc:
             # 非连接类错误：尽量向仍然存活的客户端发送 final 错误事件；
             # 若此时连接也已断开，则忽略第二次 BrokenPipe/ConnectionReset。
             try:
-                await _send_event("final", {"ok": False, "error": str(exc)})
-            except (BrokenPipeError, ConnectionResetError):
+                await _send_event(
+                    "final", {"ok": False, "error": _format_ipc_error(exc)}
+                )
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 logger.warning(
                     "failed to send error final event to disconnected client "
                     "(session_id=%s, client_id=%s, error=%s)",
@@ -273,6 +349,65 @@ class AutomationIPCServer:
                     client_id,
                     exc,
                 )
+
+    def _buffer_stream_recovery(
+        self,
+        session_id: str,
+        request_id: Any,
+        metadata: Dict[str, Any],
+        result: AgentRunResult,
+    ) -> None:
+        """Keep a completed result available after its streaming IPC client disconnects."""
+        result_meta = result.metadata if isinstance(result.metadata, dict) else {}
+        output_text = result.output_text or ""
+        attachments = getattr(result, "attachments", [])
+        if not output_text.strip() and not attachments:
+            return
+
+        recovery_meta: Dict[str, Any] = {}
+        for key, value in metadata.items():
+            if key.startswith("feishu_") or key in {"source", "user_id"}:
+                recovery_meta[key] = value
+        recovery_meta.update(result_meta)
+        recovery_meta["_stream_recovery"] = True
+
+        self._stream_recoveries.append(
+            {
+                "request_id": str(request_id or ""),
+                "session_id": session_id,
+                "output_text": output_text,
+                "metadata": recovery_meta,
+                "attachments": attachments if isinstance(attachments, list) else [],
+            }
+        )
+        logger.info(
+            "buffered stream recovery result "
+            "(session_id=%s, request_id=%s, queue_size=%d)",
+            session_id,
+            str(request_id or "")[:8],
+            len(self._stream_recoveries),
+        )
+
+    def _poll_stream_recoveries(self) -> list[Dict[str, Any]]:
+        results: list[Dict[str, Any]] = []
+        while self._stream_recoveries:
+            results.append(self._stream_recoveries.popleft())
+        return results
+
+    def _serialize_run_result_for_push(
+        self, request_id: str, session_id: str, result: AgentRunResult
+    ) -> Dict[str, Any]:
+        return {
+            "request_id": request_id,
+            "session_id": session_id,
+            "output_text": result.output_text,
+            "metadata": result.metadata if isinstance(result.metadata, dict) else {},
+            "attachments": (
+                getattr(result, "attachments", [])
+                if isinstance(getattr(result, "attachments", []), list)
+                else []
+            ),
+        }
 
     async def _dispatch(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         client_id = str(params.get("client_id") or "default")
@@ -308,6 +443,19 @@ class AutomationIPCServer:
             self._gateway.mark_activity(session_id)
             return {"created": created, "active_session_id": session_id}
 
+        if method == "session_expire":
+            session_id = str(params.get("session_id") or active_session).strip()
+            if not session_id:
+                raise ValueError("session_id 不能为空")
+            reason = str(params.get("reason") or "manual").strip() or "manual"
+            await self._gateway.expire_session(reason=reason, session_id=session_id)
+            return {
+                "expired": True,
+                "active_session_id": self._client_active_session.get(
+                    client_id, active_session
+                ),
+            }
+
         if method == "session_delete":
             session_id = str(params.get("session_id") or "").strip()
             if not session_id:
@@ -321,7 +469,9 @@ class AutomationIPCServer:
             ok = await self._gateway.delete_session(session_id)
             # 如果客户端当前活跃会话被删除，则回退到默认会话标识；实际 CoreSession 需按需显式切换。
             if ok and self._client_active_session.get(client_id) == session_id:
-                self._client_active_session[client_id] = f"{self._source}:{self._owner_id}"
+                self._client_active_session[client_id] = (
+                    f"{self._source}:{self._owner_id}"
+                )
             return {
                 "deleted": ok,
                 "active_session_id": self._client_active_session.get(client_id),
@@ -357,6 +507,35 @@ class AutomationIPCServer:
             info = self._gateway.switch_model(name, session_id=active_session)
             return {"ok": True, "info": info}
 
+        if method == "remote_workspace_use":
+            login = str(params.get("login") or "").strip()
+            if not login:
+                raise ValueError("login 不能为空")
+            requested_path = str(
+                params.get("path") or params.get("requested_path") or "~"
+            ).strip()
+            profile = str(params.get("profile") or "dev").strip() or "dev"
+            ttl_raw = params.get("ttl_seconds")
+            ttl_seconds: Optional[int]
+            try:
+                ttl_seconds = int(ttl_raw) if ttl_raw is not None else None
+            except (TypeError, ValueError):
+                ttl_seconds = None
+            state = await self._gateway.remote_workspace_use(
+                session_id=active_session,
+                login=login,
+                requested_path=requested_path,
+                profile=profile,
+                ttl_seconds=ttl_seconds,
+            )
+            return {"ok": True, "state": state}
+
+        if method == "remote_workspace_status":
+            return self._gateway.remote_workspace_status(active_session)
+
+        if method == "remote_workspace_release":
+            return await self._gateway.remote_workspace_release(active_session)
+
         if method == "get_turn_count":
             turn_count = self._gateway.get_turn_count(session_id=active_session)
             return {"turn_count": turn_count}
@@ -365,6 +544,8 @@ class AutomationIPCServer:
             # 卡片批准/拒绝由 feishu_ws_gateway 等独立进程触发，须在 daemon 内唤醒 Future
             from agent_core.permissions.wait_registry import (
                 PermissionDecision,
+            )
+            from agent_core.permissions.wait_registry import (
                 resolve_permission as _resolve_permission_wait,
             )
 
@@ -374,6 +555,9 @@ class AutomationIPCServer:
             allowed = bool(params.get("allowed"))
             clarify_requested = bool(params.get("clarify_requested"))
             path_prefix = params.get("path_prefix")
+            path_grants = params.get("path_grants")
+            if not isinstance(path_grants, list):
+                path_grants = None
             note_raw = params.get("note")
             ui_merged: Optional[str] = None
             if clarify_requested:
@@ -382,6 +566,7 @@ class AutomationIPCServer:
             decision = PermissionDecision(
                 allowed=allowed and not clarify_requested,
                 path_prefix=str(path_prefix).strip() if path_prefix else None,
+                path_grants=path_grants,
                 note=None if note_raw is None else str(note_raw),
                 clarify_requested=clarify_requested,
                 user_instruction=ui_merged,
@@ -393,19 +578,25 @@ class AutomationIPCServer:
         if method == "resolve_ask_user":
             from agent_core.permissions.ask_user_registry import (
                 parse_answers_from_ipc_params,
+            )
+            from agent_core.permissions.ask_user_registry import (
                 resolve_ask_user as _resolve_ask_user_wait,
             )
 
             bid = str(params.get("batch_id") or params.get("ask_user_id") or "").strip()
             if not bid:
                 raise ValueError("batch_id 不能为空")
-            decision = parse_answers_from_ipc_params(params if isinstance(params, dict) else {})
+            decision = parse_answers_from_ipc_params(
+                params if isinstance(params, dict) else {}
+            )
             ok = _resolve_ask_user_wait(bid, decision)
             return {"ok": bool(ok)}
 
         if method == "submit_ask_user_fragment":
             from agent_core.permissions.ask_user_registry import (
                 AskUserAnswer,
+            )
+            from agent_core.permissions.ask_user_registry import (
                 submit_ask_user_fragment as _submit_au_fragment,
             )
 
@@ -438,6 +629,9 @@ class AutomationIPCServer:
                 card = build_ask_user_card_from_registry_snapshot(snap, qid)
             return {"ok": bool(ok), "detail": detail, "card": card}
 
+        if method == "poll_stream_recoveries":
+            return {"results": self._poll_stream_recoveries()}
+
         if method == "poll_push":
             # 非阻塞轮询：批量取出该 session 所有 [out] 队列结果（统一出口）
             results = []
@@ -448,15 +642,9 @@ class AutomationIPCServer:
                         break
                     request_id, result = envelope
                     results.append(
-                        {
-                            "request_id": request_id,
-                            "output_text": result.output_text,
-                            "metadata": (
-                                result.metadata
-                                if isinstance(result.metadata, dict)
-                                else {}
-                            ),
-                        }
+                        self._serialize_run_result_for_push(
+                            request_id, active_session, result
+                        )
                     )
             return {"results": results, "session_id": active_session}
 
@@ -672,6 +860,18 @@ class AutomationIPCClient:
         self.active_session_id = str(data.get("active_session_id") or session_id)
         return bool(data.get("created", False))
 
+    async def expire_session(
+        self, session_id: Optional[str] = None, *, reason: str = "manual"
+    ) -> bool:
+        payload: Dict[str, Any] = {"reason": reason}
+        if session_id:
+            payload["session_id"] = session_id
+        data = await self._request("session_expire", payload)
+        maybe_active = data.get("active_session_id")
+        if isinstance(maybe_active, str) and maybe_active:
+            self.active_session_id = maybe_active
+        return bool(data.get("expired", False))
+
     async def delete_session(self, session_id: str) -> bool:
         data = await self._request(
             "session_delete",
@@ -717,6 +917,34 @@ class AutomationIPCClient:
         info = data.get("info")
         return dict(info) if isinstance(info, dict) else {}
 
+    async def remote_workspace_use(
+        self,
+        *,
+        login: str,
+        path: str = "~",
+        profile: str = "dev",
+        ttl_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Enable remote workspace mode for the current daemon session."""
+        payload: Dict[str, Any] = {
+            "login": login,
+            "path": path,
+            "profile": profile,
+        }
+        if ttl_seconds is not None:
+            payload["ttl_seconds"] = int(ttl_seconds)
+        data = await self._request("remote_workspace_use", payload)
+        state = data.get("state")
+        return dict(state) if isinstance(state, dict) else {}
+
+    async def remote_workspace_status(self) -> Dict[str, Any]:
+        """Return remote workspace state for the current daemon session."""
+        return await self._request("remote_workspace_status", {})
+
+    async def remote_workspace_release(self) -> Dict[str, Any]:
+        """Release remote workspace mode for the current daemon session."""
+        return await self._request("remote_workspace_release", {})
+
     async def get_token_usage(self) -> dict:
         data = await self._request("get_token_usage", {})
         usage = data.get("usage")
@@ -738,6 +966,7 @@ class AutomationIPCClient:
         permission_id: str,
         allowed: bool,
         path_prefix: Optional[str] = None,
+        path_grants: Optional[list[dict[str, str]]] = None,
         note: Optional[str] = None,
         clarify_requested: bool = False,
         user_instruction: Optional[str] = None,
@@ -750,6 +979,7 @@ class AutomationIPCClient:
             "permission_id": permission_id,
             "allowed": allowed,
             "path_prefix": path_prefix,
+            "path_grants": path_grants,
             "note": note,
             "clarify_requested": clarify_requested,
             "persist_acl": persist_acl,
@@ -814,6 +1044,12 @@ class AutomationIPCClient:
         results = data.get("results")
         return results if isinstance(results, list) else []
 
+    async def poll_stream_recoveries(self) -> list:
+        """Poll completed run_turn_stream results whose original IPC stream died."""
+        data = await self._request("poll_stream_recoveries", {})
+        results = data.get("results")
+        return results if isinstance(results, list) else []
+
     async def run_turn(
         self, agent_input: AgentRunInput, hooks: AgentHooks | None = None
     ) -> AgentRunResult:
@@ -869,7 +1105,11 @@ class AutomationIPCClient:
                 if event_type == "feishu_ask_user_notify":
                     bid = str(payload.get("batch_id") or "").strip()
                     pl = payload.get("payload")
-                    fn = getattr(hooks, "on_feishu_ask_user_notify", None) if hooks else None
+                    fn = (
+                        getattr(hooks, "on_feishu_ask_user_notify", None)
+                        if hooks
+                        else None
+                    )
                     if fn and bid and isinstance(pl, dict):
                         maybe = fn(bid, pl)
                         if inspect.isawaitable(maybe):
@@ -916,9 +1156,7 @@ class AutomationIPCClient:
         output_text = str(data.get("output_text") or "")
         # 对端提前断开或网络中断时可能收不到 final 事件，避免飞书等前端完全无反馈
         if final_result is None and not output_text.strip():
-            output_text = (
-                "连接已中断，未收到完整回复，请稍后重试。"
-            )
+            output_text = "连接已中断，未收到完整回复，请稍后重试。"
             meta_dict = {**meta_dict, "_ipc_error": "stream_incomplete"}
         return AgentRunResult(
             output_text=output_text,

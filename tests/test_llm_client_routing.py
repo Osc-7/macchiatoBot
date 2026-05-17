@@ -38,7 +38,7 @@ def _make_config() -> Config:
                 "qwen3vl": ProviderEntry(
                     base_url="https://example.com/v1",
                     api_key="k-qwen3vl",
-                    model="qwen3-vl",
+                    model="qwen",
                     capabilities=CapabilitiesModel(vision=True),
                 ),
             },
@@ -87,7 +87,7 @@ def test_switch_model_changes_active_and_caps():
     client.switch_model("qwen3vl")
     assert client.active_provider_name == "qwen3vl"
     assert client.capabilities.vision is True
-    assert client.model == "qwen3-vl"
+    assert client.model == "qwen"
 
 
 def test_switch_model_rejects_unknown():
@@ -96,6 +96,15 @@ def test_switch_model_rejects_unknown():
         client = LLMClient(config=cfg)
     with pytest.raises(ValueError):
         client.switch_model("unknown-provider")
+
+
+def test_constructor_model_override_resolves_to_active_provider():
+    """AgentCore 的 summary 客户端：model_override 为另一 provider 名时 chat() 走该端点。"""
+    cfg = _make_config()
+    with patch("agent_core.llm.providers.openai_compat.AsyncOpenAI"):
+        client = LLMClient(config=cfg, model_override="qwen3vl")
+    assert client.active_provider_name == "qwen3vl"
+    assert client.model == "qwen"
 
 
 def test_vision_provider_autopick_when_missing():
@@ -151,7 +160,7 @@ async def test_chat_with_tools_uses_active_provider_model():
             messages=[{"role": "user", "content": "hi"}], tools=None
         )
         assert mock_client.chat.completions.create.call_args.kwargs["model"] == (
-            "qwen3-vl"
+            "qwen"
         )
 
 
@@ -176,7 +185,7 @@ async def test_chat_with_image_routes_to_vision_provider_by_default():
         )
         assert response.content == "图片描述"
         assert mock_client.chat.completions.create.call_args.kwargs["model"] == (
-            "qwen3-vl"
+            "qwen"
         )
 
 

@@ -10,6 +10,10 @@ from agent_core.config import (
     LLMConfig,
     MemoryConfig,
 )
+from agent_core.remote.workspace_state import (
+    activate_remote_workspace,
+    clear_remote_workspace_state,
+)
 
 
 def _ws_config(tmp_path):
@@ -87,3 +91,63 @@ def test_attach_media_paths_list(tmp_path):
     )
     assert args["paths"][0] == str(f.resolve())
     assert args["paths"][1] == "https://example.com/x.png"
+
+
+def test_apply_keeps_remote_workspace_paths_virtual(tmp_path):
+    cfg = _ws_config(tmp_path)
+    clear_remote_workspace_state()
+    try:
+        activate_remote_workspace(
+            session_id="feishu:u1",
+            login="local-dev",
+            requested_path="~/proj",
+            resolved_path=str(tmp_path / "remote-proj"),
+        )
+        args = apply_workspace_path_resolution_to_tool_args(
+            "read_file",
+            {
+                "path": "~/.agents/skills/example/SKILL.md",
+                "__execution_context__": {
+                    "source": "feishu",
+                    "user_id": "u1",
+                    "session_id": "feishu:u1",
+                },
+            },
+            cfg,
+        )
+    finally:
+        clear_remote_workspace_state()
+
+    assert args["path"] == "~/.agents/skills/example/SKILL.md"
+
+
+def test_apply_keeps_nested_remote_call_tool_paths_virtual(tmp_path):
+    cfg = _ws_config(tmp_path)
+    clear_remote_workspace_state()
+    try:
+        activate_remote_workspace(
+            session_id="feishu:u1",
+            login="local-dev",
+            requested_path="~/proj",
+            resolved_path=str(tmp_path / "remote-proj"),
+        )
+        args = apply_workspace_path_resolution_to_tool_args(
+            "call_tool",
+            {
+                "name": "write_file",
+                "arguments": {
+                    "path": "~/notes.md",
+                    "content": "x",
+                },
+                "__execution_context__": {
+                    "source": "feishu",
+                    "user_id": "u1",
+                    "session_id": "feishu:u1",
+                },
+            },
+            cfg,
+        )
+    finally:
+        clear_remote_workspace_state()
+
+    assert args["arguments"]["path"] == "~/notes.md"

@@ -5,17 +5,23 @@ from __future__ import annotations
 import asyncio
 import time
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent_core.config import CommandToolsConfig, Config, LLMConfig
 from agent_core.context import ConversationContext
-from agent_core.kernel_interface import CoreProfile, KernelRequest
-from agent_core.tools import VersionedToolRegistry
+from agent_core.kernel_interface import CoreProfile, CoreStatsAction, KernelRequest
 from agent_core.orchestrator import ToolWorkingSetManager
+from agent_core.tools import VersionedToolRegistry
 from system.kernel import AgentKernel, CoreEntry, CorePool, KernelScheduler
 from system.kernel.scheduler import memory_owner_for_kernel_acquire
-from system.multi_agent.constants import METADATA_KEY_AGENT_MESSAGE, P2P_REQUEST_FRONTEND_TAG
+from system.kernel.summarizer import SessionSummarizer
+from system.multi_agent.constants import (
+    METADATA_KEY_AGENT_MESSAGE,
+    P2P_REQUEST_FRONTEND_TAG,
+)
 
 
 def test_memory_owner_agent_msg_uses_session_id_not_frontend_tag() -> None:
@@ -79,6 +85,31 @@ async def test_evict_normal_does_not_call_flush_checkpoint() -> None:
     agent.flush_checkpoint_for_shutdown.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_evict_passes_normal_system_prompt_to_session_summarizer() -> None:
+    agent = MagicMock()
+    agent._context.get_messages.return_value = [{"role": "user", "content": "hi"}]
+    agent._build_system_prompt.return_value = "普通 system"
+    agent._user_id = "root"
+    pool = CorePool()
+    profile = CoreProfile.default_full(frontend_id="cli", dialog_window_id="root")
+    pool._pool["cli:root"] = CoreEntry(agent=agent, profile=profile)
+    pool._kernel = MagicMock()
+    pool._kernel.kill = AsyncMock(
+        return_value=CoreStatsAction(session_id="cli:root", turn_count=1)
+    )
+    pool._summarizer = MagicMock()
+    pool._summarizer.summarize_and_persist = AsyncMock()
+
+    await pool.evict("cli:root", shutdown=False)
+
+    pool._summarizer.summarize_and_persist.assert_awaited_once()
+    assert (
+        pool._summarizer.summarize_and_persist.await_args.kwargs["system_message"]
+        == "普通 system"
+    )
+
+
 def test_kernel_parse_arguments_success_and_failure() -> None:
     """流式解析失败时不应静默得到空 dict，应返回明确错误信息。"""
     # 正常 dict
@@ -126,7 +157,9 @@ async def test_priority_queue_inject_before_user_request() -> None:
 
     # get() 应返回最小的（priority 最小 = 最高优先级）
     first = await queue.get()
-    assert first.priority == -1, "inject（priority=-1）应先于用户请求（priority=0）被处理"
+    assert (
+        first.priority == -1
+    ), "inject（priority=-1）应先于用户请求（priority=0）被处理"
     assert "子任务" in (first.text or "")
 
     second = await queue.get()
@@ -193,7 +226,9 @@ async def test_core_pool_acquire_hot_updates_profile(
     fake_agent = SimpleNamespace(
         _tool_registry=VersionedToolRegistry(),
         _tool_catalog=VersionedToolRegistry(),
-        _working_set=ToolWorkingSetManager(pinned_tools=["search_tools", "call_tool", "bash"]),
+        _working_set=ToolWorkingSetManager(
+            pinned_tools=["search_tools", "call_tool", "bash"]
+        ),
         _source="cli",
         _user_id="u1",
         _core_profile=profile_old,
@@ -317,7 +352,9 @@ async def test_agent_prepare_turn_populates_recall_result(tmp_path) -> None:
         "ask_user",
     ]
     config.tools.pinned_tools = []
-    config.tools.get_template.return_value = SimpleNamespace(exposure="pinned", extra=[])
+    config.tools.get_template.return_value = SimpleNamespace(
+        exposure="pinned", extra=[]
+    )
     config.memory = MagicMock()
     config.memory.enabled = False
     config.memory.max_working_tokens = 4000
@@ -350,7 +387,9 @@ async def test_agent_prepare_turn_populates_recall_result(tmp_path) -> None:
     turn_id = await agent.prepare_turn("测试消息")
 
     assert turn_id == 1
-    assert recall_called, "prepare_turn 在 memory_enabled=True 时应调用 recall_policy.should_recall"
+    assert (
+        recall_called
+    ), "prepare_turn 在 memory_enabled=True 时应调用 recall_policy.should_recall"
     assert len(agent._context.get_messages()) == 1
     assert agent._context.messages[0]["content"].startswith("[Time:")
     assert "测试消息" in agent._context.messages[0]["content"]
@@ -395,7 +434,9 @@ async def test_compress_context_keeps_complete_recent_turn() -> None:
 
 
 @pytest.mark.asyncio
-async def test_compress_context_inserts_single_summary_message_before_kept_turns() -> None:
+async def test_compress_context_inserts_single_summary_message_before_kept_turns() -> (
+    None
+):
     """有摘要时：messages 仅保留一条摘要 user + keep_recent 段。"""
     registry = VersionedToolRegistry()
     kernel = AgentKernel(tool_registry=registry)
@@ -433,7 +474,7 @@ async def test_compress_context_inserts_single_summary_message_before_kept_turns
 
 @pytest.mark.asyncio
 async def test_summarize_messages_passes_transcript_and_appends_summarize() -> None:
-    """待折叠段浅拷贝进 chat，末尾追加请总结；system 为主 Agent + 压缩追加段。"""
+    """待折叠段浅拷贝进 chat，末尾追加请总结；system 与主 Agent 完全一致。"""
     registry = VersionedToolRegistry()
     kernel = AgentKernel(tool_registry=registry)
 
@@ -459,9 +500,45 @@ async def test_summarize_messages_passes_transcript_and_appends_summarize() -> N
     assert msgs[0] is not old_messages[0]
     assert msgs[-1]["role"] == "user"
     assert "请总结" in msgs[-1]["content"]
+    assert "工具结果" in msgs[-1]["content"]
     sys_msg = call_kw[1]["system_message"]
-    assert "主系统提示" in sys_msg
-    assert "上下文压缩" in sys_msg
+    assert sys_msg == "主系统提示"
+
+
+@pytest.mark.asyncio
+async def test_session_summarizer_uses_original_messages_and_normal_system_prompt() -> (
+    None
+):
+    llm = AsyncMock()
+    llm.chat = AsyncMock(return_value=SimpleNamespace(content="长期摘要"))
+    summarizer = SessionSummarizer(llm_client=llm)
+    stats = CoreStatsAction(
+        session_id="feishu:user:ou_1",
+        turn_count=2,
+        token_usage={"total_tokens": 123},
+    )
+    messages = [
+        {"role": "user", "content": "用户目标"},
+        {"role": "assistant", "content": "助手回答"},
+        {"role": "tool", "content": "工具结果"},
+    ]
+
+    out = await summarizer._generate_summary(
+        stats,
+        messages,
+        system_message="普通对话 system",
+    )
+
+    assert out == "长期摘要"
+    llm.chat.assert_awaited_once()
+    call_kw = llm.chat.call_args[1]
+    assert call_kw["system_message"] == "普通对话 system"
+    sent = call_kw["messages"]
+    assert sent[:3] == messages
+    assert sent[0] is not messages[0]
+    assert sent[-1]["role"] == "user"
+    assert "Please summarize everything above" in sent[-1]["content"]
+    assert "请总结上文内容" in sent[-1]["content"]
 
 
 @pytest.mark.asyncio
@@ -479,7 +556,9 @@ async def test_kernel_run_records_tool_names_called_in_metadata() -> None:
         )
         yield ReturnAction(message="完成")
 
-    agent = MagicMock(spec=["run_loop", "_session_id", "_tool_registry", "_core_profile"])
+    agent = MagicMock(
+        spec=["run_loop", "_session_id", "_tool_registry", "_core_profile"]
+    )
     agent.run_loop = fake_run_loop
     agent._session_id = "cli:test"
     agent._tool_registry = None
@@ -498,6 +577,59 @@ async def test_kernel_run_records_tool_names_called_in_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_kernel_run_injects_configured_workspace_admin(tmp_path) -> None:
+    """Kernel 工具执行上下文应使用 config 解析后的有效 workspace admin 状态。"""
+    from agent_core.kernel_interface import ReturnAction, ToolCallAction
+    from agent_core.tools.base import ToolResult
+
+    cfg = Config(
+        llm=LLMConfig(api_key="k", model="m"),
+        command_tools=CommandToolsConfig(
+            base_dir=str(tmp_path),
+            workspace_base_dir=str(tmp_path / "workspace_parent"),
+            workspace_isolation_enabled=True,
+            bash_os_user_enabled=True,
+            bash_os_user_home_base_dir=str(tmp_path / "homes"),
+            workspace_admin_memory_owners=["feishu:u42"],
+        ),
+    )
+    profile = CoreProfile.full_from_config(
+        cfg,
+        frontend_id="feishu",
+        dialog_window_id="u42",
+    )
+
+    async def fake_run_loop(turn_id: int = 0, hooks=None):
+        await asyncio.sleep(0)
+        yield ToolCallAction(
+            tool_call_id="t1",
+            tool_name="tool_a",
+            arguments="{}",
+        )
+        yield ReturnAction(message="完成")
+
+    agent = SimpleNamespace(
+        run_loop=fake_run_loop,
+        _session_id="feishu:u42",
+        _parent_session_id="",
+        _tool_registry=None,
+        _core_profile=profile,
+        _config=cfg,
+        _source="feishu",
+        _user_id="u42",
+    )
+    registry = MagicMock()
+    registry.execute = AsyncMock(return_value=ToolResult(success=True, message="ok"))
+    kernel = AgentKernel(tool_registry=registry)
+
+    result = await kernel.run(agent, turn_id=1)
+
+    assert result.output_text == "完成"
+    ctx = registry.execute.call_args.kwargs["__execution_context__"]
+    assert ctx["bash_workspace_admin"] is True
+
+
+@pytest.mark.asyncio
 async def test_kernel_run_propagates_delegated_tool_name_from_call_tool() -> None:
     """call_tool 返回的 _delegated_tool_name 应被 kernel 追加到 _tool_names_called。"""
     from agent_core.kernel_interface import ReturnAction, ToolCallAction
@@ -512,7 +644,9 @@ async def test_kernel_run_propagates_delegated_tool_name_from_call_tool() -> Non
         )
         yield ReturnAction(message="子任务已创建")
 
-    agent = MagicMock(spec=["run_loop", "_session_id", "_tool_registry", "_core_profile"])
+    agent = MagicMock(
+        spec=["run_loop", "_session_id", "_tool_registry", "_core_profile"]
+    )
     agent.run_loop = fake_run_loop
     agent._session_id = "shuiyuan:Osc7"
     agent._tool_registry = None
@@ -555,3 +689,95 @@ async def test_kernel_run_no_metadata_when_no_tools_executed() -> None:
     result = await kernel.run(agent, turn_id=1)
     assert result.output_text == "仅文本"
     assert result.metadata == {}
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_after_compress_emits_chat_history_summarized_trace() -> (
+    None
+):
+    """上下文触顶压缩后应通过 on_trace_event 通知各前端（IPC trace / 飞书 / CLI）。"""
+    from agent_core.interfaces import AgentHooks
+    from agent_core.kernel_interface import (
+        ContextCompressedEvent,
+        ContextOverflowAction,
+        ReturnAction,
+    )
+
+    traces: list[dict[str, Any]] = []
+
+    async def on_trace(evt: dict[str, Any]) -> None:
+        traces.append(dict(evt))
+
+    class _OverflowAgent:
+        _session_id = "cli:test-overflow"
+
+        async def run_loop(self, turn_id: int = 0, hooks=None):
+            received = yield ContextOverflowAction(
+                current_tokens=900_000,
+                threshold_tokens=800_000,
+                session_id=self._session_id,
+            )
+            assert isinstance(received, ContextCompressedEvent)
+            yield ReturnAction(message="done")
+
+    registry = VersionedToolRegistry()
+    kernel = AgentKernel(tool_registry=registry)
+    hooks = AgentHooks(on_trace_event=on_trace)
+
+    with patch.object(
+        AgentKernel,
+        "compress_context",
+        new_callable=AsyncMock,
+        return_value=("folded summary text", 5),
+    ):
+        result = await kernel.run(_OverflowAgent(), turn_id=2, hooks=hooks)
+
+    assert result.output_text == "done"
+    summarized = [t for t in traces if t.get("type") == "chat_history_summarized"]
+    assert len(summarized) == 1
+    ev = summarized[0]
+    assert ev["message"] == "Chat History Summarized."
+    assert ev["messages_kept"] == 5
+    assert ev["current_tokens"] == 900_000
+    assert ev["threshold_tokens"] == 800_000
+    assert ev["had_summary"] is True
+    assert ev["session_id"] == "cli:test-overflow"
+
+
+def test_kernel_task_exception_detail_preserves_message() -> None:
+    from system.kernel.scheduler import _kernel_task_exception_detail
+
+    assert "boom" in _kernel_task_exception_detail(ValueError("boom"))
+
+
+def test_kernel_task_exception_detail_empty_str_falls_back_to_typename() -> None:
+    from system.kernel.scheduler import _kernel_task_exception_detail
+
+    class Silent(RuntimeError):
+        def __str__(self) -> str:
+            return ""
+
+    assert "Silent" in _kernel_task_exception_detail(Silent())
+
+
+def test_kernel_task_exception_detail_read_timeout_named_no_message_gets_hint() -> None:
+    """与某些 HTTP 客户端一致：异常类型为 ReadTimeout 但 str 为空时仍能提示。"""
+    from system.kernel.scheduler import _kernel_task_exception_detail
+
+    exc = type("ReadTimeout", (Exception,), {})()
+    detail = _kernel_task_exception_detail(exc)
+    assert detail.startswith("ReadTimeout")
+    assert "超时" in detail
+
+
+def test_kernel_task_exception_detail_httpx_read_timeout_includes_url() -> None:
+    import httpx
+
+    from system.kernel.scheduler import _kernel_task_exception_detail
+
+    req = httpx.Request("GET", "https://api.example.com/v1/x")
+    exc = httpx.ReadTimeout("timed out", request=req)
+    detail = _kernel_task_exception_detail(exc)
+    assert "timed out" in detail
+    assert "GET https://api.example.com/v1/x" in detail
+    assert "超时" in detail

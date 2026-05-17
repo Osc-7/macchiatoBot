@@ -19,14 +19,36 @@ def _format_permission_message(permission_id: str, payload: Dict[str, Any]) -> s
     summary = str(payload.get("summary") or "").strip()
     kind = str(payload.get("kind") or "").strip()
     timeout = payload.get("timeout_seconds")
+    command = str(payload.get("command") or "").strip()
+    cwd = str(payload.get("cwd") or "").strip()
+    risks = [
+        str(x).strip() for x in (payload.get("risk_reasons") or []) if str(x).strip()
+    ]
+    grants = payload.get("path_grants") or []
     lines = [
         "[权限申请]",
         f"摘要：{summary}",
     ]
     if kind:
         lines.append(f"类别：{kind}")
+    if cwd:
+        lines.append(f"cwd：{cwd}")
+    if command:
+        lines.append("命令：")
+        lines.append(command)
+    if risks:
+        lines.append("风险：" + "；".join(risks))
+    if grants:
+        lines.append("路径授权：")
+        for grant in grants:
+            if isinstance(grant, dict):
+                lines.append(
+                    f"- {grant.get('access_mode', 'write')}: {grant.get('path_prefix', '')}"
+                )
     if timeout is not None:
         lines.append(f"等待超时（秒）：{timeout}")
+    if payload.get("auto_execute_after_approval"):
+        lines.append("批准后将自动继续执行原操作。")
     lines.append(f"permission_id：{permission_id}")
     lines.append("超时未批准将视为拒绝。")
     return "\n".join(lines)
@@ -55,6 +77,14 @@ async def send_permission_feishu_card(
             kind=str(payload.get("kind") or ""),
             timeout_seconds=payload.get("timeout_seconds"),
             path_prefix=pfx,
+            tool_name=str(payload.get("tool_name") or ""),
+            command=str(payload.get("command") or ""),
+            cwd=str(payload.get("cwd") or ""),
+            risk_reasons=list(payload.get("risk_reasons") or []),
+            path_grants=list(payload.get("path_grants") or []),
+            auto_execute_after_approval=bool(
+                payload.get("auto_execute_after_approval")
+            ),
         )
         try:
             await client.send_interactive_card(chat_id=chat_id, card=card)

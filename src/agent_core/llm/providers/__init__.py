@@ -8,5 +8,6 @@ LLMClient 持有多个 provider 并在运行时做路由。
 from .base import BaseProvider
 from .openai_compat import OpenAICompatProvider
 from .anthropic_compat import AnthropicCompatProvider
+from .codex_oauth_provider import CodexOAuthProvider
 
-__all__ = ["BaseProvider", "OpenAICompatProvider", "AnthropicCompatProvider"]
+__all__ = ["BaseProvider", "OpenAICompatProvider", "AnthropicCompatProvider", "CodexOAuthProvider"]

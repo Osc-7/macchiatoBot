@@ -1,0 +1,58 @@
+# OpenAI Codex OAuth — ChatGPT Plus/Team/Pro 订阅
+# 通过 codex_oauth 协议，使用 Codex Responses API
+
+# GPT-5.5 默认（medium 推理）
+gpt-5.5:
+  label: "GPT 5.5"
+  protocol: "codex_oauth"
+  base_url: "https://chatgpt.com/backend-api/codex/responses"
+  model: "gpt-5.5"
+  auth_file: "./data/oauth/chatgpt-plus.json"
+  reasoning_effort: "medium"
+  capabilities:
+    vision: true
+    function_calling: true
+    parallel_tool_calls: true
+    context_window: 1000000
+
+# GPT-5.5 低推理（快/省）
+gpt-5.5-low:
+  label: "GPT 5.5 Low"
+  protocol: "codex_oauth"
+  base_url: "https://chatgpt.com/backend-api/codex/responses"
+  model: "gpt-5.5"
+  auth_file: "./data/oauth/chatgpt-plus.json"
+  reasoning_effort: "low"
+  capabilities:
+    vision: true
+    function_calling: true
+    parallel_tool_calls: true
+    context_window: 1000000
+
+# GPT-5.5 高推理（复杂任务）
+gpt-5.5-high:
+  label: "GPT 5.5 High"
+  protocol: "codex_oauth"
+  base_url: "https://chatgpt.com/backend-api/codex/responses"
+  model: "gpt-5.5"
+  auth_file: "./data/oauth/chatgpt-plus.json"
+  reasoning_effort: "high"
+  capabilities:
+    vision: true
+    function_calling: true
+    parallel_tool_calls: true
+    context_window: 1000000
+
+# GPT-5.5 极限推理
+gpt-5.5-xhigh:
+  label: "GPT 5.5 XHigh"
+  protocol: "codex_oauth"
+  base_url: "https://chatgpt.com/backend-api/codex/responses"
+  model: "gpt-5.5"
+  auth_file: "./data/oauth/chatgpt-plus.json"
+  reasoning_effort: "xhigh"
+  capabilities:
+    vision: true
+    function_calling: true
+    parallel_tool_calls: true
+    context_window: 1000000

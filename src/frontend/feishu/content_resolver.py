@@ -57,6 +57,21 @@ class FeishuContentResolver(ContentResolver):
         return f"{cleaned_stem or 'attachment'}{cleaned_suffix}" or "attachment.bin"
 
     @staticmethod
+    def _is_generic_resource_filename(name: str) -> bool:
+        """
+        飞书下载接口常返回 ``attachment.bin`` 等占位名；若直接用作本地文件名，
+        多条消息会写到同一路径互相覆盖，导致 recognize_image 读到旧图。
+        """
+        raw = (name or "").strip()
+        if not raw:
+            return True
+        stem = Path(raw).stem.lower()
+        if stem in ("attachment", "file", "download", "unnamed", "noname", "blob"):
+            return True
+        base = Path(raw).name.lower()
+        return base in ("image", "image.bin", "image.png", "temp", "tmp")
+
+    @staticmethod
     def _derive_filename(
         suggested: str,
         *,
@@ -64,12 +79,21 @@ class FeishuContentResolver(ContentResolver):
         key: str,
         mime: str,
     ) -> str:
-        if suggested:
-            return FeishuContentResolver._safe_filename(suggested)
+        sug = (suggested or "").strip()
+        if sug and not FeishuContentResolver._is_generic_resource_filename(sug):
+            return FeishuContentResolver._safe_filename(sug)
         ext = mimetypes.guess_extension(mime or "") or ""
         if ref_type == "image" and not ext:
             ext = ".png"
-        base = f"{ref_type}_{(key or 'file')[:12]}".strip("_")
+        # 用 image_key / file_key 做主文件名（飞书侧唯一），避免 attachment.bin 覆盖
+        safe_key = re.sub(r"[^\w.\-]+", "_", (key or "file"), flags=re.UNICODE).strip(
+            "._"
+        )
+        if not safe_key:
+            safe_key = "file"
+        if len(safe_key) > 160:
+            safe_key = safe_key[:160]
+        base = f"{ref_type}_{safe_key}".strip("_")
         return FeishuContentResolver._safe_filename(base + ext)
 
     @staticmethod

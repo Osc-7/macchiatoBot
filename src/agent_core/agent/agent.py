@@ -938,6 +938,7 @@ class AgentCore:
         不再在 prepare_turn 阶段启动并行总结任务。
         """
         await self._sync_external_session_updates()
+        self._context.repair_dangling_assistant_tool_calls()
         self._current_turn_id += 1
         turn_id = self._current_turn_id
 
@@ -1589,6 +1590,7 @@ class AgentCore:
         检查点存 last_active_at（本 turn 结束时间）；是否过期由 kernel 下次启动时
         用「kernel 关闭时间戳 - last_active_at」计算 elapsed 判断。
         """
+        self._context.repair_dangling_assistant_tool_calls()
         # 每轮结束后写入检查点（last_active_at = now）；过期判断在 kernel 启动时用关闭时间戳计算
         if self._checkpoint_manager is not None:
             try:
@@ -1753,6 +1755,14 @@ class AgentCore:
         # 注入执行上下文（供 bash/file_tools 等做来源与权限鉴权）
         kwargs = dict(kwargs)
         profile = getattr(self, "_core_profile", None)
+        from agent_core.agent.workspace_paths import is_bash_workspace_admin
+
+        bash_workspace_admin = is_bash_workspace_admin(
+            self._config.command_tools,
+            self._source,
+            self._user_id,
+            profile,
+        )
         kwargs["__execution_context__"] = {
             "profile_mode": getattr(profile, "mode", "full") if profile is not None else "full",
             "tool_template": getattr(profile, "tool_template", "default")
@@ -1763,14 +1773,18 @@ class AgentCore:
             )
             if profile is not None
             else False,
-            "bash_workspace_admin": bool(
-                getattr(profile, "bash_workspace_admin", False)
-            )
-            if profile is not None
-            else False,
+            "bash_workspace_admin": bash_workspace_admin,
             "source": self._source,
             "user_id": self._user_id,
+            "session_id": self._session_id,
         }
+        from agent_core.agent.tool_path_resolution import (
+            apply_workspace_path_resolution_to_tool_args,
+        )
+
+        kwargs = apply_workspace_path_resolution_to_tool_args(
+            tool_call.name, kwargs, self._config
+        )
 
         # 执行工具
         return await self._tool_registry.execute(tool_call.name, **kwargs)
@@ -1778,12 +1792,18 @@ class AgentCore:
     def _queue_media_for_next_call(self, result: ToolResult) -> None:
         """将工具结果中声明的媒体挂载到下一次 LLM 调用。"""
         prof = getattr(self, "_core_profile", None)
+        from agent_core.agent.workspace_paths import is_bash_workspace_admin
+
         media_ctx = {
             "source": self._source,
             "user_id": self._user_id,
-            "bash_workspace_admin": bool(getattr(prof, "bash_workspace_admin", False))
-            if prof is not None
-            else False,
+            "session_id": self._session_id,
+            "bash_workspace_admin": is_bash_workspace_admin(
+                self._config.command_tools,
+                self._source,
+                self._user_id,
+                prof,
+            ),
         }
 
         def _resolver(p: str):
@@ -2236,7 +2256,7 @@ class AgentCore:
             posix_run_as = caps.run_as_user
             os_user_bash = bool(posix_run_as)
             jail_cd = not (os_user_bash and ws_restricted)
-            if os_user_bash and ws_restricted:
+            if os_user_bash and caps.workspace_isolated:
                 if getattr(cmd_cfg, "bash_os_auto_provision_users", True):
                     provision_system_user(
                         posix_run_as,

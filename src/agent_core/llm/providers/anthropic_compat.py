@@ -500,6 +500,12 @@ class AnthropicCompatProvider(BaseProvider):
         consumed = [False] * n
         i = 0
 
+        thinking_cfg = self._vendor_params.get("thinking")
+        thinking_enabled = (
+            isinstance(thinking_cfg, dict)
+            and str(thinking_cfg.get("type", "")).strip().lower() == "enabled"
+        )
+
         while i < n:
             if consumed[i]:
                 i += 1
@@ -553,6 +559,17 @@ class AnthropicCompatProvider(BaseProvider):
                 tool_calls = msg.get("tool_calls") or []
                 if tool_calls:
                     content_parts: List[Dict[str, Any]] = []
+                    # thinking=enabled 时，部分 Anthropic 兼容端点会要求
+                    # assistant(tool_use) 历史也带 thinking 块；跨 provider 切换时
+                    # 历史常缺失。这里做通用兼容注入，避免后续轮次 400。
+                    if thinking_enabled:
+                        reasoning_text = str(msg.get("reasoning_content") or "").strip()
+                        content_parts.append(
+                            {
+                                "type": "thinking",
+                                "thinking": reasoning_text or "[compat] missing prior reasoning context",
+                            }
+                        )
                     if content:
                         content_parts.append({"type": "text", "text": content})
                     ids_order = []

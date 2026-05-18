@@ -208,6 +208,41 @@ def test_convert_messages_openai_nested_tool_calls():
     assert tu["input"] == {"query": "x", "tags": ["a"]}
 
 
+def test_injects_thinking_block_for_tool_calls_when_thinking_enabled():
+    p = AnthropicCompatProvider(
+        name="anthropic-compat",
+        base_url="https://example.com/v1",
+        api_key="sk-x",
+        model="kimi-for-coding",
+        capabilities=Capabilities(),
+        temperature=0.7,
+        max_tokens=4096,
+        request_timeout_seconds=30.0,
+        stream=False,
+        vendor_params={"thinking": {"type": "enabled", "budget_tokens": 16000}},
+    )
+    _, msgs = p._convert_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "先搜工具",
+                "tool_calls": [
+                    {
+                        "id": "tool_abc",
+                        "type": "function",
+                        "function": {"name": "search_tools", "arguments": "{}"},
+                    }
+                ],
+            }
+        ]
+    )
+    parts = msgs[0]["content"]
+    assert isinstance(parts, list)
+    assert parts[0]["type"] == "thinking"
+    assert isinstance(parts[0]["thinking"], str) and parts[0]["thinking"].strip()
+    assert any(isinstance(x, dict) and x.get("type") == "tool_use" for x in parts)
+
+
 def test_convert_user_pdf_file_block_to_anthropic_document():
     p = _provider(caps=Capabilities(file_input_mime_types=("application/pdf",)))
     _, msgs = p._convert_messages(

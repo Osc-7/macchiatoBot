@@ -199,6 +199,8 @@ Current branch status:
 - The automation daemon exposes a WebSocket gateway (default `0.0.0.0:9380`, overridable
   via `MACCHIATO_REMOTE_HOST` / `MACCHIATO_REMOTE_PORT`; set `MACCHIATO_REMOTE_TOKENS`
   for per-login worker tokens, or `MACCHIATO_REMOTE_TOKEN` for a shared fallback).
+- The same port now also serves a lightweight remote login panel:
+  `http://<host>:<port>/remote/login` (health: `/remote/healthz`).
 - `/remote-use`, `/remote-status`, and `/remote-release` open or release a remote
   workspace over IPC / Feishu; when active, `bash`, `read_file`, `write_file`, and
   `modify_file` are routed to the connected worker.
@@ -263,6 +265,18 @@ macchiato-remote login \
   --login personal \
   --token '<paste gen-token output>'
 ```
+
+You can also use positional server syntax:
+
+```bash
+macchiato-remote login your-macchiato-server.example.com:9380 --login personal
+```
+
+If `--token` is omitted, the CLI starts a device-login flow:
+
+1. CLI requests a one-time code from `/remote/login/start`
+2. You open `/remote/login` and approve with server `MACCHIATO_REMOTE_LOGIN_APPROVER_SECRET`
+3. CLI polls `/remote/login/poll`, receives a short-lived onboarding token, and saves it to local config
 
 Check local configuration:
 

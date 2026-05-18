@@ -10,7 +10,7 @@ kimi_code:
   vendor_params:
     thinking:
       type: "enabled"
-      budget_tokens: 16000
+      budget_tokens: 65536
   # headers:
   #   User-Agent: "claude-code/0.1.0"
   capabilities:

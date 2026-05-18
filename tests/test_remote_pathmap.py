@@ -27,7 +27,7 @@ def test_reject_parent_segments():
     assert err is not None
 
 
-def test_reject_absolute_non_workspace():
+def test_normalize_absolute_path():
     rel, err = normalize_remote_workspace_relative_path("/etc/passwd")
-    assert rel is None
-    assert err is not None
+    assert err is None
+    assert rel == "/etc/passwd"

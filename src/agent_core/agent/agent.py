@@ -1521,6 +1521,9 @@ class AgentCore:
                         anthropic_message_content=getattr(
                             response, "anthropic_message_content", None
                         ),
+                        responses_reasoning_items=getattr(
+                            response, "responses_reasoning_items", None
+                        ),
                     )
                     self._last_prompt_tokens = None
                     if self._session_logger:
@@ -1708,6 +1711,9 @@ class AgentCore:
             reasoning_content=response.reasoning_content,
             anthropic_message_content=getattr(
                 response, "anthropic_message_content", None
+            ),
+            responses_reasoning_items=getattr(
+                response, "responses_reasoning_items", None
             ),
         )
 

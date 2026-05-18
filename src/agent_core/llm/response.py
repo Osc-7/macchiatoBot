@@ -93,3 +93,9 @@ class LLMResponse:
     扩展思考 + 多轮工具调用时，Kimi 等端点要求下一轮请求**原样**回传这些块；
     仅靠 OpenAI 风格的 content + tool_calls 重建会丢失 thinking/signature，导致 400。
     """
+
+    responses_reasoning_items: Optional[List[Dict[str, Any]]] = None
+    """Responses API 的 reasoning item 列表（含 encrypted_content/summary）。
+
+    用于在后续 Responses 多轮请求中回传推理态（尤其是 store=false 场景）。
+    """

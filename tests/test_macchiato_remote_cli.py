@@ -201,3 +201,30 @@ def test_default_ssh_remote_port_for_local_tunnel_server() -> None:
     assert _default_ssh_remote_port("http://localhost:19380") == 9380
     assert _default_ssh_remote_port("http://203.0.113.10:9380") == 9380
     assert _default_ssh_remote_port("http://203.0.113.10:12345") == 12345
+
+
+def test_login_accepts_positional_server_with_static_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from macchiato_remote import cli as rc
+
+    cfg_path = tmp_path / "remote.json"
+    monkeypatch.setattr(rc, "CONFIG_PATH", cfg_path)
+    assert (
+        main(
+            [
+                "login",
+                "203.0.113.10:9380",
+                "--login",
+                "personal",
+                "--token",
+                "tok-1",
+            ]
+        )
+        == 0
+    )
+    saved = cfg_path.read_text(encoding="utf-8")
+    assert "http://203.0.113.10:9380" in saved
+    assert '"login": "personal"' in saved
+    assert '"token": "tok-1"' in saved

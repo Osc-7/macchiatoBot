@@ -60,7 +60,36 @@ def _convert_messages(
         (input_items, instructions)
         其中 system 消息被提取为 instructions。
     """
-    return _litellm_handler.convert_chat_completion_messages_to_responses_api(messages)
+    input_items, instructions = _litellm_handler.convert_chat_completion_messages_to_responses_api(messages)
+
+    # 回放上一轮保存的 Responses reasoning item（含 encrypted_content），
+    # 便于 store=false 场景下维持多轮推理态。
+    replay_items: List[Dict[str, Any]] = []
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        raw = msg.get("responses_reasoning_items")
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "reasoning":
+                continue
+            sanitized: Dict[str, Any] = {"type": "reasoning"}
+            encrypted = item.get("encrypted_content")
+            summary = item.get("summary")
+            if isinstance(encrypted, str) and encrypted:
+                sanitized["encrypted_content"] = encrypted
+            if isinstance(summary, list):
+                sanitized["summary"] = summary
+            if "encrypted_content" in sanitized or "summary" in sanitized:
+                replay_items.append(sanitized)
+
+    if replay_items:
+        input_items = replay_items + list(input_items)
+
+    return input_items, instructions
 
 
 DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex/responses"
@@ -155,6 +184,7 @@ async def _maybe_emit_delta(
 async def _parse_sse_stream(
     response: httpx.Response,
     on_delta: Optional[Callable[[str], Any]] = None,
+    on_reasoning_delta: Optional[Callable[[str], Any]] = None,
 ) -> tuple[LLMResponse, Optional[str]]:
     """解析 Codex Responses SSE 流。
 
@@ -165,6 +195,8 @@ async def _parse_sse_stream(
     """
     text_parts: List[str] = []
     completed_text_parts: List[str] = []
+    reasoning_text_parts: List[str] = []
+    responses_reasoning_items: List[Dict[str, Any]] = []
     tool_calls_map: Dict[tuple[str, Any], Dict[str, Any]] = {}
     usage: Optional[TokenUsage] = None
     response_id: Optional[str] = None
@@ -205,6 +237,23 @@ async def _parse_sse_stream(
 
         evt_type = data.get("type", event_type or "")
 
+        def _capture_reasoning_item(item: Dict[str, Any]) -> None:
+            if item.get("type") != "reasoning":
+                return
+            summary = item.get("summary")
+            encrypted = item.get("encrypted_content")
+            saved: Dict[str, Any] = {"type": "reasoning"}
+            if isinstance(summary, list):
+                saved["summary"] = summary
+                for s in summary:
+                    txt = s.get("text") if isinstance(s, dict) else None
+                    if isinstance(txt, str) and txt.strip():
+                        reasoning_text_parts.append(txt.strip())
+            if isinstance(encrypted, str) and encrypted:
+                saved["encrypted_content"] = encrypted
+            if "summary" in saved or "encrypted_content" in saved:
+                responses_reasoning_items.append(saved)
+
         # 提取 response_id（用于多轮对话的 previous_response_id）
         if evt_type == "response.created":
             response_id = data.get("response", {}).get("id")
@@ -234,6 +283,7 @@ async def _parse_sse_stream(
                         overwrite_arguments=evt_type == "response.output_item.done",
                     )
                 else:
+                    _capture_reasoning_item(item)
                     text = _extract_output_text_from_item(item)
                     if text:
                         completed_text_parts.append(text)
@@ -297,6 +347,7 @@ async def _parse_sse_stream(
                                 overwrite_arguments=True,
                             )
                         else:
+                            _capture_reasoning_item(item)
                             text = _extract_output_text_from_item(item)
                             if text:
                                 completed_output_texts.append(text)
@@ -371,6 +422,9 @@ async def _parse_sse_stream(
     content = "".join(text_parts).strip()
     if not content:
         content = "".join(completed_text_parts).strip()
+    reasoning_content = "\n\n".join(x for x in reasoning_text_parts if x).strip() or None
+    if reasoning_content:
+        await _maybe_emit_delta(on_reasoning_delta, reasoning_content)
 
     return (
         LLMResponse(
@@ -379,6 +433,8 @@ async def _parse_sse_stream(
             usage=usage,
             finish_reason="tool_calls" if tool_calls else finish_reason,
             raw_response=None,
+            reasoning_content=reasoning_content,
+            responses_reasoning_items=responses_reasoning_items or None,
         ),
         response_id,
     )
@@ -513,6 +569,7 @@ class CodexOAuthProvider(BaseProvider):
         input_list: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
         on_delta: Optional[Callable[[str], Any]] = None,
+        on_reasoning_delta: Optional[Callable[[str], Any]] = None,
     ) -> LLMResponse:
         access_token = await self._ensure_fresh_token()
 
@@ -526,7 +583,8 @@ class CodexOAuthProvider(BaseProvider):
             "input": input_list,
             "store": False,
             "stream": True,
-            "reasoning": {"effort": self._reasoning_effort},
+            "reasoning": {"effort": self._reasoning_effort, "summary": "auto"},
+            "include": ["reasoning.encrypted_content"],
         }
 
         # 多轮优化：该端点不支持 previous_response_id（会报 Unsupported parameter），
@@ -573,7 +631,9 @@ class CodexOAuthProvider(BaseProvider):
                             )
 
                         result, response_id = await _parse_sse_stream(
-                            response, on_delta=on_delta
+                            response,
+                            on_delta=on_delta,
+                            on_reasoning_delta=on_reasoning_delta,
                         )
 
                         # 该端点不支持 previous_response_id，因此不再保存 response_id。
@@ -617,7 +677,13 @@ class CodexOAuthProvider(BaseProvider):
     ) -> LLMResponse:
         # 该端点不支持 previous_response_id，因此不传此参数。
         # 多轮对话状态通过完整的 input 数组维护。
-        return await self._do_chat(messages, system_message, tools, on_content_delta)
+        return await self._do_chat(
+            messages,
+            system_message,
+            tools,
+            on_content_delta,
+            on_reasoning_delta,
+        )
 
     async def _do_chat(
         self,
@@ -625,6 +691,7 @@ class CodexOAuthProvider(BaseProvider):
         system_message: Optional[str],
         tools: Optional[List[Dict[str, Any]]],
         on_delta: Optional[Callable[[str], Any]],
+        on_reasoning_delta: Optional[Callable[[str], Any]] = None,
     ) -> LLMResponse:
         input_list, litellm_instructions = _convert_messages(messages)
         if system_message and litellm_instructions:
@@ -635,14 +702,24 @@ class CodexOAuthProvider(BaseProvider):
             )
 
         try:
-            return await self._make_request(instructions, input_list, tools, on_delta)
+            return await self._make_request(
+                instructions,
+                input_list,
+                tools,
+                on_delta,
+                on_reasoning_delta=on_reasoning_delta,
+            )
         except _CodexAPIError as e:
             if e.status_code == 401:
                 logger.info("401，刷新 token 后重试")
                 async with self._refresh_lock:
                     self._token_state = None
                 return await self._make_request(
-                    instructions, input_list, tools, on_delta
+                    instructions,
+                    input_list,
+                    tools,
+                    on_delta,
+                    on_reasoning_delta=on_reasoning_delta,
                 )
             raise
         except Exception as e:
@@ -651,7 +728,11 @@ class CodexOAuthProvider(BaseProvider):
                 async with self._refresh_lock:
                     self._token_state = None
                 return await self._make_request(
-                    instructions, input_list, tools, on_delta
+                    instructions,
+                    input_list,
+                    tools,
+                    on_delta,
+                    on_reasoning_delta=on_reasoning_delta,
                 )
             raise
 

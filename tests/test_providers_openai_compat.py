@@ -119,6 +119,42 @@ async def test_chat_with_tools_max_tokens_override_takes_effect():
 
 
 @pytest.mark.asyncio
+async def test_chat_with_tools_preserves_reasoning_content_in_history():
+    with patch("agent_core.llm.providers.openai_compat.AsyncOpenAI") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=_mock_openai_chat_completion_response()
+        )
+        mock_client.close = AsyncMock()
+        mock_cls.return_value = mock_client
+
+        provider = _make_provider()
+        await provider.chat_with_tools(
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "r1",
+                    "tool_calls": [
+                        {
+                            "id": "tool_1",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "tool_1", "content": "{}"},
+                {"role": "user", "content": "继续"},
+            ],
+            tools=None,
+        )
+        sent = mock_client.chat.completions.create.call_args.kwargs["messages"]
+        assistant = sent[0]
+        assert assistant["role"] == "assistant"
+        assert assistant["reasoning_content"] == "r1"
+
+
+@pytest.mark.asyncio
 async def test_vendor_params_forwarded_as_extra_body():
     with patch("agent_core.llm.providers.openai_compat.AsyncOpenAI") as mock_cls:
         mock_client = AsyncMock()

@@ -5,7 +5,7 @@ from typing import Iterable
 
 import pytest
 
-from agent_core.llm.providers.codex_oauth_provider import _parse_sse_stream
+from agent_core.llm.providers.codex_oauth_provider import _convert_messages, _parse_sse_stream
 
 
 class _FakeSSE:
@@ -180,3 +180,64 @@ async def test_parse_sse_stream_uses_completed_text_without_duplicate_fallbacks(
 
     assert response.content == "hello"
     assert response.tool_calls == []
+
+
+@pytest.mark.asyncio
+async def test_parse_sse_stream_extracts_reasoning_summary_and_encrypted_content():
+    response, _ = await _parse_sse_stream(
+        _FakeSSE(
+            [
+                _sse(
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": {
+                            "id": "rs_1",
+                            "type": "reasoning",
+                            "encrypted_content": "enc_abc",
+                            "summary": [
+                                {
+                                    "type": "summary_text",
+                                    "text": "Reasoning summary line.",
+                                }
+                            ],
+                        },
+                    }
+                ),
+                _sse(
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp_reason"},
+                    }
+                ),
+            ]
+        )
+    )
+
+    assert response.reasoning_content == "Reasoning summary line."
+    assert response.responses_reasoning_items is not None
+    assert len(response.responses_reasoning_items) == 1
+    assert response.responses_reasoning_items[0]["encrypted_content"] == "enc_abc"
+
+
+def test_convert_messages_replays_saved_responses_reasoning_items():
+    input_items, _ = _convert_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "ok",
+                "responses_reasoning_items": [
+                    {
+                        "type": "reasoning",
+                        "encrypted_content": "enc_prev",
+                        "summary": [{"type": "summary_text", "text": "s"}],
+                    }
+                ],
+            },
+            {"role": "user", "content": "next"},
+        ]
+    )
+    assert isinstance(input_items, list) and len(input_items) >= 1
+    first = input_items[0]
+    assert first.get("type") == "reasoning"
+    assert first.get("encrypted_content") == "enc_prev"

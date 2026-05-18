@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -148,6 +149,28 @@ class PermissionBroker:
         self._config = config or get_config()
 
     async def request(self, request: PermissionRequest) -> PermissionBrokerResult:
+        if self._is_approval_bypass_enabled(request.exec_ctx):
+            persist = False
+            grants = list(request.path_grants or [])
+            try:
+                applied = self._apply_path_grants(grants, request.exec_ctx, persist)
+            except Exception as exc:
+                return PermissionBrokerResult(
+                    allowed=False,
+                    permission_id=f"auto-{uuid.uuid4().hex[:12]}",
+                    error="ACL_PERSIST_FAILED",
+                    message=f"危险放行模式已开启，但应用路径权限失败: {exc}",
+                    persist_acl=persist,
+                )
+            return PermissionBrokerResult(
+                allowed=True,
+                permission_id=f"auto-{uuid.uuid4().hex[:12]}",
+                message="危险放行模式已开启：自动批准本次权限请求",
+                applied_grants=applied,
+                persist_acl=persist,
+                note="auto-approved-by-danger-mode",
+            )
+
         timeout = max(0.1, float(request.timeout_seconds or 300.0))
         pid, fut = register_permission_wait()
         payload = self._build_payload(pid, request, timeout)
@@ -218,6 +241,10 @@ class PermissionBroker:
             persist_acl=persist,
             note=decision.note,
         )
+
+    @staticmethod
+    def _is_approval_bypass_enabled(exec_ctx: Dict[str, Any]) -> bool:
+        return bool(exec_ctx.get("approval_bypass_enabled", False))
 
     def _build_payload(
         self,

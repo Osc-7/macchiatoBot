@@ -249,7 +249,12 @@ class CorePool:
         """
         existing = self._pool.get(session_id)
         if existing is not None and existing.agent is not None and profile is None:
-            return existing.agent
+            cur_source = str(getattr(existing.agent, "_source", "") or "").strip()
+            cur_user_id = str(getattr(existing.agent, "_user_id", "") or "").strip()
+            req_source = str(source or "").strip()
+            req_user_id = str(user_id or "").strip()
+            if cur_source == req_source and cur_user_id == req_user_id:
+                return existing.agent
 
         lock = await self._get_lock(session_id)
         async with lock:
@@ -262,6 +267,18 @@ class CorePool:
                         user_id=user_id,
                         profile=profile,
                     )
+                else:
+                    cur_source = str(getattr(entry.agent, "_source", "") or "").strip()
+                    cur_user_id = str(getattr(entry.agent, "_user_id", "") or "").strip()
+                    req_source = str(source or "").strip()
+                    req_user_id = str(user_id or "").strip()
+                    if cur_source != req_source or cur_user_id != req_user_id:
+                        await self._hot_update_profile(
+                            entry=entry,
+                            source=source,
+                            user_id=user_id,
+                            profile=entry.profile,
+                        )
                 return entry.agent
 
             if not create_if_missing:
@@ -1320,7 +1337,11 @@ class CorePool:
     ) -> None:
         """在复用 session 时热更新 profile，并按新权限重装工具集。"""
         current = entry.profile
-        if current == profile:
+        cur_source = str(getattr(entry.agent, "_source", "") or "").strip()
+        cur_user_id = str(getattr(entry.agent, "_user_id", "") or "").strip()
+        req_source = str(source or "").strip()
+        req_user_id = str(user_id or "").strip()
+        if current == profile and cur_source == req_source and cur_user_id == req_user_id:
             return
         from system.tools import build_tool_registry
 
@@ -1339,6 +1360,19 @@ class CorePool:
         )
         from agent_core.tools import VersionedToolRegistry
 
+        old_registry = getattr(entry.agent, "_tool_registry", None)
+        old_registry_tools = (
+            old_registry.list_tools()[1].copy()
+            if old_registry is not None and hasattr(old_registry, "list_tools")
+            else {}
+        )
+        old_catalog = getattr(entry.agent, "_tool_catalog", None)
+        old_catalog_tools = (
+            old_catalog.list_tools()[1].copy()
+            if old_catalog is not None and hasattr(old_catalog, "list_tools")
+            else {}
+        )
+
         reg_tools = list(reg.list_tools()[1].values())
         reg_tools = [
             t for t in reg_tools if t.name not in {"search_tools", "call_tool"}
@@ -1346,6 +1380,23 @@ class CorePool:
         stripped_reg = VersionedToolRegistry()
         for tool in reg_tools:
             stripped_reg.register(tool)
+        # 热更新时保留旧 registry 里的运行时工具（如 bash / 动态注入工具），
+        # 避免仅靠静态 build_tool_registry 重建导致工具瞬时消失。
+        for name, tool in old_registry_tools.items():
+            if name in {"search_tools", "call_tool"}:
+                continue
+            if stripped_reg.has(name):
+                continue
+            if not profile.is_tool_allowed(name):
+                continue
+            stripped_reg.register(tool)
+            if not tool_catalog.has(name):
+                tool_catalog.register(tool)
+        for name, tool in old_catalog_tools.items():
+            if name in {"search_tools", "call_tool"}:
+                continue
+            if not tool_catalog.has(name):
+                tool_catalog.register(tool)
         entry.agent._tool_registry = stripped_reg
         entry.agent._tool_catalog = tool_catalog
         from agent_core.agent.working_set_pins import compute_pinned_tool_names_for_core
@@ -1355,10 +1406,11 @@ class CorePool:
         agent_cfg = getattr(entry.agent, "_config", None) or self._config
         entry.agent._working_set = ToolWorkingSetManager(
             pinned_tools=compute_pinned_tool_names_for_core(
-                agent_cfg, profile, entry.agent._source
+                agent_cfg, profile, source
             ),
             working_set_size=agent_cfg.agent.working_set_size,
         )
+        entry.agent._current_visible_tools = set()
         entry.agent._tool_registry.register(
             SearchToolsTool(
                 registry=tool_catalog,

@@ -24,6 +24,7 @@ def test_help_text():
     assert "/session" in h
     assert "/new" in h
     assert "/remote-use" in h
+    assert "/dangerously" in h
     assert "/help" in h
 
 
@@ -343,3 +344,68 @@ async def test_try_handle_slash_command_remote_release():
     handled, reply = await try_handle_slash_command(client, "/remote-release")
     assert handled is True
     assert "已释放" in (reply or "")
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_dangerously_denied(monkeypatch):
+    class _FeishuCfg:
+        dangerous_mode_allowed_open_ids = []
+        dangerous_mode_allowed_user_ids = []
+
+    class _Cfg:
+        feishu = _FeishuCfg()
+
+    monkeypatch.setattr(slash_commands_module, "get_config", lambda: _Cfg())
+    client = MagicMock()
+    client.feishu_open_id = "ou_denied"
+    client.feishu_user_id = "u_denied"
+    client.set_dangerous_mode = AsyncMock()
+
+    handled, reply = await try_handle_slash_command(client, "/dangerously on")
+
+    assert handled is True
+    assert "Permission denied" in (reply or "")
+    client.set_dangerous_mode.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_dangerously_on_off_status(monkeypatch):
+    class _FeishuCfg:
+        dangerous_mode_allowed_open_ids = ["ou_allowed"]
+        dangerous_mode_allowed_user_ids = []
+
+    class _Cfg:
+        feishu = _FeishuCfg()
+
+    monkeypatch.setattr(slash_commands_module, "get_config", lambda: _Cfg())
+    client = MagicMock()
+    client.feishu_open_id = "ou_allowed"
+    client.feishu_user_id = "u_1"
+    client.set_dangerous_mode = AsyncMock(
+        side_effect=[
+            {"session_id": "feishu:user:ou_allowed", "dangerous_mode_enabled": True},
+            {"session_id": "feishu:user:ou_allowed", "dangerous_mode_enabled": False},
+        ]
+    )
+    client.get_dangerous_mode = AsyncMock(
+        return_value={
+            "session_id": "feishu:user:ou_allowed",
+            "dangerous_mode_enabled": True,
+        }
+    )
+
+    handled_on, reply_on = await try_handle_slash_command(client, "/dangerously on")
+    handled_status, reply_status = await try_handle_slash_command(
+        client, "/dangerously status"
+    )
+    handled_off, reply_off = await try_handle_slash_command(client, "/dangerously off")
+
+    assert handled_on is True
+    assert "Dangerous mode is ENABLED" in (reply_on or "")
+    assert handled_status is True
+    assert "Dangerous mode is ENABLED" in (reply_status or "")
+    assert handled_off is True
+    assert "Dangerous mode is DISABLED" in (reply_off or "")
+    client.set_dangerous_mode.assert_any_await(enabled=True)
+    client.set_dangerous_mode.assert_any_await(enabled=False)
+    client.get_dangerous_mode.assert_awaited_once()

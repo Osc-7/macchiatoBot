@@ -173,6 +173,8 @@ async def try_handle_slash_command_via_ipc(
         or session_id
     )
     setattr(client, "feishu_base_session_id", base_session or session_id)
+    setattr(client, "feishu_open_id", (feishu_open_id or "").strip())
+    setattr(client, "feishu_user_id", (feishu_user_id or "").strip())
     setattr(client, "session_list_limit", 30)
     await client.switch_session(effective_session, create_if_missing=True)
     handled, reply = await try_handle_slash_command(client, text)

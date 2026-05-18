@@ -536,6 +536,16 @@ class AutomationIPCServer:
         if method == "remote_workspace_release":
             return await self._gateway.remote_workspace_release(active_session)
 
+        if method == "session_set_dangerous_mode":
+            enabled = bool(params.get("enabled", False))
+            return await self._gateway.set_dangerous_mode(
+                enabled=enabled,
+                session_id=active_session,
+            )
+
+        if method == "session_get_dangerous_mode":
+            return self._gateway.get_dangerous_mode_status(session_id=active_session)
+
         if method == "get_turn_count":
             turn_count = self._gateway.get_turn_count(session_id=active_session)
             return {"turn_count": turn_count}
@@ -944,6 +954,17 @@ class AutomationIPCClient:
     async def remote_workspace_release(self) -> Dict[str, Any]:
         """Release remote workspace mode for the current daemon session."""
         return await self._request("remote_workspace_release", {})
+
+    async def set_dangerous_mode(self, *, enabled: bool) -> Dict[str, Any]:
+        """Enable/disable dangerous approval-bypass mode for active session."""
+        return await self._request(
+            "session_set_dangerous_mode",
+            {"enabled": bool(enabled)},
+        )
+
+    async def get_dangerous_mode(self) -> Dict[str, Any]:
+        """Get dangerous approval-bypass mode for active session."""
+        return await self._request("session_get_dangerous_mode", {})
 
     async def get_token_usage(self) -> dict:
         data = await self._request("get_token_usage", {})

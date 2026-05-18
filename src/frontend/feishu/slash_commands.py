@@ -11,6 +11,8 @@ import shlex
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+from agent_core.config import get_config
+
 if TYPE_CHECKING:
     from system.automation.ipc import AutomationIPCClient
 
@@ -177,7 +179,29 @@ def _help_text() -> str:
 /remote-use <login> [path] [--profile dev] - 将当前会话切换到远程工作区模式
 /remote-status - 查看当前会话远程工作区状态
 /remote-release 或 /cloud-use - 释放远程工作区，恢复云端工作区
+/dangerously on|off|status - 切换危险放行模式（授权用户可跳过人工审批）
 /help - 显示此帮助"""
+
+
+def _can_toggle_dangerous_mode(client: Any) -> bool:
+    cfg = get_config().feishu
+    allow_open_ids = {
+        str(v).strip()
+        for v in getattr(cfg, "dangerous_mode_allowed_open_ids", []) or []
+        if str(v).strip()
+    }
+    allow_user_ids = {
+        str(v).strip()
+        for v in getattr(cfg, "dangerous_mode_allowed_user_ids", []) or []
+        if str(v).strip()
+    }
+    open_id = _string_attr(client, "feishu_open_id")
+    user_id = _string_attr(client, "feishu_user_id")
+    if open_id and open_id in allow_open_ids:
+        return True
+    if user_id and user_id in allow_user_ids:
+        return True
+    return False
 
 
 def _parse_ttl_seconds(value: str) -> Optional[int]:
@@ -366,6 +390,33 @@ async def try_handle_slash_command(
         except Exception as exc:
             return True, f"压缩失败: {exc}"
         return True, _format_compress_result(res or {})
+
+    if cmd_lower in ("dangerously", "danger", "dangerous"):
+        action = parts[1].strip().lower() if len(parts) > 1 else "status"
+        if action not in {"on", "off", "status"}:
+            return True, "Usage: /dangerously on|off|status"
+        if action in {"on", "off"} and not _can_toggle_dangerous_mode(client):
+            return True, (
+                "Permission denied: your account is not allowed to toggle dangerous mode."
+            )
+        try:
+            if action == "status":
+                status = await client.get_dangerous_mode()
+            else:
+                status = await client.set_dangerous_mode(enabled=(action == "on"))
+        except Exception as exc:
+            return True, f"Failed to update dangerous mode: {exc}"
+        enabled_now = bool(status.get("dangerous_mode_enabled"))
+        sid = str(status.get("session_id") or getattr(client, "active_session_id", ""))
+        return True, (
+            "Dangerous mode is ENABLED.\n"
+            "Human approval is bypassed for permission checks in this session.\n"
+            f"Session: {sid}"
+            if enabled_now
+            else "Dangerous mode is DISABLED.\n"
+            "Human approval is required again.\n"
+            f"Session: {sid}"
+        )
 
     # /help
     if cmd_lower == "help":

@@ -1289,6 +1289,20 @@ class FeishuConfig(BaseModel):
             "需应用具备「创建与更新卡片 cardkit:card:write」。失败时自动回退为消息内嵌 JSON + PATCH。"
         ),
     )
+    dangerous_mode_allowed_open_ids: List[str] = Field(
+        default_factory=list,
+        description=(
+            "允许通过 /dangerously 开启危险放行模式的飞书 open_id 列表。"
+            "为空表示无人可开启。"
+        ),
+    )
+    dangerous_mode_allowed_user_ids: List[str] = Field(
+        default_factory=list,
+        description=(
+            "允许通过 /dangerously 开启危险放行模式的飞书 user_id 列表。"
+            "用于企业内 user_id 鉴权，和 open_id 任一命中即通过。"
+        ),
+    )
 
 
 class Config(BaseModel):

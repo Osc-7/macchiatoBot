@@ -223,8 +223,11 @@ async def test_core_pool_acquire_hot_updates_profile(
     monkeypatch.setattr("system.tools.build_tool_registry", _fake_build_tool_registry)
 
     pool = CorePool()
+    old_registry = VersionedToolRegistry()
+    old_bash_tool = SimpleNamespace(name="bash")
+    old_registry.register(old_bash_tool)
     fake_agent = SimpleNamespace(
-        _tool_registry=VersionedToolRegistry(),
+        _tool_registry=old_registry,
         _tool_catalog=VersionedToolRegistry(),
         _working_set=ToolWorkingSetManager(
             pinned_tools=["search_tools", "call_tool", "bash"]
@@ -246,12 +249,66 @@ async def test_core_pool_acquire_hot_updates_profile(
     assert agent is fake_agent
     assert isinstance(fake_agent._tool_registry, VersionedToolRegistry)
     assert fake_agent._tool_catalog is fake_registry
+    assert fake_agent._tool_registry.has("bash") is True
+    assert fake_agent._tool_catalog.has("bash") is True
     assert fake_agent._source == "wechat"
     assert fake_agent._user_id == "u2"
     assert fake_agent._core_profile == profile_new
     assert pool._pool["sess-1"].profile == profile_new
     assert captured["profile"] == profile_new
     assert captured["memory_owner_id"] == "u2"
+
+
+@pytest.mark.asyncio
+async def test_core_pool_acquire_rebinds_owner_without_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = CoreProfile.default_full(frontend_id="cli", dialog_window_id="u1")
+    fake_registry = VersionedToolRegistry()
+    captured: dict = {}
+
+    def _fake_build_tool_registry(*, profile=None, config=None, memory_owner_id=None, core_pool=None, **kwargs):  # type: ignore[no-untyped-def]
+        captured["profile"] = profile
+        captured["memory_owner_id"] = memory_owner_id
+        return fake_registry
+
+    monkeypatch.setattr("system.tools.build_tool_registry", _fake_build_tool_registry)
+
+    pool = CorePool()
+    old_registry = VersionedToolRegistry()
+    old_bash_tool = SimpleNamespace(name="bash")
+    old_registry.register(old_bash_tool)
+    fake_agent = SimpleNamespace(
+        _tool_registry=old_registry,
+        _tool_catalog=VersionedToolRegistry(),
+        _working_set=ToolWorkingSetManager(
+            pinned_tools=["search_tools", "call_tool", "bash"]
+        ),
+        _source="cli",
+        _user_id="root",
+        _core_profile=profile,
+        _session_id="sess-2",
+    )
+    pool._pool["sess-2"] = CoreEntry(agent=fake_agent, profile=profile)
+
+    agent = await pool.acquire(
+        "sess-2",
+        source="feishu",
+        user_id="ou_xxx",
+        profile=None,
+    )
+
+    assert agent is fake_agent
+    assert isinstance(fake_agent._tool_registry, VersionedToolRegistry)
+    assert fake_agent._tool_catalog is fake_registry
+    assert fake_agent._tool_registry.has("bash") is True
+    assert fake_agent._tool_catalog.has("bash") is True
+    assert fake_agent._source == "feishu"
+    assert fake_agent._user_id == "ou_xxx"
+    assert fake_agent._core_profile == profile
+    assert pool._pool["sess-2"].profile == profile
+    assert captured["profile"] == profile
+    assert captured["memory_owner_id"] == "ou_xxx"
 
 
 @pytest.mark.asyncio

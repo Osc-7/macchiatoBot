@@ -98,6 +98,9 @@ class CoreProfile:
     allowed_tools: Optional[List[str]] = None
     deny_tools: List[str] = field(default_factory=list)
     allow_dangerous_commands: bool = False
+    # 危险放行模式：为 True 时，PermissionBroker 对该 Core 产生的审批请求直接放行，
+    # 不再进入 human-in-the-loop 等待（仅应授予受信任用户）。
+    approval_bypass_enabled: bool = False
 
     visible_memory_scopes: List[str] = field(
         default_factory=lambda: ["working", "long_term", "content", "chat"]

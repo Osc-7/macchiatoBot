@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import logging
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
@@ -771,6 +771,59 @@ class AutomationCoreGateway:
             except Exception:
                 return 0
         return 0
+
+    async def set_dangerous_mode(
+        self,
+        *,
+        enabled: bool,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Toggle dangerous approval-bypass mode for a session profile."""
+        sid = (session_id or self._active_session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id 不能为空")
+
+        pool = self._kernel_scheduler.core_pool
+        # 先确保该 session 已按原有策略加载（含 checkpoint 恢复），避免覆盖既有 profile。
+        await pool.acquire(
+            sid,
+            source=self._source,
+            user_id=self._owner_id,
+            create_if_missing=True,
+            profile=None,
+        )
+        entry = pool.get_entry(sid)
+        if entry is None or getattr(entry, "profile", None) is None:
+            raise RuntimeError(f"session profile not found: {sid}")
+        profile = replace(entry.profile, approval_bypass_enabled=bool(enabled))
+
+        # 热更新该 session 的 profile，仅变更危险放行位。
+        await pool.acquire(
+            sid,
+            source=self._source,
+            user_id=self._owner_id,
+            create_if_missing=True,
+            profile=profile,
+        )
+        self.mark_activity(sid)
+        return {
+            "session_id": sid,
+            "dangerous_mode_enabled": bool(profile.approval_bypass_enabled),
+        }
+
+    def get_dangerous_mode_status(
+        self,
+        *,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        sid = (session_id or self._active_session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id 不能为空")
+        entry = self._kernel_scheduler.core_pool.get_entry(sid)
+        enabled = False
+        if entry is not None and getattr(entry, "profile", None) is not None:
+            enabled = bool(getattr(entry.profile, "approval_bypass_enabled", False))
+        return {"session_id": sid, "dangerous_mode_enabled": enabled}
 
     async def remote_workspace_use(
         self,

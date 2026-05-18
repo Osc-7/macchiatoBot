@@ -219,6 +219,11 @@ class AgentKernel:
                             if profile is not None
                             else False
                         ),
+                        "approval_bypass_enabled": (
+                            getattr(profile, "approval_bypass_enabled", False)
+                            if profile is not None
+                            else False
+                        ),
                         "bash_workspace_admin": bash_workspace_admin,
                         "source": source,
                         "user_id": user_id,

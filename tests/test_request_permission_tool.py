@@ -459,3 +459,46 @@ async def test_request_permission_clarify_includes_user_instruction_in_data(
         assert "/tmp/proj" in (result.message or "")
     finally:
         set_permission_notify_hook(None)
+
+
+async def test_request_permission_sub_mode_can_reach_human(patched_get_config):
+    """sub 模式不再被工具层硬拒绝，应可进入审批等待流。"""
+    tool = RequestPermissionTool()
+    captured: list[str] = []
+
+    def _notify(pid: str, payload: object) -> None:
+        captured.append(pid)
+
+    set_permission_notify_hook(_notify)
+    try:
+        async def _run():
+            return await tool.execute(
+                summary="subagent needs file write",
+                kind="file_write",
+                timeout_seconds=5.0,
+                __execution_context__={
+                    "profile_mode": "sub",
+                    "source": "subagent",
+                    "user_id": "sub-1",
+                    "session_id": "sub:abc",
+                    "parent_session_id": "feishu:user:u1",
+                    "feishu_chat_id": "oc_test",
+                },
+            )
+
+        task = asyncio.create_task(_run())
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if captured:
+                break
+        assert captured
+        ok = resolve_permission(
+            captured[0],
+            PermissionDecision(allowed=True, persist_acl=False),
+        )
+        assert ok
+        result = await task
+        assert result.success
+        assert result.error is None
+    finally:
+        set_permission_notify_hook(None)

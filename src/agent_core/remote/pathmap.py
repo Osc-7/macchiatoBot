@@ -16,6 +16,7 @@ def normalize_remote_workspace_relative_path(
     - Relative paths (``README.md``, ``src/a.py``)
     - ``~/foo`` → ``foo`` under remote root
     - ``/workspace/...`` logical mount
+    - Absolute paths (``/foo/bar``) as real absolute paths on remote host
     """
     raw = (path_str or "").strip()
     if not raw:
@@ -29,10 +30,7 @@ def normalize_remote_workspace_relative_path(
     elif raw.startswith("~/"):
         rel = raw[2:].lstrip("/")
     elif raw.startswith("/"):
-        return (
-            None,
-            "远程模式下请使用相对路径、~/ 前缀或 /workspace/ 下的路径",
-        )
+        rel = raw
     else:
         rel = raw.lstrip("/")
 

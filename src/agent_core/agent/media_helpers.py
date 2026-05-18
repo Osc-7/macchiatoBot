@@ -62,7 +62,7 @@ def collect_outgoing_attachment(
         return
     if att.get("type") not in {"image", "file"}:
         return
-    if "path" in att or "url" in att:
+    if "path" in att or "url" in att or "content_base64" in att:
         outgoing_attachments.append(dict(att))
 
 

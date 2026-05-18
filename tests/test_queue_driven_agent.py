@@ -429,6 +429,7 @@ class TestSchedulerQueueDispatch:
             interval_seconds=3600,
             payload_template={
                 "instruction": "远程任务测试",
+                "feishu_chat_id": "oc_test_chat",
                 "remote_login": "g3",
                 "remote_path": "~/workspace",
                 "remote_profile": "dev",
@@ -440,6 +441,7 @@ class TestSchedulerQueueDispatch:
 
         tasks = queue.list_recent(limit=10)
         assert len(tasks) == 1
+        assert tasks[0].metadata["feishu_chat_id"] == "oc_test_chat"
         assert tasks[0].metadata["remote_login"] == "g3"
         assert tasks[0].metadata["remote_path"] == "~/workspace"
         assert tasks[0].metadata["remote_profile"] == "dev"

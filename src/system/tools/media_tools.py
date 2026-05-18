@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, List, Optional
@@ -47,17 +48,118 @@ def _remote_workspace_active(exec_ctx: dict) -> bool:
         return False
 
 
+async def _read_remote_attachment_blob(
+    *,
+    path_str: str,
+    exec_ctx: dict,
+    max_bytes: int,
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    sid = str((exec_ctx or {}).get("session_id") or "").strip()
+    if not sid:
+        return None, "缺少远程会话 session_id"
+    try:
+        from agent_core.remote.pathmap import normalize_remote_workspace_relative_path
+        from agent_core.remote.worker_registry import get_remote_worker_registry
+        from agent_core.remote.workspace_state import get_remote_workspace_state
+
+        state = get_remote_workspace_state(sid)
+        if state is None:
+            return None, "远程会话未激活"
+        rel, verr = normalize_remote_workspace_relative_path(path_str)
+        if verr or rel is None:
+            return None, verr or "无效远程路径"
+        blob = await get_remote_worker_registry().file_blob_read(
+            login=state.login,
+            session_id=sid,
+            path=rel,
+            max_bytes=max_bytes,
+        )
+    except Exception as exc:
+        exc_name = exc.__class__.__name__
+        msg = str(exc).strip()
+        if isinstance(exc, TimeoutError):
+            return None, "远程读取附件超时（等待 remote file_blob_read 响应超过 120s）"
+        if msg:
+            return None, f"远程读取附件失败: {exc_name}: {msg}"
+        return None, f"远程读取附件失败: {exc_name}"
+    if blob.error:
+        return None, blob.error
+    if not blob.content_base64:
+        return None, "远程附件为空"
+    return (
+        {
+            "content_base64": blob.content_base64,
+            "file_name": blob.file_name,
+            "mime_type": blob.mime_type,
+            "bytes_read": blob.bytes_read,
+            "truncated": blob.truncated,
+        },
+        None,
+    )
+
+
+async def _read_remote_attachment_text_fallback(
+    *,
+    path_str: str,
+    exec_ctx: dict,
+    max_bytes: int,
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """兼容旧远程 worker：当 file_blob_read 不可用时，降级为 UTF-8 文本读取。"""
+    sid = str((exec_ctx or {}).get("session_id") or "").strip()
+    if not sid:
+        return None, "缺少远程会话 session_id"
+    try:
+        from agent_core.remote.pathmap import normalize_remote_workspace_relative_path
+        from agent_core.remote.worker_registry import get_remote_worker_registry
+        from agent_core.remote.workspace_state import get_remote_workspace_state
+
+        state = get_remote_workspace_state(sid)
+        if state is None:
+            return None, "远程会话未激活"
+        rel, verr = normalize_remote_workspace_relative_path(path_str)
+        if verr or rel is None:
+            return None, verr or "无效远程路径"
+        text_result = await get_remote_worker_registry().file_read(
+            login=state.login,
+            session_id=sid,
+            path=rel,
+            encoding="utf-8",
+            timeout_seconds=30.0,
+        )
+    except Exception as exc:
+        exc_name = exc.__class__.__name__
+        msg = str(exc).strip()
+        if isinstance(exc, TimeoutError):
+            return None, "远程文本兜底读取也超时（worker 可能未响应）"
+        if msg:
+            return None, f"远程文本兜底读取失败: {exc_name}: {msg}"
+        return None, f"远程文本兜底读取失败: {exc_name}"
+
+    if text_result.error:
+        return None, text_result.error
+    content_bytes = str(text_result.content or "").encode("utf-8", errors="replace")
+    truncated = bool(text_result.truncated)
+    if len(content_bytes) > max_bytes:
+        content_bytes = content_bytes[: max(1, int(max_bytes))]
+        truncated = True
+    return (
+        {
+            "content_base64": base64.b64encode(content_bytes).decode("ascii"),
+            "file_name": Path(path_str).name or "attachment.txt",
+            "mime_type": "text/plain; charset=utf-8",
+            "bytes_read": len(content_bytes),
+            "truncated": truncated,
+        },
+        None,
+    )
+
+
 def _resolve_reply_attachment_path(
     path_str: str,
     *,
     config: Config,
     exec_ctx: dict,
 ) -> tuple[Optional[Path], Optional[str]]:
-    if _remote_workspace_active(exec_ctx):
-        return None, (
-            "远程工作区下暂不支持用本地路径发送回复附件；请使用 *_url 参数，"
-            "或先将文件转成可访问的 URL。"
-        )
     from agent_core.agent.tool_path_resolution import resolve_path_string_for_tool
 
     resolved, err = resolve_path_string_for_tool(path_str, config, exec_ctx)
@@ -226,6 +328,31 @@ class AttachImageToReplyTool(BaseTool):
 
         if image_path:
             ctx = kwargs.get("__execution_context__") or {}
+            if _remote_workspace_active(ctx):
+                blob, berr = await _read_remote_attachment_blob(
+                    path_str=str(image_path).strip(),
+                    exec_ctx=ctx,
+                    max_bytes=10 * 1024 * 1024,
+                )
+                if berr or blob is None:
+                    return ToolResult(
+                        success=False,
+                        error="REMOTE_ATTACHMENT_READ_FAILED",
+                        message=berr or f"无法读取远程图片: {image_path}",
+                    )
+                attachment = {
+                    "type": "image",
+                    "content_base64": blob["content_base64"],
+                    "content_type": blob["mime_type"],
+                }
+                if blob.get("file_name"):
+                    attachment["file_name"] = blob["file_name"]
+                return ToolResult(
+                    success=True,
+                    data=attachment,
+                    message="图片已加入回复附件，用户将在对话中看到该图片。",
+                    metadata={"outgoing_attachment": attachment},
+                )
             p, err = _resolve_reply_attachment_path(
                 str(image_path).strip(),
                 config=self._config,
@@ -335,6 +462,44 @@ class AttachFileToReplyTool(BaseTool):
 
         if file_path:
             ctx = kwargs.get("__execution_context__") or {}
+            if _remote_workspace_active(ctx):
+                blob, berr = await _read_remote_attachment_blob(
+                    path_str=str(file_path).strip(),
+                    exec_ctx=ctx,
+                    max_bytes=50 * 1024 * 1024,
+                )
+                if berr or blob is None:
+                    fallback_blob, fallback_err = (
+                        await _read_remote_attachment_text_fallback(
+                            path_str=str(file_path).strip(),
+                            exec_ctx=ctx,
+                            max_bytes=50 * 1024 * 1024,
+                        )
+                    )
+                    if fallback_blob is not None:
+                        blob = fallback_blob
+                    else:
+                        return ToolResult(
+                            success=False,
+                            error="REMOTE_ATTACHMENT_READ_FAILED",
+                            message=(
+                                fallback_err
+                                or berr
+                                or f"无法读取远程文件: {file_path}"
+                            ),
+                        )
+                attachment = {
+                    "type": "file",
+                    "content_base64": blob["content_base64"],
+                    "mime_type": blob["mime_type"],
+                    "file_name": file_name or blob.get("file_name") or "attachment.bin",
+                }
+                return ToolResult(
+                    success=True,
+                    data=attachment,
+                    message="文件已加入回复附件，用户将在对话中收到该文件。",
+                    metadata={"outgoing_attachment": attachment},
+                )
             p, err = _resolve_reply_attachment_path(
                 str(file_path).strip(),
                 config=self._config,

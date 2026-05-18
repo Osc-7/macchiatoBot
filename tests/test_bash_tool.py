@@ -93,11 +93,11 @@ class TestBashSecurity:
         v = sec.check("ls -la /tmp", profile=CoreProfile(mode="sub"))
         assert v.allowed
 
-    def test_restricted_mode_deny_non_whitelist(self):
+    def test_restricted_mode_non_whitelist_requires_confirmation(self):
         sec = self._sec(allow_run_for_restricted=True)
         v = sec.check("curl http://example.com", profile=CoreProfile(mode="sub"))
-        assert v.denied
-        assert v.error_code == "COMMAND_NOT_WHITELISTED"
+        assert v.needs_confirmation
+        assert v.error_code == "CONFIRMATION_REQUIRED"
 
     def test_restricted_mode_allows_pipe_semicolon_and_logical_and(self):
         """sub 模式在白名单内允许 |、;、&& 串联只读命令（扩展子 agent 可用组合）。"""
@@ -119,8 +119,13 @@ class TestBashSecurity:
         """&& 仅放宽运算符；各段命令仍须白名单（rm 不在默认白名单）。"""
         sec = self._sec(allow_run_for_restricted=True)
         v = sec.check("echo hi && rm -rf /tmp/x", profile=CoreProfile(mode="sub"))
-        assert v.denied
-        assert v.error_code == "COMMAND_NOT_WHITELISTED"
+        assert v.needs_confirmation
+        assert v.error_code == "CONFIRMATION_REQUIRED"
+
+    def test_restricted_mode_non_whitelist_allowed_after_confirmation(self):
+        sec = self._sec(allow_run_for_restricted=True)
+        v = sec.check("python -V", profile=CoreProfile(mode="sub"), confirmed=True)
+        assert v.allowed
 
     def test_restricted_mode_deny_dangerous_even_whitelisted(self):
         sec = self._sec(

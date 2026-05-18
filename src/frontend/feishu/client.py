@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
+import base64
 import json
 import logging
 import re
@@ -377,7 +378,9 @@ class FeishuClient:
 
         attachments 每项支持：
         - {"type": "image", "path": "..."} 或 {"type": "image", "url": "..."}
+        - {"type": "image", "content_base64": "...", "content_type": "image/png"}
         - {"type": "file", "path": "..."} 或 {"type": "file", "url": "...", "file_name": "..."}
+        - {"type": "file", "content_base64": "...", "file_name": "...", "mime_type": "..."}
         """
         if not chat_id or not attachments:
             return
@@ -386,7 +389,18 @@ class FeishuClient:
             if att_type == "image":
                 image_bytes: Optional[bytes] = None
                 content_type = "image/png"
-                if "path" in att:
+                if "content_base64" in att:
+                    try:
+                        image_bytes = base64.b64decode(
+                            str(att.get("content_base64") or ""),
+                            validate=True,
+                        )
+                    except Exception:
+                        image_bytes = None
+                    ct = str(att.get("content_type") or "").strip().lower()
+                    if ct.startswith("image/"):
+                        content_type = ct
+                elif "path" in att:
                     path = Path(att["path"]).expanduser().resolve()
                     if not path.exists() or not path.is_file():
                         continue
@@ -422,7 +436,17 @@ class FeishuClient:
             if att_type == "file":
                 file_bytes: Optional[bytes] = None
                 file_name = str(att.get("file_name") or "").strip()
-                if "path" in att:
+                if "content_base64" in att:
+                    try:
+                        file_bytes = base64.b64decode(
+                            str(att.get("content_base64") or ""),
+                            validate=True,
+                        )
+                    except Exception:
+                        file_bytes = None
+                    if not file_name:
+                        file_name = "attachment.bin"
+                elif "path" in att:
                     path = Path(att["path"]).expanduser().resolve()
                     if not path.exists() or not path.is_file():
                         continue

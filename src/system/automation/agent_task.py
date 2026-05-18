@@ -63,6 +63,7 @@ def make_cron_task(
     memory_owner: str | None = None,
     core_mode: str | None = None,
     tool_template: str | None = None,
+    feishu_chat_id: str | None = None,
     remote_login: str | None = None,
     remote_path: str | None = None,
     remote_profile: str | None = None,
@@ -79,6 +80,8 @@ def make_cron_task(
         metadata["core_mode"] = core_mode
     if tool_template:
         metadata["tool_template"] = tool_template
+    if feishu_chat_id:
+        metadata["feishu_chat_id"] = feishu_chat_id
     if remote_login:
         metadata["remote_login"] = remote_login
         metadata["remote_path"] = (remote_path or "~").strip() or "~"

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import time
 from pathlib import Path
@@ -180,9 +181,31 @@ async def _upload_and_embed_attachments(
 
         img_path = att.get("path")
         img_url = att.get("url")
+        img_b64 = att.get("content_base64")
 
         try:
-            if img_path:
+            if img_b64:
+                try:
+                    file_bytes = base64.b64decode(str(img_b64), validate=True)
+                except Exception:
+                    logger.warning("invalid attachment content_base64 for image")
+                    continue
+                filename = str(att.get("file_name") or "").strip() or "attachment.png"
+                mime = str(att.get("content_type") or "").strip() or _MIME_BY_EXT.get(
+                    Path(filename).suffix.lower(), "image/png"
+                )
+                upload_result = await asyncio.to_thread(
+                    client.upload_file, file_bytes, filename, mime_type=mime,
+                )
+                if upload_result and upload_result.get("short_url"):
+                    short_url = upload_result["short_url"]
+                    w = upload_result.get("width", "")
+                    h = upload_result.get("height", "")
+                    size = f"|{w}x{h}" if w and h else ""
+                    md_parts.append(f"![image{size}]({short_url})")
+                else:
+                    logger.warning("upload_file returned no short_url for inline attachment")
+            elif img_path:
                 p = Path(img_path)
                 if not p.exists():
                     logger.warning("attachment file not found: %s", img_path)

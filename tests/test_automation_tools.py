@@ -252,6 +252,36 @@ async def test_create_scheduled_job_inherits_remote_workspace_from_session(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_create_scheduled_job_carries_feishu_chat_id(tmp_path):
+    tool = CreateScheduledJobTool(base_dir=str(tmp_path / "automation"))
+    result = await tool.execute(
+        instruction="飞书审批链路测试",
+        interval_minutes=30,
+        job_name="feishu-chat-binding",
+        __execution_context__={"feishu_chat_id": "oc_test_chat"},
+    )
+    assert result.success is True
+    payload = result.data["job"]["payload_template"]
+    assert payload["feishu_chat_id"] == "oc_test_chat"
+
+
+@pytest.mark.asyncio
+async def test_create_scheduled_job_default_sub_mode_upgrades_to_full(tmp_path):
+    tool = CreateScheduledJobTool(
+        base_dir=str(tmp_path / "automation"),
+        default_core_mode="sub",
+    )
+    result = await tool.execute(
+        instruction="权限模型升级测试",
+        interval_minutes=10,
+        job_name="sub-default-upgrade",
+    )
+    assert result.success is True
+    payload = result.data["job"]["payload_template"]
+    assert payload["core_mode"] == "full"
+
+
+@pytest.mark.asyncio
 async def test_create_scheduled_job_rejects_mixed_one_shot_and_interval(tmp_path):
     tool = CreateScheduledJobTool(base_dir=str(tmp_path / "automation"))
     result = await tool.execute(

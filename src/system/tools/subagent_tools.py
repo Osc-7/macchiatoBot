@@ -267,6 +267,24 @@ async def _run_subagent_task(
         metadata={"source": "subagent", "user_id": subagent_id},
         profile=profile,
     )
+    try:
+        # 让子 Agent 的权限审批可直接回到父会话的人类前端（如飞书卡片）。
+        if parent_session_id.startswith("feishu:"):
+            from frontend.feishu.feishu_turn_hooks import (
+                resolve_feishu_chat_id_for_session,
+            )
+
+            chat_id = resolve_feishu_chat_id_for_session(
+                parent_session_id, core_pool=core_pool
+            )
+            if chat_id:
+                request.metadata["feishu_chat_id"] = chat_id
+    except Exception as exc:
+        logger.debug(
+            "subagent permission channel metadata inject skipped parent=%s: %s",
+            parent_session_id,
+            exc,
+        )
 
     remote_bound = False
     parent_remote = get_remote_workspace_state(parent_session_id)

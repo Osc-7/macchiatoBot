@@ -127,31 +127,9 @@ class RequestPermissionTool(BaseTool):
         timeout_s = kwargs.get("timeout_seconds")
         profile_mode = str(exec_ctx.get("profile_mode") or "full").strip().lower()
         if profile_mode == "sub":
-            parent_session_id = str(exec_ctx.get("parent_session_id") or "").strip()
-            broker_target = parent_session_id or "父会话"
-            return ToolResult(
-                success=False,
-                error="SUBAGENT_PERMISSION_BROKER_REQUIRED",
-                message=(
-                    "子 Agent 不允许直接 request_permission。"
-                    "请先用 send_message_to_agent 向父会话申请，由父会话统一发起审批。"
-                ),
-                data={
-                    "broker_required": True,
-                    "parent_session_id": parent_session_id,
-                    "suggested_send_message": {
-                        "session_id": broker_target,
-                        "content": (
-                            "[PERMISSION_BROKER_REQUEST]\n"
-                            f"summary={summary}\n"
-                            f"kind={kind}\n"
-                            f"details={details if details is not None else ''}\n"
-                            "请父会话决定是否发起 request_permission，并在批准后返回可执行指令。"
-                        ),
-                        "require_reply": True,
-                    },
-                },
-            )
+            # 子 Agent 允许直接发起审批：若上游注入了 feishu_chat_id，会直接到人类卡片。
+            # 这是“至少可人工批准继续执行”的兜底能力，避免任务在子链路卡死。
+            pass
         try:
             timeout = float(timeout_s) if timeout_s is not None else 300.0
         except (TypeError, ValueError):

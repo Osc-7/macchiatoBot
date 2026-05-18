@@ -4,11 +4,13 @@
 
 import pytest
 
+from agent_core.agent.media_helpers import collect_outgoing_attachment
 from agent_core.config import CommandToolsConfig, Config, FileToolsConfig, LLMConfig
 from agent_core.remote.workspace_state import (
     activate_remote_workspace,
     clear_remote_workspace_state,
 )
+from agent_core.tools.base import ToolResult
 from system.tools.media_tools import (
     AttachFileToReplyTool,
     AttachImageToReplyTool,
@@ -26,6 +28,34 @@ def _workspace_config(tmp_path):
             workspace_isolation_enabled=True,
         ),
     )
+
+
+def test_collect_outgoing_attachment_supports_inline_base64_file():
+    result = ToolResult(
+        success=True,
+        data=None,
+        message="ok",
+        metadata={
+            "outgoing_attachment": {
+                "type": "file",
+                "content_base64": "b2s=",
+                "file_name": "report.txt",
+                "mime_type": "text/plain",
+            }
+        },
+    )
+    attachments = []
+
+    collect_outgoing_attachment(result, attachments)
+
+    assert attachments == [
+        {
+            "type": "file",
+            "content_base64": "b2s=",
+            "file_name": "report.txt",
+            "mime_type": "text/plain",
+        }
+    ]
 
 
 class TestAttachMediaTool:
@@ -120,6 +150,94 @@ class TestAttachImageToReplyTool:
         assert result.success is False
         assert result.error == "INVALID_URL"
 
+    @pytest.mark.asyncio
+    async def test_execute_with_remote_workspace_image_path_succeeds(
+        self, tmp_path, monkeypatch
+    ):
+        cfg = _workspace_config(tmp_path)
+        tool = AttachImageToReplyTool(config=cfg)
+        clear_remote_workspace_state()
+        try:
+            activate_remote_workspace(
+                session_id="feishu:u1",
+                login="local-dev",
+                requested_path="~/proj",
+                resolved_path=str(tmp_path / "remote-proj"),
+            )
+            import agent_core.remote.worker_registry as registry_mod
+
+            class _FakeRegistry:
+                async def file_blob_read(self, **kwargs):
+                    class _R:
+                        error = None
+                        content_base64 = "iVBORw0KGgo="
+                        file_name = "pic.png"
+                        mime_type = "image/png"
+                        bytes_read = 8
+                        truncated = False
+
+                    return _R()
+
+            monkeypatch.setattr(
+                registry_mod, "get_remote_worker_registry", lambda: _FakeRegistry()
+            )
+            result = await tool.execute(
+                image_path="pic.png",
+                __execution_context__={
+                    "source": "feishu",
+                    "user_id": "u1",
+                    "session_id": "feishu:u1",
+                },
+            )
+        finally:
+            clear_remote_workspace_state()
+
+        assert result.success is True
+        assert result.metadata.get("outgoing_attachment") == {
+            "type": "image",
+            "content_base64": "iVBORw0KGgo=",
+            "content_type": "image/png",
+            "file_name": "pic.png",
+        }
+
+    @pytest.mark.asyncio
+    async def test_execute_with_remote_workspace_image_blob_timeout_returns_remote_error(
+        self, tmp_path, monkeypatch
+    ):
+        cfg = _workspace_config(tmp_path)
+        tool = AttachImageToReplyTool(config=cfg)
+        clear_remote_workspace_state()
+        try:
+            activate_remote_workspace(
+                session_id="feishu:u1",
+                login="local-dev",
+                requested_path="~/proj",
+                resolved_path=str(tmp_path / "remote-proj"),
+            )
+            import agent_core.remote.worker_registry as registry_mod
+
+            class _FakeRegistry:
+                async def file_blob_read(self, **kwargs):
+                    raise TimeoutError()
+
+            monkeypatch.setattr(
+                registry_mod, "get_remote_worker_registry", lambda: _FakeRegistry()
+            )
+            result = await tool.execute(
+                image_path="pic.png",
+                __execution_context__={
+                    "source": "feishu",
+                    "user_id": "u1",
+                    "session_id": "feishu:u1",
+                },
+            )
+        finally:
+            clear_remote_workspace_state()
+
+        assert result.success is False
+        assert result.error == "REMOTE_ATTACHMENT_READ_FAILED"
+        assert "超时" in result.message
+
 
 class TestAttachFileToReplyTool:
     @pytest.mark.asyncio
@@ -158,8 +276,8 @@ class TestAttachFileToReplyTool:
         assert result.data["path"] == str(p.resolve())
 
     @pytest.mark.asyncio
-    async def test_execute_with_remote_workspace_path_is_explicitly_unsupported(
-        self, tmp_path
+    async def test_execute_with_remote_workspace_path_reads_blob_and_succeeds(
+        self, tmp_path, monkeypatch
     ):
         cfg = _workspace_config(tmp_path)
         tool = AttachFileToReplyTool(config=cfg)
@@ -170,6 +288,23 @@ class TestAttachFileToReplyTool:
                 login="local-dev",
                 requested_path="~/proj",
                 resolved_path=str(tmp_path / "remote-proj"),
+            )
+            import agent_core.remote.worker_registry as registry_mod
+
+            class _FakeRegistry:
+                async def file_blob_read(self, **kwargs):
+                    class _R:
+                        error = None
+                        content_base64 = "b2s="
+                        file_name = "report.txt"
+                        mime_type = "text/plain"
+                        bytes_read = 2
+                        truncated = False
+
+                    return _R()
+
+            monkeypatch.setattr(
+                registry_mod, "get_remote_worker_registry", lambda: _FakeRegistry()
             )
             result = await tool.execute(
                 file_path="report.txt",
@@ -182,9 +317,63 @@ class TestAttachFileToReplyTool:
         finally:
             clear_remote_workspace_state()
 
-        assert result.success is False
-        assert result.error == "INVALID_PATH"
-        assert "远程工作区" in result.message
+        assert result.success is True
+        assert result.metadata.get("outgoing_attachment") == {
+            "type": "file",
+            "content_base64": "b2s=",
+            "mime_type": "text/plain",
+            "file_name": "report.txt",
+        }
+
+    @pytest.mark.asyncio
+    async def test_execute_with_remote_workspace_path_falls_back_to_text_read(
+        self, tmp_path, monkeypatch
+    ):
+        cfg = _workspace_config(tmp_path)
+        tool = AttachFileToReplyTool(config=cfg)
+        clear_remote_workspace_state()
+        try:
+            activate_remote_workspace(
+                session_id="feishu:u1",
+                login="local-dev",
+                requested_path="~/proj",
+                resolved_path=str(tmp_path / "remote-proj"),
+            )
+            import agent_core.remote.worker_registry as registry_mod
+
+            class _FakeRegistry:
+                async def file_blob_read(self, **kwargs):
+                    raise TimeoutError()
+
+                async def file_read(self, **kwargs):
+                    class _R:
+                        error = None
+                        content = "report content"
+                        truncated = False
+
+                    return _R()
+
+            monkeypatch.setattr(
+                registry_mod, "get_remote_worker_registry", lambda: _FakeRegistry()
+            )
+            result = await tool.execute(
+                file_path="report.txt",
+                __execution_context__={
+                    "source": "feishu",
+                    "user_id": "u1",
+                    "session_id": "feishu:u1",
+                },
+            )
+        finally:
+            clear_remote_workspace_state()
+
+        assert result.success is True
+        assert result.metadata.get("outgoing_attachment") == {
+            "type": "file",
+            "content_base64": "cmVwb3J0IGNvbnRlbnQ=",
+            "mime_type": "text/plain; charset=utf-8",
+            "file_name": "report.txt",
+        }
 
     @pytest.mark.asyncio
     async def test_execute_with_url_returns_outgoing_attachment(self):

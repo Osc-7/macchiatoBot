@@ -550,7 +550,7 @@ class CreateScheduledJobTool(BaseTool):
                 ToolParameter(
                     name="core_mode",
                     type="string",
-                    description="可选：Core 运行模式：full / sub / background。不提供时与当前会话的 core_mode 对齐。",
+                    description="可选：Core 运行模式：full / sub / background。不提供时默认采用 full（若当前会话是 sub/background，也会自动提升为 full）。",
                     required=False,
                 ),
                 ToolParameter(
@@ -717,12 +717,19 @@ class CreateScheduledJobTool(BaseTool):
         memory_owner = (
             str(kwargs.get("memory_owner") or "").strip() or self._default_memory_owner
         )
-        core_mode = (
-            str(kwargs.get("core_mode") or "").strip() or self._default_core_mode
-        )
+        explicit_core_mode = str(kwargs.get("core_mode") or "").strip()
+        if explicit_core_mode:
+            core_mode = explicit_core_mode
+        else:
+            inherited_mode = str(self._default_core_mode or "").strip().lower()
+            if inherited_mode in {"sub", "background", "cron", "heartbeat"}:
+                core_mode = "full"
+            else:
+                core_mode = self._default_core_mode
         tool_template = (
             str(kwargs.get("tool_template") or "").strip() or self._default_tool_template
         )
+        feishu_chat_id = str(exec_ctx.get("feishu_chat_id") or "").strip() or None
         remote_login = str(kwargs.get("remote_login") or "").strip() or None
         remote_path = str(kwargs.get("remote_path") or "").strip() or "~"
         remote_profile = str(kwargs.get("remote_profile") or "").strip().lower() or "dev"
@@ -797,6 +804,7 @@ class CreateScheduledJobTool(BaseTool):
                 **({"memory_owner": memory_owner} if memory_owner is not None else {}),
                 **({"core_mode": core_mode} if core_mode is not None else {}),
                 **({"tool_template": tool_template} if tool_template is not None else {}),
+                **({"feishu_chat_id": feishu_chat_id} if feishu_chat_id else {}),
                 **({"remote_login": remote_login} if remote_login else {}),
                 **({"remote_path": remote_path} if remote_login else {}),
                 **({"remote_profile": remote_profile} if remote_login else {}),

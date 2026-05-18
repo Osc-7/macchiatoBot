@@ -120,6 +120,34 @@ def _workspace_frontend_user_for_automation_task(
     return ts or "cli", (task_user_id or "default").strip() or "default"
 
 
+def _resolve_feishu_chat_id_for_automation_task(
+    *,
+    raw_owner: str,
+    explicit_chat_id: str,
+    core_pool: CorePool,
+) -> str:
+    """优先使用任务显式 chat_id，否则尝试从 feishu memory_owner 回溯最近会话 chat_id。"""
+    cid = (explicit_chat_id or "").strip()
+    if cid:
+        return cid
+    owner = (raw_owner or "").strip()
+    if not owner.startswith("feishu:"):
+        return ""
+    owner_id = owner.split(":", 1)[1].strip() if ":" in owner else ""
+    if not owner_id:
+        return ""
+    try:
+        from frontend.feishu.feishu_turn_hooks import resolve_feishu_chat_id_for_session
+
+        for sid in (f"feishu:user:{owner_id}", f"feishu:chat:{owner_id}"):
+            resolved = resolve_feishu_chat_id_for_session(sid, core_pool=core_pool)
+            if resolved:
+                return str(resolved).strip()
+    except Exception:
+        return ""
+    return ""
+
+
 async def _consume_loop(
     queue: AgentTaskQueue,
     scheduler: KernelScheduler,
@@ -323,6 +351,14 @@ async def _consume_loop(
                 tt = str(task.metadata.get("tool_template") or "").strip()
                 if tt:
                     req_meta["tool_template"] = tt
+                explicit_chat_id = str(task.metadata.get("feishu_chat_id") or "").strip()
+                resolved_chat_id = _resolve_feishu_chat_id_for_automation_task(
+                    raw_owner=mo,
+                    explicit_chat_id=explicit_chat_id,
+                    core_pool=scheduler.core_pool,
+                )
+                if resolved_chat_id:
+                    req_meta["feishu_chat_id"] = resolved_chat_id
             request = KernelRequest.create(
                 text=task.instruction,
                 session_id=task.session_id,

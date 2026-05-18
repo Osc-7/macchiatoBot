@@ -269,7 +269,7 @@ class BashSecurity:
                     reason="受限模式（sub）下 bash 未启用",
                     error_code="PERMISSION_DENIED",
                 )
-            return self._check_restricted(command)
+            return self._check_restricted(command, confirmed=confirmed)
 
         path_grants: list[dict[str, str]] = []
         if self._workspace_jail_root:
@@ -495,7 +495,7 @@ class BashSecurity:
 
     # ── Layer 1 实现 ──────────────────────────────────────────
 
-    def _check_restricted(self, command: str) -> SecurityVerdict:
+    def _check_restricted(self, command: str, *, confirmed: bool = False) -> SecurityVerdict:
         """受限模式：白名单 + 禁止高危 shell 运算符（子命令、重定向、单独后台 ``&`` 等）。
 
         允许 ``|`` / ``;`` / ``&&`` / ``||`` 串联命令；各段须落在白名单内，且整体仍过危险模式检测。
@@ -528,14 +528,18 @@ class BashSecurity:
                 continue
             base_cmd = Path(parts[0]).name.lower()
             if base_cmd not in self._restricted_whitelist:
+                if confirmed:
+                    continue
                 allowed_preview = ", ".join(sorted(self._restricted_whitelist)[:10])
                 return SecurityVerdict(
-                    SecurityAction.DENY,
+                    SecurityAction.ASK_USER,
                     reason=(
                         f"受限模式下命令 '{base_cmd}' 不在白名单内。"
-                        f"允许的命令示例: {allowed_preview}"
+                        f"允许的命令示例: {allowed_preview}。"
+                        "可发起人工审批，批准后执行该命令。"
                     ),
-                    error_code="COMMAND_NOT_WHITELISTED",
+                    error_code="CONFIRMATION_REQUIRED",
+                    risk_reasons=("受限模式非白名单命令",),
                 )
 
         danger = self._check_dangerous(command)

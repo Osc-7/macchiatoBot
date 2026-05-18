@@ -406,6 +406,7 @@ class AutomationScheduler:
         memory_owner = str(payload.get("memory_owner") or "").strip()
         core_mode = str(payload.get("core_mode") or "").strip() or None
         tool_template = str(payload.get("tool_template") or "").strip() or None
+        feishu_chat_id = str(payload.get("feishu_chat_id") or "").strip() or None
         remote_login = str(payload.get("remote_login") or "").strip() or None
         remote_path = str(payload.get("remote_path") or "").strip() or "~"
         remote_profile = str(payload.get("remote_profile") or "").strip() or "dev"
@@ -425,6 +426,7 @@ class AutomationScheduler:
             memory_owner=memory_owner or None,
             core_mode=core_mode,
             tool_template=tool_template,
+            feishu_chat_id=feishu_chat_id,
             remote_login=remote_login,
             remote_path=remote_path,
             remote_profile=remote_profile,

@@ -2,24 +2,31 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import base64
+import mimetypes
+from pathlib import Path, PurePosixPath
 from typing import Optional, Tuple
 
 
 def resolve_under_workspace(root: Path, relative: str) -> Path:
-    rel = (relative or "").strip().replace("\\", "/").lstrip("/")
-    if not rel or rel == ".":
+    raw = (relative or "").strip().replace("\\", "/")
+    if not raw or raw == ".":
         candidate = root.resolve()
+    elif raw.startswith("/"):
+        if ".." in PurePosixPath(raw).parts:
+            raise ValueError("路径中不允许 ..")
+        candidate = Path(raw).resolve()
     else:
+        rel = raw.lstrip("/")
         parts = Path(rel).parts
         if ".." in parts:
             raise ValueError("路径中不允许 ..")
         candidate = (root / rel).resolve()
-    root_r = root.resolve()
-    try:
-        candidate.relative_to(root_r)
-    except ValueError as exc:
-        raise ValueError("路径越出授权工作区") from exc
+        root_r = root.resolve()
+        try:
+            candidate.relative_to(root_r)
+        except ValueError as exc:
+            raise ValueError("路径越出授权工作区") from exc
     return candidate
 
 
@@ -87,3 +94,35 @@ def write_workspace_text(
         return len(content.encode(encoding)), None
     except OSError as exc:
         return 0, str(exc)
+
+
+def read_workspace_blob(
+    root: Path,
+    relative: str,
+    *,
+    max_bytes: int = 20 * 1024 * 1024,
+) -> Tuple[str, str, str, int, bool, Optional[str]]:
+    """Returns (content_base64, file_name, mime_type, bytes_read, truncated, error)."""
+    try:
+        path = resolve_under_workspace(root, relative)
+    except ValueError as exc:
+        return "", "", "application/octet-stream", 0, False, str(exc)
+    if not path.is_file():
+        return "", "", "application/octet-stream", 0, False, "FILE_NOT_FOUND"
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return "", "", "application/octet-stream", 0, False, str(exc)
+    limit = max(1, int(max_bytes))
+    truncated = len(raw) > limit
+    if truncated:
+        raw = raw[:limit]
+    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return (
+        base64.b64encode(raw).decode("ascii"),
+        path.name,
+        mime,
+        len(raw),
+        truncated,
+        None,
+    )

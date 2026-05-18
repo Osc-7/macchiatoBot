@@ -386,3 +386,43 @@ async def test_ipc_session_delete_rejected_when_session_is_active_for_any_client
         await client_b.close()
         await server.stop()
         await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_ipc_dispatch_resolve_remote_login_feishu(monkeypatch, tmp_path: Path):
+    """网关进程须通过 IPC 命中 daemon 内的 pending；dispatch 应转发到 resolve_remote_login。"""
+    from system.automation import remote_worker_server as rws
+
+    captured: dict[str, object] = {}
+
+    def fake_resolve(**kwargs):
+        captured.update(kwargs)
+        return "success", "已批准该远程登录请求", {"schema": "2.0", "stub": True}
+
+    monkeypatch.setattr(rws, "resolve_remote_login_request_from_feishu", fake_resolve)
+
+    gateway = MagicMock()
+    server = AutomationIPCServer(
+        gateway,  # type: ignore[arg-type]
+        owner_id="root",
+        source="cli",
+        socket_path=str(tmp_path / "unused.sock"),
+    )
+
+    result = await server._dispatch(
+        "resolve_remote_login_feishu",
+        {
+            "client_id": "feishu:test",
+            "request_id": "dc-001",
+            "approve": True,
+            "approver_open_id": "ou_x",
+            "approver_user_id": "",
+        },
+    )
+
+    assert result["kind"] == "success"
+    assert result["message"] == "已批准该远程登录请求"
+    assert result["card"] == {"schema": "2.0", "stub": True}
+    assert captured["request_id"] == "dc-001"
+    assert captured["approve"] is True
+    assert captured["approver_open_id"] == "ou_x"

@@ -26,6 +26,8 @@ from .permission_card import (
     build_permission_request_card,
     parse_permission_card_payload,
 )
+from .remote_login_card import (APPROVE, REJECT, extract_card_operator_ids,
+                                parse_remote_login_card_payload)
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +259,44 @@ async def resolve_card_via_daemon_ipc(
     return "success", "已批准" if allowed else "已拒绝", card_dict
 
 
+async def resolve_remote_login_via_daemon_ipc(
+    *,
+    request_id: str,
+    approve: bool,
+    approver_open_id: str = "",
+    approver_user_id: str = "",
+) -> Tuple[str, str, Optional[Dict[str, Any]]]:
+    """通过 Automation IPC 在 daemon 内执行远程登录卡片审批。"""
+    rid = (request_id or "").strip()
+    if not rid:
+        return "warning", "缺少 request_id", None
+
+    cfg = get_config()
+    timeout = min(float(cfg.llm.request_timeout_seconds or 120.0), 60.0)
+    ipc = AutomationIPCClient(
+        owner_id="root",
+        source="feishu",
+        socket_path=default_socket_path(),
+        timeout_seconds=timeout,
+    )
+    if not await ipc.ping():
+        logger.error("card remote_login: automation_daemon IPC unreachable")
+        return "error", "无法连接 automation_daemon，请确认已启动", None
+
+    try:
+        kind, msg, card_dict = await ipc.resolve_remote_login_feishu(
+            request_id=rid,
+            approve=approve,
+            approver_open_id=approver_open_id,
+            approver_user_id=approver_user_id,
+        )
+    except RuntimeError as exc:
+        logger.warning("resolve_remote_login_feishu ipc failed: %s", exc)
+        return "error", str(exc) or "IPC 调用失败", None
+
+    return kind, msg, card_dict
+
+
 def _toast_response(
     *,
     msg: str,
@@ -310,6 +350,17 @@ async def handle_feishu_card_action(body: Dict[str, Any]) -> JSONResponse:
     if str(merged_au.get(ASK_USER_VALUE_KEY) or "").strip() in (ASK_PICK, ASK_CUSTOM):
         kind, msg, card_dict = await resolve_ask_user_via_daemon_ipc(
             raw_val, form_value=form_value
+        )
+        return _toast_response(msg=msg, kind=kind, card=card_dict)
+
+    parsed_remote = parse_remote_login_card_payload(raw_val)
+    if parsed_remote.get("decision") in (APPROVE, REJECT):
+        open_id, user_id = extract_card_operator_ids(body)
+        kind, msg, card_dict = await resolve_remote_login_via_daemon_ipc(
+            request_id=parsed_remote.get("request_id") or "",
+            approve=parsed_remote.get("decision") == APPROVE,
+            approver_open_id=open_id,
+            approver_user_id=user_id,
         )
         return _toast_response(msg=msg, kind=kind, card=card_dict)
 

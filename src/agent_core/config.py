@@ -1303,6 +1303,20 @@ class FeishuConfig(BaseModel):
             "用于企业内 user_id 鉴权，和 open_id 任一命中即通过。"
         ),
     )
+    remote_login_approver_open_ids: List[str] = Field(
+        default_factory=list,
+        description=(
+            "允许审批远程登录卡片的飞书 open_id 列表。"
+            "用于 macchiato-remote login 的首登批准。"
+        ),
+    )
+    remote_login_approver_user_ids: List[str] = Field(
+        default_factory=list,
+        description=(
+            "允许审批远程登录卡片的飞书 user_id 列表。"
+            "与 remote_login_approver_open_ids 任一命中即通过。"
+        ),
+    )
 
 
 class Config(BaseModel):

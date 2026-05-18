@@ -61,7 +61,12 @@ from .ask_user_card import (
     ASK_USER_VALUE_KEY,
     merge_ask_user_action_value,
 )
-from .card_callback import resolve_ask_user_via_daemon_ipc, resolve_card_via_daemon_ipc
+from .card_callback import (
+    resolve_ask_user_via_daemon_ipc,
+    resolve_card_via_daemon_ipc,
+    resolve_remote_login_via_daemon_ipc,
+)
+from .remote_login_card import APPROVE, REJECT, parse_remote_login_card_payload
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +90,24 @@ def _card_action_value_to_plain(raw_val: Any) -> Any:
         except Exception:
             pass
     return raw_val
+
+
+def _card_action_operator_ids(event_obj: Any) -> tuple[str, str]:
+    operator = getattr(event_obj, "operator", None) if event_obj is not None else None
+    operator_id = getattr(operator, "operator_id", None) if operator is not None else None
+    open_id = (
+        getattr(operator, "open_id", None)
+        or getattr(operator_id, "open_id", None)
+        or getattr(event_obj, "open_id", None)
+        or ""
+    )
+    user_id = (
+        getattr(operator, "user_id", None)
+        or getattr(operator_id, "user_id", None)
+        or getattr(event_obj, "user_id", None)
+        or ""
+    )
+    return str(open_id or "").strip(), str(user_id or "").strip()
 
 
 def _handle_p2_card_action_trigger(data: Any) -> Any:
@@ -134,6 +157,8 @@ def _handle_p2_card_action_trigger(data: Any) -> Any:
 
     raw_plain = _card_action_value_to_plain(raw_val)
     merged_au = merge_ask_user_action_value(raw_plain, form_value)
+    parsed_remote = parse_remote_login_card_payload(raw_plain)
+    approver_open_id, approver_user_id = _card_action_operator_ids(ev)
 
     async def _resolve_card() -> tuple[str, str, Any]:
         if str(merged_au.get(ASK_USER_VALUE_KEY) or "").strip() in (
@@ -142,6 +167,13 @@ def _handle_p2_card_action_trigger(data: Any) -> Any:
         ):
             return await resolve_ask_user_via_daemon_ipc(
                 raw_plain, form_value=form_value
+            )
+        if parsed_remote.get("decision") in (APPROVE, REJECT):
+            return await resolve_remote_login_via_daemon_ipc(
+                request_id=str(parsed_remote.get("request_id") or ""),
+                approve=parsed_remote.get("decision") == APPROVE,
+                approver_open_id=approver_open_id,
+                approver_user_id=approver_user_id,
             )
         return await resolve_card_via_daemon_ipc(raw_plain, form_value=form_value)
 

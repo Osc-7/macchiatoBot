@@ -14,6 +14,8 @@ from urllib.parse import quote, urlencode, urlparse, urlunparse
 from macchiato_remote.protocol import (
     RemoteCommandRequest,
     RemoteCommandResult,
+    RemoteFileBlobReadRequest,
+    RemoteFileBlobReadResult,
     RemoteFileReadRequest,
     RemoteFileReadResult,
     RemoteFileWriteRequest,
@@ -25,8 +27,31 @@ from macchiato_remote.protocol import (
     RemoteWorkspaceOpenRequest,
     RemoteWorkspaceOpenResult,
 )
-from macchiato_remote.runtime.files import read_workspace_text, write_workspace_text
+from macchiato_remote.runtime.files import (
+    read_workspace_blob,
+    read_workspace_text,
+    write_workspace_text,
+)
 from macchiato_remote.runtime.shell import LocalShellConfig, LocalShellSession
+
+
+def normalize_remote_server_url(server: str) -> str:
+    """Normalize server URL for remote worker connection.
+
+    Accepts shorthand like ``149.28.149.135:9380`` and rewrites it to
+    ``http://149.28.149.135:9380`` so websocket URL construction is stable.
+    """
+    s = (server or "").strip().rstrip("/")
+    if not s:
+        return ""
+    # `host:port` without scheme is common for CLI usage.
+    if "://" not in s:
+        return f"http://{s}"
+    parsed = urlparse(s)
+    # Defensive fallback for malformed schemes like `http:1.2.3.4:9380`.
+    if not parsed.netloc and parsed.path and ":" in parsed.path:
+        return f"http://{parsed.path}"
+    return s
 
 
 def raw_websocket_handshake_probe(
@@ -131,7 +156,7 @@ class RemoteWorkerClient:
         token: Optional[str] = None,
         shell_path: str = "/bin/bash",
     ) -> None:
-        self.server = server.rstrip("/")
+        self.server = normalize_remote_server_url(server)
         self.login = login.strip()
         self.token = (token or "").strip() or None
         self.shell_path = shell_path
@@ -232,12 +257,19 @@ class RemoteWorkerClient:
             scheme = "ws"
         elif scheme not in {"ws", "wss"}:
             scheme = "wss"
-        path = parsed.path.rstrip("/") + f"/remote/worker/{quote(self.login)}"
+        netloc = parsed.netloc
+        if not netloc and parsed.path and ":" in parsed.path:
+            # Backward-compatibility for legacy configs with missing scheme.
+            netloc = parsed.path
+            base_path = ""
+        else:
+            base_path = parsed.path
+        path = base_path.rstrip("/") + f"/remote/worker/{quote(self.login)}"
         query = parsed.query
         if self.token:
             extra = urlencode({"token": self.token})
             query = f"{query}&{extra}" if query else extra
-        return urlunparse((scheme, parsed.netloc, path, "", query, ""))
+        return urlunparse((scheme, netloc, path, "", query, ""))
 
     def _websocket_url_for_log(self) -> str:
         """Same URL as connect but without query string (hides token)."""
@@ -271,6 +303,10 @@ class RemoteWorkerClient:
             req = RemoteFileWriteRequest.model_validate(payload)
             result = await self._file_write(req)
             return {"type": "file_write_result", "result": result.model_dump()}
+        if msg_type == "file_blob_read":
+            req = RemoteFileBlobReadRequest.model_validate(payload)
+            result = await self._file_blob_read(req)
+            return {"type": "file_blob_read_result", "result": result.model_dump()}
         if msg_type == "reset_shell":
             req = RemoteShellResetRequest.model_validate(payload)
             result = await self._reset_shell(req)
@@ -403,6 +439,37 @@ class RemoteWorkerClient:
             path=req.path,
             bytes_written=written,
             encoding=req.encoding,
+        )
+
+    async def _file_blob_read(
+        self, req: RemoteFileBlobReadRequest
+    ) -> RemoteFileBlobReadResult:
+        session = self._sessions.get(req.session_id)
+        if session is None:
+            return RemoteFileBlobReadResult(
+                request_id=req.request_id,
+                path=req.path,
+                error="remote session is not open",
+            )
+        content_b64, name, mime, read_n, truncated, err = read_workspace_blob(
+            session.root,
+            req.path,
+            max_bytes=req.max_bytes,
+        )
+        if err:
+            return RemoteFileBlobReadResult(
+                request_id=req.request_id,
+                path=req.path,
+                error=err,
+            )
+        return RemoteFileBlobReadResult(
+            request_id=req.request_id,
+            path=req.path,
+            content_base64=content_b64,
+            file_name=name,
+            mime_type=mime,
+            bytes_read=read_n,
+            truncated=truncated,
         )
 
     async def _reset_shell(

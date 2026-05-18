@@ -585,6 +585,26 @@ class AutomationIPCServer:
             ok = _resolve_permission_wait(pid, decision)
             return {"ok": bool(ok)}
 
+        if method == "resolve_remote_login_feishu":
+            # 远程登录 pending 仅存于 automation_daemon（remote_worker_server 模块全局）。
+            # feishu_ws_gateway 等独立进程必须通过 IPC 调用，否则会误判「已过期」。
+            from system.automation.remote_worker_server import (
+                resolve_remote_login_request_from_feishu as _resolve_remote_login_feishu,
+            )
+
+            rid = str(params.get("request_id") or "").strip()
+            approve = bool(params.get("approve"))
+            approver_open_id = str(params.get("approver_open_id") or "").strip()
+            approver_user_id = str(params.get("approver_user_id") or "").strip()
+            kind, msg, card = _resolve_remote_login_feishu(
+                request_id=rid,
+                approve=approve,
+                approver_open_id=approver_open_id,
+                approver_user_id=approver_user_id,
+            )
+            card_out = card if isinstance(card, dict) else None
+            return {"kind": kind, "message": msg, "card": card_out}
+
         if method == "resolve_ask_user":
             from agent_core.permissions.ask_user_registry import (
                 parse_answers_from_ipc_params,
@@ -1009,6 +1029,29 @@ class AutomationIPCClient:
             payload["user_instruction"] = user_instruction
         data = await self._request("resolve_permission", payload)
         return bool(data.get("ok"))
+
+    async def resolve_remote_login_feishu(
+        self,
+        *,
+        request_id: str,
+        approve: bool,
+        approver_open_id: str = "",
+        approver_user_id: str = "",
+    ) -> tuple[str, str, Optional[Dict[str, Any]]]:
+        """在 daemon 进程内解析远程登录审批（网关进程须走此接口）。"""
+        data = await self._request(
+            "resolve_remote_login_feishu",
+            {
+                "request_id": request_id,
+                "approve": approve,
+                "approver_open_id": approver_open_id,
+                "approver_user_id": approver_user_id,
+            },
+        )
+        kind = str(data.get("kind") or "warning")
+        msg = str(data.get("message") or "")
+        card = data.get("card")
+        return kind, msg, card if isinstance(card, dict) else None
 
     async def resolve_ask_user(
         self,

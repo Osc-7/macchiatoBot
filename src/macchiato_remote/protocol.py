@@ -155,6 +155,24 @@ class RemoteFileWriteResult(BaseModel):
     error: Optional[str] = None
 
 
+class RemoteFileBlobReadRequest(BaseModel):
+    request_id: str
+    session_id: str
+    path: str
+    max_bytes: int = 20 * 1024 * 1024
+
+
+class RemoteFileBlobReadResult(BaseModel):
+    request_id: str
+    path: str
+    content_base64: str = ""
+    file_name: str = ""
+    mime_type: str = "application/octet-stream"
+    bytes_read: int = 0
+    truncated: bool = False
+    error: Optional[str] = None
+
+
 class RemoteShellResetRequest(BaseModel):
     request_id: str
     session_id: str

@@ -272,11 +272,31 @@ You can also use positional server syntax:
 macchiato-remote login your-macchiato-server.example.com:9380 --login personal
 ```
 
-If `--token` is omitted, the CLI starts a device-login flow:
+If `--token` is omitted, the CLI starts a device-login flow.
+
+Preferred mode (bootstrap exchange):
+
+1. Set `MACCHIATO_REMOTE_LOGIN_BOOTSTRAP_TOKEN` on server
+2. Run `macchiato-remote login <server> --login <alias> --auth-token '<bootstrap-token>'`
+3. Server verifies bootstrap token and immediately issues a worker token
+4. CLI stores the issued worker token in local config
+
+Fallback mode (manual approval panel):
 
 1. CLI requests a one-time code from `/remote/login/start`
 2. You open `/remote/login` and approve with server `MACCHIATO_REMOTE_LOGIN_APPROVER_SECRET`
 3. CLI polls `/remote/login/poll`, receives a short-lived onboarding token, and saves it to local config
+
+Feishu approval mode (recommended for no-token UX):
+
+1. Configure server Feishu bot and set `feishu.automation_activity_chat_id`
+2. Configure approver allowlist:
+   - `MACCHIATO_REMOTE_LOGIN_APPROVER_OPEN_IDS`
+   - `MACCHIATO_REMOTE_LOGIN_APPROVER_USER_IDS`
+3. Client runs only:
+   - `macchiato-remote login <server-ip>:9380 --login <alias>`
+4. Server sends an interactive Feishu approval card; approver clicks Approve/Reject
+5. CLI keeps polling and auto-saves token after approval
 
 Check local configuration:
 

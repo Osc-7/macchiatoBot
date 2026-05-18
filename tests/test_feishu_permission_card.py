@@ -21,6 +21,7 @@ from frontend.feishu.permission_card import (
     parse_permission_card_callback,
     parse_permission_card_payload,
 )
+from frontend.feishu.remote_login_card import VALUE_KEY as REMOTE_LOGIN_VALUE_KEY
 
 
 def test_build_permission_card_no_path_two_columns_plus_form() -> None:
@@ -244,3 +245,99 @@ async def test_card_callback_clarify_with_form_value(monkeypatch) -> None:
         assert decision.user_instruction == "只写 home 目录"
     finally:
         set_permission_notify_hook(None)
+
+
+@pytest.mark.asyncio
+async def test_card_callback_handles_remote_login_action(monkeypatch) -> None:
+    from frontend.feishu import card_callback as cc
+
+    async def _fake_via_ipc(**kwargs):
+        assert kwargs["request_id"] == "req-1"
+        assert kwargs["approve"] is True
+        assert kwargs["approver_open_id"] == "ou_admin"
+        return "success", "已批准该远程登录请求", {"schema": "2.0", "body": {"elements": []}}
+
+    monkeypatch.setattr(cc, "resolve_remote_login_via_daemon_ipc", _fake_via_ipc)
+
+    body = {
+        "header": {"event_type": "card.action.trigger", "token": None},
+        "event": {
+            "operator": {"operator_id": {"open_id": "ou_admin"}},
+            "action": {
+                "value": {
+                    "request_id": "req-1",
+                    REMOTE_LOGIN_VALUE_KEY: "approve",
+                    "login": "personal",
+                }
+            },
+        },
+    }
+    resp = await handle_feishu_card_action(body)
+    assert resp.status_code == 200
+    payload = json.loads(resp.body.decode())
+    assert payload["toast"]["type"] == "success"
+    assert "已批准" in payload["toast"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_card_callback_handles_remote_login_action_string_value(monkeypatch) -> None:
+    from frontend.feishu import card_callback as cc
+
+    async def _fake_via_ipc(**kwargs):
+        assert kwargs["request_id"] == "req-2"
+        assert kwargs["approve"] is True
+        return "success", "已批准该远程登录请求", {"schema": "2.0", "body": {"elements": []}}
+
+    monkeypatch.setattr(cc, "resolve_remote_login_via_daemon_ipc", _fake_via_ipc)
+
+    body = {
+        "header": {"event_type": "card.action.trigger", "token": None},
+        "event": {
+            "operator": {"operator_id": {"open_id": "ou_admin"}},
+            "action": {
+                "value": json.dumps(
+                    {
+                        "request_id": "req-2",
+                        REMOTE_LOGIN_VALUE_KEY: "approve",
+                        "login": "personal",
+                    },
+                    ensure_ascii=False,
+                )
+            },
+        },
+    }
+    resp = await handle_feishu_card_action(body)
+    assert resp.status_code == 200
+    payload = json.loads(resp.body.decode())
+    assert payload["toast"]["type"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_card_callback_handles_remote_login_action_nested_value(monkeypatch) -> None:
+    from frontend.feishu import card_callback as cc
+
+    async def _fake_via_ipc(**kwargs):
+        assert kwargs["request_id"] == "req-3"
+        assert kwargs["approve"] is True
+        return "success", "已批准该远程登录请求", {"schema": "2.0", "body": {"elements": []}}
+
+    monkeypatch.setattr(cc, "resolve_remote_login_via_daemon_ipc", _fake_via_ipc)
+
+    nested_value = {
+        "value": {
+            "request_id": "req-3",
+            REMOTE_LOGIN_VALUE_KEY: "approve",
+            "login": "personal",
+        }
+    }
+    body = {
+        "header": {"event_type": "card.action.trigger", "token": None},
+        "event": {
+            "operator": {"operator_id": {"open_id": "ou_admin"}},
+            "action": {"value": nested_value},
+        },
+    }
+    resp = await handle_feishu_card_action(body)
+    assert resp.status_code == 200
+    payload = json.loads(resp.body.decode())
+    assert payload["toast"]["type"] == "success"

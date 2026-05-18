@@ -11,6 +11,8 @@ from macchiato_remote.protocol import (
     REMOTE_WORKSPACE_MOUNT,
     RemoteCommandRequest,
     RemoteCommandResult,
+    RemoteFileBlobReadRequest,
+    RemoteFileBlobReadResult,
     RemoteFileReadRequest,
     RemoteFileReadResult,
     RemoteFileWriteRequest,
@@ -241,6 +243,29 @@ class RemoteWorkerRegistry:
             timeout_seconds=timeout_seconds,
         )
         return RemoteFileWriteResult.model_validate(payload)
+
+    async def file_blob_read(
+        self,
+        *,
+        login: str,
+        session_id: str,
+        path: str,
+        max_bytes: int = 20 * 1024 * 1024,
+        timeout_seconds: float = 120.0,
+    ) -> RemoteFileBlobReadResult:
+        conn = await self.require(login)
+        req = RemoteFileBlobReadRequest(
+            request_id=uuid.uuid4().hex,
+            session_id=session_id,
+            path=path,
+            max_bytes=max(1, int(max_bytes)),
+        )
+        payload = await conn.request(
+            "file_blob_read",
+            req.model_dump(),
+            timeout_seconds=timeout_seconds,
+        )
+        return RemoteFileBlobReadResult.model_validate(payload)
 
     async def reset_remote_shell(
         self,

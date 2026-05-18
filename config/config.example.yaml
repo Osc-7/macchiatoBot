@@ -266,6 +266,10 @@ feishu:
   reply_format: markdown_card
   assistant_reply_stream: true
   assistant_cardkit_stream: true
+  # 远程登录审批白名单（优先级低于环境变量
+  # MACCHIATO_REMOTE_LOGIN_APPROVER_OPEN_IDS / MACCHIATO_REMOTE_LOGIN_APPROVER_USER_IDS）
+  remote_login_approver_open_ids: []
+  remote_login_approver_user_ids: []
 
 memory:
   enabled: true

@@ -17,6 +17,9 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -46,6 +49,40 @@ def _save_config(data: dict) -> None:
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _normalize_server_url(server: str) -> str:
+    s = (server or "").strip().rstrip("/")
+    if not s:
+        return ""
+    parsed = urllib.parse.urlparse(s)
+    if parsed.scheme and parsed.netloc:
+        return s
+    return f"http://{s}"
+
+
+def _http_post_json(url: str, payload: dict, *, timeout: float = 10.0) -> tuple[int, dict]:
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url=url,
+        data=raw,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = int(getattr(resp, "status", 200) or 200)
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        body = exc.read().decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        return 0, {"ok": False, "error": "network_error", "message": str(exc)}
+    try:
+        data = json.loads(body) if body else {}
+    except json.JSONDecodeError:
+        data = {"ok": False, "error": "invalid_json_response", "raw": body[:500]}
+    return status, data if isinstance(data, dict) else {"ok": False, "raw": data}
 
 
 def _server_port(server: str) -> int:
@@ -222,13 +259,44 @@ def _start_background() -> int:
 
 
 def _cmd_login(args: argparse.Namespace) -> int:
+    server_raw = (
+        args.server.strip()
+        if isinstance(getattr(args, "server", None), str) and args.server.strip()
+        else str(getattr(args, "server_pos", "") or "").strip()
+    )
+    server = _normalize_server_url(server_raw)
+    if not server:
+        print("server is required. Usage: macchiato-remote login <server> --login <alias>")
+        return 1
+    login_alias = (args.login or "").strip()
+    if not login_alias:
+        print("login alias is required. Example: --login personal")
+        return 1
+    token_raw = (args.token or "").strip()
+    if token_raw:
+        return _cmd_login_static_token(
+            server=server,
+            login_alias=login_alias,
+            token=token_raw,
+            args=args,
+        )
+    return _cmd_login_device_flow(server=server, login_alias=login_alias, args=args)
+
+
+def _cmd_login_static_token(
+    *,
+    server: str,
+    login_alias: str,
+    token: str,
+    args: argparse.Namespace,
+) -> int:
     data = _load_config()
     ssh_tunnel = (args.ssh_tunnel or "").strip()
     data.update(
         {
-            "server": args.server.strip(),
-            "login": args.login.strip(),
-            "token": (args.token or "").strip(),
+            "server": server,
+            "login": login_alias,
+            "token": token,
         }
     )
     if ssh_tunnel:
@@ -238,7 +306,7 @@ def _cmd_login(args: argparse.Namespace) -> int:
                 "ssh_local_port": int(args.ssh_local_port),
                 "ssh_remote_host": args.ssh_remote_host.strip(),
                 "ssh_remote_port": int(
-                    args.ssh_remote_port or _default_ssh_remote_port(args.server)
+                    args.ssh_remote_port or _default_ssh_remote_port(server)
                 ),
             }
         )
@@ -260,6 +328,106 @@ def _cmd_login(args: argparse.Namespace) -> int:
             f"{data['ssh_tunnel']}:{data['ssh_remote_host']}:{data['ssh_remote_port']}"
         )
     return 0
+
+
+def _cmd_login_device_flow(
+    *,
+    server: str,
+    login_alias: str,
+    args: argparse.Namespace,
+) -> int:
+    auth_token = (args.auth_token or "").strip() or os.environ.get(
+        "MACCHIATO_REMOTE_AUTH_TOKEN", ""
+    ).strip()
+    start_url = f"{server}/remote/login/start"
+    status, started = _http_post_json(
+        start_url,
+        {
+            "login": login_alias,
+            "device_name": (args.device_name or "").strip(),
+            "bootstrap_token": auth_token,
+        },
+    )
+    if status <= 0:
+        print(f"Failed to contact server: {started.get('message') or started.get('error')}")
+        return 1
+    if not bool(started.get("ok")):
+        print(f"Login start rejected: {started.get('message') or started.get('error')}")
+        return 1
+    if str(started.get("status") or "").strip().lower() == "approved":
+        token = str(started.get("token") or "").strip()
+        if not token:
+            print("Login approved but token is missing in response.")
+            return 1
+        data = _load_config()
+        data.update(
+            {
+                "server": server,
+                "login": str(started.get("login") or login_alias),
+                "token": token,
+            }
+        )
+        _save_config(data)
+        print(f"Saved remote worker login '{data['login']}' for {data['server']}")
+        return 0
+
+    device_code = str(started.get("device_code") or "").strip()
+    user_code = str(started.get("user_code") or "").strip()
+    verify_uri = str(started.get("verification_uri") or "/remote/login").strip()
+    start_mode = str(started.get("mode") or "").strip().lower()
+    interval = int(started.get("interval_seconds") or 2)
+    expires_in = int(started.get("expires_in") or 600)
+    verify_full = (
+        verify_uri
+        if verify_uri.startswith("http://") or verify_uri.startswith("https://")
+        else f"{server}{verify_uri}"
+    )
+
+    if start_mode == "feishu_card":
+        print("Approval card has been sent to server Feishu approval chat.")
+        print(f"Request ID: {device_code}")
+    else:
+        print("Open the login panel and approve this device:")
+        print(f"  URL:  {verify_full}")
+        print(f"  Code: {user_code}")
+    print(f"Waiting for approval (expires in {expires_in}s)...")
+
+    poll_url = f"{server}/remote/login/poll"
+    deadline = time.time() + max(10, expires_in)
+    while time.time() < deadline:
+        _, polled = _http_post_json(
+            poll_url,
+            {"device_code": device_code},
+        )
+        if bool(polled.get("ok")) and str(polled.get("status") or "") == "approved":
+            token = str(polled.get("token") or "").strip()
+            if not token:
+                print("Server approved but did not return a token.")
+                return 1
+            data = _load_config()
+            data.update(
+                {
+                    "server": server,
+                    "login": str(polled.get("login") or login_alias),
+                    "token": token,
+                }
+            )
+            _save_config(data)
+            print(f"Saved remote worker login '{data['login']}' for {data['server']}")
+            return 0
+        state = str(polled.get("status") or "")
+        if state in {"authorization_pending", ""}:
+            time.sleep(max(1, interval))
+            continue
+        if state == "access_denied":
+            print("Login denied by server approver.")
+            return 1
+        if state == "expired_or_invalid":
+            print("Login session expired. Please run login again.")
+            return 1
+        time.sleep(max(1, interval))
+    print("Login timed out. Please run login again.")
+    return 1
 
 
 def _cmd_status(_: argparse.Namespace) -> int:
@@ -485,11 +653,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    login = sub.add_parser("login", help="save the server URL and login alias")
-    login.add_argument("--server", required=True, help="macchiatoBot server URL")
+    login = sub.add_parser("login", help="login and save remote worker identity")
+    login.add_argument(
+        "server_pos",
+        nargs="?",
+        help="macchiatoBot server URL (shorthand positional form)",
+    )
+    login.add_argument("--server", default="", help="macchiatoBot server URL")
     login.add_argument(
         "--login",
-        required=True,
+        default="",
         help="login alias used by /remote-use, e.g. personal or work-mbp",
     )
     login.add_argument(
@@ -526,6 +699,19 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="remote port to forward to (default: port from --server)",
+    )
+    login.add_argument(
+        "--device-name",
+        default="",
+        help="optional device label shown in login panel",
+    )
+    login.add_argument(
+        "--auth-token",
+        default="",
+        help=(
+            "bootstrap authorization token for first-time login exchange "
+            "(maps to server MACCHIATO_REMOTE_LOGIN_BOOTSTRAP_TOKEN)"
+        ),
     )
     login.add_argument(
         "--clear-ssh-tunnel",

@@ -228,3 +228,55 @@ def test_login_accepts_positional_server_with_static_token(
     assert "http://203.0.113.10:9380" in saved
     assert '"login": "personal"' in saved
     assert '"token": "tok-1"' in saved
+
+
+def test_login_device_flow_bootstrap_exchange_writes_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from macchiato_remote import cli as rc
+
+    cfg_path = tmp_path / "remote.json"
+    monkeypatch.setattr(rc, "CONFIG_PATH", cfg_path)
+
+    calls: list[tuple[str, dict]] = []
+
+    def _fake_post(url: str, payload: dict, *, timeout: float = 10.0) -> tuple[int, dict]:
+        _ = timeout
+        calls.append((url, payload))
+        return 200, {
+            "ok": True,
+            "status": "approved",
+            "login": "personal",
+            "token": "issued-worker-token",
+        }
+
+    monkeypatch.setattr(rc, "_http_post_json", _fake_post)
+    assert (
+        main(
+            [
+                "login",
+                "203.0.113.10:9380",
+                "--login",
+                "personal",
+                "--auth-token",
+                "boot-abc",
+            ]
+        )
+        == 0
+    )
+    assert calls
+    assert calls[0][0].endswith("/remote/login/start")
+    assert calls[0][1]["bootstrap_token"] == "boot-abc"
+
+    saved = cfg_path.read_text(encoding="utf-8")
+    assert '"token": "issued-worker-token"' in saved
+
+
+def test_remote_worker_client_normalizes_server_without_scheme() -> None:
+    from macchiato_remote.client import RemoteWorkerClient
+
+    c = RemoteWorkerClient(server="149.28.149.135:9380", login="sii", token="tok")
+    ws_url = c._websocket_url()
+    assert ws_url.startswith("ws://149.28.149.135:9380/remote/worker/sii")
+    assert "token=tok" in ws_url

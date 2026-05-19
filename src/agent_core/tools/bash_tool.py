@@ -46,7 +46,7 @@ class BashTool(BaseTool):
     def get_definition(self) -> ToolDefinition:
         return ToolDefinition(
             name=self.name,
-            description="""在持久化 bash 会话中执行命令。
+            description="""在持久化 bash 会话中执行命令，或管理后台任务。
 
 这是一个持久化的 bash 会话：环境变量、工作目录、命令历史在整个对话期间保持。
 前一条命令创建的文件、设置的变量，在后续命令中仍然可用。
@@ -55,8 +55,12 @@ class BashTool(BaseTool):
 - 查看目录/文件信息（ls、pwd、find 等）
 - 运行脚本或测试命令（pytest、python script.py 等）
 - 查询 Git 状态、构建状态等开发信息
-- 安装依赖、设置环境变量（pip install、export 等）
 - 执行多步工作流（cd 到目录 → 安装 → 构建 → 测试）
+
+**长任务管理**：
+- 使用 background=true 在独立后台进程执行命令，不阻塞当前会话
+- 安装依赖、下载大文件、编译、训练等用 background
+- 后台任务启动后可使用 job_status/job_tail/job_stop 管理
 
 注意事项：
 - 危险操作（rm -rf、chmod -R、sudo 等）或需要写入工作区外路径时，bash 会自动向人类申请权限；
@@ -71,22 +75,61 @@ class BashTool(BaseTool):
                     required=False,
                 ),
                 ToolParameter(
-                    name="restart",
+                    name="background",
                     type="boolean",
-                    description="设为 true 时重启 bash 会话（清除所有环境变量和工作目录状态）",
+                    description="设为 true 时在独立后台进程中执行命令（不阻塞当前会话，不影响 bash shell 状态）。适用于安装、下载、编译、训练等长任务",
                     required=False,
                     default=False,
                 ),
                 ToolParameter(
-                    name="timeout",
-                    type="number",
-                    description="超时时间（秒），超时后命令会被终止且 bash 会话自动重启",
+                    name="job_status",
+                    type="string",
+                    description="查询后台任务状态（传入 job_id，返回状态/exit_code/用时）",
                     required=False,
                 ),
                 ToolParameter(
-                    name="background",
+                    name="job_tail",
+                    type="string",
+                    description="读取后台任务日志（传入 job_id），配合 lines/offset 控制输出",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="job_stop",
+                    type="string",
+                    description="终止后台任务（传入 job_id），配合 signal 指定信号",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="lines",
+                    type="number",
+                    description="job_tail 时读取的尾部行数（默认 200）",
+                    required=False,
+                    default=200,
+                ),
+                ToolParameter(
+                    name="offset",
+                    type="number",
+                    description="job_tail 时从第几行开始读取（默认 0，返回结果中会给出下次续读的 offset）",
+                    required=False,
+                    default=0,
+                ),
+                ToolParameter(
+                    name="signal",
+                    type="string",
+                    description="job_stop 时发送的信号（默认 SIGTERM）",
+                    required=False,
+                    default="SIGTERM",
+                ),
+                ToolParameter(
+                    name="timeout",
+                    type="number",
+                    description="同步命令的超时时间（秒），超时后命令会被终止且 bash 会话自动重启；background 模式时则为后台任务超时",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="restart",
                     type="boolean",
-                    description="设为 true 时在独立后台进程中执行命令（不阻塞当前会话，不影响 bash shell 状态）。适用于安装、下载、编译、训练等长任务",
+                    description="设为 true 时重启 bash 会话（清除所有环境变量和工作目录状态）",
                     required=False,
                     default=False,
                 ),
@@ -109,6 +152,18 @@ class BashTool(BaseTool):
                     "params": {"command": "pip install torch", "background": True, "timeout": 300},
                 },
                 {
+                    "description": "查询后台任务状态",
+                    "params": {"job_status": "job_abc123"},
+                },
+                {
+                    "description": "读取后台任务日志尾部",
+                    "params": {"job_tail": "job_abc123", "lines": 100, "offset": 0},
+                },
+                {
+                    "description": "终止后台任务",
+                    "params": {"job_stop": "job_abc123"},
+                },
+                {
                     "description": "重启 bash 会话",
                     "params": {"restart": True},
                 },
@@ -119,8 +174,9 @@ class BashTool(BaseTool):
                 "超时后当前命令会被终止，bash 会话会自动重启并恢复之前的工作目录与环境变量",
                 "使用 restart=true 可手动重置会话（清除所有状态）",
                 "长任务（安装依赖、下载大文件、编译、训练等）建议用 background=true 走独立后台进程，避免阻塞会话",
+                "后台任务日志写入工作区 .macchiato/jobs/ 目录，可用 job_tail 读取",
             ],
-            tags=["命令", "终端", "bash", "执行"],
+            tags=["命令", "终端", "bash", "执行", "后台job"],
         )
 
     async def execute(self, **kwargs) -> ToolResult:
@@ -166,6 +222,20 @@ class BashTool(BaseTool):
                 message="Bash 会话已重启，所有环境变量和工作目录状态已清除",
             )
 
+        # ── job management：查状态 / 读日志 / 终止 ────────────────
+        job_status_id = str(kwargs.get("job_status") or "").strip()
+        job_tail_id = str(kwargs.get("job_tail") or "").strip()
+        job_stop_id = str(kwargs.get("job_stop") or "").strip()
+        if job_status_id or job_tail_id or job_stop_id:
+            return await self._handle_job_action(
+                job_status_id=job_status_id,
+                job_tail_id=job_tail_id,
+                job_stop_id=job_stop_id,
+                lines=kwargs.get("lines", 200),
+                offset=kwargs.get("offset", 0),
+                signal_name=kwargs.get("signal", "SIGTERM"),
+            )
+
         command = str(kwargs.get("command", "")).strip()
         if not command:
             return ToolResult(
@@ -177,6 +247,7 @@ class BashTool(BaseTool):
         # ── background mode：长命令走独立 job，不阻塞 shell ─────────
         if kwargs.get("background"):
             from agent_core.job_manager import get_job_manager
+            from pathlib import Path
 
             # 远程 worker 场景暂不支持 background（后续扩展）
             session_id = str(exec_ctx.get("session_id") or "").strip()
@@ -191,7 +262,9 @@ class BashTool(BaseTool):
                         message="远程模式暂不支持 background 参数，请使用本地 bash 工具",
                     )
 
-            manager = get_job_manager()
+            # 使用 bash 工作区根目录存放日志，确保当前用户可访问
+            ws_root = str(Path(self._bash._config.base_dir).resolve())
+            manager = get_job_manager(workspace_root=ws_root)
             timeout = kwargs.get("timeout")
             if timeout is not None:
                 try:
@@ -201,7 +274,7 @@ class BashTool(BaseTool):
 
             handle = await manager.start_job(
                 command,
-                cwd=str(kwargs.get("cwd", ".")),
+                cwd=ws_root,
                 timeout_seconds=timeout,
             )
             return ToolResult(
@@ -321,6 +394,84 @@ class BashTool(BaseTool):
             error="NON_ZERO_EXIT",
             message=f"命令执行结束，返回码为 {result.exit_code}",
         )
+
+    # ── job management helpers ───────────────────────────────
+
+    def _job_manager(self) -> "JobManager":
+        from agent_core.job_manager import get_job_manager
+        from pathlib import Path
+
+        ws_root = str(Path(self._bash._config.base_dir).resolve())
+        return get_job_manager(workspace_root=ws_root)
+
+    async def _handle_job_action(
+        self,
+        *,
+        job_status_id: str = "",
+        job_tail_id: str = "",
+        job_stop_id: str = "",
+        lines: int = 200,
+        offset: int = 0,
+        signal_name: str = "SIGTERM",
+    ) -> ToolResult:
+        manager = self._job_manager()
+
+        if job_status_id:
+            handle = await manager.job_status(job_status_id)
+            if handle is None:
+                return ToolResult(
+                    success=False,
+                    error="JOB_NOT_FOUND",
+                    message=f"未找到后台任务: {job_status_id}",
+                )
+            data = {
+                "job_id": handle.job_id,
+                "status": handle.status,
+                "command": handle.command,
+                "pid": handle.pid,
+                "exit_code": handle.exit_code,
+                "timed_out": handle.timed_out,
+                "duration_seconds": round(handle.duration_seconds, 2),
+                "log_path": str(handle.log_path),
+            }
+            if handle.status == "running":
+                return ToolResult(success=True, data=data, message=f"任务正在运行（已运行 {handle.duration_seconds:.1f}s）")
+            elif handle.status == "finished":
+                return ToolResult(success=True, data=data, message=f"任务已完成，耗时 {handle.duration_seconds:.1f}s，返回码 {handle.exit_code}")
+            elif handle.status == "timed_out":
+                return ToolResult(success=False, data=data, error="JOB_TIMED_OUT", message=f"任务已超时（运行了 {handle.duration_seconds:.1f}s）")
+            elif handle.status == "cancelled":
+                return ToolResult(success=False, data=data, error="JOB_CANCELLED", message="任务已被取消")
+            else:
+                return ToolResult(success=False, data=data, error="JOB_FAILED", message=f"任务失败，返回码 {handle.exit_code}")
+
+        if job_tail_id:
+            result = await manager.job_tail(job_tail_id, lines=max(1, int(lines)), offset=max(0, int(offset)))
+            if result is None:
+                return ToolResult(success=False, error="JOB_NOT_FOUND", message=f"未找到后台任务: {job_tail_id}")
+            data = {
+                "job_id": job_tail_id,
+                "status": result.get("status"),
+                "total_lines": result.get("total_lines", 0),
+                "read_lines": len(result.get("head_lines", [])) + len(result.get("tail_lines", [])),
+                "offset": result.get("offset", 0),
+                "log_path": result.get("log_path"),
+                "head_lines": result.get("head_lines", []),
+                "tail_lines": result.get("tail_lines", []),
+            }
+            msg = f"日志共 {data['total_lines']} 行"
+            remaining = data["total_lines"] - data["offset"]
+            if remaining > 0:
+                msg += f"，剩余 {remaining} 行未读（offset={data['offset']}）"
+            return ToolResult(success=True, data=data, message=msg)
+
+        if job_stop_id:
+            ok = await manager.stop_job(job_stop_id, signal_name=signal_name)
+            if not ok:
+                return ToolResult(success=False, error="STOP_FAILED", message=f"终止任务失败（任务可能不存在或已结束）: {job_stop_id}")
+            return ToolResult(success=True, message=f"后台任务已终止: {job_stop_id}")
+
+        return ToolResult(success=False, error="NO_ACTION", message="未指定 job 操作")
 
     def _resolve_profile(self, exec_ctx: dict) -> Optional["CoreProfile"]:
         """从 __execution_context__ 推断 profile（用于安全校验）。"""

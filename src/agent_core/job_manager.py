@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import signal
 import time
 import uuid
@@ -113,20 +114,15 @@ class JobManager:
             timeout_seconds=timeout_seconds,
         )
 
-        # 打开日志文件（覆盖写）
-        log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=log_fd,
-                stderr=log_fd,
-                cwd=str(job_cwd),
-                env=merged_env,
-                start_new_session=True,  # 独立 process group
-            )
-        finally:
-            os.close(log_fd)
+        # 打开日志文件（shell 自身重定向，不受 close_fds 影响）
+        quoted_log = shlex.quote(str(log_path))
+        redirected_cmd = f"({command}) > {quoted_log} 2>&1"
+        proc = await asyncio.create_subprocess_shell(
+            redirected_cmd,
+            cwd=str(job_cwd),
+            env=merged_env,
+            start_new_session=True,  # 独立 process group
+        )
 
         handle.process = proc
         async with self._lock:

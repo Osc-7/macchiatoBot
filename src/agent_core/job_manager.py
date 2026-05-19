@@ -187,18 +187,27 @@ class JobManager:
         all_lines = raw.splitlines()
         total = len(all_lines)
 
-        # offset 允许从中间续读
+        # offset 作为游标：从第 offset 行开始读，最多读 lines 行
         if offset < 0:
             offset = 0
-        if offset > total:
-            offset = total
+        if offset >= total:
+            # 已读完所有行，返回空 tail 但保留总行数
+            return {
+                "job_id": job_id,
+                "status": handle.status,
+                "head_lines": all_lines[:50] if offset == 0 else [],
+                "tail_lines": [],
+                "total_lines": total,
+                "offset": total,
+                "log_path": str(log_path),
+            }
 
-        # head：前 50 行（只在 offset=0 时返回，帮助 Agent 看到开头）
+        tail_start = offset
+        tail_end = min(tail_start + lines, total)
+        tail = all_lines[tail_start:tail_end]
+
+        # head：只在从头读时返回前 50 行，帮 Agent 看到开头
         head = all_lines[:50] if offset == 0 else []
-
-        # tail：从 offset 开始到末尾的最后 lines 行
-        tail_start = max(offset, total - lines)
-        tail = all_lines[tail_start:]
 
         return {
             "job_id": job_id,

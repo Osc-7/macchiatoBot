@@ -262,6 +262,8 @@ class BashTool(BaseTool):
                         message="远程模式暂不支持 background 参数，请使用本地 bash 工具",
                     )
 
+            # 获取 bash 当前工作目录，确保 job 在执行时 cwd 正确
+            current_cwd = await self._current_cwd()
             # 使用 bash 工作区根目录存放日志，确保当前用户可访问
             ws_root = str(Path(self._bash._config.base_dir).resolve())
             manager = get_job_manager(workspace_root=ws_root)
@@ -274,7 +276,7 @@ class BashTool(BaseTool):
 
             handle = await manager.start_job(
                 command,
-                cwd=ws_root,
+                cwd=current_cwd or ws_root,
                 timeout_seconds=timeout,
             )
             return ToolResult(

@@ -105,6 +105,10 @@ class BashTool(BaseTool):
                     "params": {"command": "export MY_VAR=hello"},
                 },
                 {
+                    "description": "后台安装依赖（不阻塞会话）",
+                    "params": {"command": "pip install torch", "background": True, "timeout": 300},
+                },
+                {
                     "description": "重启 bash 会话",
                     "params": {"restart": True},
                 },
@@ -112,8 +116,9 @@ class BashTool(BaseTool):
             usage_notes=[
                 "这是持久化 bash 会话：cd、export 等在后续命令中生效",
                 "危险命令和工作区外写入会自动申请人类批准，批准后继续执行同一条命令",
-                "超时会导致 bash 会话重启，所有状态清空",
-                "使用 restart=true 可手动重置会话",
+                "超时后当前命令会被终止，bash 会话会自动重启并恢复之前的工作目录与环境变量",
+                "使用 restart=true 可手动重置会话（清除所有状态）",
+                "长任务（安装依赖、下载大文件、编译、训练等）建议用 background=true 走独立后台进程，避免阻塞会话",
             ],
             tags=["命令", "终端", "bash", "执行"],
         )

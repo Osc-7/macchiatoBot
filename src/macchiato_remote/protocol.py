@@ -184,3 +184,80 @@ class RemoteShellResetResult(BaseModel):
     success: bool
     message: str = ""
     error: Optional[str] = None
+
+
+# ── Job lifecycle ──────────────────────────────────────────
+
+class RemoteJobStartRequest(BaseModel):
+    request_id: str
+    session_id: str
+    command: str
+    cwd: str = REMOTE_WORKSPACE_MOUNT
+    timeout_seconds: Optional[float] = None
+
+
+class RemoteJobStartResult(BaseModel):
+    request_id: str
+    session_id: str
+    job_id: str
+    pid: Optional[int] = None
+    log_path: str = ""
+    status: str = "running"
+    error: Optional[str] = None
+
+
+class RemoteJobStatusRequest(BaseModel):
+    request_id: str
+    session_id: str
+    job_id: str
+
+
+class RemoteJobStatusResult(BaseModel):
+    request_id: str
+    session_id: str
+    job_id: str
+    status: str
+    command: str = ""
+    pid: Optional[int] = None
+    exit_code: Optional[int] = None
+    timed_out: bool = False
+    duration_seconds: float = 0.0
+    log_path: str = ""
+    error: Optional[str] = None
+
+
+class RemoteJobTailRequest(BaseModel):
+    request_id: str
+    session_id: str
+    job_id: str
+    lines: int = 200
+    offset: int = 0
+
+
+class RemoteJobTailResult(BaseModel):
+    request_id: str
+    session_id: str
+    job_id: str
+    status: str
+    total_lines: int = 0
+    read_lines: int = 0
+    offset: int = 0
+    log_path: str = ""
+    head_lines: list[str] = Field(default_factory=list)
+    tail_lines: list[str] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
+class RemoteJobStopRequest(BaseModel):
+    request_id: str
+    session_id: str
+    job_id: str
+    signal: str = "SIGTERM"
+
+
+class RemoteJobStopResult(BaseModel):
+    request_id: str
+    session_id: str
+    job_id: str
+    success: bool
+    error: Optional[str] = None

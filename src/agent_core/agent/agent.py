@@ -2375,6 +2375,19 @@ class AgentCore:
                 self._tool_registry.register(
                     BashTool(bash=self._bash, security=self._bash_security)
                 )
+            # 注册后台 Job 工具（与 BashTool 共用 workspace）
+            if not self._tool_registry.has("start_job"):
+                from agent_core.tools.job_tool import (
+                    JobStatusTool,
+                    JobTailTool,
+                    StartJobTool,
+                    StopJobTool,
+                )
+
+                self._tool_registry.register(StartJobTool())
+                self._tool_registry.register(JobStatusTool())
+                self._tool_registry.register(JobTailTool())
+                self._tool_registry.register(StopJobTool())
 
         if self._config.mcp.enabled and not self._mcp_connected:
             runtime_servers = self._build_runtime_mcp_servers(self._config.mcp.servers)

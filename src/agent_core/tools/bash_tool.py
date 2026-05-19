@@ -83,6 +83,13 @@ class BashTool(BaseTool):
                     description="超时时间（秒），超时后命令会被终止且 bash 会话自动重启",
                     required=False,
                 ),
+                ToolParameter(
+                    name="background",
+                    type="boolean",
+                    description="设为 true 时在独立后台进程中执行命令（不阻塞当前会话，不影响 bash shell 状态）。适用于安装、下载、编译、训练等长任务",
+                    required=False,
+                    default=False,
+                ),
             ],
             examples=[
                 {
@@ -160,6 +167,48 @@ class BashTool(BaseTool):
                 success=False,
                 error="MISSING_COMMAND",
                 message="缺少必需参数: command（或使用 restart=true 重启会话）",
+            )
+
+        # ── background mode：长命令走独立 job，不阻塞 shell ─────────
+        if kwargs.get("background"):
+            from agent_core.job_manager import get_job_manager
+
+            # 远程 worker 场景暂不支持 background（后续扩展）
+            session_id = str(exec_ctx.get("session_id") or "").strip()
+            if session_id:
+                from agent_core.remote.workspace_state import get_remote_workspace_state
+
+                remote_state = get_remote_workspace_state(session_id)
+                if remote_state is not None:
+                    return ToolResult(
+                        success=False,
+                        error="NOT_SUPPORTED",
+                        message="远程模式暂不支持 background 参数，请使用本地 bash 工具",
+                    )
+
+            manager = get_job_manager()
+            timeout = kwargs.get("timeout")
+            if timeout is not None:
+                try:
+                    timeout = float(timeout)
+                except (TypeError, ValueError):
+                    timeout = None
+
+            handle = await manager.start_job(
+                command,
+                cwd=str(kwargs.get("cwd", ".")),
+                timeout_seconds=timeout,
+            )
+            return ToolResult(
+                success=True,
+                data={
+                    "job_id": handle.job_id,
+                    "pid": handle.pid,
+                    "log_path": str(handle.log_path),
+                    "status": handle.status,
+                    "command": handle.command,
+                },
+                message=f"后台任务已启动: {handle.job_id} (pid={handle.pid})",
             )
 
         timeout = kwargs.get("timeout")

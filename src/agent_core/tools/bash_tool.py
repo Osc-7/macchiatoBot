@@ -61,7 +61,7 @@ class BashTool(BaseTool):
 注意事项：
 - 危险操作（rm -rf、chmod -R、sudo 等）或需要写入工作区外路径时，bash 会自动向人类申请权限；
   人类批准后同一次工具调用会继续执行原始命令并返回结果
-- 超时后 bash 会话会自动重启
+- 超时后当前命令会被终止，bash 会话会自动重启并恢复之前的工作目录与环境变量
 - 使用 restart=true 可手动重启 bash 会话（清除所有状态）""",
             parameters=[
                 ToolParameter(

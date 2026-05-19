@@ -56,8 +56,9 @@ class BashRuntimeConfig:
     default_output_limit: int = 12_000
     max_output_limit: int = 200_000
     init_commands: list[str] = field(default_factory=list)
-    snapshot_enabled: bool = False
+    snapshot_enabled: bool = True
     snapshot_dir: str = "./data/bash_snapshots"
+    snapshot_keep_count: int = 3
     # 非空时以 ``runuser_path -u <user> -- <shell>`` 启动 bash（Linux 降权）
     run_as_user: Optional[str] = None
     runuser_path: str = "/sbin/runuser"
@@ -136,24 +137,32 @@ class BashRuntime:
             await self._raw_write(cmd.rstrip("\n") + "\n")
 
     async def restart(self) -> None:
-        """杀掉当前 bash 并重新启动。"""
+        """杀掉当前 bash 并重新启动，若启用 snapshot 则先保存状态再恢复。"""
+        snap_path: Optional[Path] = None
+        if self._config.snapshot_enabled and self.is_alive:
+            try:
+                snap_path = await self._write_snapshot()
+            except Exception:
+                logger.warning("BashRuntime: snapshot before restart failed", exc_info=True)
         await self.close(write_snapshot=False)
-        await self.start()
+        await self.start(snapshot_path=snap_path)
 
-    async def close(self, *, write_snapshot: bool = False) -> None:
-        """终止 bash 子进程，可选写快照。"""
+    async def close(self, *, write_snapshot: bool = False) -> Optional[Path]:
+        """终止 bash 子进程，可选写快照。返回 snapshot 路径（若写了）。"""
         if self._process is None:
-            return
+            return None
 
+        snap_path: Optional[Path] = None
         if write_snapshot and self._config.snapshot_enabled and self.is_alive:
             try:
-                await self._write_snapshot()
+                snap_path = await self._write_snapshot()
             except Exception:
                 logger.warning("BashRuntime: snapshot write failed", exc_info=True)
 
         await self._kill_process()
         self._started = False
         logger.info("BashRuntime closed: command_count=%d", self._command_count)
+        return snap_path
 
     # ── 命令执行 ──────────────────────────────────────────────
 
@@ -374,8 +383,8 @@ class BashRuntime:
             except asyncio.TimeoutError:
                 pass
 
-    async def _write_snapshot(self) -> None:
-        """将当前 bash 环境导出为快照脚本（env + cwd）。"""
+    async def _write_snapshot(self) -> Optional[Path]:
+        """将当前 bash 环境导出为快照脚本（env + cwd），返回文件路径。"""
         snap_dir = Path(self._config.snapshot_dir)
         snap_dir.mkdir(parents=True, exist_ok=True)
         snap_path = snap_dir / f"snapshot_{uuid.uuid4().hex[:8]}.sh"
@@ -386,7 +395,7 @@ class BashRuntime:
             output_limit=50_000,
         )
         if result.exit_code != 0:
-            return
+            return None
 
         lines = []
         cwd = None
@@ -406,6 +415,27 @@ class BashRuntime:
 
         snap_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         logger.debug("BashRuntime: snapshot written to %s", snap_path)
+
+        self._prune_snapshots(snap_dir)
+        return snap_path
+
+    def _prune_snapshots(self, snap_dir: Path) -> None:
+        """仅保留最近 N 个 snapshot，防止磁盘膨胀。"""
+        keep = max(1, self._config.snapshot_keep_count)
+        try:
+            files = sorted(
+                (p for p in snap_dir.iterdir() if p.is_file() and p.name.startswith("snapshot_")),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for old in files[keep:]:
+                try:
+                    old.unlink()
+                    logger.debug("BashRuntime: removed old snapshot %s", old)
+                except OSError:
+                    pass
+        except OSError:
+            pass
 
     def _clamp_timeout(self, timeout: Optional[float]) -> float:
         if timeout is None:

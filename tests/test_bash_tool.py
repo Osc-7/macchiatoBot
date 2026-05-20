@@ -751,6 +751,7 @@ class TestBashToolRemoteRecover:
             stderr="remote session is not open: sid-1",
             exit_code=127,
             cwd="/workspace",
+            error="SESSION_NOT_OPEN",
         )
         second = RemoteCommandResult(
             request_id="r2",

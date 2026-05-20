@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import quote, urlencode, urlparse, urlunparse
 
 from macchiato_remote.protocol import (
+    REMOTE_WORKSPACE_MOUNT,
     RemoteCommandRequest,
     RemoteCommandResult,
     RemoteFileBlobReadRequest,
@@ -20,6 +21,16 @@ from macchiato_remote.protocol import (
     RemoteFileReadResult,
     RemoteFileWriteRequest,
     RemoteFileWriteResult,
+    RemoteJobStartRequest,
+    RemoteJobStartResult,
+    RemoteJobStatusRequest,
+    RemoteJobStatusResult,
+    RemoteJobStopRequest,
+    RemoteJobStopResult,
+    RemoteJobTailRequest,
+    RemoteJobTailResult,
+    RemoteShellCaptureRequest,
+    RemoteShellCaptureResult,
     RemoteShellResetRequest,
     RemoteShellResetResult,
     RemoteWorkspaceCloseRequest,
@@ -32,6 +43,7 @@ from macchiato_remote.runtime.files import (
     read_workspace_text,
     write_workspace_text,
 )
+from macchiato_remote.runtime.jobs import RemoteJobRegistry
 from macchiato_remote.runtime.shell import LocalShellConfig, LocalShellSession
 
 
@@ -161,6 +173,7 @@ class RemoteWorkerClient:
         self.token = (token or "").strip() or None
         self.shell_path = shell_path
         self._sessions: Dict[str, LocalShellSession] = {}
+        self._jobs = RemoteJobRegistry()
 
     async def run_forever(self) -> None:
         try:
@@ -311,6 +324,26 @@ class RemoteWorkerClient:
             req = RemoteShellResetRequest.model_validate(payload)
             result = await self._reset_shell(req)
             return {"type": "reset_shell_result", "result": result.model_dump()}
+        if msg_type == "shell_capture":
+            req = RemoteShellCaptureRequest.model_validate(payload)
+            result = await self._shell_capture(req)
+            return {"type": "shell_capture_result", "result": result.model_dump()}
+        if msg_type == "job_start":
+            req = RemoteJobStartRequest.model_validate(payload)
+            result = await self._job_start(req)
+            return {"type": "job_start_result", "result": result.model_dump()}
+        if msg_type == "job_status":
+            req = RemoteJobStatusRequest.model_validate(payload)
+            result = await self._job_status(req)
+            return {"type": "job_status_result", "result": result.model_dump()}
+        if msg_type == "job_tail":
+            req = RemoteJobTailRequest.model_validate(payload)
+            result = await self._job_tail(req)
+            return {"type": "job_tail_result", "result": result.model_dump()}
+        if msg_type == "job_stop":
+            req = RemoteJobStopRequest.model_validate(payload)
+            result = await self._job_stop(req)
+            return {"type": "job_stop_result", "result": result.model_dump()}
         return None
 
     async def _open_workspace(
@@ -334,6 +367,7 @@ class RemoteWorkerClient:
             )
             await session.start()
             self._sessions[req.session_id] = session
+            self._jobs.open_session(req.session_id, root)
             return RemoteWorkspaceOpenResult(
                 request_id=req.request_id,
                 session_id=req.session_id,
@@ -357,6 +391,7 @@ class RemoteWorkerClient:
         session = self._sessions.pop(req.session_id, None)
         if session is not None:
             await session.close()
+        self._jobs.close_session(req.session_id)
         return RemoteWorkspaceCloseResult(
             request_id=req.request_id,
             session_id=req.session_id,
@@ -373,6 +408,7 @@ class RemoteWorkerClient:
                 stderr=f"remote session is not open: {req.session_id}",
                 exit_code=127,
                 cwd=req.cwd,
+                error="SESSION_NOT_OPEN",
             )
         return await session.execute(
             request_id=req.request_id,
@@ -499,3 +535,153 @@ class RemoteWorkerClient:
                 success=False,
                 error=str(exc),
             )
+
+    async def _shell_capture(
+        self, req: RemoteShellCaptureRequest
+    ) -> RemoteShellCaptureResult:
+        session = self._sessions.get(req.session_id)
+        if session is None:
+            return RemoteShellCaptureResult(
+                request_id=req.request_id,
+                session_id=req.session_id,
+                error="SESSION_NOT_OPEN",
+            )
+        cap = await session.capture_session()
+        if cap is None:
+            return RemoteShellCaptureResult(
+                request_id=req.request_id,
+                session_id=req.session_id,
+                cwd=str(session.root),
+                error="CAPTURE_FAILED",
+            )
+        cwd, env = cap
+        return RemoteShellCaptureResult(
+            request_id=req.request_id,
+            session_id=req.session_id,
+            cwd=cwd,
+            env=env,
+        )
+
+    def _job_manager_for(self, session_id: str):
+        return self._jobs.get(session_id)
+
+    async def _job_start(self, req: RemoteJobStartRequest) -> RemoteJobStartResult:
+        mgr = self._job_manager_for(req.session_id)
+        if mgr is None:
+            return RemoteJobStartResult(
+                request_id=req.request_id,
+                session_id=req.session_id,
+                job_id="",
+                error="SESSION_NOT_OPEN",
+            )
+        cwd = req.cwd
+        if cwd == REMOTE_WORKSPACE_MOUNT:
+            cwd = str(mgr._workspace_root)
+        try:
+            handle = await mgr.start_job(
+                req.command,
+                cwd=cwd,
+                env=dict(req.env) if req.env else None,
+                timeout_seconds=req.timeout_seconds,
+            )
+        except Exception as exc:
+            return RemoteJobStartResult(
+                request_id=req.request_id,
+                session_id=req.session_id,
+                job_id="",
+                error=str(exc),
+            )
+        return RemoteJobStartResult(
+            request_id=req.request_id,
+            session_id=req.session_id,
+            job_id=handle.job_id,
+            pid=handle.pid,
+            log_path=str(handle.log_path),
+            status=handle.status,
+        )
+
+    async def _job_status(self, req: RemoteJobStatusRequest) -> RemoteJobStatusResult:
+        mgr = self._job_manager_for(req.session_id)
+        if mgr is None:
+            return RemoteJobStatusResult(
+                request_id=req.request_id,
+                session_id=req.session_id,
+                job_id=req.job_id,
+                status="unknown",
+                error="SESSION_NOT_OPEN",
+            )
+        handle = await mgr.job_status(req.job_id)
+        if handle is None:
+            return RemoteJobStatusResult(
+                request_id=req.request_id,
+                session_id=req.session_id,
+                job_id=req.job_id,
+                status="unknown",
+                error="JOB_NOT_FOUND",
+            )
+        return RemoteJobStatusResult(
+            request_id=req.request_id,
+            session_id=req.session_id,
+            job_id=handle.job_id,
+            status=handle.status,
+            command=handle.command,
+            pid=handle.pid,
+            exit_code=handle.exit_code,
+            timed_out=handle.timed_out,
+            duration_seconds=round(handle.duration_seconds, 2),
+            log_path=str(handle.log_path),
+        )
+
+    async def _job_tail(self, req: RemoteJobTailRequest) -> RemoteJobTailResult:
+        mgr = self._job_manager_for(req.session_id)
+        if mgr is None:
+            return RemoteJobTailResult(
+                request_id=req.request_id,
+                session_id=req.session_id,
+                job_id=req.job_id,
+                status="unknown",
+                error="SESSION_NOT_OPEN",
+            )
+        data = await mgr.job_tail(
+            req.job_id, lines=max(1, int(req.lines)), offset=max(0, int(req.offset))
+        )
+        if data is None:
+            return RemoteJobTailResult(
+                request_id=req.request_id,
+                session_id=req.session_id,
+                job_id=req.job_id,
+                status="unknown",
+                error="JOB_NOT_FOUND",
+            )
+        return RemoteJobTailResult(
+            request_id=req.request_id,
+            session_id=req.session_id,
+            job_id=req.job_id,
+            status=str(data.get("status") or ""),
+            total_lines=int(data.get("total_lines") or 0),
+            read_lines=len(data.get("head_lines") or [])
+            + len(data.get("tail_lines") or []),
+            offset=int(data.get("offset") or 0),
+            log_path=str(data.get("log_path") or ""),
+            head_lines=list(data.get("head_lines") or []),
+            tail_lines=list(data.get("tail_lines") or []),
+        )
+
+    async def _job_stop(self, req: RemoteJobStopRequest) -> RemoteJobStopResult:
+        mgr = self._job_manager_for(req.session_id)
+        if mgr is None:
+            return RemoteJobStopResult(
+                request_id=req.request_id,
+                session_id=req.session_id,
+                job_id=req.job_id,
+                success=False,
+                error="SESSION_NOT_OPEN",
+            )
+        ok = await mgr.stop_job(req.job_id, signal_name=req.signal)
+        return RemoteJobStopResult(
+            request_id=req.request_id,
+            session_id=req.session_id,
+            job_id=req.job_id,
+            success=ok,
+            error=None if ok else "STOP_FAILED",
+        )

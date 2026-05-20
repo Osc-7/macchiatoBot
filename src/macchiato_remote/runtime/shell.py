@@ -10,9 +10,14 @@ import signal
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
-from macchiato_remote.protocol import RemoteCommandResult
+from macchiato_remote.protocol import REMOTE_WORKSPACE_MOUNT, RemoteCommandResult
+from macchiato_remote.runtime.workspace_guard import build_remote_workspace_guard_init
+
+_SKIP_ENV_KEYS = frozenset(
+    {"MACCHIATO_BASH", "MACCHIATO_REMOTE", "SHLVL", "PWD", "OLDPWD", "_"}
+)
 
 _SENTINEL_TAG = "__MACCHIATO_REMOTE_SENTINEL__"
 _ERR_SENTINEL_TAG = "__MACCHIATO_REMOTE_ERR_SENTINEL__"
@@ -33,6 +38,7 @@ class LocalShellSession:
     def __init__(self, config: LocalShellConfig) -> None:
         self._config = config
         self._process: Optional[asyncio.subprocess.Process] = None
+        self._last_snapshot_script: Optional[str] = None
 
     @property
     def root(self) -> Path:
@@ -66,6 +72,13 @@ class LocalShellSession:
             env=env,
             start_new_session=(os.name != "nt"),
         )
+        guard = build_remote_workspace_guard_init(root)
+        await self._raw_write(guard + "\n")
+
+    async def _raw_write(self, text: str) -> None:
+        if self._process and self._process.stdin:
+            self._process.stdin.write(text.encode("utf-8"))
+            await self._process.stdin.drain()
 
     async def close(self) -> None:
         proc = self._process
@@ -97,6 +110,7 @@ class LocalShellSession:
         command: str,
         timeout_seconds: Optional[float] = None,
         output_limit: Optional[int] = None,
+        record_snapshot: bool = True,
     ) -> RemoteCommandResult:
         if not self.is_alive:
             await self.start()
@@ -203,7 +217,22 @@ class LocalShellSession:
             exit_code = int(results[0])
         except asyncio.TimeoutError:
             timed_out = True
+            snap = self._last_snapshot_script
             await self.close()
+            await self.start()
+            if snap:
+                await self._raw_write(snap + "\n")
+
+        if record_snapshot and not timed_out and exit_code >= 0 and self.is_alive:
+            cap = await self.capture_session()
+            if cap is not None:
+                cwd, env = cap
+                lines = [
+                    f"export {k}={shlex.quote(v)}"
+                    for k, v in sorted(env.items())
+                ]
+                lines.append(f"cd {shlex.quote(cwd)} 2>/dev/null || true")
+                self._last_snapshot_script = "\n".join(lines)
 
         return RemoteCommandResult(
             request_id=request_id,
@@ -215,6 +244,32 @@ class LocalShellSession:
             truncated=truncated,
             cwd=str(self.root),
         )
+
+    async def capture_session(self) -> Optional[Tuple[str, Dict[str, str]]]:
+        if not self.is_alive:
+            return None
+        result = await self.execute(
+            request_id="capture",
+            command='echo "__CWD__=$(pwd)"; env',
+            timeout_seconds=5,
+            output_limit=50_000,
+            record_snapshot=False,
+        )
+        if result.exit_code != 0:
+            return None
+        cwd: Optional[str] = None
+        env: Dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            if line.startswith("__CWD__="):
+                cwd = line[len("__CWD__=") :].strip()
+                continue
+            if "=" in line:
+                key, _, value = line.partition("=")
+                if key.isidentifier() and key not in _SKIP_ENV_KEYS:
+                    env[key] = value
+        if not cwd:
+            cwd = str(self.root)
+        return cwd, env
 
     def _rewrite_virtual_paths(self, command: str) -> str:
         """Best-effort fallback for hosts without a real /workspace mount.

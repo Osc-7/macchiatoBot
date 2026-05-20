@@ -286,38 +286,29 @@ class RemoteWorkerRegistry:
         )
         return RemoteShellResetResult.model_validate(payload)
 
-
-_REGISTRY = RemoteWorkerRegistry()
-
-
-def get_remote_worker_registry() -> RemoteWorkerRegistry:
-    return _REGISTRY
-
-
-def reset_remote_worker_registry_for_tests() -> None:
-    global _REGISTRY
-    _REGISTRY = RemoteWorkerRegistry()
-
-    async def reset_remote_shell(
+    async def capture_remote_shell(
         self,
         *,
         login: str,
         session_id: str,
-        timeout_seconds: float = 30.0,
-    ) -> RemoteShellResetResult:
+        timeout_seconds: float = 15.0,
+    ):
+        from macchiato_remote.protocol import (
+            RemoteShellCaptureRequest,
+            RemoteShellCaptureResult,
+        )
+
         conn = await self.require(login)
-        req = RemoteShellResetRequest(
+        req = RemoteShellCaptureRequest(
             request_id=uuid.uuid4().hex,
             session_id=session_id,
         )
         payload = await conn.request(
-            "reset_shell",
+            "shell_capture",
             req.model_dump(),
             timeout_seconds=timeout_seconds,
         )
-        return RemoteShellResetResult.model_validate(payload)
-
-    # ── Job lifecycle ─────────────────────────────────────────
+        return RemoteShellCaptureResult.model_validate(payload)
 
     async def start_job(
         self,
@@ -327,6 +318,7 @@ def reset_remote_worker_registry_for_tests() -> None:
         command: str,
         cwd: str = REMOTE_WORKSPACE_MOUNT,
         timeout_seconds: Optional[float] = None,
+        env: Optional[Dict[str, str]] = None,
     ) -> "RemoteJobStartResult":
         from macchiato_remote.protocol import (
             RemoteJobStartRequest,
@@ -340,6 +332,7 @@ def reset_remote_worker_registry_for_tests() -> None:
             command=command,
             cwd=cwd,
             timeout_seconds=timeout_seconds,
+            env=dict(env or {}),
         )
         payload = await conn.request(
             "job_start",
@@ -428,3 +421,15 @@ def reset_remote_worker_registry_for_tests() -> None:
             timeout_seconds=10.0,
         )
         return RemoteJobStopResult.model_validate(payload)
+
+
+_REGISTRY = RemoteWorkerRegistry()
+
+
+def get_remote_worker_registry() -> RemoteWorkerRegistry:
+    return _REGISTRY
+
+
+def reset_remote_worker_registry_for_tests() -> None:
+    global _REGISTRY
+    _REGISTRY = RemoteWorkerRegistry()

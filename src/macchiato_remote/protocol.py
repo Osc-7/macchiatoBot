@@ -118,6 +118,7 @@ class RemoteCommandResult(BaseModel):
     timed_out: bool = False
     truncated: bool = False
     cwd: str = REMOTE_WORKSPACE_MOUNT
+    error: Optional[str] = None
 
 
 class RemoteFileReadRequest(BaseModel):
@@ -186,6 +187,19 @@ class RemoteShellResetResult(BaseModel):
     error: Optional[str] = None
 
 
+class RemoteShellCaptureRequest(BaseModel):
+    request_id: str
+    session_id: str
+
+
+class RemoteShellCaptureResult(BaseModel):
+    request_id: str
+    session_id: str
+    cwd: str = ""
+    env: Dict[str, str] = Field(default_factory=dict)
+    error: Optional[str] = None
+
+
 # ── Job lifecycle ──────────────────────────────────────────
 
 class RemoteJobStartRequest(BaseModel):
@@ -194,6 +208,7 @@ class RemoteJobStartRequest(BaseModel):
     command: str
     cwd: str = REMOTE_WORKSPACE_MOUNT
     timeout_seconds: Optional[float] = None
+    env: Dict[str, str] = Field(default_factory=dict)
 
 
 class RemoteJobStartResult(BaseModel):

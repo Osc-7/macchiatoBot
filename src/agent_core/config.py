@@ -625,7 +625,10 @@ class CommandToolsConfig(BaseModel):
     )
     snapshot_enabled: bool = Field(
         default=False,
-        description="Core evict 时是否写入 bash 环境快照（用于恢复）",
+        description=(
+            "Core evict / 手动 restart 时是否写入 bash 环境快照；"
+            "同步命令超时重启时始终尝试轻量快照恢复（与该项无关）"
+        ),
     )
     snapshot_dir: str = Field(
         default="./data/bash_snapshots",
@@ -1215,7 +1218,7 @@ class AutomationConfig(BaseModel):
 class FeishuConfig(BaseModel):
     """飞书集成配置。
 
-    用于在飞书机器人中接入 Schedule Agent。所有字段均为可选，默认关闭。
+    用于在飞书机器人中接入 macchiatoBot。所有字段均为可选，默认关闭。
     """
 
     enabled: bool = Field(
@@ -1383,7 +1386,7 @@ class Config(BaseModel):
     )
     feishu: FeishuConfig = Field(
         default_factory=FeishuConfig,
-        description="飞书集成配置，用于在飞书聊天中接入 Schedule Agent。",
+        description="飞书集成配置，用于在飞书聊天中接入 macchiatoBot。",
     )
 
 

@@ -70,7 +70,7 @@ def print_welcome():
     else:
         print()
         print("=" * 50)
-        print("  Schedule Agent - 智能日程管理助手")
+        print("  macchiatoBot - tool-driven LLM assistant")
         print("=" * 50)
         print()
         print("你好！我是你的日程管理助手，可以帮助你：")

@@ -2,468 +2,211 @@
 
 English | [中文](README_zh.md)
 
-macchiatoBot is an LLM assistant built around a tool-driven, kernel-style runtime. The project is designed for long-running use: interactive chat, scheduled automation, multi-session concurrency, and frontend integrations all go through the same execution pipeline.
+macchiatoBot is a daemon-first, tool-driven LLM assistant. The daemon owns
+sessions, scheduling, IPC, tool execution, permissions, memory, and frontend
+integration; CLI, Feishu, MCP, and automation jobs all enter through that shared
+runtime.
 
-The current codebase separates reasoning from execution:
+The repository currently publishes two installable surfaces:
 
-- `AgentCore` handles prompt building, LLM calls, memory recall, and the tool-calling loop.
-- `AgentKernel` executes tools, enforces tool visibility and permissions, and handles context compression.
-- `KernelScheduler` and the automation layer own session lifecycle, IPC, queueing, and background jobs.
+| Package | Role | Commands |
+|---|---|---|
+| `macchiato-bot` | Full assistant runtime for cloud/dev/local bot use | `macchiato`, `macchiato-daemon`, `macchiato-remote` |
+| `macchiato-remote` | Lightweight worker for exposing one authorized local workspace to a bot daemon | `macchiato-remote` |
 
-## What It Supports
+In a checkout, the root `main.py` and `automation_daemon.py` files are thin
+compatibility shims around the packaged entrypoints.
 
-- Interactive CLI backed by a long-running daemon
-- Feishu WebSocket gateway with shared sessions and slash commands
-- Local MCP stdio server
-- Scheduled jobs and notification-oriented automation
-- Tool registry with file, bash, memory, web, multimodal, Canvas, Shuiyuan, and SJTU helpers
-- Multi-provider LLM routing with runtime model switching
-- Working memory, chat history retrieval, and long-term/content memory
-- Subagent and multi-agent tooling
-
-## Architecture
+## Runtime Shape
 
 ```text
-Frontend / External Trigger
-  ├─ CLI
-  ├─ Feishu gateway
-  ├─ MCP stdio server
-  └─ Automation jobs
-          │
-          ▼
-Automation IPC / Core Gateway / Task Queue
-          │
-          ▼
-KernelScheduler / CorePool / SessionSummarizer
-          │
-          ▼
+CLI / Feishu / MCP / automation trigger
+        |
+        v
+Automation IPC + Core Gateway + task queue
+        |
+        v
+KernelScheduler + CorePool
+        |
+        v
 AgentKernel
-  ├─ tool execution
-  ├─ permission checks
-  ├─ path resolution
-  └─ context compression
-          │
-          ▼
+  - tool execution
+  - permission checks
+  - path and remote-workspace routing
+  - context compression
+        |
+        v
 AgentCore
-  ├─ prompt assembly
-  ├─ LLM provider routing
-  ├─ working set + tool selection
-  ├─ memory recall / persistence
-  └─ multi-turn reasoning loop
+  - prompt assembly
+  - LLM provider routing
+  - memory recall
+  - tool-calling loop
 ```
+
+Short version: `AgentCore` thinks, `AgentKernel` executes, and the automation
+daemon keeps the long-running process, sessions, queue, and IPC stable.
+
+### Architecture Principles
+
+- **Daemon-first runtime**: long-running state belongs to `macchiato-daemon` /
+  `automation_daemon.py`, not to individual CLI invocations.
+- **Frontend adapters stay thin**: CLI, Feishu, MCP, and automation jobs parse
+  channel-specific input and then hand work to daemon IPC or the task queue.
+- **Reasoning is separate from execution**: `AgentCore` builds prompts and talks
+  to the LLM; `AgentKernel` executes tools, checks permissions, routes paths,
+  and compresses context.
+- **Remote workspace is a routing mode**: remote mode changes where selected
+  tools run; it is not a second agent stack.
+- **Release commits stay small**: runtime architecture changes land as normal
+  feature/fix commits before a release commit handles versioning and packaging.
 
 ### Layer Map
 
-| Layer | Main modules | Responsibility |
-|---|---|---|
-| Frontend | `main.py`, `feishu_ws_gateway.py`, `mcp_server.py`, `src/frontend/*` | User entrypoints and channel-specific adapters |
-| Automation | `automation_daemon.py`, `src/system/automation/*` | IPC server/client, scheduled jobs, queue consumption, session rotation |
-| Kernel | `src/system/kernel/*` | Core pooling, scheduling, terminal shell, output routing, summarization |
-| Agent runtime | `src/agent_core/agent/*`, `src/agent_core/llm/*`, `src/agent_core/context/*` | Prompting, LLM loop, checkpoints, multimodal staging, session state |
-| Tooling | `src/system/tools/*`, `src/agent_core/tools/*`, `src/agent_core/mcp/*` | Tool registry, permissions, MCP proxying, runtime tools |
-| Integrations | `src/frontend/feishu/*`, `src/frontend/shuiyuan_integration/*`, `src/frontend/canvas_integration/*` | External platform integration and connector logic |
+| Layer | Main modules | Owns | Should not own |
+|---|---|---|---|
+| Frontend | `src/frontend/*`, root shims | Channel parsing, display, callbacks | Agent state, direct tool execution |
+| Automation | `src/system/automation/*` | IPC, queues, job definitions, session registry, scheduling | LLM prompt details |
+| Kernel | `src/system/kernel/*` | Core pooling, kernel requests, terminal shell, summarization | Provider selection details |
+| Agent runtime | `src/agent_core/agent/*`, `src/agent_core/llm/*`, `src/agent_core/context/*` | Agent loop, prompts, providers, memory/context state | Frontend transport details |
+| Tools | `src/agent_core/tools/*`, `src/system/tools/*`, `src/agent_core/mcp/*` | Tool definitions, validation, execution, MCP proxying | Release packaging |
+| Remote worker | `src/macchiato_remote/*`, `src/agent_core/remote/*` | Remote protocol, worker registry, workspace routing | Full bot daemon state |
 
-## Repository Layout
+### Tool Boundary
+
+Tools are exposed to the LLM through the registry, but the kernel remains the
+authority for visibility, permission checks, path grants, local-vs-remote
+routing, and large-result handling. That keeps the LLM loop simple: it requests
+tool calls; the kernel decides how to execute them safely.
+
+### Runtime State
+
+Generated state stays out of source control:
+
+| Path | Purpose |
+|---|---|
+| `data/` | persistent app data, sessions, automation repositories |
+| `logs/` | daemon and gateway logs |
+| `.macchiato/` | local command/job runtime state |
+| `dist/`, `build/`, `*.egg-info/` | package build outputs |
+| `.venv/`, `.pytest_cache/`, `__pycache__/` | local development artifacts |
+
+For the longer design notes and contribution placement rules, see
+[docs/architecture.md](docs/architecture.md).
+
+## Repository Map
 
 ```text
 src/
-├── agent_core/
-│   ├── agent/            # AgentCore, checkpoints, prompt builder, workspace/memory paths
-│   ├── llm/              # Provider resolution and OpenAI-compatible adapters
-│   ├── memory/           # Working memory, long-term memory, chat history DB
-│   ├── tools/            # Core tools such as bash / ask_user / permission flow
-│   ├── mcp/              # MCP client, pool, and proxy tools
-│   └── prompts/          # System prompts and skills
+├── agent_core/          # Agent loop, prompts, memory, LLM providers, core tools
 ├── system/
-│   ├── automation/       # Daemon runtime, queue, IPC, connectors, config sync
-│   ├── kernel/           # AgentKernel, scheduler, core pool, terminal
-│   ├── tools/            # App-level tools: memory, web, canvas, shuiyuan, planner
-│   └── multi_agent/      # Multi-agent registry and constants
-└── frontend/
-    ├── cli/              # Interactive CLI loop
-    ├── feishu/           # Feishu gateway, cards, callbacks, routing
-    ├── mcp_server/       # Local MCP stdio server
-    ├── canvas_integration/
-    └── shuiyuan_integration/
+│   ├── automation/      # Daemon runtime, IPC, queue, scheduler, repositories
+│   ├── kernel/          # AgentKernel, KernelScheduler, CorePool, terminal
+│   └── tools/           # App-level tools and tool registry assembly
+├── frontend/            # CLI, Feishu, MCP, Canvas, Shuiyuan adapters
+├── macchiato_bot_cli/   # Packaged CLI and daemon entrypoints
+└── macchiato_remote/    # Remote worker protocol, CLI, runtime
+
+packages/macchiato-remote/
+└── pyproject.toml       # Worker-only PyPI package built from src/macchiato_remote
 ```
 
-## Quick Start
-
-### 1. Install dependencies
+## Quick Start From A Checkout
 
 ```bash
 uv sync --all-groups
-```
-
-Optional helper:
-
-```bash
-source init.sh
-```
-
-`init.sh` is a convenience script. It runs `uv sync`, exports `PYTHONPATH`, and loads `.env` into the current shell. You do not need to source it before every command if your environment is already set up.
-
-### 2. Prepare config
-
-```bash
 cp config/config.example.yaml config/config.yaml
 cp .env.example .env
 ```
 
-Then fill provider keys in `.env`, for example `OPENAI_API_KEY`, `DASHSCOPE_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, or `KIMI_CODE_API_KEY`.
-
-### 3. Start the daemon
+Fill provider keys in `.env`, then start the daemon:
 
 ```bash
 uv run automation_daemon.py
 ```
 
-The daemon is the shared runtime for:
-
-- CLI requests
-- Feishu requests
-- scheduled automation jobs
-- session expiration and rotation
-
-### 4. Start a frontend
+In another terminal, start a frontend:
 
 ```bash
 uv run main.py
+uv run main.py "schedule a meeting tomorrow at 3pm"
 uv run feishu_ws_gateway.py
 ```
 
-For a single command:
+`source init.sh` is optional. It runs `uv sync`, exports `PYTHONPATH`, and loads
+`.env` for the current shell.
+
+## Installed Commands
+
+After installing `macchiato-bot`, use:
 
 ```bash
-uv run main.py "schedule a meeting tomorrow at 3pm"
+macchiato-daemon
+macchiato
+macchiato "schedule a meeting tomorrow at 3pm"
+macchiato-remote status
 ```
 
-Optional session identity override:
+The CLI is an IPC client. If the daemon is not running, it exits instead of
+starting a private agent process.
 
-```bash
-SCHEDULE_USER_ID=root SCHEDULE_SOURCE=cli uv run main.py
-```
+## Common Slash Commands
 
-## Runtime Model
-
-### Daemon-first workflow
-
-`main.py` is a thin IPC client. It does not run the full agent locally; it connects to `automation_daemon.py` over a Unix socket. If the daemon is not running, CLI exits with an error.
-
-### What the daemon does
-
-- loads config and tool registry
-- syncs `automation.jobs` from `config/config.yaml`
-- runs queue consumers and job scheduling
-- hosts the IPC server used by CLI and other frontends
-- centralizes session expiration, rotation, and summarization
-
-## Common Commands
-
-CLI and Feishu share the same slash command surface through IPC:
+CLI and Feishu share the same slash-command surface through daemon IPC:
 
 - `/help`
-- `/model`
-- `/model list`
-- `/model <name>`
-- `/session`
-- `/session whoami`
-- `/session list`
-- `/session new [id]`
-- `/session switch <id>`
-- `/session delete <id>`
+- `/model`, `/model list`, `/model <name>`
+- `/session`, `/session whoami`, `/session list`
+- `/session new [id]`, `/session switch <id>`, `/session delete <id>`
 - `/remote-use <login> [path]`
 - `/remote-status`
 - `/remote-release` or `/cloud-use`
 
-Example:
-
-```bash
-/session
-/session new cli:work
-/session list
-/session switch cli:root
-```
-
 ## Remote Workspaces
 
-Remote workspaces are the planned path for letting a cloud-hosted macchiatoBot
-session operate on a user-authorized folder on another machine, such as your
-laptop. The local machine runs a lightweight `macchiato-remote` worker; the
-cloud daemon keeps the LLM, memory, Feishu, scheduler, and permission flow.
+Remote workspace mode lets a cloud-hosted daemon operate on a user-authorized
+folder on another machine. The full bot stays on the daemon host; the local
+machine runs only `macchiato-remote`, which exposes bash/file capabilities for
+that authorized workspace.
 
-Current branch status:
-
-- `macchiato-remote` is packaged as an independent CLI entrypoint (WebSocket client;
-  install optional extra: `uv tool install ".[remote]"` or `uv sync --extra remote`).
-- The automation daemon exposes a WebSocket gateway (default `0.0.0.0:9380`, overridable
-  via `MACCHIATO_REMOTE_HOST` / `MACCHIATO_REMOTE_PORT`; set `MACCHIATO_REMOTE_TOKENS`
-  for per-login worker tokens, or `MACCHIATO_REMOTE_TOKEN` for a shared fallback).
-- The same port now also serves a lightweight remote login panel:
-  `http://<host>:<port>/remote/login` (health: `/remote/healthz`).
-- `/remote-use`, `/remote-status`, and `/remote-release` open or release a remote
-  workspace over IPC / Feishu; when active, `bash`, `read_file`, `write_file`, and
-  `modify_file` are routed to the connected worker.
-- When remote mode is active, the system prompt gets a remote workspace note at
-  the very end, so the agent knows the current workspace backend changed.
-
-### Install the Local Worker
-
-During development, install the lightweight worker from this repository:
-
-```bash
-cd /path/to/macchiatoBot
-uv tool install ".[remote]"
-```
-
-You can also run it directly from a checkout:
-
-```bash
-uv run macchiato-remote status
-```
-
-If you do not want to keep a full checkout on the local machine, build a wheel
-on any machine that has the repository, copy the wheel to the target machine,
-and install that wheel:
-
-```bash
-uv build --wheel
-uv tool install dist/macchiato_bot-*.whl
-```
-
-The local worker does not need `config/config.yaml`, `.env`, Feishu settings,
-LLM keys, or the automation daemon. Those stay on the cloud server.
-
-### Configure the Local Login
-
-Choose a login alias. This is the value used by `/remote-use`; it is intentionally
-not hard-coded to a device name.
-
-On the cloud server, generate a token for this worker from the repository root;
-you do not need to invent one by hand:
-
-```bash
-uv run macchiato-remote gen-token --login personal
-# optional: uv run macchiato-remote gen-token --login personal --bytes 48
-```
-
-The command registers a sha256 digest for that `login` in the server-side
-`data/automation/remote_worker_tokens.json` registry. The plaintext token is
-shown only as the first output line; pass that value to the local worker's
-`login --token`. For multiple machines, run the command again with a different
-`login`.
-
-`MACCHIATO_REMOTE_TOKENS='personal=<token1>,work-mbp=<token2>'` and
-`MACCHIATO_REMOTE_TOKEN=<token>` still work as environment override/fallbacks,
-but systemd deploys do not need token environment variables in the common case.
-Point `--server` at your daemon host including the WebSocket port (default
-**9380**, e.g. `http://203.0.113.10:9380` or behind TLS).
-
-```bash
-macchiato-remote login \
-  --server http://your-macchiato-server.example.com:9380 \
-  --login personal \
-  --token '<paste gen-token output>'
-```
-
-You can also use positional server syntax:
-
-```bash
-macchiato-remote login your-macchiato-server.example.com:9380 --login personal
-```
-
-If `--token` is omitted, the CLI starts a device-login flow.
-
-Preferred mode (bootstrap exchange):
-
-1. Set `MACCHIATO_REMOTE_LOGIN_BOOTSTRAP_TOKEN` on server
-2. Run `macchiato-remote login <server> --login <alias> --auth-token '<bootstrap-token>'`
-3. Server verifies bootstrap token and immediately issues a worker token
-4. CLI stores the issued worker token in local config
-
-Fallback mode (manual approval panel):
-
-1. CLI requests a one-time code from `/remote/login/start`
-2. You open `/remote/login` and approve with server `MACCHIATO_REMOTE_LOGIN_APPROVER_SECRET`
-3. CLI polls `/remote/login/poll`, receives a short-lived onboarding token, and saves it to local config
-
-Feishu approval mode (recommended for no-token UX):
-
-1. Configure server Feishu bot and set `feishu.automation_activity_chat_id`
-2. Configure approver allowlist:
-   - `MACCHIATO_REMOTE_LOGIN_APPROVER_OPEN_IDS`
-   - `MACCHIATO_REMOTE_LOGIN_APPROVER_USER_IDS`
-3. Client runs only:
-   - `macchiato-remote login <server-ip>:9380 --login <alias>`
-4. Server sends an interactive Feishu approval card; approver clicks Approve/Reject
-5. CLI keeps polling and auto-saves token after approval
-
-Check local configuration:
-
-```bash
-macchiato-remote status
-```
-
-Start the worker in the foreground while debugging:
-
-```bash
-macchiato-remote start
-```
-
-For daily use, run it as a lightweight background process (pid + log file, no
-launchd/systemd required):
-
-```bash
-macchiato-remote start --background
-macchiato-remote status
-macchiato-remote stop
-```
-
-Background logs are written to `~/.local/state/macchiato/remote-worker.log`; the
-pid file is `~/.local/state/macchiato/remote-worker.pid`.
-
-If public WebSocket access is unreliable in your network, save an SSH tunnel
-configuration once and let the worker manage the tunnel automatically (no daily
-manual `ssh -L`):
-
-```bash
-macchiato-remote login \
-  --server http://203.0.113.10:9380 \
-  --login macbook \
-  --token '<same token as daemon>' \
-  --ssh-tunnel ubuntu@203.0.113.10
-
-macchiato-remote start --background
-```
-
-With `--ssh-tunnel` configured, `start`, `start --background`, and `probe` open
-`127.0.0.1:19380 -> SSH_HOST:127.0.0.1:9380` automatically, and the worker
-connects through that local tunnel. Tune it with `--ssh-local-port`,
-`--ssh-remote-host`, and `--ssh-remote-port`; remove it with `--clear-ssh-tunnel`.
-
-If you see `InvalidMessage('did not receive a valid HTTP response')`, run:
-
-```bash
-macchiato-remote probe
-```
-
-This sends the same WebSocket upgrade over a **stdlib blocking socket** (no
-`asyncio`, no `HTTP_PROXY`). If the first line is `HTTP/1.1 101 Switching Protocols`,
-the path to the server is fine and the failure is specific to the `websockets`
-stack or your environment. If `probe` shows garbage/HTML or hangs, check **Clash
-TUN / VPN** (turning off **TUN mode** or bypassing the server IP often fixes it;
-empty `http_proxy` in the shell is **not** enough when TUN captures all IP traffic).
-The `start` command also prints the **underlying `__cause__`** of handshake errors
-after upgrading the package.
-
-If Clash is off but you only see **`TimeoutError`** (and `probe` also times out) while
-`nc -zv` used to work, suspect **stale routes or utun leftovers after VPN/TUN** — reboot
-the Mac, try another network (e.g. phone hotspot), and re-check `nc -zv` plus the cloud
-security group for TCP **9380**.
-
-If **`nc` works only while Clash is on and fails after quitting**, the TUN exit likely
-**did not restore the default gateway**. Reboot the Mac or use Clash’s normal quit path
-that restores routes; killing the app alone often leaves a broken routing table.
-
-#### Keeping TUN on (recommended for daily use)
-
-Add a **high-priority** rule so traffic to your daemon’s **public IP** uses `DIRECT`
-(still inside TUN, but not steered into a broken proxy chain). Place it **before** the
-catch-all `MATCH` rule, and replace the IP with yours (example uses RFC 5737 TEST-NET-3):
-
-```yaml
-rules:
-  - IP-CIDR,203.0.113.10/32,DIRECT,no-resolve
-```
-
-`no-resolve` makes the rule match by IP without DNS quirks. Reload Clash, then
-`macchiato-remote probe` should show `HTTP/1.1 101 Switching Protocols`. If handshakes
-still flake, try switching the **TUN stack** (`gvisor` vs `system`) in Clash Meta / Verge.
-
-### Use From Feishu Or CLI
-
-With the daemon reachable from your machine at the `--server` URL and the worker
-running, switch the current session into remote workspace mode:
-
-```text
-/remote-use personal ~/Project
-/remote-use personal ~/Project --profile dev --ttl 30m
-```
-
-Useful companion commands:
-
-```text
-/remote-status
-/remote-release
-/cloud-use
-```
-
-Remote mode is session-scoped. It does not globally change every core. While it
-is active, the agent is instructed that `bash`, `read_file`, `write_file`, and
-`modify_file` should be treated as operating on the remote workspace, with
-`/workspace`, `~`, and relative paths referring to the authorized local folder.
-
-Permission profiles are designed as:
-
-| Profile | Intent |
-|---|---|
-| `strict` | Only the explicitly authorized workspace, minimal host exposure |
-| `dev` | Developer-friendly sandbox with project access and common toolchain/cache mounts |
-| `host-user` | Short-lived, user-confirmed access as the local OS user |
-| `host-admin` | Highest-risk mode for explicit, per-command admin actions |
-
-The default profile is `dev`. Higher-privilege modes should be short-lived and
-audited; they are meant for explicit elevation, not as the default workspace.
+Read the setup, login modes, permission profiles, and troubleshooting notes in
+[docs/remote-workspace.md](docs/remote-workspace.md).
 
 ## Configuration
 
-Main config: `config/config.yaml`. Example: `config/config.example.yaml`.
+Main config lives at `config/config.yaml`; start from
+`config/config.example.yaml`. Provider fragments live under
+`config/llm/providers.d/*.yaml`.
 
 Important areas:
 
 | Key | Purpose |
 |---|---|
-| `llm.*` | active provider, vision provider, provider fragments, request defaults |
-| `multimodal.*` | multimodal input limits and timeout |
-| `agent.*` | iteration limits, subagent caps, working set size |
-| `tools.*` | core tool exposure and template-based tool sets |
-| `memory.*` | working-memory limits, recall policy, persistent memory |
-| `automation.jobs` | scheduled jobs managed by the daemon |
-| `file_tools.*` | file read/write/modify controls |
-| `command_tools.*` | bash enablement, workspace isolation, writable roots |
-| `canvas.*` | Canvas integration |
-| `shuiyuan.*` | Shuiyuan integration |
-| `sjtu_jw.*` | SJTU course schedule sync |
-| `mcp.*` | external MCP server configuration |
+| `llm.*` | Active provider, vision provider, provider fragments, request defaults |
+| `agent.*` | Iteration limits, subagent caps, working-set size |
+| `tools.*` | Core tool exposure and template-based tool sets |
+| `memory.*` | Working memory, recall policy, persistent memory |
+| `automation.jobs` | Scheduled jobs managed by the daemon |
+| `command_tools.*` | Bash enablement, workspace isolation, writable roots |
+| `file_tools.*` | File read/write/modify controls |
+| `mcp.*` | External MCP server configuration |
 | `feishu.*` | Feishu app and gateway settings |
-
-Provider fragments live in `config/llm/providers.d/*.yaml`. The active provider is selected by `llm.active`, and can be changed at runtime with `/model <name>`.
-
-## MCP
-
-Local MCP entry:
-
-```bash
-uv run mcp_server.py
-```
-
-External MCP servers can be configured under `mcp.servers` in `config/config.yaml`.
 
 ## Development
 
 ```bash
 uv sync --all-groups
-uv run pytest tests/ -v
+uv run pytest tests/ -v --tb=short
+black --check src/ tests/
+isort --check-only src/ tests/
 ```
 
-The repository currently has broad coverage across agent runtime, automation, permissions, multimodal handling, frontend integrations, and tool behavior.
+Focused docs:
 
-If you want the shell to inherit values from `.env`, either use `source init.sh` once for that shell, or load `.env` with your own workflow.
-
-## Additional Docs
-
+- [Architecture](docs/architecture.md)
+- [Remote workspaces](docs/remote-workspace.md)
 - [Feishu integration](docs/feishu.md)
 - [Deployment / systemd](deploy/README.md)
+- [Release process](deploy/RELEASING.md)
 - [Development guidelines](AGENTS.md)
 
 ## License

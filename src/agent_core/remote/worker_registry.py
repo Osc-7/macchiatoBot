@@ -286,6 +286,142 @@ class RemoteWorkerRegistry:
         )
         return RemoteShellResetResult.model_validate(payload)
 
+    async def capture_remote_shell(
+        self,
+        *,
+        login: str,
+        session_id: str,
+        timeout_seconds: float = 15.0,
+    ):
+        from macchiato_remote.protocol import (
+            RemoteShellCaptureRequest,
+            RemoteShellCaptureResult,
+        )
+
+        conn = await self.require(login)
+        req = RemoteShellCaptureRequest(
+            request_id=uuid.uuid4().hex,
+            session_id=session_id,
+        )
+        payload = await conn.request(
+            "shell_capture",
+            req.model_dump(),
+            timeout_seconds=timeout_seconds,
+        )
+        return RemoteShellCaptureResult.model_validate(payload)
+
+    async def start_job(
+        self,
+        *,
+        login: str,
+        session_id: str,
+        command: str,
+        cwd: str = REMOTE_WORKSPACE_MOUNT,
+        timeout_seconds: Optional[float] = None,
+        env: Optional[Dict[str, str]] = None,
+    ) -> "RemoteJobStartResult":
+        from macchiato_remote.protocol import (
+            RemoteJobStartRequest,
+            RemoteJobStartResult,
+        )
+
+        conn = await self.require(login)
+        req = RemoteJobStartRequest(
+            request_id=uuid.uuid4().hex,
+            session_id=session_id,
+            command=command,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+            env=dict(env or {}),
+        )
+        payload = await conn.request(
+            "job_start",
+            req.model_dump(),
+            timeout_seconds=10.0,
+        )
+        return RemoteJobStartResult.model_validate(payload)
+
+    async def job_status(
+        self,
+        *,
+        login: str,
+        session_id: str,
+        job_id: str,
+    ) -> "RemoteJobStatusResult":
+        from macchiato_remote.protocol import (
+            RemoteJobStatusRequest,
+            RemoteJobStatusResult,
+        )
+
+        conn = await self.require(login)
+        req = RemoteJobStatusRequest(
+            request_id=uuid.uuid4().hex,
+            session_id=session_id,
+            job_id=job_id,
+        )
+        payload = await conn.request(
+            "job_status",
+            req.model_dump(),
+            timeout_seconds=10.0,
+        )
+        return RemoteJobStatusResult.model_validate(payload)
+
+    async def job_tail(
+        self,
+        *,
+        login: str,
+        session_id: str,
+        job_id: str,
+        lines: int = 200,
+        offset: int = 0,
+    ) -> "RemoteJobTailResult":
+        from macchiato_remote.protocol import (
+            RemoteJobTailRequest,
+            RemoteJobTailResult,
+        )
+
+        conn = await self.require(login)
+        req = RemoteJobTailRequest(
+            request_id=uuid.uuid4().hex,
+            session_id=session_id,
+            job_id=job_id,
+            lines=lines,
+            offset=offset,
+        )
+        payload = await conn.request(
+            "job_tail",
+            req.model_dump(),
+            timeout_seconds=30.0,
+        )
+        return RemoteJobTailResult.model_validate(payload)
+
+    async def stop_job(
+        self,
+        *,
+        login: str,
+        session_id: str,
+        job_id: str,
+        signal: str = "SIGTERM",
+    ) -> "RemoteJobStopResult":
+        from macchiato_remote.protocol import (
+            RemoteJobStopRequest,
+            RemoteJobStopResult,
+        )
+
+        conn = await self.require(login)
+        req = RemoteJobStopRequest(
+            request_id=uuid.uuid4().hex,
+            session_id=session_id,
+            job_id=job_id,
+            signal=signal,
+        )
+        payload = await conn.request(
+            "job_stop",
+            req.model_dump(),
+            timeout_seconds=10.0,
+        )
+        return RemoteJobStopResult.model_validate(payload)
+
 
 _REGISTRY = RemoteWorkerRegistry()
 

@@ -14,6 +14,21 @@ from pydantic import BaseModel, Field, field_validator
 
 REMOTE_WORKSPACE_MOUNT = "/workspace"
 
+# 与 daemon 协商能力；worker 包主版本 bump 时递增
+REMOTE_PROTOCOL_VERSION = 2
+REMOTE_WORKER_CAPABILITIES = (
+    "exec",
+    "file_read",
+    "file_write",
+    "file_blob_read",
+    "reset_shell",
+    "shell_capture",
+    "job_start",
+    "job_status",
+    "job_tail",
+    "job_stop",
+)
+
 RemotePermissionProfile = Literal["strict", "dev", "host-user", "host-admin"]
 RemoteWorkspaceStatus = Literal["active", "pending", "released", "error"]
 
@@ -118,6 +133,7 @@ class RemoteCommandResult(BaseModel):
     timed_out: bool = False
     truncated: bool = False
     cwd: str = REMOTE_WORKSPACE_MOUNT
+    error: Optional[str] = None
 
 
 class RemoteFileReadRequest(BaseModel):
@@ -183,4 +199,95 @@ class RemoteShellResetResult(BaseModel):
     session_id: str
     success: bool
     message: str = ""
+    error: Optional[str] = None
+
+
+class RemoteShellCaptureRequest(BaseModel):
+    request_id: str
+    session_id: str
+
+
+class RemoteShellCaptureResult(BaseModel):
+    request_id: str
+    session_id: str
+    cwd: str = ""
+    env: Dict[str, str] = Field(default_factory=dict)
+    error: Optional[str] = None
+
+
+# ── Job lifecycle ──────────────────────────────────────────
+
+class RemoteJobStartRequest(BaseModel):
+    request_id: str
+    session_id: str
+    command: str
+    cwd: str = REMOTE_WORKSPACE_MOUNT
+    timeout_seconds: Optional[float] = None
+    env: Dict[str, str] = Field(default_factory=dict)
+
+
+class RemoteJobStartResult(BaseModel):
+    request_id: str
+    session_id: str
+    job_id: str
+    pid: Optional[int] = None
+    log_path: str = ""
+    status: str = "running"
+    error: Optional[str] = None
+
+
+class RemoteJobStatusRequest(BaseModel):
+    request_id: str
+    session_id: str
+    job_id: str
+
+
+class RemoteJobStatusResult(BaseModel):
+    request_id: str
+    session_id: str
+    job_id: str
+    status: str
+    command: str = ""
+    pid: Optional[int] = None
+    exit_code: Optional[int] = None
+    timed_out: bool = False
+    duration_seconds: float = 0.0
+    log_path: str = ""
+    error: Optional[str] = None
+
+
+class RemoteJobTailRequest(BaseModel):
+    request_id: str
+    session_id: str
+    job_id: str
+    lines: int = 200
+    offset: int = 0
+
+
+class RemoteJobTailResult(BaseModel):
+    request_id: str
+    session_id: str
+    job_id: str
+    status: str
+    total_lines: int = 0
+    read_lines: int = 0
+    offset: int = 0
+    log_path: str = ""
+    head_lines: list[str] = Field(default_factory=list)
+    tail_lines: list[str] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
+class RemoteJobStopRequest(BaseModel):
+    request_id: str
+    session_id: str
+    job_id: str
+    signal: str = "SIGTERM"
+
+
+class RemoteJobStopResult(BaseModel):
+    request_id: str
+    session_id: str
+    job_id: str
+    success: bool
     error: Optional[str] = None

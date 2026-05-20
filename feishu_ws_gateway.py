@@ -3,7 +3,7 @@
 Feishu long-connection gateway.
 
 使用飞书官方 Python SDK (lark-oapi) 通过 WebSocket 长连接接收事件，
-并将文本消息转发给 Schedule Agent 的 automation daemon。
+并将文本消息转发给 macchiatoBot automation daemon。
 
 运行方式示例:
 

@@ -4,10 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "macchiato-bot"
-version = "0.1.0"
-description = "LLM schedule agent (tool-driven)"
+version = "0.1.1"
+description = "macchiatoBot — daemon-first, tool-driven LLM assistant with remote worker CLI"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "macchiatoBot contributors" }]
 dependencies = [
     "pyyaml>=6.0",
     "requests>=2.28.0",
@@ -28,15 +30,26 @@ dependencies = [
     "litellm>=1.80",
     "prompt_toolkit>=3.0",
     "rich>=14.0",
+    "websockets>=12.0",
 ]
 
 [project.scripts]
+macchiato = "macchiato_bot_cli.main:main"
+macchiato-daemon = "macchiato_bot_cli.daemon:main"
 macchiato-remote = "macchiato_remote.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/Osc-7/macchiatoBot"
+Documentation = "https://github.com/Osc-7/macchiatoBot"
+Repository = "https://github.com/Osc-7/macchiatoBot"
+Issues = "https://github.com/Osc-7/macchiatoBot/issues"
+
 [project.optional-dependencies]
-remote = [
-    "websockets>=12.0",
-]
+# 向后兼容：此前用 macchiato-bot[remote] 安装 websockets；现 websockets 已在主依赖中
+remote = []
+
+[tool.uv.workspace]
+members = ["packages/macchiato-remote"]
 
 [dependency-groups]
 dev = [

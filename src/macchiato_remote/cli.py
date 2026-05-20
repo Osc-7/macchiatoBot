@@ -23,8 +23,12 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-from macchiato_remote.client import (RemoteWorkerClient,
-                                     raw_websocket_handshake_probe)
+from macchiato_remote.client import (
+    RemoteWorkerClient,
+    package_version,
+    raw_websocket_handshake_probe,
+)
+from macchiato_remote.protocol import REMOTE_PROTOCOL_VERSION
 from macchiato_remote.tokens import register_remote_worker_token
 
 CONFIG_PATH = Path.home() / ".config" / "macchiato" / "remote.json"
@@ -650,6 +654,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="macchiato-remote",
         description="Lightweight local worker for macchiatoBot remote workspaces.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=(
+            f"%(prog)s {package_version()} "
+            f"(protocol {REMOTE_PROTOCOL_VERSION})"
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

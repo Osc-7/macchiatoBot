@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "macchiato-remote"
+version = "0.2.1"
+description = "Lightweight macchiatoBot remote worker (expose local workspace to cloud agent)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "macchiatoBot contributors" }]
+dependencies = [
+    "pydantic>=2.0",
+    "websockets>=12.0",
+]
+
+[project.scripts]
+macchiato-remote = "macchiato_remote.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Osc-7/macchiatoBot"
+Documentation = "https://github.com/Osc-7/macchiatoBot/blob/master/docs/remote-workspace.md"
+Repository = "https://github.com/Osc-7/macchiatoBot"
+
+[tool.setuptools]
+package-dir = { "" = "../../src" }
+
+[tool.setuptools.packages.find]
+where = ["../../src"]
+include = ["macchiato_remote*"]
+
+[tool.setuptools.package-data]
+macchiato_remote = ["py.typed"]

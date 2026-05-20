@@ -175,6 +175,31 @@ class TestPersistence:
         assert "persistent123" in r.stdout
         await rt.close()
 
+    async def test_capture_session(self):
+        rt = _make_runtime()
+        await rt.start()
+        await rt.execute("export CAPTURE_ME=hello")
+        cap = await rt.capture_session()
+        assert cap is not None
+        assert cap.env.get("CAPTURE_ME") == "hello"
+        assert cap.cwd
+        await rt.close()
+
+    async def test_timeout_restart_restores_export(self, tmp_path):
+        snap_dir = tmp_path / "snaps"
+        rt = _make_runtime(
+            default_timeout_seconds=2.0,
+            snapshot_enabled=False,
+            snapshot_dir=str(snap_dir),
+        )
+        await rt.start()
+        await rt.execute("export AFTER_TIMEOUT=kept")
+        r = await rt.execute("sleep 60", timeout=1.0)
+        assert r.timed_out
+        r2 = await rt.execute("echo $AFTER_TIMEOUT")
+        assert "kept" in r2.stdout
+        await rt.close()
+
     async def test_function_persists(self):
         rt = _make_runtime()
         await rt.start()

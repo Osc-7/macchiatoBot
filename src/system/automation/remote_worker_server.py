@@ -582,6 +582,15 @@ def create_remote_worker_app(*, token: Optional[str] = None) -> FastAPI:
             while True:
                 message = await websocket.receive_json()
                 if isinstance(message, dict):
+                    if message.get("type") == "worker_hello":
+                        logger.info(
+                            "remote worker hello: login=%s protocol=%s package=%s caps=%s",
+                            login_s,
+                            message.get("protocol_version"),
+                            message.get("package_version"),
+                            message.get("capabilities"),
+                        )
+                        continue
                     conn.handle_message(message)
         except WebSocketDisconnect:
             logger.info("remote worker disconnected: login=%s", login_s)

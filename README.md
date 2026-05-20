@@ -192,10 +192,11 @@ session operate on a user-authorized folder on another machine, such as your
 laptop. The local machine runs a lightweight `macchiato-remote` worker; the
 cloud daemon keeps the LLM, memory, Feishu, scheduler, and permission flow.
 
-Current branch status:
+Deployment model:
 
-- `macchiato-remote` is packaged as an independent CLI entrypoint (WebSocket client;
-  install optional extra: `uv tool install ".[remote]"` or `uv sync --extra remote`).
+- **macchiato-bot** — full agent (cloud server, or a Mac that runs the bot locally).
+- **macchiato-remote** — lightweight worker only (cluster nodes, or install without the full stack).
+- Both share the same remote protocol; a machine with the full bot can also run `macchiato-remote start` to expose folders to the cloud.
 - The automation daemon exposes a WebSocket gateway (default `0.0.0.0:9380`, overridable
   via `MACCHIATO_REMOTE_HOST` / `MACCHIATO_REMOTE_PORT`; set `MACCHIATO_REMOTE_TOKENS`
   for per-login worker tokens, or `MACCHIATO_REMOTE_TOKEN` for a shared fallback).
@@ -207,32 +208,50 @@ Current branch status:
 - When remote mode is active, the system prompt gets a remote workspace note at
   the very end, so the agent knows the current workspace backend changed.
 
-### Install the Local Worker
+### Install
 
-During development, install the lightweight worker from this repository:
+| Where | Package | Command |
+|-------|---------|---------|
+| Cloud / dev (full agent) | `macchiato-bot` | `uv sync` in repo, or `uv tool install macchiato-bot` |
+| Mac (full bot + optional worker) | `macchiato-bot` | same; includes `macchiato-remote` CLI and `websockets` |
+| Laptop / cluster (worker only) | **`macchiato-remote`** | `uv tool install macchiato-remote` or `pipx install macchiato-remote` |
+
+**Worker-only install (recommended; published on PyPI):**
+
+```bash
+uv tool install macchiato-remote
+macchiato-remote --version
+```
+
+See https://pypi.org/project/macchiato-remote/
+
+After `uv tool install macchiato-bot` you get `macchiato` (CLI), `macchiato-daemon`, and `macchiato-remote`.
+
+From a git tag:
+
+```bash
+uv tool install "macchiato-remote @ git+https://github.com/<org>/macchiatoBot.git@v0.2.0#subdirectory=packages/macchiato-remote"
+```
+
+From a release wheel (see GitHub Releases on tag push):
+
+```bash
+uv tool install https://github.com/<org>/macchiatoBot/releases/download/v0.2.0/macchiato_remote-0.2.0-py3-none-any.whl
+```
+
+Helper script: `deploy/install-macchiato-remote.sh` (`INSTALLER=uv|pipx|pip`).
+
+**Develop from this repository:**
 
 ```bash
 cd /path/to/macchiatoBot
-uv tool install ".[remote]"
-```
-
-You can also run it directly from a checkout:
-
-```bash
+uv sync
 uv run macchiato-remote status
+# or install editable worker package:
+uv tool install -e packages/macchiato-remote
 ```
 
-If you do not want to keep a full checkout on the local machine, build a wheel
-on any machine that has the repository, copy the wheel to the target machine,
-and install that wheel:
-
-```bash
-uv build --wheel
-uv tool install dist/macchiato_bot-*.whl
-```
-
-The local worker does not need `config/config.yaml`, `.env`, Feishu settings,
-LLM keys, or the automation daemon. Those stay on the cloud server.
+The worker does not need `config/config.yaml`, `.env`, Feishu settings, LLM keys, or the automation daemon on that machine.
 
 ### Configure the Local Login
 

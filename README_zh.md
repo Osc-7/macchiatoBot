@@ -104,36 +104,45 @@ CLI 与飞书都支持一组常用斜杠命令（通过 IPC）：
 
 远程工作区用于让部署在云服务器上的 macchiatoBot 会话操作另一台机器上由用户授权的目录，例如你的电脑。云端仍负责 LLM、记忆、飞书、调度和权限流；本机只运行一个轻量的 `macchiato-remote` worker，负责暴露本机工作区、bash/file 能力和本机确认。
 
-当前分支状态：
+部署模型：
 
-- 已新增独立的 `macchiato-remote` CLI（WebSocket 客户端；需 `uv sync --extra remote` 或 `uv tool install ".[remote]"` 安装 `websockets`）。
+- **macchiato-bot** — 完整 agent（云服务器，或 Mac 上本地使用）。
+- **macchiato-remote** — 仅远程互联模块（集群节点等轻量场景）。
+- 装了完整 bot 的机器也可同时 `macchiato-remote start`，把目录暴露给云端。
 - 云上 `automation_daemon` 暴露 WebSocket 网关（默认监听 `0.0.0.0:9380`，可用 `MACCHIATO_REMOTE_HOST` / `MACCHIATO_REMOTE_PORT` 覆盖；建议设置按机器区分的 `MACCHIATO_REMOTE_TOKENS`，也可用共享兜底 `MACCHIATO_REMOTE_TOKEN`）。
 - 已接入 `/remote-use`、`/remote-status`、`/remote-release`；启用后 `bash`、`read_file`、`write_file`、`modify_file` 路由到已连接的 worker。
 - 当某个 session 启用 remote mode 时，会在 system prompt 末尾追加远程工作区说明。
 
-### 在本机安装 worker
+### 安装
 
-开发阶段可以从本仓库安装轻量 worker：
+| 场景 | 安装包 | 命令 |
+|------|--------|------|
+| 云 / 开发（完整 agent） | `macchiato-bot` | 仓库内 `uv sync`，或 `uv tool install macchiato-bot` |
+| Mac（本地 bot + 可选暴露目录） | `macchiato-bot` | 同上，已含 `macchiato-remote` 与 `websockets` |
+| 集群 / 仅暴露目录 | **`macchiato-remote`** | `uv tool install macchiato-remote` 或 `pipx install macchiato-remote` |
+
+**仅 worker（推荐，已发布 PyPI）：**
+
+```bash
+uv tool install macchiato-remote
+macchiato-remote --version
+```
+
+详见 [macchiato-remote on PyPI](https://pypi.org/project/macchiato-remote/)。
+
+**仓库开发：**
 
 ```bash
 cd /path/to/macchiatoBot
-uv tool install ".[remote]"
-```
-
-也可以直接从 checkout 运行：
-
-```bash
+uv sync
 uv run macchiato-remote status
 ```
 
-如果你不想在本机保留完整仓库，可以在任意有仓库的机器上构建 wheel，把 wheel 拷到本机再安装：
+也可 `uv tool install -e packages/macchiato-remote`。
 
-```bash
-uv build --wheel
-uv tool install dist/macchiato_bot-*.whl
-```
+完整 bot：`uv tool install macchiato-bot` 后使用 `macchiato`、`macchiato-daemon`、`macchiato-remote`（[PyPI](https://pypi.org/project/macchiato-bot/)）。发版见 `deploy/RELEASING.md`。
 
-本机 worker 不需要 `config/config.yaml`、`.env`、飞书配置、LLM key 或 automation daemon。这些仍然只需要放在云服务器上。
+本机 worker 不需要 `config/config.yaml`、`.env`、飞书、LLM key 或 automation daemon。
 
 ### 配置本机登录别名
 

@@ -280,3 +280,48 @@ def test_remote_worker_client_normalizes_server_without_scheme() -> None:
     ws_url = c._websocket_url()
     assert ws_url.startswith("ws://149.28.149.135:9380/remote/worker/sii")
     assert "token=tok" in ws_url
+
+
+def test_worker_hello_payload() -> None:
+    from macchiato_remote.client import worker_hello_payload
+    from macchiato_remote.protocol import (
+        REMOTE_PROTOCOL_VERSION,
+        REMOTE_WORKER_CAPABILITIES,
+    )
+
+    payload = worker_hello_payload()
+    assert payload["type"] == "worker_hello"
+    assert payload["protocol_version"] == REMOTE_PROTOCOL_VERSION
+    assert payload["capabilities"] == list(REMOTE_WORKER_CAPABILITIES)
+    assert isinstance(payload["package_version"], str)
+
+
+def test_cli_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "macchiato-remote" in out
+    assert "protocol" in out
+
+
+def test_remote_worker_websocket_accepts_worker_hello(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from system.automation import remote_worker_server as rws
+
+    monkeypatch.setenv("MACCHIATO_REMOTE_TOKENS", "work-mbp=machine-token")
+    app = rws.create_remote_worker_app()
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/remote/worker/work-mbp?token=machine-token"
+        ) as websocket:
+            websocket.send_json(
+                {
+                    "type": "worker_hello",
+                    "protocol_version": 2,
+                    "capabilities": ["exec"],
+                    "package_version": "0.2.0",
+                }
+            )
+            websocket.close()

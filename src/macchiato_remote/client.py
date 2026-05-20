@@ -12,6 +12,8 @@ from typing import Any, Dict, Optional
 from urllib.parse import quote, urlencode, urlparse, urlunparse
 
 from macchiato_remote.protocol import (
+    REMOTE_PROTOCOL_VERSION,
+    REMOTE_WORKER_CAPABILITIES,
     REMOTE_WORKSPACE_MOUNT,
     RemoteCommandRequest,
     RemoteCommandResult,
@@ -45,6 +47,27 @@ from macchiato_remote.runtime.files import (
 )
 from macchiato_remote.runtime.jobs import RemoteJobRegistry
 from macchiato_remote.runtime.shell import LocalShellConfig, LocalShellSession
+
+
+def package_version() -> str:
+    """Installed distribution version (macchiato-remote or macchiato-bot)."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    for dist in ("macchiato-remote", "macchiato-bot"):
+        try:
+            return version(dist)
+        except PackageNotFoundError:
+            continue
+    return "0.0.0+dev"
+
+
+def worker_hello_payload() -> Dict[str, Any]:
+    return {
+        "type": "worker_hello",
+        "protocol_version": REMOTE_PROTOCOL_VERSION,
+        "capabilities": list(REMOTE_WORKER_CAPABILITIES),
+        "package_version": package_version(),
+    }
 
 
 def normalize_remote_server_url(server: str) -> str:
@@ -178,10 +201,10 @@ class RemoteWorkerClient:
     async def run_forever(self) -> None:
         try:
             import websockets
-        except ImportError as exc:  # pragma: no cover - depends on install extra
+        except ImportError as exc:  # pragma: no cover
             raise RuntimeError(
-                "macchiato-remote start requires the remote extra: "
-                "uv tool install '.[remote]'"
+                "macchiato-remote start requires websockets: "
+                "uv tool install macchiato-remote  (or: pip install macchiato-remote)"
             ) from exc
 
         url = self._websocket_url()
@@ -212,8 +235,12 @@ class RemoteWorkerClient:
                     ping_interval=60.0,
                     ping_timeout=120.0,
                 ) as ws:
+                    await ws.send(
+                        json.dumps(worker_hello_payload(), ensure_ascii=False)
+                    )
                     print(
                         "macchiato-remote: connected (login registered on server). "
+                        f"protocol={REMOTE_PROTOCOL_VERSION} package={package_version()}. "
                         "Leave this process running; use /remote-use in Feishu.",
                         file=sys.stderr,
                         flush=True,

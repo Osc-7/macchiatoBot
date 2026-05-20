@@ -1,6 +1,8 @@
 """Lightweight remote-worker package for macchiatoBot."""
 
 from .protocol import (
+    REMOTE_PROTOCOL_VERSION,
+    REMOTE_WORKER_CAPABILITIES,
     REMOTE_WORKSPACE_MOUNT,
     RemoteCommandRequest,
     RemoteCommandResult,
@@ -19,6 +21,8 @@ from .protocol import (
 )
 
 __all__ = [
+    "REMOTE_PROTOCOL_VERSION",
+    "REMOTE_WORKER_CAPABILITIES",
     "REMOTE_WORKSPACE_MOUNT",
     "RemoteCommandRequest",
     "RemoteCommandResult",

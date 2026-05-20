@@ -14,6 +14,21 @@ from pydantic import BaseModel, Field, field_validator
 
 REMOTE_WORKSPACE_MOUNT = "/workspace"
 
+# 与 daemon 协商能力；worker 包主版本 bump 时递增
+REMOTE_PROTOCOL_VERSION = 2
+REMOTE_WORKER_CAPABILITIES = (
+    "exec",
+    "file_read",
+    "file_write",
+    "file_blob_read",
+    "reset_shell",
+    "shell_capture",
+    "job_start",
+    "job_status",
+    "job_tail",
+    "job_stop",
+)
+
 RemotePermissionProfile = Literal["strict", "dev", "host-user", "host-admin"]
 RemoteWorkspaceStatus = Literal["active", "pending", "released", "error"]
 

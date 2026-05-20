@@ -10,7 +10,7 @@
 modify_file 支持三种模式：search_replace（局部替换）、append（追加）、overwrite（覆盖）。
 """
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable, Optional, Tuple
 
 from agent_core.agent.session_capabilities import (
@@ -48,6 +48,67 @@ def _remote_workspace_session_if_active(
     if state is None:
         return None
     return sid, state
+
+
+def _remote_workspace_root_for_display(remote_state: Any) -> str:
+    root = (
+        getattr(remote_state, "display_remote_path", None)
+        or getattr(remote_state, "resolved_path", None)
+        or getattr(remote_state, "requested_path", None)
+        or "/workspace"
+    )
+    return str(root)
+
+
+def _remote_effective_path_for_display(
+    path_str: str, rel: str, remote_state: Any
+) -> str:
+    rel_s = (rel or "").strip()
+    if not rel_s or rel_s == ".":
+        return _remote_workspace_root_for_display(remote_state)
+    if rel_s.startswith("/"):
+        return rel_s
+    base = PurePosixPath(_remote_workspace_root_for_display(remote_state))
+    return str(base / rel_s)
+
+
+def _remote_file_tool_data(
+    *, path_str: str, rel: str, remote_state: Any, **extra: Any
+) -> dict:
+    data = {
+        "path": f"{path_str} (remote:{remote_state.login})",
+        "remote": True,
+        "remote_workspace_root": _remote_workspace_root_for_display(remote_state),
+        "resolved_remote_path": _remote_effective_path_for_display(
+            path_str, rel, remote_state
+        ),
+    }
+    if extra:
+        data.update(extra)
+    return data
+
+
+def _is_explicit_absolute_or_home(path_str: str) -> bool:
+    p = (path_str or "").strip()
+    return p.startswith("/") or p.startswith("~")
+
+
+def _apply_remote_working_directory(path_str: str, working_directory: Any) -> str:
+    p = (path_str or "").strip()
+    wd = str(working_directory or "").strip()
+    if not p or not wd or _is_explicit_absolute_or_home(p):
+        return path_str
+    if wd == "~":
+        return f"~/{p.lstrip('/')}"
+    return str(PurePosixPath(wd) / p)
+
+
+def _apply_local_working_directory(path_str: str, working_directory: Any) -> str:
+    p = (path_str or "").strip()
+    wd = str(working_directory or "").strip()
+    if not p or not wd or _is_explicit_absolute_or_home(p):
+        return path_str
+    return str(Path(wd) / p)
 
 
 def _redirect_memory_md_if_needed(path_str: str, exec_ctx: dict, config: Config) -> str:
@@ -293,6 +354,12 @@ class ReadFileTool(BaseTool):
                     description="最多读取的行数；未提供时从 start_line 读取到文件末尾",
                     required=False,
                 ),
+                ToolParameter(
+                    name="working_directory",
+                    type="string",
+                    description="可选。给相对 path 指定解析目录；绝对路径与 ~/ 路径不受影响",
+                    required=False,
+                ),
             ],
             examples=[
                 {
@@ -322,9 +389,7 @@ class ReadFileTool(BaseTool):
                 error="MISSING_PATH",
                 message="缺少必需参数: path",
             )
-
-        path_str = _redirect_memory_md_if_needed(path_str, exec_ctx, self._config)
-        kwargs["path"] = path_str
+        working_directory = kwargs.get("working_directory")
 
         if not self._ft_config.allow_read:
             return ToolResult(
@@ -372,13 +437,16 @@ class ReadFileTool(BaseTool):
 
         remote_sess = _remote_workspace_session_if_active(exec_ctx)
         if remote_sess is not None:
+            path_str = _apply_remote_working_directory(path_str, working_directory)
+            path_str = _redirect_memory_md_if_needed(path_str, exec_ctx, self._config)
+            kwargs["path"] = path_str
             session_id, remote_state = remote_sess
             rel, verr = normalize_remote_workspace_relative_path(path_str)
-            if verr:
+            if verr or rel is None:
                 return ToolResult(
                     success=False,
                     error="INVALID_PATH",
-                    message=verr,
+                    message=verr or f"无效路径: {path_str}",
                 )
             sl: Optional[int] = None
             el: Optional[int] = None
@@ -426,9 +494,12 @@ class ReadFileTool(BaseTool):
                     message=fr.error,
                 )
             data: dict = {
-                "path": f"{path_str} (remote:{remote_state.login})",
+                **_remote_file_tool_data(
+                    path_str=path_str,
+                    rel=rel,
+                    remote_state=remote_state,
+                ),
                 "content": fr.content,
-                "remote": True,
                 "truncated": fr.truncated,
             }
             if start_line is not None:
@@ -440,6 +511,9 @@ class ReadFileTool(BaseTool):
                 data=data,
                 message="成功读取远程文件",
             )
+        path_str = _apply_local_working_directory(path_str, working_directory)
+        path_str = _redirect_memory_md_if_needed(path_str, exec_ctx, self._config)
+        kwargs["path"] = path_str
 
         resolved, err = _resolve_read_path_for_file_tool(
             path_str, exec_ctx, self._ft_config, self._config
@@ -639,6 +713,12 @@ class WriteFileTool(BaseTool):
                     required=False,
                     default="utf-8",
                 ),
+                ToolParameter(
+                    name="working_directory",
+                    type="string",
+                    description="可选。给相对 path 指定解析目录；绝对路径与 ~/ 路径不受影响",
+                    required=False,
+                ),
             ],
             examples=[
                 {
@@ -681,9 +761,7 @@ class WriteFileTool(BaseTool):
                 error="MISSING_CONTENT",
                 message="缺少必需参数: content",
             )
-
-        path_str = _redirect_memory_md_if_needed(path_str, exec_ctx, self._config)
-        kwargs["path"] = path_str
+        working_directory = kwargs.get("working_directory")
 
         if not self._ft_config.allow_write:
             return ToolResult(
@@ -694,13 +772,16 @@ class WriteFileTool(BaseTool):
 
         remote_sess = _remote_workspace_session_if_active(exec_ctx)
         if remote_sess is not None:
+            path_str = _apply_remote_working_directory(path_str, working_directory)
+            path_str = _redirect_memory_md_if_needed(path_str, exec_ctx, self._config)
+            kwargs["path"] = path_str
             session_id, remote_state = remote_sess
             rel, verr = normalize_remote_workspace_relative_path(path_str)
-            if verr:
+            if verr or rel is None:
                 return ToolResult(
                     success=False,
                     error="INVALID_PATH",
-                    message=verr,
+                    message=verr or f"无效路径: {path_str}",
                 )
             if self._permission_provider:
                 summary = f"写入(远程) {path_str}，共 {len(content)} 字符"
@@ -735,12 +816,16 @@ class WriteFileTool(BaseTool):
                 )
             return ToolResult(
                 success=True,
-                data={
-                    "path": f"{path_str} (remote:{remote_state.login})",
-                    "remote": True,
-                },
+                data=_remote_file_tool_data(
+                    path_str=path_str,
+                    rel=rel,
+                    remote_state=remote_state,
+                ),
                 message="成功写入远程文件",
             )
+        path_str = _apply_local_working_directory(path_str, working_directory)
+        path_str = _redirect_memory_md_if_needed(path_str, exec_ctx, self._config)
+        kwargs["path"] = path_str
 
         resolved, err = _resolve_mutation_path_for_file_tool(
             path_str, exec_ctx, self._ft_config, self._config
@@ -994,6 +1079,12 @@ class ModifyFileTool(BaseTool):
                     required=False,
                     default="utf-8",
                 ),
+                ToolParameter(
+                    name="working_directory",
+                    type="string",
+                    description="可选。给相对 path 指定解析目录；绝对路径与 ~/ 路径不受影响",
+                    required=False,
+                ),
             ],
             examples=[
                 {
@@ -1047,6 +1138,7 @@ class ModifyFileTool(BaseTool):
                 error="MISSING_PATH",
                 message="缺少必需参数: path",
             )
+        working_directory = kwargs.get("working_directory")
 
         if not self._ft_config.allow_modify:
             return ToolResult(
@@ -1054,9 +1146,6 @@ class ModifyFileTool(BaseTool):
                 error="PERMISSION_DENIED",
                 message="文件修改功能未启用。请在配置中设置 file_tools.allow_modify: true",
             )
-
-        path_str = _redirect_memory_md_if_needed(path_str, exec_ctx, self._config)
-        kwargs["path"] = path_str
 
         mode = kwargs.get("mode", "search_replace")
         if mode not in ("search_replace", "append", "overwrite"):
@@ -1071,13 +1160,16 @@ class ModifyFileTool(BaseTool):
 
         remote_sess = _remote_workspace_session_if_active(exec_ctx)
         if remote_sess is not None:
+            path_str = _apply_remote_working_directory(path_str, working_directory)
+            path_str = _redirect_memory_md_if_needed(path_str, exec_ctx, self._config)
+            kwargs["path"] = path_str
             session_id, remote_state = remote_sess
             rel, verr = normalize_remote_workspace_relative_path(path_str)
-            if verr:
+            if verr or rel is None:
                 return ToolResult(
                     success=False,
                     error="INVALID_PATH",
-                    message=verr,
+                    message=verr or f"无效路径: {path_str}",
                 )
             registry = get_remote_worker_registry()
 
@@ -1163,11 +1255,12 @@ class ModifyFileTool(BaseTool):
                     )
                 return ToolResult(
                     success=True,
-                    data={
-                        "path": f"{path_str} (remote:{remote_state.login})",
-                        "mode": "search_replace",
-                        "remote": True,
-                    },
+                    data=_remote_file_tool_data(
+                        path_str=path_str,
+                        rel=rel,
+                        remote_state=remote_state,
+                        mode="search_replace",
+                    ),
                     message="成功在远程文件上完成局部替换",
                 )
 
@@ -1212,13 +1305,17 @@ class ModifyFileTool(BaseTool):
                 )
             return ToolResult(
                 success=True,
-                data={
-                    "path": f"{path_str} (remote:{remote_state.login})",
-                    "mode": mode,
-                    "remote": True,
-                },
+                data=_remote_file_tool_data(
+                    path_str=path_str,
+                    rel=rel,
+                    remote_state=remote_state,
+                    mode=mode,
+                ),
                 message=f"成功{action_cn}远程文件",
             )
+        path_str = _apply_local_working_directory(path_str, working_directory)
+        path_str = _redirect_memory_md_if_needed(path_str, exec_ctx, self._config)
+        kwargs["path"] = path_str
 
         resolved, err = _resolve_mutation_path_for_file_tool(
             path_str, exec_ctx, self._ft_config, self._config

@@ -3,6 +3,7 @@
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -13,6 +14,10 @@ from agent_core.config import (
     FileToolsConfig,
     CommandToolsConfig,
     MemoryConfig,
+)
+from agent_core.remote.workspace_state import (
+    activate_remote_workspace,
+    clear_remote_workspace_state,
 )
 from agent_core.agent.readable_ephemeral_grants import add_ephemeral_readable_prefix
 from agent_core.agent.readable_ephemeral_grants import (
@@ -101,6 +106,7 @@ def _permission_cleanup():
         set_permission_notify_hook(None)
         clear_ephemeral_readable_grants_for_tests()
         clear_ephemeral_writable_grants_for_tests()
+        clear_remote_workspace_state()
 
 
 def _auto_resolve_permission(decision_or_factory):
@@ -623,6 +629,120 @@ class TestWriteFileTool:
             assert Path(temp_file).read_text() == "print(1)"
         finally:
             Path(temp_file).unlink(missing_ok=True)
+
+    @pytest.mark.asyncio
+    async def test_write_file_remote_data_includes_workspace_and_resolved_path(
+        self, monkeypatch
+    ):
+        config = _make_config(allow_write=True, base_dir=".")
+        tool = WriteFileTool(config=config)
+        activate_remote_workspace(
+            session_id="feishu:u_remote",
+            login="sii",
+            requested_path="~",
+            resolved_path="/root",
+        )
+
+        class _RemoteRegistryStub:
+            async def file_write(self, **kwargs):
+                return SimpleNamespace(error=None)
+
+        monkeypatch.setattr(
+            "system.tools.file_tools.get_remote_worker_registry",
+            lambda: _RemoteRegistryStub(),
+        )
+
+        result = await tool.execute(
+            path="test_writefile_verify.txt",
+            content="hello",
+            __execution_context__={"session_id": "feishu:u_remote"},
+        )
+
+        assert result.success
+        assert result.data["remote_workspace_root"] == "/root"
+        assert result.data["resolved_remote_path"] == "/root/test_writefile_verify.txt"
+
+    @pytest.mark.asyncio
+    async def test_write_file_remote_absolute_path_keeps_host_absolute(
+        self, monkeypatch
+    ):
+        config = _make_config(allow_write=True, base_dir=".")
+        tool = WriteFileTool(config=config)
+        activate_remote_workspace(
+            session_id="feishu:u_remote_abs",
+            login="sii",
+            requested_path="~",
+            resolved_path="/root",
+        )
+
+        class _RemoteRegistryStub:
+            async def file_write(self, **kwargs):
+                return SimpleNamespace(error=None)
+
+        monkeypatch.setattr(
+            "system.tools.file_tools.get_remote_worker_registry",
+            lambda: _RemoteRegistryStub(),
+        )
+
+        result = await tool.execute(
+            path="/inspire/project/test.txt",
+            content="hello",
+            __execution_context__={"session_id": "feishu:u_remote_abs"},
+        )
+
+        assert result.success
+        assert result.data["remote_workspace_root"] == "/root"
+        assert result.data["resolved_remote_path"] == "/inspire/project/test.txt"
+
+    @pytest.mark.asyncio
+    async def test_write_file_remote_working_directory_applies_to_relative_path(
+        self, monkeypatch
+    ):
+        config = _make_config(allow_write=True, base_dir=".")
+        tool = WriteFileTool(config=config)
+        activate_remote_workspace(
+            session_id="feishu:u_remote_wd",
+            login="sii",
+            requested_path="~",
+            resolved_path="/root",
+        )
+        seen: dict[str, str] = {}
+
+        class _RemoteRegistryStub:
+            async def file_write(self, **kwargs):
+                seen["path"] = kwargs.get("path", "")
+                return SimpleNamespace(error=None)
+
+        monkeypatch.setattr(
+            "system.tools.file_tools.get_remote_worker_registry",
+            lambda: _RemoteRegistryStub(),
+        )
+
+        result = await tool.execute(
+            path="test.txt",
+            content="hello",
+            working_directory="/inspire/hdd/project/demo",
+            __execution_context__={"session_id": "feishu:u_remote_wd"},
+        )
+
+        assert result.success
+        assert seen["path"] == "/inspire/hdd/project/demo/test.txt"
+        assert result.data["resolved_remote_path"] == "/inspire/hdd/project/demo/test.txt"
+
+    @pytest.mark.asyncio
+    async def test_write_file_local_working_directory_applies_to_relative_path(
+        self, tmp_path
+    ):
+        config = _make_config(allow_write=True, base_dir=str(tmp_path))
+        tool = WriteFileTool(config=config)
+        wd = tmp_path / "subdir"
+        result = await tool.execute(
+            path="hello.txt",
+            content="ok",
+            working_directory=str(wd),
+        )
+        assert result.success
+        assert (wd / "hello.txt").read_text(encoding="utf-8") == "ok"
 
 
 # ============================================================================

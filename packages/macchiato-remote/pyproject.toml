@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "macchiato-remote"
-version = "0.2.2"
+version = "0.2.3"
 description = "Lightweight macchiatoBot remote worker (expose local workspace to cloud agent)"
 readme = "README.md"
 requires-python = ">=3.11"

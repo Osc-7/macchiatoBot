@@ -17,6 +17,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       - name: Build macchiato-bot wheel
         run: uv build --wheel -o dist/
@@ -41,6 +42,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: pypi-wheels
@@ -48,7 +51,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
-      - name: Publish to PyPI (macchiato-bot + macchiato-remote)
-        run: uv publish --check-url https://pypi.org/simple/ dist/*.whl
+      - name: Publish to PyPI (skip versions already on index)
+        run: bash deploy/publish-dist.sh dist
         env:
           UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}

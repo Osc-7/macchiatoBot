@@ -34,7 +34,13 @@ from agent_core.permissions.wait_registry import (
     set_permission_notify_hook,
 )
 from agent_core.tools.bash_tool import BashTool
-from macchiato_remote.protocol import RemoteCommandResult, RemoteWorkspaceState
+from macchiato_remote.protocol import (
+    RemoteCommandResult,
+    RemoteJobStartResult,
+    RemoteJobStatusResult,
+    RemoteShellCaptureResult,
+    RemoteWorkspaceState,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -733,6 +739,110 @@ class _FakeRemoteRegistry:
         if not self.open_success:
             raise RuntimeError("open failed")
         return type("OpenResult", (), {"success": True})()
+
+
+class _FakeRemoteRegistryWithJobs(_FakeRemoteRegistry):
+    def __init__(self) -> None:
+        super().__init__(results=[])
+        self.capture_calls = 0
+        self.start_job_calls: list[dict] = []
+        self.job_status_calls: list[str] = []
+
+    async def capture_remote_shell(self, **kwargs) -> RemoteShellCaptureResult:
+        self.capture_calls += 1
+        return RemoteShellCaptureResult(
+            request_id="cap1",
+            session_id=str(kwargs.get("session_id") or ""),
+            cwd="/workspace",
+            env={"TEST_ENV": "1"},
+        )
+
+    async def start_job(self, **kwargs) -> RemoteJobStartResult:
+        self.start_job_calls.append(kwargs)
+        return RemoteJobStartResult(
+            request_id="js1",
+            session_id=str(kwargs.get("session_id") or ""),
+            job_id="job-remote-abc",
+            pid=4242,
+            log_path="/tmp/job-remote-abc.log",
+            status="running",
+        )
+
+    async def job_status(self, **kwargs) -> RemoteJobStatusResult:
+        self.job_status_calls.append(str(kwargs.get("job_id") or ""))
+        return RemoteJobStatusResult(
+            request_id="jst1",
+            session_id=str(kwargs.get("session_id") or ""),
+            job_id=str(kwargs.get("job_id") or ""),
+            status="running",
+            command="echo tick",
+            pid=4242,
+            duration_seconds=1.5,
+            log_path="/tmp/job-remote-abc.log",
+        )
+
+
+class TestBashToolRemoteBackground:
+    async def test_remote_background_starts_job_via_registry(self, monkeypatch):
+        tool, rt = _make_tool()
+        state = RemoteWorkspaceState(
+            session_id="sid-bg",
+            login="personal",
+            requested_path="/home/osc7/proj",
+            profile="dev",
+            status="active",
+        )
+        fake = _FakeRemoteRegistryWithJobs()
+
+        import agent_core.remote.workspace_state as state_mod
+        import agent_core.remote.worker_registry as worker_mod
+
+        monkeypatch.setattr(state_mod, "get_remote_workspace_state", lambda sid: state)
+        monkeypatch.setattr(worker_mod, "get_remote_worker_registry", lambda: fake)
+        await rt.start()
+        try:
+            result = await tool.execute(
+                command="for i in 1 2 3; do echo tick $i; sleep 1; done",
+                background=True,
+                timeout=30,
+                __execution_context__={"session_id": "sid-bg", "profile_mode": "full"},
+            )
+            assert result.success, result.message
+            assert result.data["job_id"] == "job-remote-abc"
+            assert result.data.get("remote") is True
+            assert fake.capture_calls == 1
+            assert len(fake.start_job_calls) == 1
+            assert fake.start_job_calls[0]["command"].startswith("for i in")
+        finally:
+            await rt.close()
+
+    async def test_remote_job_status(self, monkeypatch):
+        tool, rt = _make_tool()
+        state = RemoteWorkspaceState(
+            session_id="sid-bg2",
+            login="personal",
+            requested_path="/home/osc7",
+            profile="dev",
+            status="active",
+        )
+        fake = _FakeRemoteRegistryWithJobs()
+
+        import agent_core.remote.workspace_state as state_mod
+        import agent_core.remote.worker_registry as worker_mod
+
+        monkeypatch.setattr(state_mod, "get_remote_workspace_state", lambda sid: state)
+        monkeypatch.setattr(worker_mod, "get_remote_worker_registry", lambda: fake)
+        await rt.start()
+        try:
+            result = await tool.execute(
+                job_status="job-remote-abc",
+                __execution_context__={"session_id": "sid-bg2", "profile_mode": "full"},
+            )
+            assert result.success
+            assert result.data["status"] == "running"
+            assert fake.job_status_calls == ["job-remote-abc"]
+        finally:
+            await rt.close()
 
 
 class TestBashToolRemoteRecover:

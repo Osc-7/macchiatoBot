@@ -10,6 +10,8 @@ BashTool + BashSecurity 测试。
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from agent_core.bash_runtime import BashRuntime, BashRuntimeConfig
@@ -634,6 +636,65 @@ class TestBashToolExecution:
             assert not result.success
             assert result.error == "COMMAND_TIMEOUT"
             assert result.data["timed_out"] is True
+        finally:
+            await rt.close()
+
+
+class TestBashToolBackground:
+    async def test_background_dangerous_command_rejected(self, permission_config, tmp_path):
+        touched = tmp_path / "bg_should_not_exist"
+        _auto_resolve(PermissionDecision(allowed=False, note="no"))
+        tool, rt = _make_tool(base_dir=str(tmp_path))
+        await rt.start()
+        try:
+            result = await tool.execute(
+                command=f"eval 'touch {touched}'",
+                background=True,
+            )
+            assert not result.success
+            assert result.error == "PERMISSION_DENIED"
+            assert not touched.exists()
+        finally:
+            await rt.close()
+
+    async def test_background_uses_bash_cwd_and_env(self, tmp_path):
+        tool, rt = _make_tool(base_dir=str(tmp_path))
+        await rt.start()
+        try:
+            sub = tmp_path / "work"
+            sub.mkdir()
+            await tool.execute(command=f"cd {sub}")
+            await tool.execute(command="export BG_TEST_VAR=from_shell")
+            start = await tool.execute(
+                command="sh -c 'echo $BG_TEST_VAR $(pwd)'",
+                background=True,
+            )
+            assert start.success
+            job_id = start.data["job_id"]
+
+            for _ in range(40):
+                st = await tool.execute(job_status=job_id)
+                if st.data["status"] != "running":
+                    break
+                await asyncio.sleep(0.05)
+
+            assert st.success
+            assert st.data["status"] == "finished"
+            tail = await tool.execute(job_tail=job_id, lines=50, offset=0)
+            assert tail.success
+            combined = "\n".join(tail.data.get("tail_lines", []))
+            assert "from_shell" in combined
+            assert str(sub.resolve()) in combined
+        finally:
+            await rt.close()
+
+    async def test_conflicting_restart_and_command(self):
+        tool, rt = _make_tool()
+        await rt.start()
+        try:
+            result = await tool.execute(command="echo hi", restart=True)
+            assert not result.success
+            assert result.error == "CONFLICTING_PARAMS"
         finally:
             await rt.close()
 

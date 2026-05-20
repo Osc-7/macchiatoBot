@@ -305,7 +305,8 @@ class JobManager:
                 await asyncio.wait_for(proc.wait(), timeout=timeout)
             else:
                 await proc.wait()
-            # 正常结束
+            if handle.status == JobStatus.CANCELLED:
+                return
             handle.exit_code = proc.returncode
             handle.end_time = time.time()
             if proc.returncode == 0:
@@ -342,9 +343,10 @@ class JobManager:
                     )
                 except asyncio.TimeoutError:
                     pass
-            handle.exit_code = proc.returncode if proc.returncode is not None else -1
-            handle.status = JobStatus.TIMED_OUT
-            handle.end_time = time.time()
+            if handle.status != JobStatus.CANCELLED:
+                handle.exit_code = proc.returncode if proc.returncode is not None else -1
+                handle.status = JobStatus.TIMED_OUT
+                handle.end_time = time.time()
 
         logger.info(
             "Job ended: %s status=%s exit_code=%s duration=%.1fs",

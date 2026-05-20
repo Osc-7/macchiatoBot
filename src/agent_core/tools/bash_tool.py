@@ -65,8 +65,8 @@ class BashTool(BaseTool):
 注意事项：
 - 危险操作（rm -rf、chmod -R、sudo 等）或需要写入工作区外路径时，bash 会自动向人类申请权限；
   人类批准后同一次工具调用会继续执行原始命令并返回结果
-- 超时后当前命令会被终止，bash 会话会自动重启并恢复之前的工作目录与环境变量
-- 使用 restart=true 可手动重启 bash 会话（清除所有状态）""",
+- 同步命令超时后当前命令会被终止，bash 会话会自动重启并尝试恢复工作目录与环境变量
+- 使用 restart=true 可手动重启 bash 会话（清除所有状态；若启用 snapshot_enabled 则 evict 时也可恢复）""",
             parameters=[
                 ToolParameter(
                     name="command",
@@ -171,7 +171,7 @@ class BashTool(BaseTool):
             usage_notes=[
                 "这是持久化 bash 会话：cd、export 等在后续命令中生效",
                 "危险命令和工作区外写入会自动申请人类批准，批准后继续执行同一条命令",
-                "超时后当前命令会被终止，bash 会话会自动重启并恢复之前的工作目录与环境变量",
+                "同步命令超时后会重启 bash 并尝试恢复 cwd/env；长任务请用 background=true",
                 "使用 restart=true 可手动重置会话（清除所有状态）",
                 "长任务（安装依赖、下载大文件、编译、训练等）建议用 background=true 走独立后台进程，避免阻塞会话",
                 "后台任务日志写入工作区 .macchiato/jobs/ 目录，可用 job_tail 读取",
@@ -181,6 +181,10 @@ class BashTool(BaseTool):
 
     async def execute(self, **kwargs) -> ToolResult:
         exec_ctx = kwargs.pop("__execution_context__", None) or {}
+
+        param_err = self._validate_params(kwargs)
+        if param_err is not None:
+            return param_err
 
         restart = kwargs.get("restart", False)
         if restart:
@@ -241,66 +245,20 @@ class BashTool(BaseTool):
             return ToolResult(
                 success=False,
                 error="MISSING_COMMAND",
-                message="缺少必需参数: command（或使用 restart=true 重启会话）",
+                message="缺少必需参数: command（或使用 restart=true / job_* 管理后台任务）",
             )
 
-        # ── background mode：长命令走独立 job，不阻塞 shell ─────────
+        timeout, timeout_err = self._parse_timeout(kwargs.get("timeout"))
+        if timeout_err is not None:
+            return timeout_err
+
         if kwargs.get("background"):
-            from agent_core.job_manager import get_job_manager
-            from pathlib import Path
-
-            # 远程 worker 场景暂不支持 background（后续扩展）
-            session_id = str(exec_ctx.get("session_id") or "").strip()
-            if session_id:
-                from agent_core.remote.workspace_state import get_remote_workspace_state
-
-                remote_state = get_remote_workspace_state(session_id)
-                if remote_state is not None:
-                    return ToolResult(
-                        success=False,
-                        error="NOT_SUPPORTED",
-                        message="远程模式暂不支持 background 参数，请使用本地 bash 工具",
-                    )
-
-            # 获取 bash 当前工作目录，确保 job 在执行时 cwd 正确
-            current_cwd = await self._current_cwd()
-            # 使用 bash 工作区根目录存放日志，确保当前用户可访问
-            ws_root = str(Path(self._bash._config.base_dir).resolve())
-            manager = get_job_manager(workspace_root=ws_root)
-            timeout = kwargs.get("timeout")
-            if timeout is not None:
-                try:
-                    timeout = float(timeout)
-                except (TypeError, ValueError):
-                    timeout = None
-
-            handle = await manager.start_job(
-                command,
-                cwd=current_cwd or ws_root,
-                timeout_seconds=timeout,
+            return await self._execute_background(
+                command=command,
+                timeout=timeout,
+                exec_ctx=exec_ctx,
+                kwargs=kwargs,
             )
-            return ToolResult(
-                success=True,
-                data={
-                    "job_id": handle.job_id,
-                    "pid": handle.pid,
-                    "log_path": str(handle.log_path),
-                    "status": handle.status,
-                    "command": handle.command,
-                },
-                message=f"后台任务已启动: {handle.job_id} (pid={handle.pid})",
-            )
-
-        timeout = kwargs.get("timeout")
-        if timeout is not None:
-            try:
-                timeout = float(timeout)
-            except (TypeError, ValueError):
-                return ToolResult(
-                    success=False,
-                    error="INVALID_TIMEOUT",
-                    message="timeout 必须是数字（秒）",
-                )
 
         remote_result = await self._try_execute_remote(
             command=command,
@@ -312,7 +270,96 @@ class BashTool(BaseTool):
         if remote_result is not None:
             return remote_result
 
-        # 忽略模型可能仍传入的 confirm（不再具有效力；批准仅能通过人类审批）
+        security_result = await self._ensure_command_allowed(
+            command=command,
+            exec_ctx=exec_ctx,
+            kwargs=kwargs,
+        )
+        if security_result is not None:
+            return security_result
+
+        result = await self._bash.execute(command, timeout=timeout)
+
+        data = {
+            "command": result.command,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "return_code": result.exit_code,
+            "timed_out": result.timed_out,
+            "truncated": result.truncated,
+        }
+
+        if result.timed_out:
+            return ToolResult(
+                success=False,
+                data=data,
+                error="COMMAND_TIMEOUT",
+                message="命令执行超时，进程已终止；bash 会话已重启并尝试恢复工作目录与环境变量",
+            )
+
+        if result.exit_code == 0:
+            return ToolResult(success=True, data=data, message="命令执行成功")
+
+        return ToolResult(
+            success=False,
+            data=data,
+            error="NON_ZERO_EXIT",
+            message=f"命令执行结束，返回码为 {result.exit_code}",
+        )
+
+    # ── 参数校验与安全（同步 / background 共用）────────────────
+
+    @staticmethod
+    def _validate_params(kwargs: dict) -> Optional[ToolResult]:
+        restart = bool(kwargs.get("restart"))
+        has_command = bool(str(kwargs.get("command") or "").strip())
+        background = bool(kwargs.get("background"))
+        has_job = any(
+            str(kwargs.get(k) or "").strip()
+            for k in ("job_status", "job_tail", "job_stop")
+        )
+
+        if restart and (has_command or background or has_job):
+            return ToolResult(
+                success=False,
+                error="CONFLICTING_PARAMS",
+                message="restart 不能与 command、background 或 job_* 同时使用",
+            )
+        if has_job and (has_command or background):
+            return ToolResult(
+                success=False,
+                error="CONFLICTING_PARAMS",
+                message="job_status/job_tail/job_stop 不能与 command 或 background 同时使用",
+            )
+        if background and not has_command:
+            return ToolResult(
+                success=False,
+                error="MISSING_COMMAND",
+                message="background=true 时必须提供 command",
+            )
+        return None
+
+    @staticmethod
+    def _parse_timeout(raw: object) -> tuple[Optional[float], Optional[ToolResult]]:
+        if raw is None:
+            return None, None
+        try:
+            return float(raw), None
+        except (TypeError, ValueError):
+            return None, ToolResult(
+                success=False,
+                error="INVALID_TIMEOUT",
+                message="timeout 必须是数字（秒）",
+            )
+
+    async def _ensure_command_allowed(
+        self,
+        *,
+        command: str,
+        exec_ctx: dict,
+        kwargs: dict,
+    ) -> Optional[ToolResult]:
+        """BashSecurity + 人类审批。返回 ToolResult 表示中止；None 表示可执行。"""
         kwargs.pop("confirm", None)
 
         from agent_core.permissions.bash_danger_approvals import (
@@ -367,34 +414,72 @@ class BashTool(BaseTool):
                     "path_grants": list(verdict.path_grants),
                 },
             )
+        return None
 
-        result = await self._bash.execute(command, timeout=timeout)
+    async def _execute_background(
+        self,
+        *,
+        command: str,
+        timeout: Optional[float],
+        exec_ctx: dict,
+        kwargs: dict,
+    ) -> ToolResult:
+        import os
+        from pathlib import Path
 
-        data = {
-            "command": result.command,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "return_code": result.exit_code,
-            "timed_out": result.timed_out,
-            "truncated": result.truncated,
-        }
+        from agent_core.job_manager import get_job_manager
 
-        if result.timed_out:
-            return ToolResult(
-                success=False,
-                data=data,
-                error="COMMAND_TIMEOUT",
-                message=f"命令执行超时，进程已终止且 bash 会话已重启",
-            )
+        session_id = str(exec_ctx.get("session_id") or "").strip()
+        if session_id:
+            from agent_core.remote.workspace_state import get_remote_workspace_state
 
-        if result.exit_code == 0:
-            return ToolResult(success=True, data=data, message="命令执行成功")
+            if get_remote_workspace_state(session_id) is not None:
+                return ToolResult(
+                    success=False,
+                    error="NOT_SUPPORTED",
+                    message="远程模式暂不支持 background 参数，请使用同步 command",
+                )
 
+        security_result = await self._ensure_command_allowed(
+            command=command,
+            exec_ctx=exec_ctx,
+            kwargs=kwargs,
+        )
+        if security_result is not None:
+            return security_result
+
+        ws_root = str(Path(self._bash._config.base_dir).resolve())
+        if self._bash._config.subprocess_env is not None:
+            base_env = dict(self._bash._config.subprocess_env)
+        else:
+            base_env = dict(os.environ)
+
+        session = await self._bash.capture_session()
+        if session is not None:
+            job_cwd = session.cwd
+            job_env = {**base_env, **session.env}
+        else:
+            job_cwd = await self._current_cwd() or ws_root
+            job_env = base_env
+
+        manager = get_job_manager(workspace_root=ws_root)
+        handle = await manager.start_job(
+            command,
+            cwd=job_cwd,
+            env=job_env,
+            timeout_seconds=timeout,
+        )
         return ToolResult(
-            success=False,
-            data=data,
-            error="NON_ZERO_EXIT",
-            message=f"命令执行结束，返回码为 {result.exit_code}",
+            success=True,
+            data={
+                "job_id": handle.job_id,
+                "pid": handle.pid,
+                "log_path": str(handle.log_path),
+                "status": handle.status,
+                "command": handle.command,
+                "cwd": handle.cwd,
+            },
+            message=f"后台任务已启动: {handle.job_id} (pid={handle.pid})",
         )
 
     # ── job management helpers ───────────────────────────────

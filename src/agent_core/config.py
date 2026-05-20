@@ -625,7 +625,10 @@ class CommandToolsConfig(BaseModel):
     )
     snapshot_enabled: bool = Field(
         default=False,
-        description="Core evict 时是否写入 bash 环境快照（用于恢复）",
+        description=(
+            "Core evict / 手动 restart 时是否写入 bash 环境快照；"
+            "同步命令超时重启时始终尝试轻量快照恢复（与该项无关）"
+        ),
     )
     snapshot_dir: str = Field(
         default="./data/bash_snapshots",

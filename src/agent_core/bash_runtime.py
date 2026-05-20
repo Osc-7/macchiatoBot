@@ -19,6 +19,7 @@ import asyncio
 import codecs
 import logging
 import os
+import shlex
 import signal
 import uuid
 from dataclasses import dataclass, field
@@ -43,6 +44,17 @@ class BashResult:
     timed_out: bool = False
     truncated: bool = False
     command: str = ""
+
+
+@dataclass
+class BashSessionCapture:
+    """从长驻 bash 捕获的工作目录与环境变量（供后台 job 对齐会话）。"""
+
+    cwd: str
+    env: Dict[str, str]
+
+
+_SKIP_ENV_KEYS = frozenset({"MACCHIATO_BASH", "SHLVL", "PWD", "OLDPWD", "_"})
 
 
 @dataclass
@@ -79,6 +91,8 @@ class BashRuntime:
         self._process: Optional[asyncio.subprocess.Process] = None
         self._started = False
         self._command_count = 0
+        # 每次成功执行后更新；超时重启时恢复（避免在卡死的 shell 里 capture）
+        self._last_snapshot_path: Optional[Path] = None
 
     # ── 生命周期 ──────────────────────────────────────────────
 
@@ -136,10 +150,12 @@ class BashRuntime:
         for cmd in self._config.init_commands:
             await self._raw_write(cmd.rstrip("\n") + "\n")
 
-    async def restart(self) -> None:
-        """杀掉当前 bash 并重新启动，若启用 snapshot 则先保存状态再恢复。"""
+    async def restart(self, *, force_snapshot: bool = False) -> None:
+        """杀掉当前 bash 并重新启动，并按需恢复环境快照。"""
         snap_path: Optional[Path] = None
-        if self._config.snapshot_enabled and self.is_alive:
+        if force_snapshot:
+            snap_path = self._last_snapshot_path
+        elif self._config.snapshot_enabled and self.is_alive:
             try:
                 snap_path = await self._write_snapshot()
             except Exception:
@@ -172,6 +188,8 @@ class BashRuntime:
         *,
         timeout: Optional[float] = None,
         output_limit: Optional[int] = None,
+        restart_on_timeout: bool = True,
+        record_snapshot: bool = True,
     ) -> BashResult:
         """
         在长驻 bash 中执行一条命令。
@@ -192,7 +210,8 @@ class BashRuntime:
         wrapped = self._wrap_command(command, sentinel_id)
         await self._raw_write(wrapped)
 
-        self._command_count += 1
+        if record_snapshot:
+            self._command_count += 1
 
         stdout_buf: list[str] = []
         stderr_buf: list[str] = []
@@ -283,8 +302,10 @@ class BashRuntime:
                 timeout,
                 command[:120],
             )
-            # 命令超时后需要重启 bash，因为上一条命令可能仍在运行
-            await self.restart()
+            if restart_on_timeout:
+                snap = self._last_snapshot_path
+                await self.close(write_snapshot=False)
+                await self.start(snapshot_path=snap)
 
         # 检测 bash 是否在命令执行期间退出（如 `exit N`）
         if exit_code == -1 and not timed_out and self._process is not None:
@@ -293,7 +314,7 @@ class BashRuntime:
             except asyncio.TimeoutError:
                 pass
 
-        return BashResult(
+        result = BashResult(
             stdout="".join(stdout_buf),
             stderr="".join(stderr_buf),
             exit_code=exit_code,
@@ -301,6 +322,21 @@ class BashRuntime:
             truncated=truncated,
             command=command,
         )
+        if (
+            restart_on_timeout
+            and record_snapshot
+            and not timed_out
+            and self.is_alive
+            and exit_code >= 0
+        ):
+            try:
+                self._last_snapshot_path = await self._write_snapshot()
+            except Exception:
+                logger.debug(
+                    "BashRuntime: post-command snapshot failed",
+                    exc_info=True,
+                )
+        return result
 
     # ── 属性 ──────────────────────────────────────────────────
 
@@ -383,35 +419,53 @@ class BashRuntime:
             except asyncio.TimeoutError:
                 pass
 
+    async def capture_session(self) -> Optional[BashSessionCapture]:
+        """捕获当前 bash 的 cwd 与环境变量（失败时返回 None）。"""
+        if not self.is_alive:
+            return None
+        result = await self.execute(
+            'echo "__CWD__=$(pwd)"; env',
+            timeout=5,
+            output_limit=50_000,
+            restart_on_timeout=False,
+            record_snapshot=False,
+        )
+        if result.exit_code != 0:
+            return None
+        cwd, env = self._parse_cwd_and_env(result.stdout)
+        if not cwd:
+            cwd = str(Path(self._config.base_dir).resolve())
+        return BashSessionCapture(cwd=cwd, env=env)
+
+    @staticmethod
+    def _parse_cwd_and_env(stdout: str) -> tuple[Optional[str], Dict[str, str]]:
+        cwd: Optional[str] = None
+        env: Dict[str, str] = {}
+        for line in stdout.splitlines():
+            if line.startswith("__CWD__="):
+                cwd = line[len("__CWD__=") :].strip()
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            if key.isidentifier() and key not in _SKIP_ENV_KEYS:
+                env[key] = value
+        return cwd, env
+
     async def _write_snapshot(self) -> Optional[Path]:
         """将当前 bash 环境导出为快照脚本（env + cwd），返回文件路径。"""
         snap_dir = Path(self._config.snapshot_dir)
         snap_dir.mkdir(parents=True, exist_ok=True)
         snap_path = snap_dir / f"snapshot_{uuid.uuid4().hex[:8]}.sh"
 
-        result = await self.execute(
-            "echo \"__CWD__=$(pwd)\"; env",
-            timeout=5,
-            output_limit=50_000,
-        )
-        if result.exit_code != 0:
+        capture = await self.capture_session()
+        if capture is None:
             return None
 
-        lines = []
-        cwd = None
-        for line in result.stdout.splitlines():
-            if line.startswith("__CWD__="):
-                cwd = line[len("__CWD__="):]
-                continue
-            if "=" in line:
-                key = line.split("=", 1)[0]
-                if key.isidentifier() and key not in (
-                    "MACCHIATO_BASH", "SHLVL", "PWD", "OLDPWD", "_",
-                ):
-                    lines.append(f"export {line}")
-
-        if cwd:
-            lines.append(f"cd '{cwd}' 2>/dev/null || true")
+        lines = [
+            f"export {k}={shlex.quote(v)}" for k, v in sorted(capture.env.items())
+        ]
+        lines.append(f"cd {shlex.quote(capture.cwd)} 2>/dev/null || true")
 
         snap_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         logger.debug("BashRuntime: snapshot written to %s", snap_path)

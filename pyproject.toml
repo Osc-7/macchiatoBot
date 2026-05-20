@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "macchiato-bot"
 version = "0.1.1"
-description = "macchiatoBot — LLM schedule agent (tool-driven); includes remote worker CLI"
+description = "macchiatoBot — daemon-first, tool-driven LLM assistant with remote worker CLI"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

@@ -290,7 +290,7 @@ class TestLLMClient:
             response = await client.chat_with_tools(
                 messages=[{"role": "user", "content": "创建一个会议"}],
                 tools=tools,
-                system_message="你是一个日程助手",
+                system_message="你是 macchiatoBot",
             )
 
             assert response.content is None

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Schedule Agent MCP Server 入口（stdio）。
+macchiatoBot MCP Server 入口（stdio）。
 """
 
 import asyncio

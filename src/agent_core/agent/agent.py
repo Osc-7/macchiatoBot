@@ -178,12 +178,12 @@ def _pricing_map_for_active_provider(agent: Any) -> Optional[dict[str, Any]]:
 
 class AgentCore:
     """
-    日程管理 Agent。
+    macchiatoBot 核心 Agent。
 
-    基于 LLM 的智能日程管理助手，支持：
+    基于 LLM 的工具驱动助手，支持：
     - 自然语言交互
     - 多轮对话
-    - 工具调用（添加事件、任务、查询等）
+    - 工具调用（文件、命令、记忆、日程、集成工具等）
     - 时间上下文感知
     """
 

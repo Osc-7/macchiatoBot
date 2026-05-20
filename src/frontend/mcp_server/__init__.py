@@ -1,5 +1,5 @@
 """
-Schedule Agent MCP Server。
+macchiatoBot MCP Server。
 
 将现有本地工具以 MCP 标准协议暴露，供外部 MCP Client 调用。
 """

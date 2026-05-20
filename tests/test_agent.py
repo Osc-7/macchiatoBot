@@ -371,7 +371,7 @@ class TestBuildSystemPrompt:
         """测试系统提示包含 Agent 信息"""
         prompt = agent._build_system_prompt()
 
-        assert ("智能日程管理助手" in prompt) or ("人工智能助手" in prompt)
+        assert ("macchiatoBot" in prompt) or ("人工智能助手" in prompt)
         assert "创建和管理日程事件" in prompt
         assert "创建和管理待办任务" in prompt
 
@@ -929,7 +929,7 @@ class TestAgentIntegration:
         agent = AgentCore(config=mock_config)
 
         responses = [
-            LLMResponse(content="你好！我是日程助手。", tool_calls=[]),
+            LLMResponse(content="你好！我是 macchiatoBot。", tool_calls=[]),
             LLMResponse(content="今天天气不错！", tool_calls=[]),
         ]
 
@@ -942,7 +942,7 @@ class TestAgentIntegration:
             r1 = await agent.process_input("你好")
             r2 = await agent.process_input("今天天气怎么样？")
 
-        assert r1 == "你好！我是日程助手。"
+        assert r1 == "你好！我是 macchiatoBot。"
         assert r2 == "今天天气不错！"
 
         # 上下文应该包含 4 条消息（2 轮对话）

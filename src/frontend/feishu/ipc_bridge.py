@@ -234,7 +234,7 @@ class FeishuIPCBridge:
         多轮工具调用展示保持一致（但不暴露思维链 reasoning token）。
 
         Args:
-            session_id: Schedule Agent 会话 ID（已根据飞书会话映射）
+            session_id: macchiatoBot 会话 ID（已根据飞书会话映射）
             text: 输入的自然语言消息
             metadata: 附加到 AgentRunInput.metadata 的信息（可包含飞书 open_id/chat_id 等）
             owner_id: 逻辑用户 ID，目前主要用于日志标识

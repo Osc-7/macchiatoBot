@@ -1218,7 +1218,7 @@ class AutomationConfig(BaseModel):
 class FeishuConfig(BaseModel):
     """飞书集成配置。
 
-    用于在飞书机器人中接入 Schedule Agent。所有字段均为可选，默认关闭。
+    用于在飞书机器人中接入 macchiatoBot。所有字段均为可选，默认关闭。
     """
 
     enabled: bool = Field(
@@ -1386,7 +1386,7 @@ class Config(BaseModel):
     )
     feishu: FeishuConfig = Field(
         default_factory=FeishuConfig,
-        description="飞书集成配置，用于在飞书聊天中接入 Schedule Agent。",
+        description="飞书集成配置，用于在飞书聊天中接入 macchiatoBot。",
     )
 
 

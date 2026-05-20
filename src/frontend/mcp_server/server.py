@@ -1,5 +1,5 @@
 """
-Schedule Agent 工具 MCP Server。
+macchiatoBot 工具 MCP Server。
 
 复用现有 BaseTool/ToolRegistry，将本地工具通过 MCP 协议（stdio）暴露。
 """
@@ -26,7 +26,7 @@ class ScheduleToolsMCPServer:
         self,
         config: Optional[Config] = None,
         tools: Optional[List[Any]] = None,
-        server_name: str = "schedule-agent-tools",
+        server_name: str = "macchiato-tools",
         server_version: str = "0.1.0",
     ):
         self._config = config or get_config()

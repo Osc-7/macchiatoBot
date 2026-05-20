@@ -20,7 +20,7 @@ macchiato-remote = "macchiato_remote.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Osc-7/macchiatoBot"
-Documentation = "https://github.com/Osc-7/macchiatoBot#远程工作区remote-workspace"
+Documentation = "https://github.com/Osc-7/macchiatoBot/blob/master/docs/remote-workspace.md"
 Repository = "https://github.com/Osc-7/macchiatoBot"
 
 [tool.setuptools]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Schedule Agent CLI 入口
+macchiatoBot CLI 入口
 
 通过 UNIX socket 连接长驻 automation daemon，提供命令行交互界面。
 若 daemon 未运行则报错退出。
@@ -39,7 +39,7 @@ def _parse_args(argv: List[str]) -> tuple[List[str], bool]:
         remaining_args: [script_name, ...] 形式
         use_kernel_shell: 若首参为 shell/terminal 则为 True，表示进入 Kernel 系统控制台
     """
-    parser = argparse.ArgumentParser(description="Schedule Agent CLI")
+    parser = argparse.ArgumentParser(description="macchiatoBot CLI")
     parser.add_argument(
         "command",
         nargs="*",

@@ -1,7 +1,7 @@
 """
 飞书会话映射工具。
 
-负责将飞书的 user/chat 信息映射为内部的 Schedule Agent session_id。
+负责将飞书的 user/chat 信息映射为内部的 macchiatoBot session_id。
 """
 
 from __future__ import annotations

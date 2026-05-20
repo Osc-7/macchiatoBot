@@ -65,7 +65,6 @@ macchiato/
 user_file/
 pictures/
 scripts/
-docs/
 
 # Local-only helpers
 gitleaks

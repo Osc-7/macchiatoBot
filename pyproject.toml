@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "macchiato-bot"
-version = "0.1.1"
+version = "0.1.2"
 description = "macchiatoBot — daemon-first, tool-driven LLM assistant with remote worker CLI"
 readme = "README.md"
 requires-python = ">=3.11"

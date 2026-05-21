@@ -73,3 +73,5 @@ claude_code_env.sh
 feature_list.json
 run_automation.sh
 MagicMock/
+config/llm/providers.d/custom.yaml
+config/llm/providers.d/right_code.yaml

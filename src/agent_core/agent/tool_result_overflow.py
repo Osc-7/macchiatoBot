@@ -45,6 +45,119 @@ from agent_core.tools.base import ToolResult
 logger = logging.getLogger(__name__)
 
 _FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_DATA_URL_BASE64_RE = re.compile(r"^data:([^;,]+)?;base64,", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class _Base64SanitizeStats:
+    """记录本次 base64 脱敏的命中统计。"""
+
+    redacted_fields: int = 0
+    redacted_chars: int = 0
+
+    def add(self, *, fields: int = 0, chars: int = 0) -> "_Base64SanitizeStats":
+        return _Base64SanitizeStats(
+            redacted_fields=self.redacted_fields + int(fields),
+            redacted_chars=self.redacted_chars + int(chars),
+        )
+
+
+def _is_base64_key(key: str) -> bool:
+    """
+    判断字段名是否表示 base64 负载。
+
+    约定：
+    - 显式含 ``base64``；
+    - 常见文件块字段 ``file_data``。
+    """
+    k = (key or "").strip().lower()
+    if not k:
+        return False
+    return ("base64" in k) or (k == "file_data")
+
+
+def _is_data_url_base64(value: str) -> bool:
+    """是否为 ``data:*;base64,`` 形式的数据 URL。"""
+    if not isinstance(value, str):
+        return False
+    return bool(_DATA_URL_BASE64_RE.match(value.strip()))
+
+
+def _base64_placeholder(*, chars: int, source: str) -> str:
+    """构造稳定的占位文本，避免把真实 base64 放入上下文。"""
+    return f"[base64 omitted: {chars} chars, source={source}]"
+
+
+def _sanitize_base64_payload(obj: Any, *, parent_key: str = "") -> tuple[Any, _Base64SanitizeStats]:
+    """
+    递归脱敏对象中的 base64 字段，返回 (sanitized_obj, stats)。
+
+    规则：
+    - dict 中键名命中 ``_is_base64_key`` 且值为字符串：替换为占位文本；
+    - 任意位置字符串若为 ``data:*;base64,``：整段替换为占位文本；
+    - 其他字段递归保留。
+    """
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        stats = _Base64SanitizeStats()
+        for k, v in obj.items():
+            key = str(k)
+            if isinstance(v, str) and _is_base64_key(key):
+                out[key] = _base64_placeholder(chars=len(v), source=key)
+                stats = stats.add(fields=1, chars=len(v))
+                continue
+            sanitized_v, child = _sanitize_base64_payload(v, parent_key=key)
+            out[key] = sanitized_v
+            stats = stats.add(fields=child.redacted_fields, chars=child.redacted_chars)
+        return out, stats
+
+    if isinstance(obj, list):
+        out_list: list[Any] = []
+        stats = _Base64SanitizeStats()
+        for item in obj:
+            sanitized_item, child = _sanitize_base64_payload(item, parent_key=parent_key)
+            out_list.append(sanitized_item)
+            stats = stats.add(fields=child.redacted_fields, chars=child.redacted_chars)
+        return out_list, stats
+
+    if isinstance(obj, str) and _is_data_url_base64(obj):
+        return (
+            _base64_placeholder(chars=len(obj), source=f"{parent_key or 'data_url'}"),
+            _Base64SanitizeStats(redacted_fields=1, redacted_chars=len(obj)),
+        )
+
+    return obj, _Base64SanitizeStats()
+
+
+def _sanitize_tool_result_base64(result: ToolResult) -> tuple[ToolResult, _Base64SanitizeStats]:
+    """
+    返回用于写入上下文的 ToolResult（base64 已脱敏）。
+
+    未命中时返回原对象，避免不必要拷贝。
+    """
+    sanitized_data, data_stats = _sanitize_base64_payload(result.data)
+    sanitized_meta, meta_stats = _sanitize_base64_payload(result.metadata or {})
+    total = data_stats.add(
+        fields=meta_stats.redacted_fields, chars=meta_stats.redacted_chars
+    )
+    if total.redacted_fields <= 0:
+        return result, total
+
+    new_meta = dict(sanitized_meta) if isinstance(sanitized_meta, dict) else {}
+    new_meta["_base64_omitted"] = {
+        "fields": total.redacted_fields,
+        "chars": total.redacted_chars,
+    }
+    return (
+        ToolResult(
+            success=result.success,
+            data=sanitized_data,
+            message=result.message,
+            error=result.error,
+            metadata=new_meta,
+        ),
+        total,
+    )
 
 
 def _sanitize_for_filename(value: str, *, fallback: str = "x") -> str:
@@ -138,18 +251,21 @@ def maybe_offload_tool_result(
         显式截断 marker。
         ``outcome``：本次操作的统计元数据。
     """
+    # 无论是否启用 overflow，先做 base64 脱敏，避免把大块编码内容写入上下文。
+    result_for_context, _sanitize_stats = _sanitize_tool_result_base64(result)
+
     if not max_tokens or max_tokens <= 0:
-        return result, OverflowOutcome(triggered=False)
+        return result_for_context, OverflowOutcome(triggered=False)
 
     try:
-        original_json = result.to_json()
+        original_json = result_for_context.to_json()
     except Exception as exc:  # pragma: no cover —— ToolResult.to_json 极少抛
         logger.warning("maybe_offload_tool_result: to_json failed: %s", exc)
-        return result, OverflowOutcome(triggered=False)
+        return result_for_context, OverflowOutcome(triggered=False)
 
     original_tokens = estimate_tokens(original_json)
     if original_tokens <= max_tokens:
-        return result, OverflowOutcome(
+        return result_for_context, OverflowOutcome(
             triggered=False, original_tokens=original_tokens
         )
 
@@ -169,7 +285,7 @@ def maybe_offload_tool_result(
             exc,
         )
         return _build_truncated_result(
-            result=result,
+            result=result_for_context,
             original_json=original_json,
             original_tokens=original_tokens,
             max_tokens=max_tokens,
@@ -199,7 +315,7 @@ def maybe_offload_tool_result(
             exc,
         )
         return _build_truncated_result(
-            result=result,
+            result=result_for_context,
             original_json=original_json,
             original_tokens=original_tokens,
             max_tokens=max_tokens,
@@ -220,7 +336,7 @@ def maybe_offload_tool_result(
         display_path = f"{overflow_dir_name}/{filename}"
 
     new_result = _build_truncated_result(
-        result=result,
+        result=result_for_context,
         original_json=original_json,
         original_tokens=original_tokens,
         max_tokens=max_tokens,

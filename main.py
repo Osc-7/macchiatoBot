@@ -8,6 +8,8 @@ packaged entrypoint code.
 
 from macchiato_bot_cli import main as _cli
 
+_ORIGINAL_MAIN_ASYNC = _cli.main_async
+
 AutomationIPCClient = _cli.AutomationIPCClient
 default_socket_path = _cli.default_socket_path
 get_config = _cli.get_config
@@ -22,7 +24,7 @@ async def main_async(args=None):
     _cli.get_config = get_config
     _cli.run_interactive_loop = run_interactive_loop
     _cli.run_single_command = run_single_command
-    return await _cli.main_async(args)
+    return await _ORIGINAL_MAIN_ASYNC(args)
 
 
 def main():

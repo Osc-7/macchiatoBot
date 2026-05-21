@@ -275,7 +275,7 @@ class CoreProfile:
             allow_dangerous_commands=False,
             visible_memory_scopes=["long_term"],
             memory_enabled=False,
-            max_context_tokens=40_000,
+            max_context_tokens=120000,
             session_expired_seconds=600,
             frontend_id=frontend_id,
             dialog_window_id=dialog_window_id,

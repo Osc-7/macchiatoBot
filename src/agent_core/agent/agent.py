@@ -1853,8 +1853,6 @@ class AgentCore:
 
         mem_cfg = self._config.memory
         max_tokens = getattr(mem_cfg, "max_tool_result_tokens", None)
-        if not max_tokens or max_tokens <= 0:
-            return result
 
         cmd_cfg = self._config.command_tools
         overflow_dir_name = (
@@ -1880,7 +1878,7 @@ class AgentCore:
             tool_name=tool_name,
             tool_call_id=tool_call_id,
             workspace_dir=workspace_dir,
-            max_tokens=int(max_tokens),
+            max_tokens=(int(max_tokens) if max_tokens and max_tokens > 0 else None),
             overflow_dir_name=overflow_dir_name,
             is_workspace_admin=is_admin,
             admin_overflow_dir=admin_dir,

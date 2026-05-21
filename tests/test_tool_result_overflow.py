@@ -189,3 +189,40 @@ class TestMaybeOffloadToolResult:
         # marker 用绝对路径
         assert outcome.display_path == str(outcome.overflow_path.resolve())
         assert outcome.display_path in new_result.message
+
+    def test_base64_field_is_sanitized_even_under_threshold(self, tmp_path: Path):
+        raw_b64 = "QUJD" * 2000
+        result = ToolResult(
+            success=True,
+            message="ok",
+            data={"content_base64": raw_b64, "mime_type": "image/png"},
+            metadata={"nested": {"file_data": raw_b64}},
+        )
+        new_result, outcome = maybe_offload_tool_result(
+            result,
+            tool_name="attach_file_to_reply",
+            tool_call_id="call_base64_1",
+            workspace_dir=str(tmp_path),
+            max_tokens=1_000_000,  # 不触发 overflow，仅验证脱敏
+        )
+
+        assert outcome.triggered is False
+        assert new_result is not result
+        assert "base64 omitted" in str(new_result.data.get("content_base64"))
+        assert "base64 omitted" in str(new_result.metadata["nested"]["file_data"])
+        s = new_result.to_json()
+        assert raw_b64 not in s
+        assert new_result.metadata["_base64_omitted"]["fields"] >= 2
+
+    def test_data_url_base64_is_sanitized(self, tmp_path: Path):
+        data_url = "data:image/png;base64," + ("A" * 10000)
+        result = ToolResult(success=True, message="ok", data={"preview_url": data_url})
+        new_result, _ = maybe_offload_tool_result(
+            result,
+            tool_name="attach_media",
+            tool_call_id="call_base64_2",
+            workspace_dir=str(tmp_path),
+            max_tokens=10_000,
+        )
+        assert "base64 omitted" in str(new_result.data["preview_url"])
+        assert "data:image/png;base64" not in new_result.to_json()

@@ -221,7 +221,8 @@ class AgentCore:
         self._config = config or get_config()
         self._user_id = user_id.strip() or "root"
         self._source = source.strip() or "cli"
-        self._llm_client = LLMClient(self._config)
+        frontend_override = self._config.llm.frontend_providers.get(self._source)
+        self._llm_client = LLMClient(self._config, model_override=frontend_override)
         summary_model = getattr(self._config.llm, "summary_model", None)
         self._summary_llm_client = (
             LLMClient(self._config, model_override=summary_model)

@@ -103,6 +103,26 @@ class LocalShellSession:
             except (OSError, ProcessLookupError):
                 pass
 
+
+    @staticmethod
+    def _normalize_extra_read_roots(raw_roots: list[str]) -> list[str]:
+        """Return existing absolute directories allowed for cd/pushd guards."""
+        roots: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_roots:
+            try:
+                p = Path(str(raw or "").strip()).expanduser().resolve()
+            except OSError:
+                continue
+            if not p.is_dir():
+                continue
+            key = str(p)
+            if key in seen:
+                continue
+            seen.add(key)
+            roots.append(key)
+        return roots
+
     async def execute(
         self,
         *,
@@ -111,6 +131,7 @@ class LocalShellSession:
         timeout_seconds: Optional[float] = None,
         output_limit: Optional[int] = None,
         record_snapshot: bool = True,
+        extra_read_roots: Optional[list[str]] = None,
     ) -> RemoteCommandResult:
         if not self.is_alive:
             await self.start()
@@ -118,11 +139,14 @@ class LocalShellSession:
         timeout = float(timeout_seconds or self._config.default_timeout_seconds)
         limit = int(output_limit or self._config.default_output_limit)
         rewritten = self._rewrite_virtual_paths(command)
+        extra_roots = self._normalize_extra_read_roots(extra_read_roots or [])
+        extra_roots_env = ":".join(shlex.quote(p) for p in extra_roots)
         sentinel_id = uuid.uuid4().hex[:12]
         stdout_sentinel = f"{_SENTINEL_TAG}:{sentinel_id}:"
         stderr_sentinel = f"{_ERR_SENTINEL_TAG}:{sentinel_id}"
 
         wrapped = (
+            f"export MACCHIATO_REMOTE_EXTRA_READ_ROOTS={extra_roots_env}\n"
             f"{rewritten}\n"
             f"__MACCHIATO_REMOTE_EC=$?\n"
             f"echo '{stderr_sentinel}' >&2\n"

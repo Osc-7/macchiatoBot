@@ -233,6 +233,14 @@ class LLMConfig(BaseModel):
             "capabilities.vision=True 的 provider。"
         ),
     )
+    frontend_providers: Dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "按前端/渠道指定主对话 provider（例如 shuiyuan: qwen_3.5_plus）。"
+            "当 AgentCore 的 source 匹配 key 时，自动将该 provider 作为本会话 active，"
+            "覆盖全局 llm.active。"
+        ),
+    )
     provider_include: List[str] = Field(
         default_factory=list,
         description=(

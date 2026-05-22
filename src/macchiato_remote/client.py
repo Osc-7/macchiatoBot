@@ -442,6 +442,7 @@ class RemoteWorkerClient:
             command=req.command,
             timeout_seconds=req.timeout_seconds,
             output_limit=req.output_limit,
+            extra_read_roots=list(req.extra_read_roots or []),
         )
 
     async def _file_read(self, req: RemoteFileReadRequest) -> RemoteFileReadResult:

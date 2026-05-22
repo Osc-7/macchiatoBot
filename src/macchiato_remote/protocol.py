@@ -122,6 +122,7 @@ class RemoteCommandRequest(BaseModel):
     cwd: str = REMOTE_WORKSPACE_MOUNT
     timeout_seconds: Optional[float] = None
     output_limit: Optional[int] = None
+    extra_read_roots: list[str] = Field(default_factory=list)
 
 
 class RemoteCommandResult(BaseModel):

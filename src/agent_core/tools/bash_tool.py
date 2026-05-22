@@ -383,6 +383,41 @@ class BashTool(BaseTool):
         except OSError:
             return None
 
+    @staticmethod
+    def _remote_read_roots(exec_ctx: dict) -> list[str]:
+        """Read ACL roots that should be visible to the remote shell guard."""
+        from agent_core.agent.path_grants import (
+            list_ephemeral_path_prefixes,
+            load_user_path_prefixes,
+        )
+        from agent_core.config import get_config
+
+        source = str(exec_ctx.get("source") or "cli")
+        user_id = str(exec_ctx.get("user_id") or "root")
+        cfg = get_config()
+        roots: list[str] = []
+        for raw in (
+            *load_user_path_prefixes(
+                cfg.command_tools.acl_base_dir,
+                source,
+                user_id,
+                access_mode="read",
+            ),
+            *list_ephemeral_path_prefixes(
+                source,
+                user_id,
+                access_mode="read",
+            ),
+        ):
+            try:
+                p = Path(raw).expanduser().resolve()
+            except OSError:
+                continue
+            s = str(p)
+            if s not in roots:
+                roots.append(s)
+        return roots
+
     def _normalize_command_for_security(
         self, command: str, remote_state: Any
     ) -> str:
@@ -759,6 +794,7 @@ class BashTool(BaseTool):
             command=command,
             timeout=timeout,
             output_limit=cfg.command_tools.default_output_limit,
+            exec_ctx=exec_ctx,
         )
         return self._remote_command_tool_result(result, remote_state, metadata)
 
@@ -946,6 +982,7 @@ class BashTool(BaseTool):
         command: str,
         timeout: Optional[float],
         output_limit: int,
+        exec_ctx: dict,
     ) -> tuple[Any, dict]:
         reopen_attempted = False
         reopen_succeeded = False
@@ -956,6 +993,7 @@ class BashTool(BaseTool):
                 command=command,
                 timeout_seconds=timeout,
                 output_limit=output_limit,
+                extra_read_roots=self._remote_read_roots(exec_ctx),
             )
         except Exception as exc:
             raise RuntimeError(f"远程 worker 执行失败: {exc}") from exc
@@ -982,6 +1020,7 @@ class BashTool(BaseTool):
                     command=command,
                     timeout_seconds=timeout,
                     output_limit=output_limit,
+                    extra_read_roots=self._remote_read_roots(exec_ctx),
                 )
         metadata = {
             "workspace_backend": "remote",

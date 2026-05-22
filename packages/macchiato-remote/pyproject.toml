@@ -24,7 +24,7 @@ Documentation = "https://github.com/Osc-7/macchiatoBot/blob/master/docs/remote-w
 Repository = "https://github.com/Osc-7/macchiatoBot"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["../../src"]
 include = ["macchiato_remote*"]
 
 [tool.setuptools.package-data]

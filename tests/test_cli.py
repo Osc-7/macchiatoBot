@@ -319,8 +319,12 @@ class TestRunInteractiveLoop:
             agent.active_session_id = session_id
             return created
 
+        async def _expire_session(session_id: str, *, reason: str = "manual") -> None:
+            pass
+
         agent.list_sessions = _list_sessions
         agent.switch_session = AsyncMock(side_effect=_switch_session)
+        agent.expire_session = AsyncMock(side_effect=_expire_session)
 
         with patch(
             "builtins.input",
@@ -513,3 +517,209 @@ class TestMain:
         ):
             with patch("sys.argv", ["main.py"]):
                 cli_module.main()
+
+
+class TestNewCommands:
+    """测试新增斜杠指令（与飞书对齐）"""
+
+    @pytest.fixture(autouse=True)
+    def disable_prompt_toolkit(self):
+        import frontend.cli.interactive as interactive_module
+
+        with patch.object(interactive_module, "_HAS_PROMPT_TOOLKIT", False):
+            yield
+
+    @pytest.mark.asyncio
+    async def test_interrupt_command(self, capsys):
+        """测试 /interrupt 调用 terminal_cancel"""
+        agent = MagicMock()
+        agent.process_input = AsyncMock(return_value="不会调用")
+        agent.clear_context = MagicMock()
+        agent.get_token_usage = MagicMock(
+            return_value={
+                "call_count": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            }
+        )
+        agent.active_session_id = "cli:root"
+        agent.terminal_cancel = AsyncMock(return_value=True)
+
+        with patch("builtins.input", side_effect=["interrupt", "quit"]):
+            reason = await run_interactive_loop(agent)
+
+        assert reason == "quit"
+        agent.terminal_cancel.assert_awaited_once_with("cli:root")
+        captured = capsys.readouterr()
+        assert "interrupted" in captured.out.lower() or "中断" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_new_command_expires_before_create(self, capsys):
+        """测试 /new 先 expire 当前会话再创建"""
+        agent = MagicMock()
+        agent.process_input = AsyncMock(return_value="不会调用")
+        agent.clear_context = MagicMock()
+        agent.get_token_usage = MagicMock(
+            return_value={
+                "call_count": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            }
+        )
+        agent.active_session_id = "cli:root"
+        agent.list_sessions = MagicMock(return_value=["cli:root"])
+        agent.switch_session = AsyncMock(return_value=True)
+        agent.expire_session = AsyncMock()
+        agent.run_turn = AsyncMock(return_value=AgentRunResult(output_text="ok"))
+
+        with patch("builtins.input", side_effect=["new cli:work", "quit"]):
+            reason = await run_interactive_loop(agent)
+
+        assert reason == "quit"
+        agent.expire_session.assert_called_once()
+        agent.switch_session.assert_awaited_once()
+        captured = capsys.readouterr()
+        assert "cli:work" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_dangerously_status_command(self, capsys):
+        """测试 /dangerously status"""
+        agent = MagicMock()
+        agent.process_input = AsyncMock(return_value="不会调用")
+        agent.clear_context = MagicMock()
+        agent.get_token_usage = MagicMock(
+            return_value={
+                "call_count": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            }
+        )
+        agent.active_session_id = "cli:root"
+        agent.get_dangerous_mode = AsyncMock(
+            return_value={"dangerous_mode_enabled": False, "session_id": "cli:root"}
+        )
+        agent.run_turn = AsyncMock(return_value=AgentRunResult(output_text="ok"))
+
+        with patch("builtins.input", side_effect=["dangerously status", "quit"]):
+            reason = await run_interactive_loop(agent)
+
+        assert reason == "quit"
+        agent.get_dangerous_mode.assert_called_once()
+        captured = capsys.readouterr()
+        assert "DISABLED" in captured.out.upper()
+
+    @pytest.mark.asyncio
+    async def test_remote_status_command(self, capsys):
+        """测试 /remote-status"""
+        agent = MagicMock()
+        agent.process_input = AsyncMock(return_value="不会调用")
+        agent.clear_context = MagicMock()
+        agent.get_token_usage = MagicMock(
+            return_value={
+                "call_count": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            }
+        )
+        agent.active_session_id = "cli:root"
+        agent.remote_workspace_status = AsyncMock(return_value={"state": {}})
+        agent.run_turn = AsyncMock(return_value=AgentRunResult(output_text="ok"))
+
+        with patch("builtins.input", side_effect=["remote-status", "quit"]):
+            reason = await run_interactive_loop(agent)
+
+        assert reason == "quit"
+        agent.remote_workspace_status.assert_called_once()
+        captured = capsys.readouterr()
+        assert "远程工作区" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_ask_user_callback_resolves(self):
+        """测试 CLI ask_user 回调能读取输入并通过 IPC 提交答案"""
+        agent = MagicMock()
+        agent.resolve_ask_user = AsyncMock(return_value=True)
+
+        captured_hooks = None
+
+        async def _mock_run_turn(agent_input, hooks=None):
+            nonlocal captured_hooks
+            captured_hooks = hooks
+            if hooks and hooks.on_feishu_ask_user_notify:
+                hooks.on_feishu_ask_user_notify(
+                    "batch-1",
+                    {
+                        "questions": [
+                            {
+                                "id": "q1",
+                                "text": "Choose one",
+                                "options": [
+                                    {"label": "A", "value": "a"},
+                                    {"label": "B", "value": "b"},
+                                ],
+                                "allow_custom": True,
+                            }
+                        ]
+                    },
+                )
+            return AgentRunResult(output_text="ok")
+
+        agent.run_turn = AsyncMock(side_effect=_mock_run_turn)
+        agent.get_token_usage = MagicMock(
+            return_value={
+                "call_count": 1,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            }
+        )
+
+        with patch("builtins.input", side_effect=["hello", "0", "quit"]):
+            await run_interactive_loop(agent)
+
+        agent.resolve_ask_user.assert_called_once()
+        call = agent.resolve_ask_user.call_args
+        assert call.kwargs["batch_id"] == "batch-1"
+        answers = call.kwargs["answers"]
+        assert isinstance(answers, list)
+        assert answers[0]["question_id"] == "q1"
+        assert answers[0]["selected_option"] == "a"
+
+    @pytest.mark.asyncio
+    async def test_permission_callback_resolves(self):
+        """测试 CLI permission 回调能读取输入并通过 IPC 提交裁决"""
+        agent = MagicMock()
+        agent.resolve_permission = AsyncMock(return_value=True)
+
+        async def _mock_run_turn(agent_input, hooks=None):
+            if hooks and hooks.on_feishu_permission_notify:
+                hooks.on_feishu_permission_notify(
+                    "perm-1",
+                    {
+                        "summary": "Allow access?",
+                        "kind": "file",
+                        "auto_execute_after_approval": True,
+                    },
+                )
+            return AgentRunResult(output_text="ok")
+
+        agent.run_turn = AsyncMock(side_effect=_mock_run_turn)
+        agent.get_token_usage = MagicMock(
+            return_value={
+                "call_count": 1,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            }
+        )
+
+        with patch("builtins.input", side_effect=["hello", "y", "n", "quit"]):
+            await run_interactive_loop(agent)
+
+        agent.resolve_permission.assert_called_once()
+        call = agent.resolve_permission.call_args
+        assert call.kwargs["permission_id"] == "perm-1"
+        assert call.kwargs["allowed"] is True

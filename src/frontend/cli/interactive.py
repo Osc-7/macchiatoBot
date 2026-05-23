@@ -8,12 +8,13 @@ import asyncio
 import inspect
 import json
 import os
+import shlex
 import signal
 import sys
 import shutil
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from agent_core.interfaces import AgentHooks, AgentRunInput
 from system.automation.repositories import _automation_base_dir
@@ -98,15 +99,21 @@ def print_help():
 - `/compress [N]` &nbsp;&nbsp;主动折叠上下文为摘要；可选 `N` 指定保留最近几轮
 - `/help` &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;显示此帮助
 - `/usage` / `/stats` &nbsp;&nbsp;本会话 token 用量
+- `/interrupt` / `/cancel` / `/stop` &nbsp;&nbsp;中断当前正在执行的内核任务
 - `/session` &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;显示当前会话
 - `/session whoami` &nbsp;显示当前 user/source/session
 - `/session list` &nbsp;列出当前已加载会话
 - `/session switch <id>` &nbsp;切换到指定会话（已存在）
 - `/session new [id]` &nbsp;创建并切换到新会话
 - `/session delete <id>` &nbsp;删除会话记录（仅从会话列表移除，不删历史）
+- `/new [id]` &nbsp;快速新开 core 对话（先保存当前会话记忆）
 - `/model` / `/model list` &nbsp;列出各模型的 **备注 label（切换用）** 与能力；当前主对话标 `*`，vision 回落标 `V`
 - `/model <model name>` &nbsp;切换：与列表中的展示名一致（一般为 label；无 label 时为配置名）
 - `/model switch <model name>` &nbsp;与上一行相同（多写 `switch` 亦可）
+- `/remote-use <login> [path] [--profile dev]` &nbsp;&nbsp;切换到远程工作区模式
+- `/remote-status` &nbsp;&nbsp;查看当前远程工作区状态
+- `/remote-release` &nbsp;&nbsp;释放远程工作区，恢复云端工作区
+- `/dangerously on|off|status` &nbsp;&nbsp;切换危险放行模式（跳过人工审批）
 
 ## 示例对话
 
@@ -130,12 +137,19 @@ def print_help():
         print("  /compress [N]        主动折叠上下文为摘要（可选 N 指定保留最近几轮）")
         print("  /help                显示此帮助")
         print("  /usage 或 /stats     本会话 token 用量")
+        print("  /interrupt           中断当前正在执行的内核任务")
         print("  /session             查看当前会话")
         print("  /session whoami")
         print("  /session list")
         print("  /session switch <id>")
         print("  /session new [id]")
         print("  /session delete <id> 删除会话记录")
+        print("  /new [id]            快速新开 core 对话")
+        print("  /model               列出或切换模型")
+        print("  /remote-use          切换到远程工作区")
+        print("  /remote-status       查看远程工作区状态")
+        print("  /remote-release      释放远程工作区")
+        print("  /dangerously         切换危险放行模式")
         print()
         print("示例对话:")
         print("  • 明天下午3点有个团队会议")
@@ -267,6 +281,97 @@ def _print_compress_result(res: dict) -> None:
         print()
 
 
+def _parse_ttl_seconds(value: str) -> Optional[int]:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return None
+    unit = raw[-1]
+    number = raw[:-1] if unit in {"s", "m", "h"} else raw
+    try:
+        n = int(number)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    if unit == "h":
+        return n * 3600
+    if unit == "m":
+        return n * 60
+    return n
+
+
+def _parse_remote_use_args(
+    cmd_text: str,
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    try:
+        tokens = shlex.split(cmd_text)
+    except ValueError as exc:
+        return None, f"解析失败: {exc}"
+    if len(tokens) < 2:
+        return (
+            None,
+            "用法: /remote-use <login> [path] [--profile strict|dev|host-user|host-admin] [--ttl 30m]",
+        )
+    login = tokens[1].strip()
+    path = "~"
+    profile = "dev"
+    ttl_seconds: Optional[int] = None
+    i = 2
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--profile":
+            if i + 1 >= len(tokens):
+                return None, "缺少 --profile 的值"
+            profile = tokens[i + 1].strip()
+            i += 2
+            continue
+        if tok.startswith("--profile="):
+            profile = tok.split("=", 1)[1].strip()
+            i += 1
+            continue
+        if tok == "--ttl":
+            if i + 1 >= len(tokens):
+                return None, "缺少 --ttl 的值"
+            ttl_seconds = _parse_ttl_seconds(tokens[i + 1])
+            if ttl_seconds is None:
+                return None, "ttl 格式应为正整数秒，或 30m / 2h"
+            i += 2
+            continue
+        if tok.startswith("--ttl="):
+            ttl_seconds = _parse_ttl_seconds(tok.split("=", 1)[1])
+            if ttl_seconds is None:
+                return None, "ttl 格式应为正整数秒，或 30m / 2h"
+            i += 1
+            continue
+        if tok.startswith("--"):
+            return None, f"未知参数: {tok}"
+        path = tok
+        i += 1
+    if profile not in {"strict", "dev", "host-user", "host-admin"}:
+        return None, "profile 必须是 strict、dev、host-user 或 host-admin"
+    return {
+        "login": login,
+        "path": path,
+        "profile": profile,
+        "ttl_seconds": ttl_seconds,
+    }, None
+
+
+def _format_remote_state_cli(state: dict[str, Any]) -> str:
+    if not state:
+        return "远程工作区未启用。"
+    path = state.get("resolved_path") or state.get("requested_path") or "—"
+    mount = state.get("workspace_mount") or "/workspace"
+    login = state.get("login") or "—"
+    profile = state.get("profile") or "—"
+    return (
+        "远程工作区已启用\n"
+        f"登录: {login}\n"
+        f"权限档位: {profile}\n"
+        f"工作区: {mount} -> {path}"
+    )
+
+
 async def run_interactive_loop(agent: Any) -> str:
     """运行交互式对话循环，返回退出原因（quit/sigint/eof）。"""
     print_welcome()
@@ -326,6 +431,20 @@ async def run_interactive_loop(agent: Any) -> str:
             and hasattr(agent, "active_session_id")
         )
 
+    async def _expire_active_before_new(target_session_id: str) -> Optional[str]:
+        active = getattr(agent, "active_session_id", None)
+        target = (target_session_id or "").strip()
+        if not active or active == target:
+            return None
+        expire_fn = getattr(agent, "expire_session", None)
+        if not callable(expire_fn) or not inspect.iscoroutinefunction(expire_fn):
+            return None
+        try:
+            await expire_fn(active, reason="manual_new")
+        except Exception as exc:  # noqa: BLE001
+            return str(exc) or type(exc).__name__
+        return None
+
     async def _handle_session_command(raw: str) -> bool:
         if not _supports_session_commands():
             return False
@@ -382,6 +501,9 @@ async def run_interactive_loop(agent: Any) -> str:
                 if len(parts) > 2 and parts[2].strip()
                 else f"cli:{int(time.time())}"
             )
+            err = await _expire_active_before_new(session_id)
+            if err:
+                print(hint(f"  新建会话前保存当前会话记忆失败: {err}"))
             created = await _call_method(
                 "switch_session", session_id, create_if_missing=True
             )
@@ -648,6 +770,141 @@ async def run_interactive_loop(agent: Any) -> str:
                 continue
 
             if await _handle_session_command(cmd_text):
+                continue
+
+            # ── /interrupt | /cancel | /stop ─────────────────────────────
+            if cmd_lower in ("interrupt", "cancel", "stop"):
+                sid = str(getattr(agent, "active_session_id", "") or "").strip()
+                if not sid:
+                    print(hint("  无法解析当前会话 ID，请先发一条普通消息再试。"))
+                    print(thin_separator())
+                    continue
+                try:
+                    cancelled = await _call_method("terminal_cancel", sid)
+                except Exception as exc:
+                    print(accent(f"  中断失败: {exc}"))
+                    print(thin_separator())
+                    continue
+                if cancelled is None:
+                    print(hint("  当前 agent 不支持中断指令。"))
+                elif cancelled:
+                    print(hint("  Chat session interrupted."))
+                else:
+                    print(hint("  No active chat session."))
+                print(thin_separator())
+                continue
+
+            # ── /remote-use | /remote-status | /remote-release ───────────
+            if cmd_lower in ("remote-status", "remote status"):
+                try:
+                    res = await _call_method("remote_workspace_status")
+                except Exception as exc:
+                    print(accent(f"  远程工作区状态读取失败: {exc}"))
+                    print(thin_separator())
+                    continue
+                if res is None:
+                    print(hint("  当前 agent 不支持远程工作区指令。"))
+                else:
+                    state = res.get("state") if isinstance(res, dict) else None
+                    print(hint(_format_remote_state_cli(state if isinstance(state, dict) else {})))
+                print(thin_separator())
+                continue
+
+            if cmd_lower in ("remote-release", "remote release", "cloud-use"):
+                try:
+                    res = await _call_method("remote_workspace_release")
+                except Exception as exc:
+                    print(accent(f"  释放远程工作区失败: {exc}"))
+                    print(thin_separator())
+                    continue
+                if res is None:
+                    print(hint("  当前 agent 不支持远程工作区指令。"))
+                else:
+                    released = bool(res.get("released")) if isinstance(res, dict) else False
+                    if released:
+                        print(hint("  已释放远程工作区，当前会话将恢复云端工作区模式。"))
+                    else:
+                        print(hint("  当前会话未启用远程工作区。"))
+                print(thin_separator())
+                continue
+
+            if cmd_lower.startswith("remote-use"):
+                parsed, err = _parse_remote_use_args(cmd_text)
+                if err:
+                    print(hint(f"  {err}"))
+                    print(thin_separator())
+                    continue
+                try:
+                    state = await _call_method("remote_workspace_use", **parsed)
+                except Exception as exc:
+                    print(accent(f"  切换远程工作区失败: {exc}"))
+                    print(thin_separator())
+                    continue
+                if state is None:
+                    print(hint("  当前 agent 不支持远程工作区指令。"))
+                else:
+                    print(hint(_format_remote_state_cli(state if isinstance(state, dict) else {})))
+                print(thin_separator())
+                continue
+
+            # ── /dangerously ────────────────────────────────────────────
+            if cmd_lower.split()[:1] in (["dangerously"], ["danger"], ["dangerous"]):
+                parts_d = cmd_text.strip().split()
+                action = parts_d[1].strip().lower() if len(parts_d) > 1 else "status"
+                if action not in {"on", "off", "status"}:
+                    print(hint("  用法: /dangerously on|off|status"))
+                    print(thin_separator())
+                    continue
+                try:
+                    if action == "status":
+                        status = await _call_method("get_dangerous_mode")
+                    else:
+                        status = await _call_method("set_dangerous_mode", enabled=(action == "on"))
+                except Exception as exc:
+                    print(accent(f"  查询/切换失败: {exc}"))
+                    print(thin_separator())
+                    continue
+                if not isinstance(status, dict):
+                    print(hint("  当前 agent 不支持 dangerous mode 指令。"))
+                    print(thin_separator())
+                    continue
+                enabled_now = bool(status.get("dangerous_mode_enabled"))
+                sid = str(status.get("session_id") or getattr(agent, "active_session_id", ""))
+                if enabled_now:
+                    msg = (
+                        "Dangerous mode is ENABLED.\n"
+                        "Human approval is bypassed for permission checks in this session.\n"
+                        f"Session: {sid}"
+                    )
+                else:
+                    msg = (
+                        "Dangerous mode is DISABLED.\n"
+                        "Human approval is required again.\n"
+                        f"Session: {sid}"
+                    )
+                print(hint(f"  {msg}"))
+                print(thin_separator())
+                continue
+
+            # ── /new [id] ───────────────────────────────────────────────
+            if cmd_lower.split()[:1] == ["new"]:
+                parts_n = cmd_text.strip().split()
+                session_id = (
+                    parts_n[1].strip()
+                    if len(parts_n) > 1 and parts_n[1].strip()
+                    else f"cli:{int(time.time())}"
+                )
+                err = await _expire_active_before_new(session_id)
+                if err:
+                    print(hint(f"  新建会话前保存当前会话记忆失败: {err}"))
+                created = await _call_method(
+                    "switch_session", session_id, create_if_missing=True
+                )
+                if created:
+                    print(hint(f"  已创建并切换到新会话: {session_id}"))
+                else:
+                    print(hint(f"  会话已存在，已切换: {session_id}"))
+                print(thin_separator())
                 continue
 
             if cmd_lower.startswith("model"):
@@ -971,11 +1228,211 @@ async def run_interactive_loop(agent: Any) -> str:
                         )
                         _print_with_spinner(hint(f"  {note}"))
 
+                # ── ask_user / permission 终端交互 ──────────────────────────
+                # run_turn_stream 会在 tool trace 之后顺序投递这些事件；
+                # 此时主线程正在 await processing_task，可以在回调里同步读 stdin。
+                # 为避免 stdin 竞争，使用 prompt_toolkit 若可用，否则回退 input()。
+                def _prompt_sync(prompt_text: str) -> str:
+                    if _HAS_PROMPT_TOOLKIT and pt_session is not None:
+                        try:
+                            loop = asyncio.get_running_loop()
+                            return loop.run_until_complete(
+                                pt_session.prompt_async(HTML(prompt_text))
+                            )
+                        except Exception:
+                            pass
+                    return input(prompt_text)
+
+                def on_feishu_ask_user_notify(
+                    batch_id: str, payload: dict[str, Any]
+                ) -> None:
+                    questions = payload.get("questions") or []
+                    if not isinstance(questions, list) or not questions:
+                        return
+                    _stop_spinner()
+                    _flush_reasoning_buffer()
+                    if stream_started:
+                        _persist_live_block()
+                    _pause_spinner()
+                    with io_lock:
+                        _erase_spinner_line()
+                    print()
+                    print(label("[Agent 提问]"))
+                    print()
+                    answers_out: list[dict[str, Any]] = []
+                    for qi, q in enumerate(questions):
+                        qid = str(q.get("id") or f"q{qi + 1}")
+                        text = str(q.get("text") or q.get("question") or "").strip()
+                        options = q.get("options") or []
+                        allow_custom = bool(q.get("allow_custom", True))
+                        print(hint(f"  Q{qi + 1}: {text}"))
+                        if isinstance(options, list) and options:
+                            for oi, opt in enumerate(options):
+                                opt_label = str(opt.get("label") or opt.get("value") or f"{oi}")
+                                opt_text = str(opt.get("text") or opt.get("label") or "")
+                                print(hint(f"    [{oi}] {opt_label}") + (
+                                    f" - {opt_text}" if opt_text and opt_text != opt_label else ""
+                                ))
+                            opt_range = f"0-{len(options) - 1}"
+                        else:
+                            opt_range = "无选项"
+                        custom_hint = " 或直接输入回答" if allow_custom else ""
+                        prompt_line = f"  请选择 [{opt_range}]{custom_hint} (q=跳过): "
+                        while True:
+                            try:
+                                choice = _prompt_sync(prompt_line).strip()
+                            except (EOFError, KeyboardInterrupt):
+                                choice = "q"
+                            if choice.lower() == "q":
+                                answers_out.append({
+                                    "question_id": qid,
+                                    "selected_option": None,
+                                    "custom_text": None,
+                                })
+                                break
+                            if isinstance(options, list) and options:
+                                try:
+                                    idx = int(choice)
+                                    if 0 <= idx < len(options):
+                                        sel = options[idx]
+                                        val = str(sel.get("value") or sel.get("label") or f"{idx}")
+                                        answers_out.append({
+                                            "question_id": qid,
+                                            "selected_option": val,
+                                            "custom_text": None,
+                                        })
+                                        break
+                                except (TypeError, ValueError):
+                                    pass
+                            if allow_custom and choice:
+                                answers_out.append({
+                                    "question_id": qid,
+                                    "selected_option": None,
+                                    "custom_text": choice,
+                                })
+                                break
+                            print(hint("    无效输入，请重试。"))
+                        print()
+                    print(thin_separator())
+                    _resume_spinner()
+                    # 异步提交答案到 IPC（不阻塞回调返回）
+                    fn = getattr(agent, "resolve_ask_user", None)
+                    if callable(fn) and inspect.iscoroutinefunction(fn):
+                        try:
+                            loop = asyncio.get_running_loop()
+                            loop.create_task(fn(batch_id=batch_id, answers=answers_out))
+                        except Exception:
+                            pass
+
+                def on_feishu_permission_notify(
+                    permission_id: str, payload: dict[str, Any]
+                ) -> None:
+                    summary = str(payload.get("summary") or "").strip()
+                    kind = str(payload.get("kind") or "").strip()
+                    path_prefix = str(payload.get("path_prefix") or "").strip()
+                    auto_exec = bool(payload.get("auto_execute_after_approval"))
+                    _stop_spinner()
+                    _flush_reasoning_buffer()
+                    if stream_started:
+                        _persist_live_block()
+                    _pause_spinner()
+                    with io_lock:
+                        _erase_spinner_line()
+                    print()
+                    print(label("[权限请求]"))
+                    if summary:
+                        print(hint(f"  {summary}"))
+                    if kind:
+                        print(hint(f"  类型: {kind}"))
+                    if path_prefix:
+                        print(hint(f"  路径前缀: {path_prefix}"))
+                    if auto_exec:
+                        print(hint("  批准后将自动继续执行原操作。"))
+                    print(hint(f"  permission_id: {permission_id}"))
+                    print()
+                    prompt_line = "  批准? [y/n/c=需要澄清/q=跳过]: "
+                    while True:
+                        try:
+                            choice = _prompt_sync(prompt_line).strip().lower()
+                        except (EOFError, KeyboardInterrupt):
+                            choice = "q"
+                        if choice == "q":
+                            print(thin_separator())
+                            _resume_spinner()
+                            return
+                        if choice == "c":
+                            note = ""
+                            try:
+                                note = _prompt_sync("  请说明需要澄清的内容: ").strip()
+                            except (EOFError, KeyboardInterrupt):
+                                pass
+                            print(thin_separator())
+                            _resume_spinner()
+                            fn = getattr(agent, "resolve_permission", None)
+                            if callable(fn) and inspect.iscoroutinefunction(fn):
+                                try:
+                                    loop = asyncio.get_running_loop()
+                                    loop.create_task(
+                                        fn(
+                                            permission_id=permission_id,
+                                            allowed=False,
+                                            clarify_requested=True,
+                                            user_instruction=note or None,
+                                        )
+                                    )
+                                except Exception:
+                                    pass
+                            return
+                        if choice in ("y", "yes"):
+                            persist = False
+                            try:
+                                persist_in = _prompt_sync(
+                                    "  是否持久化该路径授权? [y/N]: "
+                                ).strip().lower()
+                                persist = persist_in in ("y", "yes")
+                            except (EOFError, KeyboardInterrupt):
+                                pass
+                            print(thin_separator())
+                            _resume_spinner()
+                            fn = getattr(agent, "resolve_permission", None)
+                            if callable(fn) and inspect.iscoroutinefunction(fn):
+                                try:
+                                    loop = asyncio.get_running_loop()
+                                    loop.create_task(
+                                        fn(
+                                            permission_id=permission_id,
+                                            allowed=True,
+                                            persist_acl=persist,
+                                        )
+                                    )
+                                except Exception:
+                                    pass
+                            return
+                        if choice in ("n", "no"):
+                            print(thin_separator())
+                            _resume_spinner()
+                            fn = getattr(agent, "resolve_permission", None)
+                            if callable(fn) and inspect.iscoroutinefunction(fn):
+                                try:
+                                    loop = asyncio.get_running_loop()
+                                    loop.create_task(
+                                        fn(
+                                            permission_id=permission_id,
+                                            allowed=False,
+                                        )
+                                    )
+                                except Exception:
+                                    pass
+                            return
+                        print(hint("    无效输入，请重试。"))
+
                 is_processing = True
                 hooks = AgentHooks(
                     on_assistant_delta=on_stream_delta,
                     on_reasoning_delta=on_reasoning_delta,
                     on_trace_event=on_trace_event,
+                    on_feishu_ask_user_notify=on_feishu_ask_user_notify,
+                    on_feishu_permission_notify=on_feishu_permission_notify,
                 )
                 processing_task = asyncio.create_task(
                     agent.run_turn(AgentRunInput(text=user_input), hooks=hooks)

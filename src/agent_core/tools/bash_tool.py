@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from macchiato_remote.protocol import REMOTE_WORKSPACE_MOUNT
 
-from agent_core.permissions.broker import PathGrant, PermissionBroker, PermissionRequest
+from agent_core.permissions.broker import PathGrant, PermissionBroker, PermissionBrokerResult, PermissionRequest
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 
 if TYPE_CHECKING:
@@ -385,7 +385,11 @@ class BashTool(BaseTool):
 
     @staticmethod
     def _remote_read_roots(exec_ctx: dict) -> list[str]:
-        """Read ACL roots that should be visible to the remote shell guard."""
+        """Read ACL roots that should be visible to the remote shell guard.
+
+        Includes both read and write grants: a path approved for writing
+        must also be enterable via cd on the remote side.
+        """
         from agent_core.agent.path_grants import (
             list_ephemeral_path_prefixes,
             load_user_path_prefixes,
@@ -396,26 +400,27 @@ class BashTool(BaseTool):
         user_id = str(exec_ctx.get("user_id") or "root")
         cfg = get_config()
         roots: list[str] = []
-        for raw in (
-            *load_user_path_prefixes(
-                cfg.command_tools.acl_base_dir,
-                source,
-                user_id,
-                access_mode="read",
-            ),
-            *list_ephemeral_path_prefixes(
-                source,
-                user_id,
-                access_mode="read",
-            ),
-        ):
-            try:
-                p = Path(raw).expanduser().resolve()
-            except OSError:
-                continue
-            s = str(p)
-            if s not in roots:
-                roots.append(s)
+        for mode in ("read", "write"):
+            for raw in (
+                *load_user_path_prefixes(
+                    cfg.command_tools.acl_base_dir,
+                    source,
+                    user_id,
+                    access_mode=mode,
+                ),
+                *list_ephemeral_path_prefixes(
+                    source,
+                    user_id,
+                    access_mode=mode,
+                ),
+            ):
+                try:
+                    p = Path(raw).expanduser().resolve()
+                except OSError:
+                    continue
+                s = str(p)
+                if s not in roots:
+                    roots.append(s)
         return roots
 
     def _normalize_command_for_security(
@@ -490,18 +495,25 @@ class BashTool(BaseTool):
                 cwd = self._remote_jail_root(remote_state) or remote_state.workspace_mount
             else:
                 cwd = await self._current_cwd()
-            perm_result = await self._request_bash_permission(
+            broker_result = await self._request_bash_permission(
                 command=check_command,
                 verdict=verdict,
                 exec_ctx=exec_ctx,
                 cwd=cwd,
                 remote=remote_state is not None,
             )
-            if perm_result is not None:
-                return perm_result
-            if remote_state is None and getattr(
-                security, "_workspace_jail_root", None
-            ):
+            if not broker_result.allowed:
+                return self._permission_failure_result(
+                    broker_result.error, broker_result.message, command, broker_result
+                )
+            # 应用用户批准的 path grants 到 security 的写入根
+            for grant in broker_result.applied_grants:
+                if grant.access_mode == "write":
+                    try:
+                        security._workspace_extra_write_roots.append(Path(grant.path_prefix))
+                    except Exception:
+                        pass
+            if getattr(security, "_workspace_jail_root", None):
                 security.refresh_write_roots_from_config(
                     str(exec_ctx.get("source") or "cli"),
                     str(exec_ctx.get("user_id") or "root"),
@@ -716,7 +728,7 @@ class BashTool(BaseTool):
         exec_ctx: dict,
         cwd: Optional[str],
         remote: bool = False,
-    ) -> Optional[ToolResult]:
+    ) -> PermissionBrokerResult:
         grants = [
             grant
             for raw in verdict.path_grants
@@ -751,9 +763,7 @@ class BashTool(BaseTool):
                 exec_ctx=dict(exec_ctx),
             )
         )
-        if res.allowed:
-            return None
-        return self._permission_failure_result(res.error, res.message, command, res)
+        return res
 
     @staticmethod
     def _permission_failure_result(

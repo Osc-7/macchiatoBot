@@ -101,20 +101,28 @@ class ConversationContext:
         content: str,
         *,
         media_items: Optional[List[Dict[str, Any]]] = None,
+        turn_id: Optional[int] = None,
     ) -> None:
         """
         添加用户消息。
 
         Args:
             content: 消息文本内容
-            media_items: 可选，多模态内容（如图片 image_url），与文本合并为一条消息
+            media_items: 可选，多模态内容（path/url 引用），与文本合并为一条消息
+            turn_id: 可选，所属 turn；用于 API 请求时按 turn 临时注入二进制
         """
+        message: Dict[str, Any] = {"role": "user"}
+        if turn_id is not None:
+            message["_turn_id"] = turn_id
         if media_items:
+            from agent_core.agent.media_helpers import normalize_media_items_for_context
+
             parts: List[Dict[str, Any]] = [{"type": "text", "text": content}]
-            parts.extend(media_items)
-            self._add_message({"role": "user", "content": parts})
+            parts.extend(normalize_media_items_for_context(media_items))
+            message["content"] = parts
         else:
-            self._add_message({"role": "user", "content": content})
+            message["content"] = content
+        self._add_message(message)
 
     def add_assistant_message(
         self,

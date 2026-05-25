@@ -114,12 +114,23 @@ def resolve_media_to_content_item(
             "远程工作区下暂不支持直接挂载远程媒体路径；请提供 http(s)/data URL，或先把媒体同步到 daemon 可读路径。",
         )
     path = _resolve_media_path(media_path, config=config, exec_ctx=exec_ctx)
-    data_url, mime, err = _file_to_data_url(path)
-    if err:
-        return None, err
+    mime, _ = mimetypes.guess_type(str(path))
+    if not mime:
+        mime = "application/octet-stream"
 
     if (mime or "").startswith("video/"):
-        return {"type": "video_url", "video_url": {"url": data_url}}, None
+        return {
+            "type": "media_ref",
+            "media_type": "video",
+            "path": str(path),
+            "name": path.name,
+            "mime_type": mime,
+        }, None
 
-    # 默认按图片处理（包含未知 mime 的兜底）
-    return {"type": "image_url", "image_url": {"url": data_url}}, None
+    return {
+        "type": "media_ref",
+        "media_type": "image",
+        "path": str(path),
+        "name": path.name,
+        "mime_type": mime,
+    }, None

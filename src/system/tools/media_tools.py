@@ -176,6 +176,9 @@ class AttachMediaTool(BaseTool):
     实际的多模态理解发生在下一次 chat_with_tools 调用中，由当前主模型统一处理文字+图像/视频。
     """
 
+    def __init__(self, config: Optional[Config] = None) -> None:
+        self._config = config or get_config()
+
     @property
     def name(self) -> str:
         return "attach_media"
@@ -244,14 +247,51 @@ class AttachMediaTool(BaseTool):
                 message="必须提供 path 或 paths 中的至少一个媒体路径。",
             )
 
-        # 不做实际文件读取，仅把路径交给 runtime，在下一轮调用前注入多模态内容。
+        ctx = kwargs.get("__execution_context__") or {}
         unique_paths = list(dict.fromkeys(params.paths))
+        media_items: List[Dict[str, Any]] = []
+        errors: List[str] = []
+
+        from agent_core.utils.media import resolve_media_to_content_item
+
+        for raw_path in unique_paths:
+            item, err = resolve_media_to_content_item(
+                raw_path, config=self._config, exec_ctx=ctx
+            )
+            if err or item is None:
+                errors.append(f"{raw_path}: {err or '无法解析媒体'}")
+                continue
+            media_type = str(item.get("media_type") or "").strip().lower()
+            if media_type == "video":
+                errors.append(
+                    f"{raw_path}: 当前默认不把视频直接挂载给模型，请改用文字描述或截图。"
+                )
+                continue
+            if item.get("type") == "media_ref" and media_type == "image":
+                media_items.append(item)
+            else:
+                errors.append(f"{raw_path}: 仅支持挂载图片（image）")
+
+        if not media_items:
+            return ToolResult(
+                success=False,
+                error="INVALID_MEDIA_PATH",
+                message="；".join(errors) if errors else "没有可挂载的图片。",
+            )
+
+        msg = "图片已标记，将在下一轮 LLM 调用中附加（Kimi 等 provider 会优先走 Files API ms:// 引用）。"
+        if errors:
+            msg += f" 部分路径已跳过：{'；'.join(errors)}"
 
         return ToolResult(
             success=True,
-            data={"paths": unique_paths},
-            message="媒体已标记，将在下一轮 LLM 调用中作为多模态输入附加。",
-            metadata={"embed_in_next_call": True, "paths": unique_paths},
+            data={"paths": [str(i.get("path") or "") for i in media_items if i.get("path")]},
+            message=msg,
+            metadata={
+                "embed_in_next_call": True,
+                "paths": [str(i.get("path") or "") for i in media_items if i.get("path")],
+                "media_items": media_items,
+            },
         )
 
 

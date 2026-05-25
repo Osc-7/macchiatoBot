@@ -5,7 +5,7 @@ InternalLoader — 在每次 LLM 调用前，动态组装完整的请求 Payload
     Prompt | Context | Messages | Tool Result
 
 职责边界：
-- 只做数据组装，不做任何网络 IO
+- 以数据组装为主；Kimi Files API 上传在启用 ``vendor_files_api`` 时于 assemble 内发生
 - 从 AgentCore 的公开属性读取状态，避免与 AgentCore 强耦合
 - 由 AgentCore.run_loop() 在每次直接调用 LLM 前使用
 """
@@ -80,6 +80,41 @@ class InternalLoader:
         if agent._pending_multimodal_items:
             messages = agent._append_pending_multimodal_messages(messages)
             agent._pending_multimodal_items.clear()
+
+        try:
+            caps_vision = bool(agent._llm_client.capabilities.vision)
+            has_vision_provider = bool(agent._llm_client.vision_provider_name)
+            vision_supported = caps_vision or not has_vision_provider
+            enable_native_file_blocks = bool(
+                getattr(agent._llm_client, "supports_native_file_blocks", False)
+            )
+            supported_file_mime_types = list(
+                getattr(agent._llm_client.capabilities, "file_input_mime_types", ())
+                or ()
+            )
+        except Exception:
+            vision_supported = True
+            enable_native_file_blocks = False
+            supported_file_mime_types = []
+
+        kimi_files = agent._build_kimi_files_client()
+        if kimi_files is not None:
+            from agent_core.agent.media_helpers import persist_kimi_ms_urls_in_context
+
+            persist_kimi_ms_urls_in_context(
+                agent._context.messages, kimi_files=kimi_files
+            )
+
+        from agent_core.agent.media_helpers import hydrate_messages_for_api
+
+        messages = hydrate_messages_for_api(
+            messages,
+            current_turn_id=agent._current_turn_id,
+            vision_supported=vision_supported,
+            enable_native_file_blocks=enable_native_file_blocks,
+            supported_file_mime_types=supported_file_mime_types,
+            kimi_files=kimi_files,
+        )
 
         # 工具快照：统一由工作集决定首轮暴露 + 后续 search_tools 扩展的可见集
         agent._last_snapshot = agent._working_set.build_snapshot(agent._tool_registry)

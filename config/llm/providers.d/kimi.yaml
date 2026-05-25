@@ -20,8 +20,7 @@ kimi_code:
     reasoning_content: true
     thinking_tag_inline: false
     context_window: 262144
-    file_input_mime_types:
-      - application/pdf
+    vendor_files_api: kimi
 
 kimi_k2.6:
   label: "Kimi K2.6"
@@ -39,3 +38,4 @@ kimi_k2.6:
     reasoning_content: true
     thinking_tag_inline: false
     context_window: 262144
+    vendor_files_api: kimi

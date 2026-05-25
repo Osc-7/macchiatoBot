@@ -40,3 +40,6 @@ class Capabilities:
 
     file_input_mime_types: Tuple[str, ...] = ()
     """模型原生支持的输入文件 MIME 列表；空表示不支持直接文件输入。"""
+
+    vendor_files_api: Optional[str] = None
+    """厂商 Files API 标识，如 ``kimi``；启用后图片优先 upload + ``ms://`` 引用。"""

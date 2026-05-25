@@ -248,6 +248,8 @@ class AgentCore:
         self._last_snapshot = ToolSnapshot(version=-1, tool_names=[], openai_tools=[])
         self._current_visible_tools: set[str] = set()
         self._pending_multimodal_items: List[Dict[str, Any]] = []
+        # Kimi Files API：path -> file_id 会话缓存，避免重复 upload
+        self._vendor_file_ref_cache: Dict[str, str] = {}
         # 前端（如飞书）可将媒体标记为 defer_with_next_user_input，
         # 这些内容会缓存到下一次“带文本的用户输入”再注入，避免收到图片即立刻触发分析。
         self._pending_user_multimodal_items: List[Dict[str, Any]] = []
@@ -1023,7 +1025,9 @@ class AgentCore:
             )
 
         self._context.add_user_message(
-            effective_text, media_items=effective_media_items
+            effective_text,
+            media_items=effective_media_items,
+            turn_id=turn_id,
         )
         # context 已变化，上一轮 API 返回的 prompt_tokens 不再代表当前窗口。
         self._last_prompt_tokens = None
@@ -1796,6 +1800,23 @@ class AgentCore:
         # 执行工具
         return await self._tool_registry.execute(tool_call.name, **kwargs)
 
+    def _build_kimi_files_client(self) -> Optional[Any]:
+        """当前 active provider 启用 ``vendor_files_api=kimi`` 时返回上传客户端。"""
+        try:
+            caps = self._llm_client.capabilities
+            if getattr(caps, "vendor_files_api", None) != "kimi":
+                return None
+            prov = self._llm_client._active_provider()
+            from agent_core.llm.vendor_files import build_kimi_vendor_files_client
+
+            return build_kimi_vendor_files_client(
+                provider_base_url=str(getattr(prov, "base_url", "") or ""),
+                api_key=str(getattr(prov, "api_key", "") or ""),
+                cache=self._vendor_file_ref_cache,
+            )
+        except Exception:
+            return None
+
     def _queue_media_for_next_call(self, result: ToolResult) -> None:
         """将工具结果中声明的媒体挂载到下一次 LLM 调用。"""
         prof = getattr(self, "_core_profile", None)
@@ -1823,6 +1844,13 @@ class AgentCore:
             self._pending_multimodal_items,
             media_resolver=_resolver,
         )
+        kimi_files = self._build_kimi_files_client()
+        if kimi_files is not None and self._pending_multimodal_items:
+            from agent_core.agent.media_helpers import persist_kimi_ms_urls_in_media_items
+
+            persist_kimi_ms_urls_in_media_items(
+                self._pending_multimodal_items, kimi_files=kimi_files
+            )
 
     def _collect_outgoing_attachment(self, result: ToolResult) -> None:
         """将工具结果中声明的「随回复发给用户的附件」加入本轮待发送列表。"""
@@ -1931,6 +1959,7 @@ class AgentCore:
             self._pending_multimodal_items,
             vision_supported=vision_supported,
             unseen_media=self._last_unseen_media,
+            turn_id=self._current_turn_id,
         )
 
     async def finalize_session(self) -> Optional[SessionSummary]:

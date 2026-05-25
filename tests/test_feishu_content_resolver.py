@@ -72,11 +72,9 @@ async def test_resolve_feishu_pdf_as_generic_user_file(monkeypatch, tmp_path: Pa
     )
     item = await resolver.resolve(ref)
     assert item is not None
-    assert item["type"] == "user_file"
-    assert item["mime_type"] == "application/pdf"
-    assert item["name"] == "spec.pdf"
-    assert item["path"].endswith("spec.pdf")
-    assert item["file_data"]
+    assert item["type"] == "text"
+    assert "spec.pdf" in item["text"]
+    assert item["text"].find(str(tmp_path)) >= 0 or "spec.pdf" in item["text"]
     assert (tmp_path / "spec.pdf").exists()
 
 
@@ -111,10 +109,8 @@ async def test_resolve_feishu_pdf_keeps_unicode_filename_from_message_metadata(
     )
     item = await resolver.resolve(ref)
     assert item is not None
-    assert item["type"] == "user_file"
-    assert item["mime_type"] == "application/pdf"
-    assert item["name"] == "测试文档.pdf"
-    assert item["path"].endswith("测试文档.pdf")
+    assert item["type"] == "text"
+    assert "测试文档.pdf" in item["text"]
     assert (tmp_path / "测试文档.pdf").exists()
 
 
@@ -142,8 +138,8 @@ async def test_resolve_feishu_image_keeps_multimodal(monkeypatch, tmp_path: Path
     )
     item = await resolver.resolve(ref)
     assert item is not None
-    assert item["type"] == "image_url"
-    assert "data:image/png;base64," in item["image_url"]["url"]
+    assert item["type"] == "media_ref"
+    assert item["media_type"] == "image"
     assert item["path"].endswith("x.png")
     assert (tmp_path / "x.png").exists()
 
@@ -175,7 +171,8 @@ async def test_resolve_feishu_image_does_not_use_generic_attachment_bin_path(
     )
     item = await resolver.resolve(ref)
     assert item is not None
-    assert item["type"] == "image_url"
+    assert item["type"] == "media_ref"
+    assert item["media_type"] == "image"
     assert "attachment.bin" not in (item.get("path") or "")
     assert "img_calendar_post_9a1" in (item.get("path") or "")
     assert "img_calendar_post_9a1" in item["name"]

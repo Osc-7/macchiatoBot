@@ -169,7 +169,9 @@ class CoreLifecycleLogger:
                 else:
                     record["system_prompt"] = system_prompt
             if messages is not None:
-                record["messages"] = messages
+                from agent_core.agent.tool_result_overflow import sanitize_binary_payloads
+
+                record["messages"] = sanitize_binary_payloads(messages)
         self._write(record)
 
     def on_llm_response(

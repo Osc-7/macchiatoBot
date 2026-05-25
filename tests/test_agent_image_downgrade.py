@@ -86,8 +86,7 @@ def test_adapt_content_items_for_provider_keeps_pdf_when_supported():
     )
     assert "/tmp/spec.pdf" in preface
     assert "application/pdf" in preface
-    assert adapted[0]["type"] == "file"
-    assert adapted[0]["file"]["filename"] == "spec.pdf"
+    assert adapted == []
 
 
 def test_adapt_content_items_for_provider_falls_back_to_preview_when_unsupported():
@@ -141,7 +140,7 @@ async def test_prepare_turn_downgrades_image_when_main_lacks_vision():
 
 
 @pytest.mark.asyncio
-async def test_prepare_turn_keeps_pdf_file_block_when_provider_supports_it():
+async def test_prepare_turn_keeps_pdf_as_path_ref_not_file_block():
     agent = AgentCore(
         config=Config(
             llm=LLMConfig(
@@ -177,10 +176,10 @@ async def test_prepare_turn_keeps_pdf_file_block_when_provider_supports_it():
         ],
     )
     last = agent.context.messages[-1]
-    assert isinstance(last["content"], list)
-    assert last["content"][0]["type"] == "text"
-    assert last["content"][0]["text"].startswith("[Time:")
-    assert last["content"][1]["type"] == "file"
+    assert isinstance(last["content"], str)
+    assert last["content"].startswith("[Time:")
+    assert "/tmp/spec.pdf" in last["content"]
+    assert "file_data" not in last["content"]
 
 
 @pytest.mark.asyncio
@@ -255,7 +254,7 @@ def test_append_pending_multimodal_downgrades_without_vision():
 
 def test_append_pending_multimodal_keeps_list_when_vision_supported():
     pending = [
-        {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+        {"type": "media_ref", "media_type": "image", "url": "https://example.com/a.png"},
     ]
     msgs = append_pending_multimodal_messages(
         [{"role": "user", "content": "hi"}],
@@ -264,7 +263,7 @@ def test_append_pending_multimodal_keeps_list_when_vision_supported():
     )
     extra = msgs[-1]
     assert isinstance(extra["content"], list)
-    assert extra["content"][1]["type"] == "image_url"
+    assert extra["content"][1]["type"] == "media_ref"
 
 
 def test_switch_model_updates_recognize_image_visibility():

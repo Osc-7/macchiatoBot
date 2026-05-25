@@ -67,23 +67,37 @@ class TestAttachMediaTool:
         assert result.error == "MISSING_MEDIA_PATH"
 
     @pytest.mark.asyncio
-    async def test_execute_with_single_path(self):
-        tool = AttachMediaTool()
-        result = await tool.execute(path="user_file/page_1.png")
+    async def test_execute_with_single_path(self, tmp_path):
+        img = tmp_path / "page_1.png"
+        img.write_bytes(
+            bytes.fromhex(
+                "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+                "0000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082"
+            )
+        )
+        tool = AttachMediaTool(config=_workspace_config(tmp_path))
+        result = await tool.execute(path=str(img))
         assert result.success is True
         assert result.metadata.get("embed_in_next_call") is True
-        assert "paths" in result.data
-        assert result.data["paths"] == ["user_file/page_1.png"]
+        assert result.metadata.get("media_items")
+        assert result.metadata["media_items"][0]["type"] == "media_ref"
+        assert result.data["paths"] == [str(img)]
 
     @pytest.mark.asyncio
-    async def test_execute_with_paths_list_merges_and_deduplicates(self):
-        tool = AttachMediaTool()
-        result = await tool.execute(
-            path="user_file/a.png",
-            paths=["user_file/a.png", "user_file/b.png"],
+    async def test_execute_with_paths_list_merges_and_deduplicates(self, tmp_path):
+        a = tmp_path / "a.png"
+        b = tmp_path / "b.png"
+        payload = bytes.fromhex(
+            "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+            "0000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082"
         )
+        a.write_bytes(payload)
+        b.write_bytes(payload)
+        tool = AttachMediaTool(config=_workspace_config(tmp_path))
+        result = await tool.execute(path=str(a), paths=[str(a), str(b)])
         assert result.success is True
-        assert result.data["paths"] == ["user_file/a.png", "user_file/b.png"]
+        assert result.data["paths"] == [str(a), str(b)]
+        assert len(result.metadata["media_items"]) == 2
 
 
 class TestAttachImageToReplyTool:

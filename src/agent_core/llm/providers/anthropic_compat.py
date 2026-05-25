@@ -62,6 +62,11 @@ def _convert_openai_user_content_part_to_anthropic(part: Any) -> Any:
             },
         }
 
+    if part_type == "media_ref":
+        media_type = str(part.get("media_type") or "").strip().lower()
+        if media_type in {"file", "video"}:
+            return None
+
     return part
 
 

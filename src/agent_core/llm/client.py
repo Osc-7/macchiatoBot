@@ -84,6 +84,9 @@ def _build_provider_from_entry(
             for x in (getattr(caps_src, "file_input_mime_types", []) or [])
             if str(x).strip()
         ),
+        vendor_files_api=(
+            str(getattr(caps_src, "vendor_files_api", "") or "").strip() or None
+        ),
     )
 
     vendor_params = dict(getattr(entry, "vendor_params", {}) or {})

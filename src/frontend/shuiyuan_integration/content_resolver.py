@@ -10,7 +10,6 @@ base64 data URL，供 LLM 多模态推理使用。
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import os
 from typing import Any, Dict, Optional
@@ -97,12 +96,19 @@ class ShuiyuanContentResolver(ContentResolver):
             mime,
         )
 
-        data_url = (
-            f"data:{mime};base64,{base64.b64encode(raw_bytes).decode('ascii')}"
-        )
         if (mime or "").startswith("video/"):
-            return {"type": "video_url", "video_url": {"url": data_url}}
-        return {"type": "image_url", "image_url": {"url": data_url}}
+            return {
+                "type": "media_ref",
+                "media_type": "video",
+                "url": url,
+                "mime_type": mime,
+            }
+        return {
+            "type": "media_ref",
+            "media_type": "image",
+            "url": url,
+            "mime_type": mime,
+        }
 
 
 # 模块导入时即向 agent_core 注册，供 resolve_content_refs 使用。

@@ -17,6 +17,9 @@ _notify_hook: Optional[Callable[[str, Dict[str, Any]], None]] = None
 _permission_ipc_stream_notify: ContextVar[
     Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]]
 ] = ContextVar("permission_ipc_stream_notify", default=None)
+_permission_session_stream_notify: Dict[
+    str, Callable[[str, Dict[str, Any]], Awaitable[None]]
+] = {}
 
 
 @asynccontextmanager
@@ -29,6 +32,27 @@ async def permission_ipc_stream_notify_scope(
         yield
     finally:
         _permission_ipc_stream_notify.reset(token)
+
+
+@asynccontextmanager
+async def permission_session_notify_scope(
+    session_id: str,
+    forward: Callable[[str, Dict[str, Any]], Awaitable[None]],
+):
+    """按 session_id 注册 IPC 转发，供跨任务工具执行时兜底转发权限事件。"""
+    sid = str(session_id or "").strip()
+    if not sid:
+        yield
+        return
+    prev = _permission_session_stream_notify.get(sid)
+    _permission_session_stream_notify[sid] = forward
+    try:
+        yield
+    finally:
+        if prev is None:
+            _permission_session_stream_notify.pop(sid, None)
+        else:
+            _permission_session_stream_notify[sid] = prev
 
 
 def set_permission_notify_hook(
@@ -110,6 +134,17 @@ def notify_permission_pending(permission_id: str, payload: Dict[str, Any]) -> No
             return
         loop.create_task(stream_fn(permission_id, payload))
         return
+    sid = str(payload.get("session_id") or "").strip()
+    if sid:
+        session_stream_fn = _permission_session_stream_notify.get(sid)
+        if session_stream_fn is not None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                logger.warning("permission notify: session stream 需要运行中事件循环")
+                return
+            loop.create_task(session_stream_fn(permission_id, payload))
+            return
     if _notify_hook is not None:
         try:
             _notify_hook(permission_id, payload)

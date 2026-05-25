@@ -129,6 +129,12 @@ def _sanitize_base64_payload(obj: Any, *, parent_key: str = "") -> tuple[Any, _B
     return obj, _Base64SanitizeStats()
 
 
+def sanitize_binary_payloads(obj: Any) -> Any:
+    """递归脱敏对象中的 base64 / data URL，供日志与上下文写入使用。"""
+    sanitized, _ = _sanitize_base64_payload(obj)
+    return sanitized
+
+
 def _sanitize_tool_result_base64(result: ToolResult) -> tuple[ToolResult, _Base64SanitizeStats]:
     """
     返回用于写入上下文的 ToolResult（base64 已脱敏）。

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import logging
 import mimetypes
 import re
@@ -155,8 +154,8 @@ class FeishuContentResolver(ContentResolver):
 
     @staticmethod
     def _is_natively_supported_file_input(mime: str) -> bool:
-        mime_norm = str(mime or "").strip().lower()
-        return mime_norm == "application/pdf"
+        _ = mime
+        return False
 
     async def resolve(self, ref: ContentReference) -> Optional[Dict[str, Any]]:
         extra = ref.extra or {}
@@ -201,17 +200,11 @@ class FeishuContentResolver(ContentResolver):
         local_path = uploads_dir / resolved_name
         local_path.write_bytes(raw_bytes)
 
-        data_url = (
-            f"data:{normalized_mime};base64,"
-            f"{base64.b64encode(raw_bytes).decode('ascii')}"
-        )
-
         if ref.ref_type == "document":
             preview = self._extract_text_preview(local_path, normalized_mime)
             if self._is_natively_supported_file_input(normalized_mime):
                 return {
                     "type": "user_file",
-                    "file_data": base64.b64encode(raw_bytes).decode("ascii"),
                     "mime_type": normalized_mime,
                     "path": str(local_path),
                     "name": local_path.name,
@@ -231,10 +224,11 @@ class FeishuContentResolver(ContentResolver):
 
         if normalized_mime.startswith("video/"):
             return {
-                "type": "video_url",
-                "video_url": {"url": data_url},
+                "type": "media_ref",
+                "media_type": "video",
                 "path": str(local_path),
                 "name": local_path.name,
+                "mime_type": normalized_mime,
                 "defer_with_next_user_input": True,
             }
         if normalized_mime.startswith("audio/"):
@@ -247,10 +241,11 @@ class FeishuContentResolver(ContentResolver):
             }
         # image 及未知类型统一按图片处理
         return {
-            "type": "image_url",
-            "image_url": {"url": data_url},
+            "type": "media_ref",
+            "media_type": "image",
             "path": str(local_path),
             "name": local_path.name,
+            "mime_type": normalized_mime,
             "defer_with_next_user_input": True,
         }
 

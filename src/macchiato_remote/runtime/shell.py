@@ -91,7 +91,10 @@ class LocalShellSession:
             else:
                 proc.terminate()
         except (OSError, ProcessLookupError):
-            return
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                return
         try:
             await asyncio.wait_for(proc.wait(), timeout=3)
         except asyncio.TimeoutError:
@@ -101,7 +104,14 @@ class LocalShellSession:
                 else:
                     proc.kill()
             except (OSError, ProcessLookupError):
-                pass
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    return
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                return
 
 
     @staticmethod

@@ -121,6 +121,7 @@ class RemoteCommandRequest(BaseModel):
     command: str
     cwd: str = REMOTE_WORKSPACE_MOUNT
     timeout_seconds: Optional[float] = None
+    wait_window_ms: Optional[int] = None
     output_limit: Optional[int] = None
     extra_read_roots: list[str] = Field(default_factory=list)
 
@@ -135,6 +136,11 @@ class RemoteCommandResult(BaseModel):
     truncated: bool = False
     cwd: str = REMOTE_WORKSPACE_MOUNT
     error: Optional[str] = None
+    backgrounded: bool = False
+    job_id: Optional[str] = None
+    job_status: Optional[str] = None
+    job_log_path: Optional[str] = None
+    job_pid: Optional[int] = None
 
 
 class RemoteFileReadRequest(BaseModel):

@@ -437,13 +437,85 @@ class RemoteWorkerClient:
                 cwd=req.cwd,
                 error="SESSION_NOT_OPEN",
             )
-        return await session.execute(
+        hard_timeout = req.timeout_seconds
+        wait_window_ms = req.wait_window_ms if req.wait_window_ms is not None else 30_000
+        if self._is_stateful_shell_command(req.command):
+            return await session.execute(
+                request_id=req.request_id,
+                command=req.command,
+                timeout_seconds=hard_timeout,
+                output_limit=req.output_limit,
+                extra_read_roots=list(req.extra_read_roots or []),
+            )
+        mgr = self._job_manager_for(req.session_id)
+        if mgr is None:
+            return RemoteCommandResult(
+                request_id=req.request_id,
+                command=req.command,
+                stderr=f"remote session is not open: {req.session_id}",
+                exit_code=127,
+                cwd=req.cwd,
+                error="SESSION_NOT_OPEN",
+            )
+        cap = await session.capture_session()
+        job_cwd = str(session.root)
+        job_env: Dict[str, str] = {}
+        if cap is not None:
+            job_cwd, job_env = cap
+        handle = await mgr.start_job(
+            req.command,
+            cwd=job_cwd,
+            env=job_env,
+            timeout_seconds=hard_timeout,
+        )
+        waited = max(0.0, float(wait_window_ms) / 1000.0)
+        end_at = asyncio.get_running_loop().time() + waited
+        status = handle
+        while status.status == "running" and asyncio.get_running_loop().time() < end_at:
+            await asyncio.sleep(0.05)
+            latest = await mgr.job_status(handle.job_id)
+            if latest is not None:
+                status = latest
+        if status.status == "running":
+            return RemoteCommandResult(
+                request_id=req.request_id,
+                command=req.command,
+                cwd=job_cwd,
+                backgrounded=True,
+                job_id=handle.job_id,
+                job_status=status.status,
+                job_log_path=str(handle.log_path),
+                job_pid=handle.pid,
+            )
+        try:
+            stdout = status.log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            stdout = ""
+        return RemoteCommandResult(
             request_id=req.request_id,
             command=req.command,
-            timeout_seconds=req.timeout_seconds,
-            output_limit=req.output_limit,
-            extra_read_roots=list(req.extra_read_roots or []),
+            stdout=stdout,
+            stderr="",
+            exit_code=int(status.exit_code or 0),
+            timed_out=bool(status.timed_out or status.status == "timed_out"),
+            truncated=False,
+            cwd=job_cwd,
         )
+
+    def _job_manager_for(self, session_id: str):
+        return self._jobs.get(session_id)
+
+    @staticmethod
+    def _is_stateful_shell_command(command: str) -> bool:
+        raw = str(command or "").strip()
+        if not raw:
+            return False
+        lowered = raw.lower()
+        if lowered.startswith(
+            ("cd ", "export ", "unset ", "alias ", "unalias ", "source ", ". ")
+        ):
+            return True
+        return "() {" in raw
 
     async def _file_read(self, req: RemoteFileReadRequest) -> RemoteFileReadResult:
         session = self._sessions.get(req.session_id)
@@ -589,9 +661,6 @@ class RemoteWorkerClient:
             cwd=cwd,
             env=env,
         )
-
-    def _job_manager_for(self, session_id: str):
-        return self._jobs.get(session_id)
 
     async def _job_start(self, req: RemoteJobStartRequest) -> RemoteJobStartResult:
         mgr = self._job_manager_for(req.session_id)

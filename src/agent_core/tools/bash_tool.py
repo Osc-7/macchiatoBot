@@ -4,14 +4,17 @@ BashTool -- 持久化 bash 会话工具。
 绑定到 AgentCore 的 BashRuntime，作为 meta tool 在 AgentCore.__init__ 中自注册
 （与 search_tools / call_tool 同模式）。
 
-对 LLM 暴露的参数对齐 Anthropic 官方 Bash tool API:
+对 LLM 暴露的核心参数：
   - command (string): 要执行的命令
+  - wait_window_ms (number): 同步前台等待窗口（毫秒）
+  - hard_timeout_seconds / timeout (number): 任务硬超时（秒，timeout 为兼容参数）
   - restart (bool): 是否重启 bash 会话
-  - timeout (number): 超时秒数
 """
 
 from __future__ import annotations
 
+import asyncio
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -41,6 +44,11 @@ class BashTool(BaseTool):
     ) -> None:
         self._bash = bash
         self._security = security
+        self._sleep_timeout_pattern = re.compile(
+            r"(?<![\w./-])sleep\s+([0-9]*\.?[0-9]+)\s*([smhd]?)\b",
+            re.IGNORECASE,
+        )
+        self._default_wait_window_ms = 30_000
 
     @property
     def name(self) -> str:
@@ -68,7 +76,8 @@ class BashTool(BaseTool):
 注意事项：
 - 危险操作（rm -rf、chmod -R、sudo 等）或需要写入工作区外路径时，bash 会自动向人类申请权限；
   人类批准后同一次工具调用会继续执行原始命令并返回结果
-- 同步命令超时后当前命令会被终止，bash 会话会自动重启并尝试恢复工作目录与环境变量
+- 同步 command 会先在前台等待 wait_window_ms；窗口到期不会报错，而是自动后台化并返回 job 信息
+- 仅当任务超过 hard_timeout_seconds（或兼容参数 timeout）才会记为 timed_out
 - 使用 restart=true 可手动重启 bash 会话（清除所有状态；若启用 snapshot_enabled 则 evict 时也可恢复）""",
             parameters=[
                 ToolParameter(
@@ -126,7 +135,20 @@ class BashTool(BaseTool):
                 ToolParameter(
                     name="timeout",
                     type="number",
-                    description="同步命令的超时时间（秒），超时后命令会被终止且 bash 会话自动重启；background 模式时则为后台任务超时",
+                    description="兼容参数：当未提供 hard_timeout_seconds 时，timeout 作为 hard timeout（秒）使用。wait window 到期不会失败，只会后台化",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="wait_window_ms",
+                    type="number",
+                    description="同步 command 前台等待窗口（毫秒，默认 30000）。窗口到期不会报错，会自动返回后台 job 信息",
+                    required=False,
+                    default=30000,
+                ),
+                ToolParameter(
+                    name="hard_timeout_seconds",
+                    type="number",
+                    description="任务硬超时（秒）。仅当真实运行时长超过该值，任务才会以 timed_out 失败",
                     required=False,
                 ),
                 ToolParameter(
@@ -152,7 +174,15 @@ class BashTool(BaseTool):
                 },
                 {
                     "description": "后台安装依赖（不阻塞会话）",
-                    "params": {"command": "pip install torch", "background": True, "timeout": 300},
+                    "params": {"command": "pip install torch", "background": True, "hard_timeout_seconds": 300},
+                },
+                {
+                    "description": "同步命令超过前台窗口后自动后台化",
+                    "params": {
+                        "command": "sleep 60 && echo done",
+                        "wait_window_ms": 1000,
+                        "hard_timeout_seconds": 120,
+                    },
                 },
                 {
                     "description": "查询后台任务状态",
@@ -174,7 +204,9 @@ class BashTool(BaseTool):
             usage_notes=[
                 "这是持久化 bash 会话：cd、export 等在后续命令中生效",
                 "危险命令和工作区外写入会自动申请人类批准，批准后继续执行同一条命令",
-                "同步命令超时后会重启 bash 并尝试恢复 cwd/env；长任务请用 background=true",
+                "同步 command 先在前台等待 wait_window_ms，窗口到期仅会自动转后台，不会返回 COMMAND_TIMEOUT",
+                "仅当任务超过 hard_timeout_seconds 才会被标记为 timed_out（可通过 job_status 查看）",
+                "当返回 data.job_id/status/log_path 时，表示任务已后台化，可继续用 job_status/job_tail/job_stop",
                 "使用 restart=true 可手动重置会话（清除所有状态）",
                 "长任务（安装依赖、下载大文件、编译、训练等）建议用 background=true 走独立后台进程，避免阻塞会话",
                 "后台任务日志写入工作区 .macchiato/jobs/ 目录，可用 job_tail 读取",
@@ -253,14 +285,23 @@ class BashTool(BaseTool):
                 message="缺少必需参数: command（或使用 restart=true / job_* 管理后台任务）",
             )
 
-        timeout, timeout_err = self._parse_timeout(kwargs.get("timeout"))
-        if timeout_err is not None:
-            return timeout_err
+        controls, controls_err = self._parse_timeout_controls(
+            timeout=kwargs.get("timeout"),
+            hard_timeout=kwargs.get("hard_timeout_seconds"),
+            wait_window_ms=kwargs.get("wait_window_ms"),
+            command=command,
+        )
+        if controls_err is not None:
+            return controls_err
+        hard_timeout = controls["hard_timeout_seconds"]
+        wait_window_seconds = (
+            controls["wait_window_seconds"] or self._default_wait_window_ms / 1000.0
+        )
 
         if kwargs.get("background"):
             return await self._execute_background(
                 command=command,
-                timeout=timeout,
+                timeout=hard_timeout,
                 exec_ctx=exec_ctx,
                 kwargs=kwargs,
             )
@@ -277,7 +318,8 @@ class BashTool(BaseTool):
                 return security_result
             return await self._execute_remote_sync(
                 command=command,
-                timeout=timeout,
+                timeout=hard_timeout,
+                wait_window_seconds=wait_window_seconds,
                 remote_state=remote_state,
                 exec_ctx=exec_ctx,
             )
@@ -290,8 +332,22 @@ class BashTool(BaseTool):
         if security_result is not None:
             return security_result
 
-        result = await self._bash.execute(command, timeout=timeout)
+        if self._is_stateful_shell_command(command):
+            return await self._execute_stateful_sync(command=command, timeout=hard_timeout)
 
+        return await self._execute_local_sync_via_job(
+            command=command,
+            hard_timeout_seconds=hard_timeout,
+            wait_window_seconds=wait_window_seconds,
+        )
+
+    async def _execute_stateful_sync(
+        self,
+        *,
+        command: str,
+        timeout: Optional[float],
+    ) -> ToolResult:
+        result = await self._bash.execute(command, timeout=timeout)
         data = {
             "command": result.command,
             "stdout": result.stdout,
@@ -300,7 +356,6 @@ class BashTool(BaseTool):
             "timed_out": result.timed_out,
             "truncated": result.truncated,
         }
-
         if result.timed_out:
             return ToolResult(
                 success=False,
@@ -308,15 +363,224 @@ class BashTool(BaseTool):
                 error="COMMAND_TIMEOUT",
                 message="命令执行超时，进程已终止；bash 会话已重启并尝试恢复工作目录与环境变量",
             )
-
         if result.exit_code == 0:
             return ToolResult(success=True, data=data, message="命令执行成功")
-
         return ToolResult(
             success=False,
             data=data,
             error="NON_ZERO_EXIT",
             message=f"命令执行结束，返回码为 {result.exit_code}",
+        )
+
+    async def _execute_local_sync_via_job(
+        self,
+        *,
+        command: str,
+        hard_timeout_seconds: Optional[float],
+        wait_window_seconds: float,
+    ) -> ToolResult:
+        import os
+
+        from agent_core.job_manager import JobStatus, get_job_manager
+
+        ws_root = str(Path(self._bash._config.base_dir).resolve())
+        if self._bash._config.subprocess_env is not None:
+            base_env = dict(self._bash._config.subprocess_env)
+        else:
+            base_env = dict(os.environ)
+
+        session = await self._bash.capture_session()
+        if session is not None:
+            job_cwd = session.cwd
+            job_env = {**base_env, **session.env}
+        else:
+            job_cwd = await self._current_cwd() or ws_root
+            job_env = base_env
+
+        manager = get_job_manager(workspace_root=ws_root)
+        handle = await manager.start_job(
+            command,
+            cwd=job_cwd,
+            env=job_env,
+            timeout_seconds=hard_timeout_seconds,
+        )
+        end_at = asyncio.get_running_loop().time() + max(0.0, wait_window_seconds)
+        current = handle
+        while (
+            current.status == JobStatus.RUNNING
+            and asyncio.get_running_loop().time() < end_at
+        ):
+            await asyncio.sleep(0.05)
+            latest = await manager.job_status(handle.job_id)
+            if latest is not None:
+                current = latest
+
+        if current.status == JobStatus.RUNNING:
+            return self._background_job_result(
+                job_id=current.job_id,
+                pid=current.pid,
+                log_path=str(current.log_path),
+                status=current.status,
+                command=current.command,
+                cwd=current.cwd,
+                remote=False,
+            )
+
+        try:
+            log_text = current.log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            log_text = ""
+        return self._job_completion_result(
+            command=command,
+            stdout=log_text,
+            stderr="",
+            return_code=current.exit_code,
+            timed_out=bool(current.timed_out or current.status == JobStatus.TIMED_OUT),
+            truncated=False,
+            remote=False,
+        )
+
+    @staticmethod
+    def _background_job_result(
+        *,
+        job_id: str,
+        pid: Optional[int],
+        log_path: str,
+        status: str,
+        command: str,
+        cwd: str,
+        remote: bool,
+        remote_login: Optional[str] = None,
+    ) -> ToolResult:
+        data = {
+            "job_id": job_id,
+            "pid": pid,
+            "log_path": log_path,
+            "status": status,
+            "command": command,
+            "cwd": cwd,
+            "auto_backgrounded": True,
+            "remote": remote,
+        }
+        metadata: dict[str, Any] = {}
+        if remote_login:
+            data["remote_login"] = remote_login
+            metadata["workspace_backend"] = "remote"
+            metadata["remote_login"] = remote_login
+        return ToolResult(
+            success=True,
+            data=data,
+            message=f"前台等待窗口已到，任务已转后台继续执行: {job_id}",
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _job_completion_result(
+        *,
+        command: str,
+        stdout: str,
+        stderr: str,
+        return_code: Optional[int],
+        timed_out: bool,
+        truncated: bool,
+        remote: bool,
+        remote_login: Optional[str] = None,
+        remote_cwd: Optional[str] = None,
+    ) -> ToolResult:
+        rc = int(return_code if return_code is not None else -1)
+        data = {
+            "command": command,
+            "stdout": stdout,
+            "stderr": stderr,
+            "return_code": rc,
+            "timed_out": timed_out,
+            "truncated": truncated,
+            "remote": remote,
+        }
+        metadata: dict[str, Any] = {}
+        if remote_login:
+            data["remote_login"] = remote_login
+            data["remote_cwd"] = remote_cwd or REMOTE_WORKSPACE_MOUNT
+            metadata["workspace_backend"] = "remote"
+            metadata["remote_login"] = remote_login
+        if timed_out:
+            return ToolResult(
+                success=False,
+                data=data,
+                error="COMMAND_TIMEOUT",
+                message="命令执行超时（hard timeout 命中）",
+                metadata=metadata,
+            )
+        if rc == 0:
+            return ToolResult(
+                success=True,
+                data=data,
+                message="命令执行成功",
+                metadata=metadata,
+            )
+        return ToolResult(
+            success=False,
+            data=data,
+            error="NON_ZERO_EXIT",
+            message=f"命令执行结束，返回码为 {rc}",
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _is_stateful_shell_command(command: str) -> bool:
+        raw = str(command or "").strip()
+        if not raw:
+            return False
+        lowered = raw.lower()
+        if lowered.startswith(
+            ("cd ", "export ", "unset ", "alias ", "unalias ", "source ", ". ")
+        ):
+            return True
+        return "() {" in raw
+
+    def _parse_timeout_controls(
+        self,
+        *,
+        timeout: object,
+        hard_timeout: object,
+        wait_window_ms: object,
+        command: str,
+    ) -> tuple[dict[str, Optional[float]], Optional[ToolResult]]:
+        legacy_timeout, timeout_err = self._parse_timeout(timeout)
+        if timeout_err is not None:
+            return {}, timeout_err
+        hard_timeout_s, hard_timeout_err = self._parse_timeout(hard_timeout)
+        if hard_timeout_err is not None:
+            return {}, ToolResult(
+                success=False,
+                error="INVALID_HARD_TIMEOUT",
+                message="hard_timeout_seconds 必须是数字（秒）",
+            )
+        wait_window_seconds: Optional[float] = None
+        if wait_window_ms is not None:
+            try:
+                wait_window_seconds = max(0.0, float(wait_window_ms) / 1000.0)
+            except (TypeError, ValueError):
+                return {}, ToolResult(
+                    success=False,
+                    error="INVALID_WAIT_WINDOW",
+                    message="wait_window_ms 必须是数字（毫秒）",
+                )
+        hard_timeout_seconds = (
+            hard_timeout_s
+            if hard_timeout_s is not None
+            else legacy_timeout
+        )
+        if hard_timeout_seconds is None:
+            hard_timeout_seconds = self._infer_timeout_from_command(command)
+        if wait_window_seconds is None:
+            wait_window_seconds = self._default_wait_window_ms / 1000.0
+        return (
+            {
+                "hard_timeout_seconds": hard_timeout_seconds,
+                "wait_window_seconds": wait_window_seconds,
+            },
+            None,
         )
 
     # ── 参数校验与安全（同步 / background 共用）────────────────
@@ -363,6 +627,35 @@ class BashTool(BaseTool):
                 error="INVALID_TIMEOUT",
                 message="timeout 必须是数字（秒）",
             )
+
+    def _infer_timeout_from_command(self, command: str) -> Optional[float]:
+        """Best-effort timeout inference for sleep-heavy commands.
+
+        Agent 经常会执行 `sleep N && tail ...` 这类“等待后读取”的模式。
+        当用户/模型未显式给 timeout 时，按 sleep 总时长 + 缓冲自动放宽，
+        避免将正常等待误判成超时并触发 shell 重启。
+        """
+        total_sleep = 0.0
+        unit_scale = {
+            "": 1.0,
+            "s": 1.0,
+            "m": 60.0,
+            "h": 3600.0,
+            "d": 86400.0,
+        }
+        for match in self._sleep_timeout_pattern.finditer(command):
+            try:
+                value = float(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            if value <= 0:
+                continue
+            unit = (match.group(2) or "").lower()
+            total_sleep += value * unit_scale.get(unit, 1.0)
+        if total_sleep <= 0:
+            return None
+        # 给 sleep 留安全缓冲，避免边界时间抖动导致误超时。
+        return max(3.0, total_sleep + 5.0)
 
     @staticmethod
     def _get_remote_state(exec_ctx: dict) -> Any:
@@ -788,6 +1081,7 @@ class BashTool(BaseTool):
         *,
         command: str,
         timeout: Optional[float],
+        wait_window_seconds: float,
         remote_state: Any,
         exec_ctx: dict,
     ) -> ToolResult:
@@ -803,6 +1097,7 @@ class BashTool(BaseTool):
             session_id=session_id,
             command=command,
             timeout=timeout,
+            wait_window_seconds=wait_window_seconds,
             output_limit=cfg.command_tools.default_output_limit,
             exec_ctx=exec_ctx,
         )
@@ -991,6 +1286,7 @@ class BashTool(BaseTool):
         session_id: str,
         command: str,
         timeout: Optional[float],
+        wait_window_seconds: float,
         output_limit: int,
         exec_ctx: dict,
     ) -> tuple[Any, dict]:
@@ -1002,6 +1298,7 @@ class BashTool(BaseTool):
                 session_id=session_id,
                 command=command,
                 timeout_seconds=timeout,
+                wait_window_ms=max(0, int(wait_window_seconds * 1000)),
                 output_limit=output_limit,
                 extra_read_roots=self._remote_read_roots(exec_ctx),
             )
@@ -1029,6 +1326,7 @@ class BashTool(BaseTool):
                     session_id=session_id,
                     command=command,
                     timeout_seconds=timeout,
+                    wait_window_ms=max(0, int(wait_window_seconds * 1000)),
                     output_limit=output_limit,
                     extra_read_roots=self._remote_read_roots(exec_ctx),
                 )
@@ -1045,6 +1343,23 @@ class BashTool(BaseTool):
     def _remote_command_tool_result(
         result: Any, remote_state: Any, metadata: dict
     ) -> ToolResult:
+        if bool(getattr(result, "backgrounded", False)):
+            return ToolResult(
+                success=True,
+                data={
+                    "job_id": getattr(result, "job_id", ""),
+                    "pid": getattr(result, "job_pid", None),
+                    "log_path": getattr(result, "job_log_path", ""),
+                    "status": getattr(result, "job_status", "running"),
+                    "command": result.command,
+                    "cwd": result.cwd,
+                    "auto_backgrounded": True,
+                    "remote": True,
+                    "remote_login": remote_state.login,
+                },
+                message=f"前台等待窗口已到，远程任务已转后台继续执行: {getattr(result, 'job_id', '')}",
+                metadata=metadata,
+            )
         data = {
             "command": result.command,
             "stdout": result.stdout,

@@ -172,6 +172,7 @@ class RemoteWorkerRegistry:
         session_id: str,
         command: str,
         timeout_seconds: Optional[float] = None,
+        wait_window_ms: Optional[int] = None,
         output_limit: Optional[int] = None,
         extra_read_roots: Optional[list[str]] = None,
     ) -> RemoteCommandResult:
@@ -182,6 +183,7 @@ class RemoteWorkerRegistry:
             command=command,
             cwd=REMOTE_WORKSPACE_MOUNT,
             timeout_seconds=timeout_seconds,
+            wait_window_ms=wait_window_ms,
             output_limit=output_limit,
             extra_read_roots=list(extra_read_roots or []),
         )

@@ -237,30 +237,7 @@ class JobManager:
         if proc is None:
             return False
 
-        # 杀整个 process group
-        try:
-            os.killpg(proc.pid, sig)
-        except (ProcessLookupError, OSError):
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                return False
-
-        # 等待进程退出，超时后 SIGKILL
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=_JOB_KILL_GRACE_SECONDS)
-        except asyncio.TimeoutError:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=_JOB_KILL_GRACE_SECONDS)
-            except asyncio.TimeoutError:
-                pass
+        await _terminate_process_tree(proc, sig)
 
         handle.status = JobStatus.CANCELLED
         handle.end_time = time.time()
@@ -319,30 +296,7 @@ class JobManager:
             logger.warning(
                 "Job timeout after %.1fs: %s", timeout or 0, handle.job_id
             )
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                try:
-                    proc.terminate()
-                except ProcessLookupError:
-                    pass
-            # 给 grace period
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=_JOB_KILL_GRACE_SECONDS)
-            except asyncio.TimeoutError:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    try:
-                        proc.kill()
-                    except ProcessLookupError:
-                        pass
-                try:
-                    await asyncio.wait_for(
-                        proc.wait(), timeout=_JOB_KILL_GRACE_SECONDS
-                    )
-                except asyncio.TimeoutError:
-                    pass
+            await _terminate_process_tree(proc, signal.SIGTERM)
             if handle.status != JobStatus.CANCELLED:
                 handle.exit_code = proc.returncode if proc.returncode is not None else -1
                 handle.status = JobStatus.TIMED_OUT
@@ -368,3 +322,36 @@ def get_job_manager(workspace_root: Optional[str] = None) -> JobManager:
     if key not in _job_managers:
         _job_managers[key] = JobManager(workspace_root=key)
     return _job_managers[key]
+
+
+async def _terminate_process_tree(
+    proc: asyncio.subprocess.Process,
+    sig: signal.Signals,
+) -> None:
+    """Best-effort killpg first, then terminate/kill fallback."""
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(proc.pid, sig)
+    except (ProcessLookupError, OSError):
+        try:
+            if sig == signal.SIGKILL:
+                proc.kill()
+            else:
+                proc.terminate()
+        except ProcessLookupError:
+            return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=_JOB_KILL_GRACE_SECONDS)
+    except asyncio.TimeoutError:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                return
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_JOB_KILL_GRACE_SECONDS)
+        except asyncio.TimeoutError:
+            return

@@ -181,23 +181,7 @@ class RemoteSessionJobManager:
         proc = handle.process
         if proc is None:
             return False
-        try:
-            os.killpg(proc.pid, sig)
-        except (ProcessLookupError, OSError):
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                return False
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=_JOB_KILL_GRACE_SECONDS)
-        except asyncio.TimeoutError:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
+        await _terminate_process_tree(proc, sig)
         handle.status = JobStatus.CANCELLED
         handle.end_time = time.time()
         return True
@@ -221,23 +205,7 @@ class RemoteSessionJobManager:
             )
         except asyncio.TimeoutError:
             handle.timed_out = True
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                try:
-                    proc.terminate()
-                except ProcessLookupError:
-                    pass
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=_JOB_KILL_GRACE_SECONDS)
-            except asyncio.TimeoutError:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    try:
-                        proc.kill()
-                    except ProcessLookupError:
-                        pass
+            await _terminate_process_tree(proc, signal.SIGTERM)
             if handle.status != JobStatus.CANCELLED:
                 handle.exit_code = proc.returncode if proc.returncode is not None else -1
                 handle.status = JobStatus.TIMED_OUT
@@ -258,3 +226,35 @@ class RemoteJobRegistry:
 
     def get(self, session_id: str) -> Optional[RemoteSessionJobManager]:
         return self._managers.get(session_id)
+
+
+async def _terminate_process_tree(
+    proc: asyncio.subprocess.Process,
+    sig: signal.Signals,
+) -> None:
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(proc.pid, sig)
+    except (ProcessLookupError, OSError):
+        try:
+            if sig == signal.SIGKILL:
+                proc.kill()
+            else:
+                proc.terminate()
+        except ProcessLookupError:
+            return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=_JOB_KILL_GRACE_SECONDS)
+    except asyncio.TimeoutError:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                return
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_JOB_KILL_GRACE_SECONDS)
+        except asyncio.TimeoutError:
+            return

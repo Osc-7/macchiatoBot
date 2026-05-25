@@ -645,6 +645,66 @@ class TestBashToolExecution:
         finally:
             await rt.close()
 
+    async def test_sleep_without_explicit_timeout_auto_extends(self):
+        tool, rt = _make_tool(default_timeout_seconds=0.2, max_timeout_seconds=5.0)
+        await rt.start()
+        try:
+            result = await tool.execute(command="sleep 0.4 && echo woke")
+            assert result.success
+            assert "woke" in result.data["stdout"] or result.data.get("auto_backgrounded")
+        finally:
+            await rt.close()
+
+    async def test_sync_wait_window_auto_background(self, tmp_path):
+        tool, rt = _make_tool(base_dir=str(tmp_path))
+        await rt.start()
+        try:
+            start = await tool.execute(
+                command="sleep 0.5 && echo bgdone",
+                wait_window_ms=50,
+                hard_timeout_seconds=5,
+            )
+            assert start.success
+            assert start.data.get("auto_backgrounded") is True
+            job_id = start.data["job_id"]
+            assert job_id
+            for _ in range(80):
+                st = await tool.execute(job_status=job_id)
+                if st.data["status"] != "running":
+                    break
+                await asyncio.sleep(0.05)
+            assert st.success
+            assert st.data["status"] == "finished"
+            tail = await tool.execute(job_tail=job_id, lines=200, offset=0)
+            assert tail.success
+            out = "\n".join(tail.data.get("head_lines", []) + tail.data.get("tail_lines", []))
+            assert "bgdone" in out
+        finally:
+            await rt.close()
+
+    async def test_hard_timeout_marks_job_timed_out(self, tmp_path):
+        tool, rt = _make_tool(base_dir=str(tmp_path))
+        await rt.start()
+        try:
+            start = await tool.execute(
+                command="sleep 2",
+                wait_window_ms=20,
+                hard_timeout_seconds=0.2,
+            )
+            assert start.success
+            assert start.data.get("auto_backgrounded") is True
+            job_id = start.data["job_id"]
+            for _ in range(80):
+                st = await tool.execute(job_status=job_id)
+                if st.data["status"] != "running":
+                    break
+                await asyncio.sleep(0.05)
+            assert not st.success
+            assert st.error == "JOB_TIMED_OUT"
+            assert st.data["status"] == "timed_out"
+        finally:
+            await rt.close()
+
 
 class TestBashToolBackground:
     async def test_background_dangerous_command_rejected(self, permission_config, tmp_path):
@@ -726,10 +786,12 @@ class _FakeRemoteRegistry:
         self._results = list(results)
         self.open_workspace_calls = 0
         self.execute_calls = 0
+        self.execute_kwargs: list[dict] = []
         self.open_success = open_success
 
     async def execute_command(self, **kwargs) -> RemoteCommandResult:
         self.execute_calls += 1
+        self.execute_kwargs.append(kwargs)
         if not self._results:
             raise RuntimeError("unexpected execute_command call")
         return self._results.pop(0)
@@ -846,6 +908,41 @@ class TestBashToolRemoteBackground:
 
 
 class TestBashToolRemoteRecover:
+    async def test_remote_sleep_without_timeout_passes_inferred_timeout(self, monkeypatch):
+        tool, rt = _make_tool()
+        state = RemoteWorkspaceState(
+            session_id="sid-sleep",
+            login="g3",
+            requested_path="/home/osc7",
+            profile="dev",
+            status="active",
+        )
+        only = RemoteCommandResult(
+            request_id="r-sleep",
+            command="sleep 45 && tail -n 20 app.log",
+            stdout="done\n",
+            exit_code=0,
+            cwd="/workspace",
+        )
+        fake_registry = _FakeRemoteRegistry([only], open_success=True)
+
+        import agent_core.remote.workspace_state as state_mod
+        import agent_core.remote.worker_registry as worker_mod
+
+        monkeypatch.setattr(state_mod, "get_remote_workspace_state", lambda sid: state)
+        monkeypatch.setattr(worker_mod, "get_remote_worker_registry", lambda: fake_registry)
+        await rt.start()
+        try:
+            result = await tool.execute(
+                command="sleep 45 && tail -n 20 app.log",
+                __execution_context__={"session_id": "sid-sleep", "profile_mode": "full"},
+            )
+            assert result.success
+            assert fake_registry.execute_calls == 1
+            assert fake_registry.execute_kwargs[0]["timeout_seconds"] >= 50
+        finally:
+            await rt.close()
+
     async def test_remote_session_not_open_reopen_and_retry_success(self, monkeypatch):
         tool, rt = _make_tool()
         state = RemoteWorkspaceState(
@@ -930,5 +1027,49 @@ class TestBashToolRemoteRecover:
             assert fake_registry.execute_calls == 1
             assert result.metadata.get("remote_reopen_attempted") is True
             assert result.metadata.get("remote_reopen_succeeded") is False
+        finally:
+            await rt.close()
+
+
+class TestBashToolRemoteWaitWindow:
+    async def test_remote_sync_auto_background_result(self, monkeypatch):
+        tool, rt = _make_tool()
+        state = RemoteWorkspaceState(
+            session_id="sid-rbg",
+            login="g3",
+            requested_path="/home/osc7",
+            profile="dev",
+            status="active",
+        )
+        bg = RemoteCommandResult(
+            request_id="rbg1",
+            command="sleep 30",
+            cwd="/workspace",
+            backgrounded=True,
+            job_id="job_remote_bg_1",
+            job_status="running",
+            job_log_path="/tmp/job_remote_bg_1.log",
+            job_pid=7777,
+        )
+        fake_registry = _FakeRemoteRegistry([bg], open_success=True)
+
+        import agent_core.remote.workspace_state as state_mod
+        import agent_core.remote.worker_registry as worker_mod
+
+        monkeypatch.setattr(state_mod, "get_remote_workspace_state", lambda sid: state)
+        monkeypatch.setattr(worker_mod, "get_remote_worker_registry", lambda: fake_registry)
+        await rt.start()
+        try:
+            result = await tool.execute(
+                command="sleep 30",
+                wait_window_ms=100,
+                hard_timeout_seconds=120,
+                __execution_context__={"session_id": "sid-rbg", "profile_mode": "full"},
+            )
+            assert result.success
+            assert result.data["auto_backgrounded"] is True
+            assert result.data["job_id"] == "job_remote_bg_1"
+            assert result.data["remote"] is True
+            assert fake_registry.execute_kwargs[0]["wait_window_ms"] == 100
         finally:
             await rt.close()

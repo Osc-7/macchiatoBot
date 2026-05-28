@@ -1350,6 +1350,9 @@ async function uploadChatFile(file) {
   window.visualViewport.addEventListener("resize", positionInput);
   window.visualViewport.addEventListener("scroll", positionInput);
 
+  // Initial positioning on load
+  requestAnimationFrame(() => positionInput());
+
   if (textarea) {
     textarea.addEventListener("focus", () => {
       if (!isMobile()) return;

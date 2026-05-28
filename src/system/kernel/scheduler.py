@@ -527,25 +527,32 @@ class KernelScheduler:
             extra={"request_id": request.request_id, "session_id": request.session_id},
         )
 
-    def cancel_session_tasks(self, session_id: str) -> bool:
+    async def cancel_session_tasks(self, session_id: str) -> bool:
         """取消指定 session 的所有活跃执行任务并标记为已取消。
 
         同时处理两种情况：
         - 请求已在执行 (_session_active_tasks) -> 直接 cancel 所有 Tasks
         - 请求仍在队列中等待 dispatch -> 加入 _cancelled_sessions，
           _run_and_route 开头会检查并跳过
+
+        **重要**：cancel 后 await 被取消任务完成（finally / _cleanup 回调跑完），
+        确保 _cancelled_sessions 标记在返回前被已取消任务正确清理，
+        避免新入队请求在取消窗口内被误判为 cancelled 而 skip。
         """
         self._cancelled_sessions.add(session_id)
         tasks = self._session_active_tasks.get(session_id, set())
-        cancelled_any = False
-        for task in list(tasks):
-            if not task.done():
-                task.cancel()
-                cancelled_any = True
+        active_tasks = [t for t in list(tasks) if not t.done()]
+        cancelled_any = bool(active_tasks)
+        for task in active_tasks:
+            task.cancel()
+        # 等待被取消的任务实际完成（finally 块跑完、done 回调 fired），
+        # 消除「标记 cancelled → task.cancel()（异步调度）→ finally 尚未跑」的竞态窗口。
+        if active_tasks:
+            await asyncio.wait(active_tasks, timeout=30.0)
         if cancelled_any:
             logger.info(
                 "KernelScheduler: cancelled %d active task(s) for session_id=%s",
-                len(tasks),
+                len(active_tasks),
                 session_id,
             )
         else:

@@ -427,10 +427,10 @@ class KernelTerminal:
         """
         取消指定 session 的正在运行的任务（类比 kill -INT）。
 
-        通过 Scheduler.cancel_session_tasks() 取消 inflight 任务，
+        通过 Scheduler.cancel_session_tasks() 取消 inflight 任务（async 等待任务实际清理完成），
         但不销毁 Core 本身。
         """
-        return self._scheduler.cancel_session_tasks(session_id)
+        return await self._scheduler.cancel_session_tasks(session_id)
 
     async def create_logic_user(
         self,

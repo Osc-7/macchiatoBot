@@ -1304,11 +1304,20 @@ class FeishuConfig(BaseModel):
             "需应用具备「创建与更新卡片 cardkit:card:write」。失败时自动回退为消息内嵌 JSON + PATCH。"
         ),
     )
+    dangerous_mode_allowed_usernames: List[str] = Field(
+        default_factory=list,
+        description=(
+            "允许通过 /dangerously 开启危险放行模式的统一用户名列表。"
+            "未来所有前端（飞书 / dashboard / CLI）共用同一套用户名鉴权。"
+            "当前 dashboard 端直接使用登录用户名匹配此项；飞书端仍回退到"
+            " open_id / user_id 检查（见下两个字段）。为空表示无人可开启。"
+        ),
+    )
     dangerous_mode_allowed_open_ids: List[str] = Field(
         default_factory=list,
         description=(
             "允许通过 /dangerously 开启危险放行模式的飞书 open_id 列表。"
-            "为空表示无人可开启。"
+            "为空表示无人可开启。未来统一用户名后此字段可废弃。"
         ),
     )
     dangerous_mode_allowed_user_ids: List[str] = Field(
@@ -1316,6 +1325,7 @@ class FeishuConfig(BaseModel):
         description=(
             "允许通过 /dangerously 开启危险放行模式的飞书 user_id 列表。"
             "用于企业内 user_id 鉴权，和 open_id 任一命中即通过。"
+            "未来统一用户名后此字段可废弃。"
         ),
     )
     remote_login_approver_open_ids: List[str] = Field(

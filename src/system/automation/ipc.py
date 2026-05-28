@@ -807,11 +807,13 @@ class AutomationIPCClient:
         *,
         owner_id: str = "root",
         source: str = "cli",
+        username: str = "",
         socket_path: Optional[str] = None,
         timeout_seconds: float = 300.0,
     ) -> None:
         self.owner_id = owner_id.strip() or "root"
         self.source = source.strip() or "cli"
+        self.username = username.strip()
         self.active_session_id = f"{self.source}:{self.owner_id}"
         self._socket_path = socket_path or default_socket_path()
         self._timeout_seconds = float(timeout_seconds)

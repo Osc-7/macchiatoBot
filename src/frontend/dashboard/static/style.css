@@ -931,6 +931,8 @@ select.control {
   background: #5a9a6a;
   box-shadow: 0 0 4px rgba(90, 154, 106, 0.4);
   transition: background 0.2s, box-shadow 0.2s;
+  vertical-align: middle;
+  margin: 0 1px;
 }
 .chat-status-dot.dot-danger {
   background: var(--danger);

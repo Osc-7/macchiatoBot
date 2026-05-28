@@ -874,7 +874,7 @@ function renderModels(models) {
     opt.value = name;
     const modelId = m?.model || "";
     opt.textContent = modelId ? `${name} (${modelId})` : name;
-    if (m?.active) opt.selected = true;
+    if (m?.is_active) opt.selected = true;
     sel.appendChild(opt);
   });
 }
@@ -893,9 +893,11 @@ function renderStatusbar(models, dangerousMode, tokenUsage) {
   // Model: show the active model's short name
   const modelEl = $("statusModel");
   if (modelEl && Array.isArray(models)) {
-    const active = models.find((m) => m?.active);
-    // Try various fields: name, model, id
-    modelEl.textContent = active?.name || active?.model || active?.id || "—";
+    const active = models.find((m) => m?.is_active);
+    // Prefer label, then name, then model id
+    const label = active?.label || active?.name || active?.model || "—";
+    modelEl.textContent = label;
+    modelEl.title = active?.model ? `${active.model}${active.context_window ? ` · ${(active.context_window / 1000).toFixed(0)}k ctx` : ''}` : '';
   }
 
   // Danger mode: indicator dot
@@ -911,21 +913,25 @@ function renderStatusbar(models, dangerousMode, tokenUsage) {
   const ctxEl = $("statusContext");
   if (ctxEl) {
     const total = tokenUsage?.total_tokens ?? 0;
-    // Try to get context_window from active model metadata
+    // Get context_window from active model
     let ctxWindow = null;
     if (Array.isArray(models)) {
-      const active = models.find((m) => m?.active);
-      ctxWindow = active?.context_window || active?.capabilities?.context_window || null;
+      const active = models.find((m) => m?.is_active);
+      ctxWindow = active?.context_window || null;
     }
     if (ctxWindow && ctxWindow > 0) {
       const pct = Math.round((total / ctxWindow) * 100);
-      ctxEl.textContent = `context ${pct}%`;
+      const ctxK = (ctxWindow / 1000).toFixed(0);
+      ctxEl.textContent = `ctx ${pct}%`;
+      ctxEl.title = `${(total / 1000).toFixed(1)}k / ${ctxK}k tokens`;
       ctxEl.classList.toggle("ctx-warn", pct > 70);
       ctxEl.classList.toggle("ctx-critical", pct > 90);
     } else if (total > 0) {
-      ctxEl.textContent = `${(total / 1000).toFixed(1)}k tokens`;
+      ctxEl.textContent = `${(total / 1000).toFixed(1)}k tok`;
+      ctxEl.classList.remove("ctx-warn", "ctx-critical");
     } else {
-      ctxEl.textContent = "context —";
+      ctxEl.textContent = "ctx —";
+      ctxEl.classList.remove("ctx-warn", "ctx-critical");
     }
   }
 }

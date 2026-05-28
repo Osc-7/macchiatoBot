@@ -968,6 +968,56 @@ select.control {
   gap: 12px;
 }
 
+.chat-actions-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* File attachments preview */
+.chat-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0;
+}
+
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  border: 1px solid rgba(212, 165, 116, 0.35);
+  font-size: 12px;
+  color: var(--accent-strong);
+}
+
+.attach-chip .attach-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attach-chip .attach-remove {
+  cursor: pointer;
+  opacity: 0.7;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.attach-chip .attach-remove:hover {
+  opacity: 1;
+  color: var(--danger);
+}
+
+.attach-chip.uploading {
+  opacity: 0.6;
+  border-style: dashed;
+}
+
 /* ============= Settings ============= */
 .callout {
   background: var(--accent-soft);
@@ -1907,8 +1957,15 @@ select.control {
 }
 
 @media (max-width: 720px) {
+  html, body {
+    overflow: hidden;
+    height: 100%;
+  }
   .app {
     grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+    height: 100dvh;
+    overflow: hidden;
   }
   .sidebar {
     flex-direction: row;
@@ -1968,18 +2025,32 @@ select.control {
     padding: 8px 14px;
     gap: 6px;
     min-height: 44px;
+    flex-wrap: wrap;
   }
   .topbar h1 {
     font-size: 15px;
   }
+  .topbar-left {
+    flex: 1;
+    min-width: 0;
+  }
   .topbar-left p {
     display: none;
   }
+  .topbar-right {
+    gap: 6px;
+    flex-shrink: 0;
+  }
   .topbar-field {
     font-size: 11px;
+    gap: 4px;
+  }
+  .topbar-field span {
+    display: none;
   }
   .topbar-field .control {
-    min-width: 100px;
+    min-width: 0;
+    max-width: 130px;
     font-size: 11px;
     padding: 4px 8px;
   }
@@ -2061,7 +2132,8 @@ select.control {
   /* ── Chat (mobile-first) ── */
   .view-chat {
     gap: 0;
-    padding-bottom: 0;
+    padding: 0;
+    overflow: hidden;
   }
   .chat-window {
     flex: 1;
@@ -2072,6 +2144,8 @@ select.control {
     border-left: 0;
     border-right: 0;
     border-top: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
   .message.assistant > .bubble,
   .message.user > .bubble {
@@ -2094,29 +2168,104 @@ select.control {
     margin-bottom: 2px;
   }
 
-  /* Chat input: fixed to bottom, phone-messenger style */
+  /* Chat input: transparent wrapper */
   .chat-input {
-    padding: 6px 8px calc(10px + env(safe-area-inset-bottom, 0px));
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 20;
+    padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
+    border: 0;
     border-radius: 0;
-    border-left: 0;
-    border-right: 0;
-    border-bottom: 0;
     gap: 6px;
-    background: var(--bg-soft);
+    background: transparent;
   }
-  .chat-input textarea {
-    font-size: 16px; /* prevent iOS zoom on focus */
-    min-height: 22px;
+  /* Leave room for the fixed input bar */
+  .chat-window {
+    padding-bottom: 90px;
+  }
+
+  /* ── Pill row: textarea + buttons in a single rounded bar ── */
+  .chat-input-pill {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    background: var(--elevated);
+    border-radius: 18px;
+    padding: 6px 10px 12px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+  }
+  .chat-input-pill textarea {
+    flex: 1;
+    order: 1;
+    font-size: 16px;
+    min-height: 24px;
     max-height: 100px;
     resize: none;
-    padding: 8px 10px;
-    border-radius: 20px;
-    background: var(--elevated);
-    border: 1px solid var(--line);
+    padding: 8px 4px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
     line-height: 1.4;
   }
-  .chat-input textarea:focus {
-    border-color: var(--accent);
+  .chat-input-pill .chat-actions {
+    display: contents;
+  }
+  .chat-input-pill .chat-actions-left {
+    display: contents;
+  }
+  #chatAttachBtn {
+    order: 0;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    font-size: 18px;
+    font-weight: 300;
+    line-height: 1;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    color: var(--muted);
+    align-self: flex-end;
+    margin-bottom: 2px;
+  }
+  #chatSendBtn {
+    order: 2;
+    width: 28px;
+    height: 28px;
+    min-height: 28px;
+    padding: 0;
+    border-radius: 50%;
+    font-size: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    align-self: flex-end;
+    margin-bottom: 2px;
+  }
+  #chatSendBtn::after {
+    content: "↑";
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1;
+    display: block;
+    transform: translateY(-3px);
+  }
+  .chat-attachments {
+    padding: 2px 4px;
+    gap: 4px;
+  }
+  .attach-chip {
+    font-size: 11px;
+    padding: 2px 8px;
+  }
+  .attach-chip .attach-name {
+    max-width: 80px;
   }
 
   #chatHint {
@@ -2132,12 +2281,36 @@ select.control {
   .chat-actions {
     gap: 6px;
   }
-  .chat-actions .btn {
-    font-size: 14px;
-    padding: 8px 18px;
+  .chat-actions-left {
+    gap: 4px;
+  }
+  /* Send button: compact circle */
+  #chatSendBtn {
+    width: 40px;
+    height: 40px;
     min-height: 40px;
-    border-radius: 20px;
+    padding: 0;
+    border-radius: 50%;
+    font-size: 0;          /* hide text */
+    display: grid;
+    place-items: center;
     flex-shrink: 0;
+  }
+  #chatSendBtn::after {
+    content: "↑";
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1;
+  }
+  #chatAttachBtn {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    font-size: 16px;
+    display: grid;
+    place-items: center;
+    background: var(--elevated);
+    border: 1px solid var(--line);
   }
 
   /* ── Settings ── */
@@ -2317,18 +2490,29 @@ select.control {
     font-size: 11px;
   }
   .chat-input {
-    padding: 4px 6px 8px;
+    padding: 4px 8px calc(6px + env(safe-area-inset-bottom, 0px));
   }
-  .chat-input textarea {
-    font-size: 16px; /* prevent iOS zoom on focus */
-    min-height: 20px;
+  .chat-input-pill {
+    padding: 2px 4px;
+  }
+  .chat-input-pill textarea {
+    font-size: 16px;
+    min-height: 22px;
     max-height: 80px;
-    padding: 7px 10px;
+    padding: 7px 2px;
   }
-  .chat-actions .btn {
-    padding: 7px 16px;
-    min-height: 38px;
+  #chatSendBtn {
+    width: 28px;
+    height: 28px;
+    min-height: 28px;
+  }
+  #chatSendBtn::after {
     font-size: 14px;
+  }
+  #chatAttachBtn {
+    width: 26px;
+    height: 26px;
+    font-size: 15px;
   }
 
   .btn {

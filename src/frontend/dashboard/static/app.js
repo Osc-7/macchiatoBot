@@ -1218,6 +1218,105 @@ document.addEventListener("click", (evt) => {
 // ===== Chat =====
 const chatWindow = $("chatWindow");
 
+// ── File upload ──
+const chatFileInput = $("chatFileInput");
+const chatAttachBtn = $("chatAttachBtn");
+const chatAttachments = $("chatAttachments");
+const uploadedFiles = [];  // { filename, path }
+
+chatAttachBtn?.addEventListener("click", () => chatFileInput?.click());
+
+chatFileInput?.addEventListener("change", async () => {
+  const files = Array.from(chatFileInput.files || []);
+  chatFileInput.value = "";
+  for (const file of files) {
+    await uploadChatFile(file);
+  }
+});
+
+async function uploadChatFile(file) {
+  const chip = document.createElement("span");
+  chip.className = "attach-chip uploading";
+  chip.innerHTML = `<span class="attach-name">${escapeHtml(file.name)}</span><span class="attach-remove">×</span>`;
+  chatAttachments.appendChild(chip);
+  chatAttachments.classList.remove("hidden");
+
+  try {
+    const form = new FormData();
+    form.append("file", file);
+    const resp = await fetch(apiUrl("/api/chat/upload"), {
+      method: "POST",
+      credentials: "same-origin",
+      body: form,
+    });
+    if (resp.status === 401) { redirectToLogin(); throw new Error("Unauthorized"); }
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) throw new Error(data.detail || "upload failed");
+    uploadedFiles.push({ filename: data.filename, path: data.path });
+    chip.classList.remove("uploading");
+    chip.querySelector(".attach-remove").addEventListener("click", () => {
+      const idx = uploadedFiles.findIndex((f) => f.path === data.path);
+      if (idx >= 0) uploadedFiles.splice(idx, 1);
+      chip.remove();
+      if (!uploadedFiles.length) chatAttachments.classList.add("hidden");
+    });
+  } catch (err) {
+    chip.remove();
+    if (!uploadedFiles.length) chatAttachments.classList.add("hidden");
+    showToast(`Upload failed: ${err.message}`);
+  }
+}
+
+// ── Keyboard-aware input on mobile ──
+// iOS Safari anchors position:fixed to the layout viewport, which
+// doesn't resize when the keyboard opens.  We adjust `bottom`
+// dynamically so the input always sits right above the keyboard.
+// iOS also auto-scrolls on focus — we cancel that so our calculation
+// (which assumes offsetTop≈0) is correct.
+(function setupKeyboardHandling() {
+  if (!window.visualViewport) return;
+  const input = document.querySelector(".chat-input");
+  const textarea = document.querySelector(".chat-input textarea");
+  if (!input) return;
+
+  const isMobile = () => window.matchMedia("(max-width: 720px)").matches;
+
+  function positionInput() {
+    if (!isMobile()) {
+      input.style.bottom = "";
+      return;
+    }
+    const vv = window.visualViewport;
+    const kb = window.innerHeight - vv.height - vv.offsetTop;
+    input.style.bottom = Math.max(0, kb) + "px";
+  }
+
+  window.visualViewport.addEventListener("resize", positionInput);
+  window.visualViewport.addEventListener("scroll", positionInput);
+
+  if (textarea) {
+    textarea.addEventListener("focus", () => {
+      if (!isMobile()) return;
+      // 1) Fight iOS auto-scroll for the first ~500ms
+      let count = 0;
+      const cancel = () => { count = 999; };
+      const fight = () => {
+        if (count >= 10) return;
+        window.scrollTo(0, 0);
+        count++;
+        setTimeout(fight, 50);
+      };
+      fight();
+      textarea.addEventListener("blur", cancel, { once: true });
+
+      // 2) Proactively reposition — visualViewport events fire late on iOS
+      [100, 250, 400, 550].forEach(ms => {
+        setTimeout(positionInput, ms);
+      });
+    });
+  }
+})();
+
 // ── Chat history persistence (localStorage) ──
 
 function chatStorageKey(sessionId) {
@@ -1837,7 +1936,16 @@ async function nonStreamChat(text, sessionId, ctx) {
 
 $("chatForm").addEventListener("submit", async (evt) => {
   evt.preventDefault();
-  const text = $("chatText").value.trim();
+  let text = $("chatText").value.trim();
+  // Append uploaded file info
+  if (uploadedFiles.length) {
+    const fileList = uploadedFiles.map((f) => `[file: ${f.filename} → ${f.path}]`).join("\n");
+    text = text ? `${text}\n\n${fileList}` : fileList;
+    // Clear attachments
+    uploadedFiles.length = 0;
+    chatAttachments.innerHTML = "";
+    chatAttachments.classList.add("hidden");
+  }
   if (!text) return;
   const sessionId = activeSessionId || $("activeSessionSelect").value || "";
   makeUserBubble(text);

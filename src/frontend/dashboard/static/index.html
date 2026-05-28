@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content" />
     <title>macchiato Web</title>
     <link rel="stylesheet" href="/console/assets/style.css" />
   </head>
@@ -73,20 +73,24 @@
           </div>
           <form class="chat-input" id="chatForm">
             <div class="slash-suggest hidden" id="slashSuggest"></div>
-            <textarea
-              id="chatText"
-              rows="3"
-              placeholder="Ask macchiato anything… (try /help)"
-            ></textarea>
-            <div class="chat-actions">
-              <label class="chat-flag">
-                <input type="checkbox" id="streamToggle" checked />
-                <span>Stream</span>
-              </label>
-              <span class="muted" id="chatHint">
-                Streaming via daemon IPC · <kbd>Enter</kbd> sends · slash commands supported
-              </span>
-              <button type="submit" class="btn primary" id="chatSendBtn">Send</button>
+            <div class="chat-attachments hidden" id="chatAttachments"></div>
+            <div class="chat-input-pill">
+              <textarea
+                id="chatText"
+                rows="3"
+                placeholder="Ask macchiato anything… (try /help)"
+              ></textarea>
+              <div class="chat-actions">
+                <div class="chat-actions-left">
+                  <input type="checkbox" id="streamToggle" checked class="hidden" />
+                  <input type="file" id="chatFileInput" class="hidden" multiple />
+                  <button type="button" class="btn-icon" id="chatAttachBtn" title="Attach file">+</button>
+                </div>
+                <span class="muted" id="chatHint">
+                  Streaming via daemon IPC · <kbd>Enter</kbd> sends · slash commands supported
+                </span>
+                <button type="submit" class="btn primary" id="chatSendBtn">Send</button>
+              </div>
             </div>
           </form>
         </section>

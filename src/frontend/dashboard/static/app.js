@@ -1879,7 +1879,16 @@ function acceptSuggest(item) {
   hideSuggest();
 }
 
-$("chatText").addEventListener("input", updateSuggest);
+// Auto-resize on mobile: grow textarea height as user types
+function autoResizeTextarea(el) {
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 120) + "px";
+}
+
+$("chatText").addEventListener("input", (evt) => {
+  autoResizeTextarea(evt.target);
+  updateSuggest();
+});
 $("chatText").addEventListener("focus", updateSuggest);
 $("chatText").addEventListener("blur", () => {
   window.setTimeout(hideSuggest, 120);

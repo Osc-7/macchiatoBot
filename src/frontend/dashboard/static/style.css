@@ -2058,30 +2058,85 @@ select.control {
     font-size: 12px;
   }
 
-  /* ── Chat ── */
-  .message.assistant > .bubble,
-  .message.user > .bubble {
-    max-width: 88%;
-  }
-  .bubble {
-    font-size: 13px;
-    padding: 7px 10px;
+  /* ── Chat (mobile-first) ── */
+  .view-chat {
+    gap: 0;
+    padding-bottom: 0;
   }
   .chat-window {
-    padding: 10px;
-    gap: 10px;
+    flex: 1;
+    min-height: 0;
+    padding: 8px 10px;
+    gap: 8px;
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
   }
+  .message.assistant > .bubble,
+  .message.user > .bubble {
+    max-width: 90%;
+  }
+  .bubble {
+    font-size: 14px;
+    padding: 8px 12px;
+    border-radius: 14px;
+    line-height: 1.5;
+  }
+  .bubble.user {
+    border-bottom-right-radius: 4px;
+  }
+  .bubble.assistant {
+    border-bottom-left-radius: 4px;
+  }
+  .bubble .role {
+    font-size: 9px;
+    margin-bottom: 2px;
+  }
+
+  /* Chat input: fixed to bottom, phone-messenger style */
   .chat-input {
-    padding: 8px;
+    padding: 6px 8px calc(10px + env(safe-area-inset-bottom, 0px));
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+    border-bottom: 0;
+    gap: 6px;
+    background: var(--bg-soft);
   }
   .chat-input textarea {
-    font-size: 14px;
-    min-height: 40px;
+    font-size: 16px; /* prevent iOS zoom on focus */
+    min-height: 22px;
+    max-height: 100px;
+    resize: none;
+    padding: 8px 10px;
+    border-radius: 20px;
+    background: var(--elevated);
+    border: 1px solid var(--line);
+    line-height: 1.4;
+  }
+  .chat-input textarea:focus {
+    border-color: var(--accent);
+  }
+
+  #chatHint {
+    display: none;
+  }
+  .chat-flag span {
+    display: none;
+  }
+  .chat-flag input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+  }
+  .chat-actions {
+    gap: 6px;
   }
   .chat-actions .btn {
-    font-size: 12px;
-    padding: 6px 12px;
-    min-height: 36px;
+    font-size: 14px;
+    padding: 8px 18px;
+    min-height: 40px;
+    border-radius: 20px;
+    flex-shrink: 0;
   }
 
   /* ── Settings ── */
@@ -2252,16 +2307,26 @@ select.control {
     max-width: 95%;
   }
   .bubble {
-    font-size: 12.5px;
-    padding: 6px 8px;
+    font-size: 14px;
+    padding: 8px 12px;
   }
   .bubble .body pre {
     padding: 6px 8px;
     font-size: 11px;
   }
+  .chat-input {
+    padding: 4px 6px 8px;
+  }
   .chat-input textarea {
     font-size: 16px; /* prevent iOS zoom on focus */
-    min-height: 36px;
+    min-height: 20px;
+    max-height: 80px;
+    padding: 7px 10px;
+  }
+  .chat-actions .btn {
+    padding: 7px 16px;
+    min-height: 38px;
+    font-size: 14px;
   }
 
   .btn {

@@ -658,6 +658,18 @@ select.control {
   background: rgba(217, 122, 122, 0.06);
 }
 
+/* Auto-collapse animation */
+.permission-card.collapsing,
+.ask-user-card.collapsing {
+  max-height: 40px;
+  opacity: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  margin-bottom: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease-out, opacity 0.25s ease-out, padding 0.3s ease-out, margin 0.3s ease-out;
+}
+
 .permission-head {
   display: flex;
   align-items: flex-start;

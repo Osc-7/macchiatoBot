@@ -1702,6 +1702,15 @@ function addPermissionRequest(ctx, event) {
     card.querySelectorAll("button").forEach((b) => { b.disabled = true; });
     const status = card.querySelector(".permission-status");
     if (status) status.textContent = label;
+    // Auto-collapse after a short delay
+    setTimeout(() => {
+      card.classList.add("collapsing");
+      card.addEventListener("transitionend", () => {
+        card.remove();
+      }, { once: true });
+      // Fallback: force remove if transition doesn't fire
+      setTimeout(() => card.remove(), 500);
+    }, 800);
   };
 
   card.querySelectorAll("[data-perm-action]").forEach((btn) => {

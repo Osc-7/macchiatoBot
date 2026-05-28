@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Dict
 
 import yaml
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+import uuid
+
+from fastapi import APIRouter, FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -1335,6 +1337,27 @@ def create_dashboard_app(
                 ).encode("utf-8")
 
         return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+    @console.post("/api/chat/upload")
+    async def post_chat_upload(file: UploadFile) -> Dict[str, Any]:
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="no file selected")
+        # Sanitise filename and ensure uniqueness
+        safe_name = Path(file.filename or "upload").name
+        stem, suffix = os.path.splitext(safe_name)
+        unique_name = f"{stem}_{uuid.uuid4().hex[:8]}{suffix}"
+        upload_dir = Path(os.environ.get("MACCHIATO_DASHBOARD_UPLOAD_DIR", "/tmp/macchiato_uploads"))
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        dest = upload_dir / unique_name
+        content = await file.read()
+        dest.write_bytes(content)
+        logger.info("Uploaded %s → %s (%d bytes)", file.filename, dest, len(content))
+        return {
+            "ok": True,
+            "filename": file.filename,
+            "path": str(dest),
+            "size": len(content),
+        }
 
     app.include_router(console)
 

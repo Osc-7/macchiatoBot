@@ -2625,3 +2625,13 @@ select.control {
   margin: 18px 0 0;
   line-height: 1.5;
 }
+
+/* KaTeX math rendering */
+.bubble .body .katex-display {
+  margin: 0.6em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.bubble .body .katex {
+  font-size: 1.05em;
+}

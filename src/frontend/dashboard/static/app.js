@@ -1314,6 +1314,15 @@ async function uploadChatFile(file) {
         setTimeout(positionInput, ms);
       });
     });
+
+    // 3) On blur, immediately reset bottom so the bar slides back smoothly
+    textarea.addEventListener("blur", () => {
+      if (!isMobile()) return;
+      // Short delay to let iOS keyboard dismiss animation start
+      setTimeout(() => {
+        input.style.bottom = "";
+      }, 50);
+    });
   }
 })();
 
@@ -1411,6 +1420,19 @@ function renderMarkdown(text) {
     return `\u0000CODE${codeBlocks.length - 1}\u0000`;
   });
 
+  // 1b. Pull out math blocks ($$...$$ and $...$) to protect from HTML escaping.
+  const mathBlocks = [];
+  // Block-level: $$...$$
+  src = src.replace(/\$\$([\s\S]*?)\$\$/g, (_, tex) => {
+    mathBlocks.push({ tex: tex.trim(), display: true });
+    return `\u0000MATH${mathBlocks.length - 1}\u0000`;
+  });
+  // Inline: $...$ (but not $$ which is already handled)
+  src = src.replace(/(?<!\$)\$(?!\$)([^\$\n]+?)\$(?!\$)/g, (_, tex) => {
+    mathBlocks.push({ tex: tex.trim(), display: false });
+    return `\u0000MATH${mathBlocks.length - 1}\u0000`;
+  });
+
   // 2. Escape HTML so the model can't inject tags.
   src = escapeHtml(src);
 
@@ -1489,6 +1511,16 @@ function renderMarkdown(text) {
     const item = codeBlocks[+i];
     const langAttr = item.lang ? ` data-lang="${escapeHtml(item.lang)}"` : "";
     return `<pre><code${langAttr}>${escapeHtml(item.code)}</code></pre>`;
+  });
+
+  // 10. Restore math blocks with KaTeX rendering.
+  src = src.replace(/\u0000MATH(\d+)\u0000/g, (_, i) => {
+    const item = mathBlocks[+i];
+    try {
+      return katex.renderToString(item.tex, { displayMode: item.display, throwOnError: false });
+    } catch {
+      return `<code>${escapeHtml(item.tex)}</code>`;
+    }
   });
 
   return src;

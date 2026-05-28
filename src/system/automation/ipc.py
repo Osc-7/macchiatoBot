@@ -808,6 +808,7 @@ class AutomationIPCClient:
         owner_id: str = "root",
         source: str = "cli",
         username: str = "",
+        client_id: str | None = None,
         socket_path: Optional[str] = None,
         timeout_seconds: float = 300.0,
     ) -> None:
@@ -827,7 +828,7 @@ class AutomationIPCClient:
             "prompt_cache_miss_tokens": 0,
         }
         self._turn_count_cache = 0
-        self._client_id = f"{os.getpid()}-{id(self)}"
+        self._client_id = client_id or f"{os.getpid()}-{id(self)}"
 
     @property
     def config(self) -> Any:

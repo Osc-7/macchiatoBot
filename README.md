@@ -11,7 +11,7 @@ The repository currently publishes two installable surfaces:
 
 | Package | Role | Commands |
 |---|---|---|
-| `macchiato-bot` | Full assistant runtime for cloud/dev/local bot use | `macchiato`, `macchiato-daemon`, `macchiato-remote` |
+| `macchiato-bot` | Full assistant runtime for cloud/dev/local bot use | `macchiato`, `macchiato-daemon`, `macchiato-remote`, `macchiato-dashboard` |
 | `macchiato-remote` | Lightweight worker for exposing one authorized local workspace to a bot daemon | `macchiato-remote` |
 
 In a checkout, the root `main.py` and `automation_daemon.py` files are thin
@@ -143,8 +143,24 @@ After installing `macchiato-bot`, use:
 macchiato-daemon
 macchiato
 macchiato "schedule a meeting tomorrow at 3pm"
+macchiato-dashboard
 macchiato-remote status
 ```
+
+`macchiato-dashboard` listens on `http://127.0.0.1:8765` by default for config editing and kernel status/session operations (spawn/cancel/kill).
+
+**Public exposure**: merge into your existing Nginx `:80` site (same as `/remote/`):
+
+- `/login` — sign-in page
+- `/console/` — web console
+
+See [deploy/nginx/README.md](deploy/nginx/README.md). Whitelist in `dashboard_auth.yaml`; use `secure_cookies: false` on plain HTTP.
+
+Dashboard capabilities (v1):
+- Live config editor with change stats plus backup/restore (autosave also creates backups)
+- Kernel overview (active cores / queue / token usage / turn count)
+- Session operations (session list, quick select, switch, clear context, spawn/cancel/kill)
+- Model operations (list available providers and switch active model)
 
 The CLI is an IPC client. If the daemon is not running, it exits instead of
 starting a private agent process.

@@ -37,6 +37,7 @@ dependencies = [
 macchiato = "macchiato_bot_cli.main:main"
 macchiato-daemon = "macchiato_bot_cli.daemon:main"
 macchiato-remote = "macchiato_remote.cli:main"
+macchiato-dashboard = "frontend.dashboard.server:main"
 
 [project.urls]
 Homepage = "https://github.com/Osc-7/macchiatoBot"
@@ -69,6 +70,9 @@ line_length = 88
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+"frontend.dashboard" = ["static/*.html", "static/*.css", "static/*.js"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

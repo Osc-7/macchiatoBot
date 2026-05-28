@@ -8,7 +8,7 @@ macchiatoBot 是一个 daemon-first、工具驱动的 LLM 助手。常驻 daemon
 
 | 包 | 作用 | 命令 |
 |---|---|---|
-| `macchiato-bot` | 完整 bot 运行时，适合云端、开发机或本机完整使用 | `macchiato`、`macchiato-daemon`、`macchiato-remote` |
+| `macchiato-bot` | 完整 bot 运行时，适合云端、开发机或本机完整使用 | `macchiato`、`macchiato-daemon`、`macchiato-remote`、`macchiato-dashboard` |
 | `macchiato-remote` | 轻量 worker，只把本机授权目录暴露给远端 daemon | `macchiato-remote` |
 
 仓库根目录的 `main.py` 与 `automation_daemon.py` 只是兼容 `uv run` 的薄入口，实际实现位于 `src/macchiato_bot_cli/`。
@@ -127,8 +127,24 @@ uv run feishu_ws_gateway.py
 macchiato-daemon
 macchiato
 macchiato "明天下午3点开会"
+macchiato-dashboard
 macchiato-remote status
 ```
+
+`macchiato-dashboard` 默认监听 `http://127.0.0.1:8765`，用于配置编辑和内核状态管理（可在页面中执行 spawn/cancel/kill）。
+
+**公网部署**：与 `/remote/` 相同，合并进现有 Nginx `:80` 站点：
+
+- `/login` — 登录页
+- `/console/` — Web 控制台
+
+详见 [deploy/nginx/README.md](deploy/nginx/README.md)。`dashboard_auth.yaml` 白名单 + HTTP 下 `secure_cookies: false`。
+
+仪表盘能力（v1）：
+- 配置文件在线编辑、改动统计、手动备份/恢复（自动保存前也会留档）
+- 内核总览（active cores / queue / token usage / turn count）
+- 会话运维（会话列表、点击填充、switch、clear context、spawn/cancel/kill）
+- 模型运维（读取可用模型并一键切换）
 
 CLI 是 daemon 的 IPC 客户端。daemon 不运行时，CLI 会退出，而不是偷偷启动一个私有 agent 进程。
 

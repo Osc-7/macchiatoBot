@@ -439,6 +439,7 @@ class RemoteWorkerClient:
             )
         hard_timeout = req.timeout_seconds
         wait_window_ms = req.wait_window_ms if req.wait_window_ms is not None else 30_000
+        wait_for_completion = bool(req.wait_for_completion)
         if self._is_stateful_shell_command(req.command):
             return await session.execute(
                 request_id=req.request_id,
@@ -471,7 +472,9 @@ class RemoteWorkerClient:
         waited = max(0.0, float(wait_window_ms) / 1000.0)
         end_at = asyncio.get_running_loop().time() + waited
         status = handle
-        while status.status == "running" and asyncio.get_running_loop().time() < end_at:
+        while status.status == "running" and (
+            wait_for_completion or asyncio.get_running_loop().time() < end_at
+        ):
             await asyncio.sleep(0.05)
             latest = await mgr.job_status(handle.job_id)
             if latest is not None:

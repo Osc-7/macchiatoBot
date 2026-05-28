@@ -591,13 +591,14 @@ class KernelScheduler:
                     task_set.discard(t)
                     if not task_set:
                         self._session_active_tasks.pop(sid, None)
-                        # 仅「跳过派发」类任务不会走 _run_and_route 的 inflight finally；
-                        # 在全部路由任务结束后清除 cancel 标记，避免会话永久拒收新请求。
-                        if (
-                            sid in self._cancelled_sessions
-                            and self.session_inflight_request_count(sid) == 0
-                        ):
-                            self.clear_cancelled(sid)
+                # 无论 task_set 是否为空，只要该 session 无已派发的 inflight 任务，
+                # 就清除 cancel 标记。否则 skip 型任务的 _cleanup 会让 task_set
+                # 永远非空，cancel 标记无法被清理，会话永久拒收新请求。
+                if (
+                    sid in self._cancelled_sessions
+                    and self.session_inflight_request_count(sid) == 0
+                ):
+                    self.clear_cancelled(sid)
 
             task.add_done_callback(_cleanup)
             # task_done() 使 queue.join() 能正确追踪完成状态

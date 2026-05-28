@@ -1965,15 +1965,15 @@ select.control {
 
   /* ── Topbar ── */
   .topbar {
-    flex-wrap: wrap;
-    padding: 12px 14px;
-    gap: 8px;
+    padding: 8px 14px;
+    gap: 6px;
+    min-height: 44px;
   }
   .topbar h1 {
-    font-size: 16px;
+    font-size: 15px;
   }
   .topbar-left p {
-    font-size: 11px;
+    display: none;
   }
   .topbar-field {
     font-size: 11px;
@@ -1981,12 +1981,12 @@ select.control {
   .topbar-field .control {
     min-width: 100px;
     font-size: 11px;
-    padding: 5px 8px;
+    padding: 4px 8px;
   }
 
   /* ── Views ── */
   .view {
-    padding: 12px 14px 16px;
+    padding: 6px 14px 16px;
   }
   .view-kernel {
     padding-bottom: 10px;
@@ -2066,11 +2066,12 @@ select.control {
   .chat-window {
     flex: 1;
     min-height: 0;
-    padding: 8px 10px;
-    gap: 8px;
+    padding: 4px 10px 8px;
+    gap: 6px;
     border-radius: 0;
     border-left: 0;
     border-right: 0;
+    border-top: 0;
   }
   .message.assistant > .bubble,
   .message.user > .bubble {
@@ -2280,13 +2281,14 @@ select.control {
     font-size: 11px;
   }
   .topbar {
-    padding: 8px 10px;
+    padding: 4px 10px;
+    min-height: 38px;
   }
   .topbar h1 {
-    font-size: 14px;
+    font-size: 13px;
   }
   .view {
-    padding: 8px 10px 12px;
+    padding: 4px 10px 12px;
   }
   .kpi-grid {
     grid-template-columns: repeat(2, 1fr);

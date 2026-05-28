@@ -64,6 +64,10 @@ function switchView(name) {
   if (name === "kernel") {
     requestAnimationFrame(() => $("consoleInput")?.focus({ preventScroll: true }));
   }
+  if (name === "chat") {
+    const sid = activeSessionId || $("activeSessionSelect").value || "";
+    restoreChatMessages(sid);
+  }
 }
 
 navItems.forEach((n) => n.addEventListener("click", () => switchView(n.dataset.view)));
@@ -1214,6 +1218,72 @@ document.addEventListener("click", (evt) => {
 // ===== Chat =====
 const chatWindow = $("chatWindow");
 
+// ── Chat history persistence (localStorage) ──
+
+function chatStorageKey(sessionId) {
+  return `chat_history_${sessionId || "__default"}`;
+}
+
+function saveChatPair(sessionId, userText, assistantText) {
+  try {
+    const key = chatStorageKey(sessionId);
+    const history = JSON.parse(localStorage.getItem(key) || "[]");
+    history.push({ role: "user", text: userText });
+    history.push({ role: "assistant", text: assistantText });
+    // Keep last 100 messages per session
+    if (history.length > 100) history.splice(0, history.length - 100);
+    localStorage.setItem(key, JSON.stringify(history));
+  } catch { /* storage full or unavailable */ }
+}
+
+function loadChatHistory(sessionId) {
+  try {
+    const key = chatStorageKey(sessionId);
+    return JSON.parse(localStorage.getItem(key) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function clearChatHistory(sessionId) {
+  try {
+    const key = chatStorageKey(sessionId);
+    localStorage.removeItem(key);
+  } catch { /* ignore */ }
+}
+
+function restoreChatMessages(sessionId) {
+  // Remove the empty state if present
+  const empty = chatWindow.querySelector(".empty");
+  if (empty) empty.remove();
+  // Clear existing messages
+  chatWindow.querySelectorAll(".message").forEach((el) => el.remove());
+  const history = loadChatHistory(sessionId);
+  history.forEach((entry) => {
+    if (entry.role === "user") {
+      const wrap = makeMessage("user");
+      const bubble = document.createElement("div");
+      bubble.className = "bubble user";
+      bubble.innerHTML = `<span class="role">you</span><div class="body"></div>`;
+      bubble.querySelector(".body").textContent = entry.text;
+      wrap.appendChild(bubble);
+      chatWindow.appendChild(wrap);
+    } else {
+      const wrap = makeMessage("assistant");
+      wrap.innerHTML = `
+        <div class="bubble assistant">
+          <span class="role">macchiato</span>
+          <div class="body"></div>
+        </div>
+      `;
+      const body = wrap.querySelector(".body");
+      body.innerHTML = renderMarkdown(entry.text);
+      chatWindow.appendChild(wrap);
+    }
+  });
+  chatWindow.scrollTop = chatWindow.scrollHeight;
+}
+
 function escapeHtml(text) {
   return (text || "").replace(/[&<>"']/g, (c) => ({
     "&": "&amp;",
@@ -1773,13 +1843,25 @@ $("chatForm").addEventListener("submit", async (evt) => {
   makeUserBubble(text);
   $("chatText").value = "";
   hideSuggest();
+
+  // Handle /clear: also wipe history from localStorage
+  if (text.startsWith("/clear")) {
+    clearChatHistory(sessionId);
+  }
+
   const ctx = makeAssistantBubble();
   $("chatSendBtn").disabled = true;
   try {
     if ($("streamToggle").checked) {
-      await streamChat(text, sessionId, ctx);
+      const ok = await streamChat(text, sessionId, ctx);
+      if (ok && ctx.rawText) {
+        saveChatPair(sessionId, text, ctx.rawText);
+      }
     } else {
       await nonStreamChat(text, sessionId, ctx);
+      if (ctx.rawText) {
+        saveChatPair(sessionId, text, ctx.rawText);
+      }
     }
     await loadKernel();
   } catch (error) {
@@ -1974,11 +2056,20 @@ async function boot() {
     await loadConfig();
     await loadBackups();
     await loadKernel();
+    // Restore chat history for the initial session
+    const sid = activeSessionId || $("activeSessionSelect").value || "";
+    restoreChatMessages(sid);
   } catch (e) {
     showToast(`Init failed: ${e.message}`, 4000);
   }
   window.setInterval(pollHealth, 8000);
 }
+
+// Reload chat history when the user picks a different session
+$("activeSessionSelect")?.addEventListener("change", () => {
+  const sid = activeSessionId || $("activeSessionSelect").value || "";
+  restoreChatMessages(sid);
+});
 
 $("authLogout")?.addEventListener("click", async () => {
   try {

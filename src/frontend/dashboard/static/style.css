@@ -2192,6 +2192,7 @@ select.control {
     border-radius: 0;
     gap: 6px;
     background: transparent;
+    transition: bottom 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
   }
   /* Leave room for the fixed input bar */
   .chat-window {

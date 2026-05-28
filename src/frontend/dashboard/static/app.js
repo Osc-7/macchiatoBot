@@ -894,25 +894,38 @@ function renderStatusbar(models, dangerousMode, tokenUsage) {
   const modelEl = $("statusModel");
   if (modelEl && Array.isArray(models)) {
     const active = models.find((m) => m?.active);
-    modelEl.textContent = active?.name || active?.model || "—";
+    // Try various fields: name, model, id
+    modelEl.textContent = active?.name || active?.model || active?.id || "—";
   }
 
-  // Danger mode
+  // Danger mode: indicator dot
   const dangerEl = $("statusDanger");
   if (dangerEl) {
     const enabled = dangerousMode?.dangerous_mode_enabled;
-    dangerEl.textContent = enabled ? "danger" : "safe";
-    dangerEl.classList.toggle("danger-on", Boolean(enabled));
+    dangerEl.className = "chat-status-item chat-status-dot";
+    dangerEl.classList.toggle("dot-danger", Boolean(enabled));
+    dangerEl.title = enabled ? "Danger mode ON" : "Safe mode";
   }
 
-  // Context: show total tokens used
+  // Context window usage percentage
   const ctxEl = $("statusContext");
   if (ctxEl) {
     const total = tokenUsage?.total_tokens ?? 0;
-    if (total >= 1000) {
+    // Try to get context_window from active model metadata
+    let ctxWindow = null;
+    if (Array.isArray(models)) {
+      const active = models.find((m) => m?.active);
+      ctxWindow = active?.context_window || active?.capabilities?.context_window || null;
+    }
+    if (ctxWindow && ctxWindow > 0) {
+      const pct = Math.round((total / ctxWindow) * 100);
+      ctxEl.textContent = `context ${pct}%`;
+      ctxEl.classList.toggle("ctx-warn", pct > 70);
+      ctxEl.classList.toggle("ctx-critical", pct > 90);
+    } else if (total > 0) {
       ctxEl.textContent = `${(total / 1000).toFixed(1)}k tokens`;
     } else {
-      ctxEl.textContent = `${total} tokens`;
+      ctxEl.textContent = "context —";
     }
   }
 }
@@ -1314,19 +1327,14 @@ async function uploadChatFile(file) {
   function positionInput() {
     if (!isMobile()) {
       input.style.bottom = "";
-      statusbar?.classList.remove("kb-up");
+      if (statusbar) statusbar.style.bottom = "";
       return;
     }
     const vv = window.visualViewport;
     const kb = window.innerHeight - vv.height - vv.offsetTop;
-    input.style.bottom = Math.max(0, kb) + "px";
-    // Show statusbar above keyboard when keyboard is up
-    if (statusbar) {
-      statusbar.classList.toggle("kb-up", kb > 20);
-      if (kb > 20) {
-        statusbar.style.bottom = Math.max(0, kb) + "px";
-      }
-    }
+    const kbPx = Math.max(0, kb);
+    input.style.bottom = kbPx + "px";
+    if (statusbar) statusbar.style.bottom = kbPx + "px";
   }
 
   window.visualViewport.addEventListener("resize", positionInput);
@@ -1359,6 +1367,7 @@ async function uploadChatFile(file) {
       // Short delay to let iOS keyboard dismiss animation start
       setTimeout(() => {
         input.style.bottom = "";
+        if (statusbar) statusbar.style.bottom = "";
       }, 50);
     });
   }

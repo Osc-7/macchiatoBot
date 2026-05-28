@@ -908,7 +908,7 @@ select.control {
 .chat-statusbar {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   padding: 4px 12px;
   font-size: 11px;
   color: var(--text-muted);
@@ -916,9 +916,37 @@ select.control {
   line-height: 1.4;
 }
 .chat-status-sep {
-  opacity: 0.4;
+  opacity: 0.3;
 }
-.chat-status-item.danger-on {
+.chat-status-item {
+  white-space: nowrap;
+}
+
+/* Danger mode indicator dot */
+.chat-status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #5a9a6a;
+  box-shadow: 0 0 4px rgba(90, 154, 106, 0.4);
+  transition: background 0.2s, box-shadow 0.2s;
+}
+.chat-status-dot.dot-danger {
+  background: var(--danger);
+  box-shadow: 0 0 6px rgba(217, 122, 122, 0.6);
+  animation: dot-pulse 2s ease-in-out infinite;
+}
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Context window usage warnings */
+.chat-status-item.ctx-warn {
+  color: #c9a84c;
+}
+.chat-status-item.ctx-critical {
   color: var(--danger);
   font-weight: 600;
 }
@@ -2213,7 +2241,7 @@ select.control {
     background: transparent;
     transition: bottom 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
   }
-  /* Status bar on mobile: fixed above input */
+  /* Status bar on mobile: fixed above input, always visible */
   .chat-statusbar {
     position: fixed;
     bottom: 0;
@@ -2224,11 +2252,7 @@ select.control {
     background: var(--bg);
     border-top: 1px solid var(--line);
     font-size: 10px;
-    transform: translateY(100%);
-    transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), bottom 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
-  }
-  .chat-statusbar.kb-up {
-    transform: translateY(0);
+    transition: bottom 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
   }
   /* Leave room for the fixed input bar + status bar */
   .chat-window {

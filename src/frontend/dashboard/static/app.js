@@ -889,6 +889,34 @@ function renderUsage(usage) {
   $("tuCacheHit").textContent = u.prompt_cache_hit_tokens ?? 0;
 }
 
+function renderStatusbar(models, dangerousMode, tokenUsage) {
+  // Model: show the active model's short name
+  const modelEl = $("statusModel");
+  if (modelEl && Array.isArray(models)) {
+    const active = models.find((m) => m?.active);
+    modelEl.textContent = active?.name || active?.model || "—";
+  }
+
+  // Danger mode
+  const dangerEl = $("statusDanger");
+  if (dangerEl) {
+    const enabled = dangerousMode?.dangerous_mode_enabled;
+    dangerEl.textContent = enabled ? "danger" : "safe";
+    dangerEl.classList.toggle("danger-on", Boolean(enabled));
+  }
+
+  // Context: show total tokens used
+  const ctxEl = $("statusContext");
+  if (ctxEl) {
+    const total = tokenUsage?.total_tokens ?? 0;
+    if (total >= 1000) {
+      ctxEl.textContent = `${(total / 1000).toFixed(1)}k tokens`;
+    } else {
+      ctxEl.textContent = `${total} tokens`;
+    }
+  }
+}
+
 async function loadKernel() {
   const data = await requestJson("/api/kernel");
   const connected = Boolean(data.connected);
@@ -903,6 +931,7 @@ async function loadKernel() {
   updateConsoleKnownSessions(data.cores, data.sessions);
   renderModels(data.models);
   renderUsage(data.token_usage);
+  renderStatusbar(data.models, data.dangerous_mode, data.token_usage);
   if (!connected && data.error) showToast(`Daemon offline: ${data.error}`);
 }
 
@@ -1276,6 +1305,7 @@ async function uploadChatFile(file) {
 (function setupKeyboardHandling() {
   if (!window.visualViewport) return;
   const input = document.querySelector(".chat-input");
+  const statusbar = document.getElementById("chatStatusbar");
   const textarea = document.querySelector(".chat-input textarea");
   if (!input) return;
 
@@ -1284,11 +1314,19 @@ async function uploadChatFile(file) {
   function positionInput() {
     if (!isMobile()) {
       input.style.bottom = "";
+      statusbar?.classList.remove("kb-up");
       return;
     }
     const vv = window.visualViewport;
     const kb = window.innerHeight - vv.height - vv.offsetTop;
     input.style.bottom = Math.max(0, kb) + "px";
+    // Show statusbar above keyboard when keyboard is up
+    if (statusbar) {
+      statusbar.classList.toggle("kb-up", kb > 20);
+      if (kb > 20) {
+        statusbar.style.bottom = Math.max(0, kb) + "px";
+      }
+    }
   }
 
   window.visualViewport.addEventListener("resize", positionInput);

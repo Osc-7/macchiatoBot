@@ -904,6 +904,25 @@ select.control {
   accent-color: var(--accent);
 }
 
+/* Chat status bar */
+.chat-statusbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: transparent;
+  line-height: 1.4;
+}
+.chat-status-sep {
+  opacity: 0.4;
+}
+.chat-status-item.danger-on {
+  color: var(--danger);
+  font-weight: 600;
+}
+
 .chat-input {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -2194,9 +2213,26 @@ select.control {
     background: transparent;
     transition: bottom 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
   }
-  /* Leave room for the fixed input bar */
+  /* Status bar on mobile: fixed above input */
+  .chat-statusbar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 19;
+    padding: 3px 12px;
+    background: var(--bg);
+    border-top: 1px solid var(--line);
+    font-size: 10px;
+    transform: translateY(100%);
+    transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), bottom 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .chat-statusbar.kb-up {
+    transform: translateY(0);
+  }
+  /* Leave room for the fixed input bar + status bar */
   .chat-window {
-    padding-bottom: 90px;
+    padding-bottom: 110px;
   }
 
   /* ── Pill row: textarea + buttons in a single rounded bar ── */

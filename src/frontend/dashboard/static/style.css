@@ -2251,7 +2251,9 @@ select.control {
     right: 0;
     z-index: 19;
     padding: 3px 12px;
-    background: var(--bg);
+    background: rgba(22, 22, 24, 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
     border-top: 1px solid var(--line);
     font-size: 10px;
     transition: bottom 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);

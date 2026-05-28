@@ -1340,7 +1340,11 @@ async function uploadChatFile(file) {
     const kb = window.innerHeight - vv.height - vv.offsetTop;
     const kbPx = Math.max(0, kb);
     input.style.bottom = kbPx + "px";
-    if (statusbar) statusbar.style.bottom = kbPx + "px";
+    // Position statusbar just above the input bar
+    if (statusbar) {
+      const inputH = input.offsetHeight;
+      statusbar.style.bottom = (kbPx + inputH) + "px";
+    }
   }
 
   window.visualViewport.addEventListener("resize", positionInput);

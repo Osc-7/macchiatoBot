@@ -1,0 +1,32 @@
+# Dashboard web login whitelist.
+# Copy to dashboard_auth.yaml (same directory) and customize.
+# This file is NOT edited through the dashboard Settings UI — keep credentials here.
+#
+# Only usernames listed below can sign in via the browser login page.
+# Recommended: chmod 600 dashboard_auth.yaml
+
+enabled: true
+
+# Stable secret for signed session cookies (required for production).
+session_secret: "change-me-to-a-long-random-string"
+
+# Session lifetime in hours (default 168 = 7 days).
+session_hours: 168
+
+# Set true when dashboard is served over HTTPS (reverse proxy).
+secure_cookies: false
+
+# Optional Bearer token for scripts / API clients (Authorization: Bearer …).
+# auth_token: ""
+
+users:
+  - username: admin
+    password: "change-me"
+
+  # - username: alice
+  #   password: "another-strong-password"
+
+# Shorthand map form is also supported:
+# users:
+#   admin: "change-me"
+#   alice: "another-strong-password"

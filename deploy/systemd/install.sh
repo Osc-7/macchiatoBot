@@ -5,11 +5,13 @@
 #   ./deploy/systemd/install.sh /path/to/macchiatoBot ubuntu --with-proxy
 #   ./deploy/systemd/install.sh /path/to/macchiatoBot ubuntu --with-resource-limits
 #   ./deploy/systemd/install.sh /path/to/macchiatoBot ubuntu --with-needrestart-guard
+#   ./deploy/systemd/install.sh /path/to/macchiatoBot ubuntu --with-dashboard
 #   ./deploy/systemd/install.sh --dry-run /path/to/macchiatoBot ubuntu
 #
 # --with-proxy            同时安装 50-macchiato-proxy.conf（本机 Clash 等 HTTP 代理 + NO_PROXY 直连国内域名）
 # --with-resource-limits  仅为 macchiato-automation 安装 50-macchiato-resource-limits.conf（cgroup 内存/CPU 兜底）
 # --with-needrestart-guard 安装 needrestart 规则，避免 apt hook 自动重启 macchiato-* 服务
+# --with-dashboard        安装 macchiato-dashboard.service（127.0.0.1:18765，配合 Nginx 反代）
 # --automation-root       仅 macchiato-automation 以 root 运行（command_tools.bash_os_user_enabled 时使用 runuser/useradd）
 #
 # 安装前请在项目根执行: uv sync（或 source init.sh），确保 .venv 存在。
@@ -21,6 +23,7 @@ DRY_RUN=0
 WITH_PROXY=0
 WITH_RESOURCE_LIMITS=0
 WITH_NEEDRESTART_GUARD=0
+WITH_DASHBOARD=0
 AUTOMATION_ROOT=0
 RAW_ARGS=()
 for a in "$@"; do
@@ -29,6 +32,7 @@ for a in "$@"; do
     --with-proxy) WITH_PROXY=1 ;;
     --with-resource-limits) WITH_RESOURCE_LIMITS=1 ;;
     --with-needrestart-guard) WITH_NEEDRESTART_GUARD=1 ;;
+    --with-dashboard) WITH_DASHBOARD=1 ;;
     --automation-root) AUTOMATION_ROOT=1 ;;
     *) RAW_ARGS+=("$a") ;;
   esac
@@ -88,6 +92,10 @@ install_service() {
 for s in macchiato-automation macchiato-feishu-gateway macchiato-shuiyuan-connector; do
   install_service "$s"
 done
+
+if [[ "$WITH_DASHBOARD" -eq 1 ]]; then
+  install_service macchiato-dashboard
+fi
 
 install_proxy_dropins() {
   local src="$SCRIPT_DIR/50-macchiato-proxy.conf"
@@ -190,6 +198,10 @@ echo "安装完成。首次启用示例:"
 echo "  sudo systemctl enable --now macchiato-automation.service"
 echo "  sudo systemctl enable --now macchiato-feishu-gateway.service"
 echo "  sudo systemctl enable --now macchiato-shuiyuan-connector.service"
+if [[ "$WITH_DASHBOARD" -eq 1 ]]; then
+  echo "  sudo systemctl enable --now macchiato-dashboard.service"
+  echo "  Nginx 反代见 deploy/nginx/README.md"
+fi
 echo "或一次性启动（不写入开机）:"
 echo "  sudo systemctl start macchiato.target"
 echo "注意: restart macchiato.target 一般不会重启上述 .service；更新代码后请:"

@@ -13,7 +13,24 @@
 | `systemd/50-macchiato-proxy.conf` | 可选 drop-in：HTTP(S) 代理 + `NO_PROXY`（与 `--with-proxy` 配套） |
 | `systemd/50-macchiato-resource-limits.conf` | 可选 drop-in：仅 `macchiato-automation` 的 cgroup 内存/CPU 上限（与 `--with-resource-limits` 配套） |
 | `systemd/60-macchiato-needrestart.conf` | 可选 needrestart 配置：避免 apt hook 自动重启 `macchiato-*` 服务（与 `--with-needrestart-guard` 配套） |
+| `systemd/macchiato-dashboard.service.in` | Web 仪表盘（本机 `127.0.0.1:18765`，配合 Nginx） |
+| `nginx/macchiato-dashboard.conf.in` | Dashboard HTTPS 反代模板（见 `nginx/README.md`） |
 
+## Web Dashboard + Nginx
+
+Dashboard **不要**绑 `0.0.0.0` 裸奔公网。推荐：
+
+1. systemd 常驻本机 `127.0.0.1:18765`（安装时加 `--with-dashboard`）
+2. Nginx 对外 HTTPS（模板 `deploy/nginx/macchiato-dashboard.conf.in`）
+3. `config/dashboard_auth.yaml` 白名单 + `secure_cookies: true`
+
+详细步骤见 [deploy/nginx/README.md](nginx/README.md)。
+
+```bash
+sudo ./deploy/systemd/install.sh "$(pwd)" ubuntu --with-dashboard
+sudo systemctl enable --now macchiato-dashboard.service
+# 再按 nginx/README.md 配置站点并 reload nginx
+```
 
 ## 版本库
 

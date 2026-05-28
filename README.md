@@ -2,8 +2,7 @@
 
 English | [中文](README_zh.md)
 
-macchiatoBot is a daemon-first, tool-driven LLM assistant. The daemon owns
-sessions, scheduling, IPC, tool execution, permissions, memory, and frontend
+macchiatoBot is an LLM agent framework with long-running abilities, high-concurrency and remote controls. The daemon owns sessions, scheduling, IPC, tool execution, permissions, memory, and frontend
 integration; CLI, Feishu, MCP, and automation jobs all enter through that shared
 runtime.
 

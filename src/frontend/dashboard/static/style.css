@@ -908,49 +908,79 @@ select.control {
 .chat-statusbar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
+  gap: 8px;
+  padding: 5px 12px;
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--muted);
   background: transparent;
-  line-height: 1.4;
+  line-height: 1;
 }
 .chat-status-sep {
-  opacity: 0.3;
+  opacity: 0.25;
+  color: var(--muted);
+  font-size: 10px;
+  user-select: none;
 }
 .chat-status-item {
   white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
 }
 
-/* Danger mode indicator dot */
-.chat-status-dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
+/* Safe / Danger dot */
+.chat-status-safe {
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  background: #5a9a6a;
-  box-shadow: 0 0 4px rgba(90, 154, 106, 0.4);
-  transition: background 0.2s, box-shadow 0.2s;
-  vertical-align: middle;
-  margin: 0 1px;
+  background: var(--success);
+  flex-shrink: 0;
+  margin-left: auto;
+  transition: background 0.25s;
+  cursor: default;
 }
-.chat-status-dot.dot-danger {
+.chat-status-safe.danger {
   background: var(--danger);
-  box-shadow: 0 0 6px rgba(217, 122, 122, 0.6);
-  animation: dot-pulse 2s ease-in-out infinite;
+  animation: safe-pulse 2s ease-in-out infinite;
 }
-@keyframes dot-pulse {
+@keyframes safe-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
 }
 
-/* Context window usage warnings */
-.chat-status-item.ctx-warn {
-  color: #c9a84c;
+/* Context ring */
+.ctx-ring-wrap {
+  gap: 0;
 }
-.chat-status-item.ctx-critical {
-  color: var(--danger);
+.ctx-ring-svg {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+}
+.ctx-ring-track {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 3;
+}
+.ctx-ring-fill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.5s ease, stroke 0.3s;
+}
+.ctx-ring-fill.warn {
+  stroke: #c9a84c;
+}
+.ctx-ring-fill.critical {
+  stroke: var(--danger);
+}
+.ctx-ring-text {
+  font-size: 9.5px;
   font-weight: 600;
+  fill: var(--muted-strong);
+  text-anchor: middle;
+  dominant-baseline: central;
+  font-family: inherit;
 }
 
 .chat-input {
@@ -1012,6 +1042,13 @@ select.control {
   margin-bottom: 4px;
 }
 
+.chat-input-pill {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
 .chat-input textarea {
   background: transparent;
   border: 0;
@@ -1020,6 +1057,7 @@ select.control {
   font: inherit;
   outline: none;
   min-height: 50px;
+  width: 100%;
 }
 
 .chat-actions {

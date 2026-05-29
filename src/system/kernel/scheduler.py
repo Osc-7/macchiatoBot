@@ -805,15 +805,60 @@ class KernelScheduler:
                     for _k in ("feishu_chat_id", "feishu_open_id"):
                         if _k in request.metadata and request.metadata[_k]:
                             md_ch[_k] = request.metadata[_k]
-                run_result = await self._kernel.run(
-                    agent,
-                    turn_id=turn_id,
-                    hooks=hooks,
-                    on_signal=_on_signal,
-                    channel_metadata=md_ch or None,
-                )
-                if feishu_hook_ctx is not None:
-                    run_result = await feishu_hook_ctx.finalize_after_run(run_result)
+
+                # Restore IPC stream ContextVars lost during scheduler dispatch.
+                # Scheduler's _dispatch_loop creates tasks via asyncio.create_task,
+                # which inherits ContextVars from _dispatch_loop, not from the IPC handler.
+                # Forward functions are passed through metadata instead.
+                ipc_ask_fwd = md.pop("_ipc_ask_user_forward", None)
+                ipc_perm_fwd = md.pop("_ipc_permission_forward", None)
+                ipc_perm_sid = md.pop("_ipc_permission_session_id", None)
+
+                _run_result_holder: Dict[str, Any] = {}
+
+                async def _do_run() -> None:
+                    nonlocal feishu_hook_ctx
+                    r = await self._kernel.run(
+                        agent,
+                        turn_id=turn_id,
+                        hooks=hooks,
+                        on_signal=_on_signal,
+                        channel_metadata=md_ch or None,
+                    )
+                    if feishu_hook_ctx is not None:
+                        r = await feishu_hook_ctx.finalize_after_run(r)
+                    _run_result_holder["result"] = r
+
+                if ipc_ask_fwd or ipc_perm_fwd or ipc_perm_sid:
+                    from contextlib import AsyncExitStack
+                    from agent_core.permissions.ask_user_registry import (
+                        ask_user_ipc_stream_notify_scope,
+                    )
+                    from agent_core.permissions.wait_registry import (
+                        permission_ipc_stream_notify_scope,
+                        permission_session_notify_scope,
+                    )
+
+                    async with AsyncExitStack() as stack:
+                        if ipc_perm_sid and ipc_perm_fwd:
+                            await stack.enter_async_context(
+                                permission_session_notify_scope(
+                                    ipc_perm_sid, ipc_perm_fwd
+                                )
+                            )
+                        if ipc_ask_fwd:
+                            await stack.enter_async_context(
+                                ask_user_ipc_stream_notify_scope(ipc_ask_fwd)
+                            )
+                        if ipc_perm_fwd:
+                            await stack.enter_async_context(
+                                permission_ipc_stream_notify_scope(ipc_perm_fwd)
+                            )
+                        await _do_run()
+                else:
+                    await _do_run()
+
+                run_result = _run_result_holder["result"]
 
                 # 后处理
                 await agent._finalize_turn(run_result)

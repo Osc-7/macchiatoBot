@@ -22,10 +22,6 @@ from agent_core.interfaces import (
     InjectMessageCommand,
 )
 from agent_core.permissions.ask_user_registry import ask_user_ipc_stream_notify_scope
-from agent_core.permissions.wait_registry import (
-    permission_ipc_stream_notify_scope,
-    permission_session_notify_scope,
-)
 
 from .core_gateway import AutomationCoreGateway
 
@@ -301,20 +297,20 @@ class AutomationIPCServer:
                     len(_ci),
                     [str(i.get("type")) for i in _ci[:3]],
                 )
-            async with permission_session_notify_scope(
-                active_session, _forward_permission_stream
-            ):
-                async with ask_user_ipc_stream_notify_scope(_forward_ask_user_stream):
-                    async with permission_ipc_stream_notify_scope(
-                        _forward_permission_stream
-                    ):
-                        result = await self._gateway.inject_message(
-                            InjectMessageCommand(
-                                session_id=active_session,
-                                input=AgentRunInput(text=text, metadata=meta_dict),
-                            ),
-                            hooks=hooks,
-                        )
+            # Pass IPC stream forward functions through metadata to the scheduler,
+            # where ContextVars will be properly restored (scheduler dispatches via
+            # create_task which does NOT inherit ContextVars from this scope).
+            meta_dict["_ipc_ask_user_forward"] = _forward_ask_user_stream
+            meta_dict["_ipc_permission_forward"] = _forward_permission_stream
+            meta_dict["_ipc_permission_session_id"] = active_session
+
+            result = await self._gateway.inject_message(
+                InjectMessageCommand(
+                    session_id=active_session,
+                    input=AgentRunInput(text=text, metadata=meta_dict),
+                ),
+                hooks=hooks,
+            )
             if stream_closed:
                 recovery_sent = True
                 self._buffer_stream_recovery(active_session, req_id, meta_dict, result)

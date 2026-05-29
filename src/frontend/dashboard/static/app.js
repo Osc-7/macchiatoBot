@@ -9,6 +9,10 @@ const toastEl = $("toast");
 // used by chat and console to send the right session_id to the daemon.
 let activeSessionId = "";
 
+// AbortController for the current streaming fetch – used to cleanly
+// cancel an in-flight stream when the user sends a new message (e.g. /stop).
+let activeStreamAbort = null;
+
 function showToast(message, timeoutMs = 2600) {
   toastEl.textContent = message;
   toastEl.classList.remove("hidden");
@@ -894,44 +898,58 @@ function renderStatusbar(models, dangerousMode, tokenUsage) {
   const modelEl = $("statusModel");
   if (modelEl && Array.isArray(models)) {
     const active = models.find((m) => m?.is_active);
-    // Prefer label, then name, then model id
     const label = active?.label || active?.name || active?.model || "—";
     modelEl.textContent = label;
     modelEl.title = active?.model ? `${active.model}${active.context_window ? ` · ${(active.context_window / 1000).toFixed(0)}k ctx` : ''}` : '';
   }
 
-  // Danger mode: indicator dot
+  // Danger mode: dot indicator
   const dangerEl = $("statusDanger");
   if (dangerEl) {
     const enabled = dangerousMode?.dangerous_mode_enabled;
-    dangerEl.className = "chat-status-item chat-status-dot";
-    dangerEl.classList.toggle("dot-danger", Boolean(enabled));
-    dangerEl.title = enabled ? "Danger mode ON" : "Safe mode";
+    dangerEl.classList.toggle("danger", Boolean(enabled));
+    dangerEl.title = enabled ? "Dangerous mode ON" : "Safe mode";
   }
 
-  // Context window usage percentage
-  const ctxEl = $("statusContext");
-  if (ctxEl) {
-    const total = tokenUsage?.total_tokens ?? 0;
-    // Get context_window from active model
-    let ctxWindow = null;
-    if (Array.isArray(models)) {
+  // Context window: SVG ring — uses current context tokens, NOT accumulated total
+  const ctxRingFill = $("ctxRingFill");
+  const ctxRingText = $("ctxRingText");
+  if (ctxRingFill && ctxRingText) {
+    // Prefer backend-provided context_window fields (real-time current context)
+    const curTokens = tokenUsage?.context_window_current_tokens
+      ?? tokenUsage?.total_tokens ?? 0;
+    const maxTokens = tokenUsage?.context_window_max_tokens;
+    // Fallback to model config if backend doesn't provide context_window fields
+    let ctxMax = maxTokens || null;
+    if (!ctxMax && Array.isArray(models)) {
       const active = models.find((m) => m?.is_active);
-      ctxWindow = active?.context_window || null;
+      ctxMax = active?.context_window || null;
     }
-    if (ctxWindow && ctxWindow > 0) {
-      const pct = Math.round((total / ctxWindow) * 100);
-      const ctxK = (ctxWindow / 1000).toFixed(0);
-      ctxEl.textContent = `ctx ${pct}%`;
-      ctxEl.title = `${(total / 1000).toFixed(1)}k / ${ctxK}k tokens`;
-      ctxEl.classList.toggle("ctx-warn", pct > 70);
-      ctxEl.classList.toggle("ctx-critical", pct > 90);
-    } else if (total > 0) {
-      ctxEl.textContent = `${(total / 1000).toFixed(1)}k tok`;
-      ctxEl.classList.remove("ctx-warn", "ctx-critical");
+    const circumference = 2 * Math.PI * 16; // r=16 → ~100.53
+    if (ctxMax && ctxMax > 0 && curTokens > 0) {
+      const pct = Math.min(100, Math.round((curTokens / ctxMax) * 100));
+      const offset = circumference * (1 - pct / 100);
+      ctxRingFill.setAttribute("stroke-dasharray", circumference);
+      ctxRingFill.setAttribute("stroke-dashoffset", offset);
+      ctxRingText.textContent = `${pct}%`;
+
+      ctxRingFill.classList.toggle("warn", pct > 70 && pct <= 90);
+      ctxRingFill.classList.toggle("critical", pct > 90);
+
+      const curK = (curTokens / 1000).toFixed(1);
+      const maxK = (ctxMax / 1000).toFixed(0);
+      const wrap = ctxRingFill.closest(".ctx-ring-wrap");
+      if (wrap) wrap.title = `${curK}k / ${maxK}k tokens (current context)`;
+    } else if (curTokens > 0) {
+      ctxRingFill.setAttribute("stroke-dasharray", "0");
+      ctxRingFill.setAttribute("stroke-dashoffset", "0");
+      ctxRingText.textContent = `${(curTokens / 1000).toFixed(1)}k`;
+      ctxRingFill.classList.remove("warn", "critical");
     } else {
-      ctxEl.textContent = "ctx —";
-      ctxEl.classList.remove("ctx-warn", "ctx-critical");
+      ctxRingFill.setAttribute("stroke-dasharray", "0");
+      ctxRingFill.setAttribute("stroke-dashoffset", "0");
+      ctxRingText.textContent = "—";
+      ctxRingFill.classList.remove("warn", "critical");
     }
   }
 }
@@ -1862,14 +1880,15 @@ function addAskUserRequest(ctx, event) {
 
   const blocks = questions.map((q, qi) => {
     const qid = q.id || `q${qi + 1}`;
-    const text = q.text || q.question || `Question ${qi + 1}`;
+    const text = q.prompt || q.text || q.question || `Question ${qi + 1}`;
     const options = Array.isArray(q.options) ? q.options : [];
     const allowCustom = q.allow_custom !== false;
     let optionsHtml = "";
     if (options.length) {
       optionsHtml = `<div class="ask-options">${options.map((opt, oi) => {
-        const val = opt.value || opt.label || String(oi);
-        const label = opt.text || opt.label || val;
+        // opt can be a string or {value, label, text}
+        const val = typeof opt === "string" ? opt : (opt.value || opt.label || String(oi));
+        const label = typeof opt === "string" ? opt : (opt.text || opt.label || val);
         return `<label class="ask-option"><input type="radio" name="ask-${batchId}-${qid}" value="${escapeHtml(val)}" /> ${escapeHtml(label)}</label>`;
       }).join("")}</div>`;
     }
@@ -1945,80 +1964,118 @@ function addAskUserRequest(ctx, event) {
 }
 
 async function streamChat(text, sessionId, ctx) {
-  const resp = await fetch(apiUrl("/api/chat/stream"), {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, session_id: sessionId || undefined }),
-  });
-  if (resp.status === 401) {
-    redirectToLogin();
-    throw new Error("Unauthorized");
-  }
-  if (!resp.ok || !resp.body) {
-    throw new Error(`HTTP ${resp.status}`);
-  }
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
+  // Create a fresh AbortController for this stream and store it globally
+  // so the submit handler can abort it on the next message (e.g. /stop).
+  const controller = new AbortController();
+  activeStreamAbort = controller;
   let receivedFinal = false;
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let idx;
-    while ((idx = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, idx).trim();
-      buffer = buffer.slice(idx + 1);
-      if (!line) continue;
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      switch (event.type) {
-        case "assistant_delta":
-          appendDelta(ctx, event.delta || "");
-          break;
-        case "reasoning_delta":
-          appendReasoning(ctx, event.delta || "");
-          break;
-        case "trace": {
-          const data = event.data || {};
-          if (data.type === "tool_call") addToolCall(ctx, data);
-          else if (data.type === "tool_result") finishToolCall(ctx, data);
-          break;
+  try {
+    const resp = await fetch(apiUrl("/api/chat/stream"), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, session_id: sessionId || undefined }),
+      signal: controller.signal,
+    });
+    if (resp.status === 401) {
+      redirectToLogin();
+      throw new Error("Unauthorized");
+    }
+    if (!resp.ok || !resp.body) {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (!line) continue;
+        let event;
+        try {
+          event = JSON.parse(line);
+        } catch {
+          continue;
         }
-        case "permission_request":
-          addPermissionRequest(ctx, event);
-          break;
-        case "ask_user":
-          addAskUserRequest(ctx, event);
-          break;
-        case "system": {
-          ctx.bubble.classList.remove("assistant");
-          ctx.bubble.classList.add("system");
-          const roleEl = ctx.bubble.querySelector(".role");
-          if (roleEl) roleEl.textContent = "slash";
-          ctx.rawText = event.message || "";
-          ctx.body.textContent = ctx.rawText;
-          break;
-        }
-        case "final":
-          receivedFinal = true;
-          if (event.output_text && !ctx.rawText) {
-            ctx.rawText = event.output_text;
-            ctx.body.innerHTML = renderMarkdown(ctx.rawText);
+        switch (event.type) {
+          case "assistant_delta":
+            appendDelta(ctx, event.delta || "");
+            break;
+          case "reasoning_delta":
+            appendReasoning(ctx, event.delta || "");
+            break;
+          case "trace": {
+            const data = event.data || {};
+            if (data.type === "tool_call") addToolCall(ctx, data);
+            else if (data.type === "tool_result") finishToolCall(ctx, data);
+            break;
           }
-          break;
-        case "error":
-          ctx.body.textContent = `Error: ${event.message || "unknown error"}`;
-          break;
-        default:
-          break;
+          case "permission_request":
+            addPermissionRequest(ctx, event);
+            break;
+          case "ask_user":
+            addAskUserRequest(ctx, event);
+            break;
+          case "system": {
+            ctx.bubble.classList.remove("assistant");
+            ctx.bubble.classList.add("system");
+            const roleEl = ctx.bubble.querySelector(".role");
+            if (roleEl) roleEl.textContent = "slash";
+            ctx.rawText = event.message || "";
+            ctx.body.textContent = ctx.rawText;
+            break;
+          }
+          case "final":
+            receivedFinal = true;
+            if (event.output_text && !ctx.rawText) {
+              ctx.rawText = event.output_text;
+              ctx.body.innerHTML = renderMarkdown(ctx.rawText);
+            }
+            break;
+          case "error":
+            ctx.body.textContent = `Error: ${event.message || "unknown error"}`;
+            break;
+          default:
+            break;
+        }
       }
+    }
+  } catch (error) {
+    if (error.name === "AbortError") {
+      // User intentionally aborted (e.g. /stop or new message) – silence.
+      return false;
+    }
+    // Try to recover from mobile network / proxy drops that surface as
+    // "Load failed" or generic fetch errors after the IPC turn finishes.
+    try {
+      ctx.body.classList.add("streaming");
+      ctx.body.textContent = "Connection interrupted, recovering result…";
+      const recData = await requestJson("/api/chat/recoveries", {
+        method: "POST",
+        body: JSON.stringify({ session_id: sessionId || undefined }),
+      });
+      const rec = (recData.recoveries || [])[0];
+      if (rec && rec.output_text) {
+        ctx.rawText = rec.output_text;
+        ctx.body.innerHTML = renderMarkdown(ctx.rawText);
+        ctx.body.classList.remove("streaming");
+        return true;
+      }
+    } catch (_) {
+      // Recovery failed – fall through to generic error below.
+    }
+    ctx.body.classList.remove("streaming");
+    ctx.body.textContent = `Error: ${error.message}`;
+  } finally {
+    if (activeStreamAbort === controller) {
+      activeStreamAbort = null;
     }
   }
   ctx.body.classList.remove("streaming");
@@ -2060,6 +2117,15 @@ $("chatForm").addEventListener("submit", async (evt) => {
 
   const ctx = makeAssistantBubble();
   $("chatSendBtn").disabled = true;
+
+  // Abort any in-flight stream before starting a new one (e.g. /stop cancels the
+  // current assistant turn, /clear wipes history, or a normal new message that
+  // should interrupt the previous response).
+  if (activeStreamAbort) {
+    activeStreamAbort.abort();
+    activeStreamAbort = null;
+  }
+
   try {
     if ($("streamToggle").checked) {
       const ok = await streamChat(text, sessionId, ctx);

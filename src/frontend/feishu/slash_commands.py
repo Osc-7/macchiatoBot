@@ -383,7 +383,7 @@ async def try_handle_slash_command(
         if cancelled:
             return (
                 True,
-                "Chat session interrupted.",
+                "已中断当前会话。",
             )
         return (
             True,

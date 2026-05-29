@@ -308,13 +308,23 @@ def notify_ask_user_pending(batch_id: str, payload: Dict[str, Any]) -> None:
         except RuntimeError:
             logger.warning("ask_user notify: ipc stream 需要运行中事件循环")
             return
+        logger.info(
+            "ask_user notify: using IPC stream, batch_id=%s, sid=%s",
+            batch_id,
+            payload.get("session_id", "?"),
+        )
         loop.create_task(stream_fn(batch_id, payload))
         return
     if _notify_hook is not None:
+        logger.info("ask_user notify: using global hook, batch_id=%s", batch_id)
         try:
             _notify_hook(batch_id, payload)
         except Exception as exc:
             logger.warning("ask_user notify hook failed: %s", exc)
+        return
+    logger.warning(
+        "ask_user notify: no stream and no hook, batch_id=%s will time out", batch_id
+    )
 
 
 def parse_answers_from_ipc_params(params: Dict[str, Any]) -> AskUserBatchDecision:

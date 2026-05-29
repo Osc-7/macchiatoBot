@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content" />
     <title>macchiato Web</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
-    <link rel="stylesheet" href="/console/assets/style.css" />
+    <link rel="stylesheet" href="/console/assets/style.css?v=8" />
   </head>
   <body>
     <div class="app">
@@ -75,9 +75,16 @@
           <div class="chat-statusbar" id="chatStatusbar">
             <span class="chat-status-item" id="statusModel">—</span>
             <span class="chat-status-sep">·</span>
-            <span class="chat-status-item" id="statusDanger">safe</span>
-            <span class="chat-status-sep">·</span>
-            <span class="chat-status-item" id="statusContext">—</span>
+            <span class="chat-status-safe" id="statusDanger" title="Safe mode"></span>
+            <span class="chat-status-item ctx-ring-wrap" id="statusContext">
+              <svg class="ctx-ring-svg" viewBox="0 0 40 40">
+                <g transform="rotate(-90 20 20)">
+                  <circle class="ctx-ring-track" cx="20" cy="20" r="16" />
+                  <circle class="ctx-ring-fill" cx="20" cy="20" r="16" id="ctxRingFill" />
+                </g>
+                <text x="20" y="21" class="ctx-ring-text" id="ctxRingText">—</text>
+              </svg>
+            </span>
           </div>
           <form class="chat-input" id="chatForm">
             <div class="slash-suggest hidden" id="slashSuggest"></div>
@@ -326,6 +333,6 @@
       </main>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-    <script src="/console/assets/app.js"></script>
+    <script src="/console/assets/app.js?v=8"></script>
   </body>
 </html>

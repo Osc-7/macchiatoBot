@@ -17,6 +17,8 @@ import uuid
 from fastapi import APIRouter, FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.staticfiles import StaticFiles as StarletteStaticFiles
+from starlette.responses import Response
 from pydantic import BaseModel
 
 from agent_core.config import find_config_file
@@ -30,6 +32,23 @@ from frontend.dashboard.paths import CONSOLE_PREFIX, LOGIN_PATH, console_path
 from system.automation.ipc import AutomationIPCClient
 
 logger = logging.getLogger(__name__)
+
+
+class NoCacheStaticFiles(StarletteStaticFiles):
+    """StaticFiles that always disables browser caching for dashboard assets."""
+
+    def file_response(
+        self,
+        full_path: str | os.PathLike[str],
+        stat_result: os.stat_result,
+        scope,
+        status_code: int = 200,
+    ) -> Response:
+        resp = super().file_response(full_path, stat_result, scope, status_code)
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return resp
 
 
 async def _maybe_handle_slash(client: AutomationIPCClient, text: str) -> str | None:
@@ -513,13 +532,18 @@ class DashboardBackend:
         cfg_path.write_text(yaml_text, encoding="utf-8")
         return cfg_path
 
-    async def _with_client(self, username: str = "") -> AutomationIPCClient:
-        client = AutomationIPCClient(
-            source="dashboard",
-            owner_id="root",
-            username=username,
-            client_id="dashboard",
-        )
+    async def _with_client(
+        self, username: str = "", timeout_seconds: float | None = None
+    ) -> AutomationIPCClient:
+        kwargs: Dict[str, Any] = {
+            "source": "dashboard",
+            "owner_id": "root",
+            "username": username,
+            "client_id": "dashboard",
+        }
+        if timeout_seconds is not None:
+            kwargs["timeout_seconds"] = timeout_seconds
+        client = AutomationIPCClient(**kwargs)
         await client.connect()
         return client
 
@@ -632,7 +656,8 @@ class DashboardBackend:
         self, text: str, *, session_id: str | None = None, username: str = ""
     ) -> AsyncIterator[Dict[str, Any]]:
         """Stream chat events (assistant_delta / reasoning_delta / trace / final)."""
-        client = await self._with_client(username=username)
+        # Use a long timeout so ask_user / permission waits do not kill the IPC stream.
+        client = await self._with_client(username=username, timeout_seconds=7200.0)
         try:
             if session_id:
                 await client.switch_session(session_id=session_id)
@@ -688,6 +713,11 @@ class DashboardBackend:
             async def _on_ask_user_notify(
                 batch_id: str, payload: Dict[str, Any]
             ) -> None:
+                logger.info(
+                    "chat_stream ask_user notify: batch_id=%s questions=%d",
+                    batch_id,
+                    len(payload.get("questions") or []),
+                )
                 await queue.put(
                     {
                         "type": "ask_user",
@@ -718,9 +748,16 @@ class DashboardBackend:
                     await queue.put(SENTINEL)
 
             task = asyncio.create_task(_runner())
+            _http_disconnect = False
             try:
                 while True:
-                    event = await queue.get()
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    except asyncio.TimeoutError:
+                        # SSE keepalive for mobile proxies / Safari that drop
+                        # idle connections after ~30-60 s.
+                        yield {"type": "_keepalive"}
+                        continue
                     if event is SENTINEL:
                         break
                     yield event
@@ -751,13 +788,47 @@ class DashboardBackend:
                     "token_usage": usage,
                     "turn_count": turn_count,
                 }
-            finally:
+            except GeneratorExit:
+                # HTTP connection dropped (e.g. Safari mobile timeout).
+                # Do NOT cancel the IPC task – that would close the IPC writer
+                # while the server may still be streaming, causing BrokenPipe.
+                # Let the turn finish naturally; the server buffers the result.
+                _http_disconnect = True
+                raise
+            except asyncio.CancelledError:
+                _http_disconnect = True
+                raise
+            except Exception:
+                # Genuine error in this coroutine – cancel the IPC task.
                 if not task.done():
                     task.cancel()
                     try:
                         await task
                     except Exception:  # noqa: BLE001
                         pass
+                raise
+            finally:
+                if not _http_disconnect and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except Exception:  # noqa: BLE001
+                        pass
+        finally:
+            await client.close()
+
+    async def get_stream_recoveries(
+        self, *, session_id: str | None = None, username: str = ""
+    ) -> list[Dict[str, Any]]:
+        """Poll recoveries from IPC server and optionally filter by session."""
+        client = await self._with_client(username=username)
+        try:
+            recoveries = await client.poll_stream_recoveries()
+            if session_id:
+                recoveries = [
+                    r for r in recoveries if r.get("session_id") == session_id
+                ]
+            return recoveries if isinstance(recoveries, list) else []
         finally:
             await client.close()
 
@@ -1084,7 +1155,7 @@ def create_dashboard_app(
     static_dir = Path(__file__).with_name("static")
     app.mount(
         console_path("/assets"),
-        StaticFiles(directory=static_dir),
+        NoCacheStaticFiles(directory=static_dir),
         name="dashboard-assets",
     )
 
@@ -1104,7 +1175,14 @@ def create_dashboard_app(
 
     @console.get("/")
     async def index() -> FileResponse:
-        return FileResponse(static_dir / "index.html")
+        return FileResponse(
+            static_dir / "index.html",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
 
     @console.get("/api/auth/status")
     async def auth_status_api(request: Request) -> Dict[str, Any]:
@@ -1327,6 +1405,11 @@ def create_dashboard_app(
                 async for event in service.chat_stream(
                     text, session_id=session_id, username=username
                 ):
+                    if event.get("type") == "_keepalive":
+                        # SSE comment line – keeps mobile proxies / Safari from
+                        # dropping the connection during long turns.
+                        yield b": \n"
+                        continue
                     yield (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
             except Exception as exc:  # noqa: BLE001
                 yield (
@@ -1337,6 +1420,15 @@ def create_dashboard_app(
                 ).encode("utf-8")
 
         return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+    @console.post("/api/chat/recoveries")
+    async def post_chat_recoveries(request: Request) -> JSONResponse:
+        username = getattr(request.state, "dashboard_user", "")
+        try:
+            recoveries = await service.get_stream_recoveries(username=username)
+            return JSONResponse({"recoveries": recoveries})
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @console.post("/api/chat/upload")
     async def post_chat_upload(file: UploadFile) -> Dict[str, Any]:

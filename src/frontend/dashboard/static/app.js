@@ -2267,6 +2267,16 @@ $("chatText").addEventListener("blur", () => {
   window.setTimeout(hideSuggest, 120);
 });
 
+// IME composition guard: some browsers set isComposing=false before the
+// candidate panel is actually dismissed. Track it manually.
+let isIMEComposing = false;
+let lastCompositionEndAt = 0;
+$("chatText").addEventListener("compositionstart", () => { isIMEComposing = true; });
+$("chatText").addEventListener("compositionend", () => {
+  isIMEComposing = false;
+  lastCompositionEndAt = Date.now();
+});
+
 $("chatText").addEventListener("keydown", (evt) => {
   // Suggestion navigation first
   if (suggestVisible()) {
@@ -2282,7 +2292,7 @@ $("chatText").addEventListener("keydown", (evt) => {
       renderSuggest();
       return;
     }
-    if (evt.key === "Tab" || (evt.key === "Enter" && !evt.metaKey && !evt.ctrlKey && !evt.shiftKey && !evt.isComposing)) {
+    if (evt.key === "Tab" || (evt.key === "Enter" && !evt.metaKey && !evt.ctrlKey && !evt.shiftKey && !evt.isComposing && !isIMEComposing && (Date.now() - lastCompositionEndAt > 120))) {
       evt.preventDefault();
       acceptSuggest(suggestItems[suggestIdx]);
       return;
@@ -2295,7 +2305,7 @@ $("chatText").addEventListener("keydown", (evt) => {
   }
 
   if (evt.key !== "Enter") return;
-  if (evt.isComposing) return;
+  if (evt.isComposing || isIMEComposing || (Date.now() - lastCompositionEndAt <= 120)) return;
   if (evt.metaKey || evt.ctrlKey || evt.shiftKey) {
     evt.preventDefault();
     const el = evt.target;

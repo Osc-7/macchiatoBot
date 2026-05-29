@@ -666,8 +666,8 @@ class DashboardBackend:
         finally:
             await client.close()
 
-    async def switch_model(self, name: str) -> Dict[str, Any]:
-        client = await self._with_client()
+    async def switch_model(self, name: str, *, username: str = "") -> Dict[str, Any]:
+        client = await self._with_client(username=username)
         try:
             info = await client.switch_model(name=name)
             return {"active_session_id": client.active_session_id, "info": info}
@@ -679,6 +679,8 @@ class DashboardBackend:
         try:
             if session_id:
                 await client.switch_session(session_id=session_id)
+            elif username:
+                await client.switch_session(session_id=self._web_session_prefix(username))
             slash_reply = await _maybe_handle_slash(client, text)
             if slash_reply is not None:
                 usage = await client.get_token_usage()
@@ -716,6 +718,8 @@ class DashboardBackend:
         try:
             if session_id:
                 await client.switch_session(session_id=session_id)
+            elif username:
+                await client.switch_session(session_id=self._web_session_prefix(username))
 
             slash_reply = await _maybe_handle_slash(client, text)
             if slash_reply is not None:
@@ -971,6 +975,8 @@ class DashboardBackend:
                     return {"ok": True, "kind": "text", "output": KERNEL_CONSOLE_HELP}
                 if verb in ("ps", "cores"):
                     data = await client.terminal_ps()
+                    if username and not self._is_admin(username):
+                        data = self._filter_cores_for_user(data, username)
                     return {
                         "ok": True,
                         "kind": "text",
@@ -1019,6 +1025,10 @@ class DashboardBackend:
                             "kind": "error",
                             "output": "usage: inspect <session_id>",
                         }
+                    try:
+                        self._assert_session_access(args[0], username)
+                    except HTTPException as exc:
+                        return {"ok": False, "kind": "error", "output": exc.detail}
                     data = await client.terminal_inspect(args[0])
                     return {
                         "ok": True,
@@ -1040,6 +1050,10 @@ class DashboardBackend:
                             "kind": "error",
                             "output": "usage: kill <session_id>",
                         }
+                    try:
+                        self._assert_session_access(args[0], username)
+                    except HTTPException as exc:
+                        return {"ok": False, "kind": "error", "output": exc.detail}
                     await client.terminal_kill(args[0])
                     return {"ok": True, "kind": "text", "output": f"killed: {args[0]}"}
                 if verb == "cancel":
@@ -1049,6 +1063,10 @@ class DashboardBackend:
                             "kind": "error",
                             "output": "usage: cancel <session_id>",
                         }
+                    try:
+                        self._assert_session_access(args[0], username)
+                    except HTTPException as exc:
+                        return {"ok": False, "kind": "error", "output": exc.detail}
                     cancelled = await client.terminal_cancel(args[0])
                     return {
                         "ok": True,
@@ -1062,6 +1080,10 @@ class DashboardBackend:
                             "kind": "error",
                             "output": "usage: spawn <session_id>",
                         }
+                    try:
+                        self._assert_session_access(args[0], username)
+                    except HTTPException as exc:
+                        return {"ok": False, "kind": "error", "output": exc.detail}
                     data = await client.terminal_spawn(
                         session_id=args[0], source="dashboard"
                     )
@@ -1073,6 +1095,8 @@ class DashboardBackend:
                     }
                 if verb in ("sessions", "session-list"):
                     data = await client.list_sessions()
+                    if username and not self._is_admin(username):
+                        data = self._filter_sessions_for_user(data, username)
                     return {
                         "ok": True,
                         "kind": "text",
@@ -1106,6 +1130,10 @@ class DashboardBackend:
                             "output": "usage: attach <session_id> <message...>",
                         }
                     sid = args[0]
+                    try:
+                        self._assert_session_access(sid, username)
+                    except HTTPException as exc:
+                        return {"ok": False, "kind": "error", "output": exc.detail}
                     text = " ".join(args[1:])
                     result = await client.terminal_attach(sid, text)
                     output = getattr(result, "output_text", None) or "(no text reply)"
@@ -1413,17 +1441,21 @@ def create_dashboard_app(
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @console.post("/api/kernel/context/clear")
-    async def post_kernel_context_clear() -> Dict[str, Any]:
+    async def post_kernel_context_clear(request: Request) -> Dict[str, Any]:
         try:
-            await service.clear_context()
+            username = getattr(request.state, "dashboard_user", "")
+            await service.clear_context(username=username)
             return {"ok": True}
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @console.post("/api/kernel/model/switch")
-    async def post_kernel_model_switch(payload: ModelSwitchRequest) -> Dict[str, Any]:
+    async def post_kernel_model_switch(
+        payload: ModelSwitchRequest, request: Request
+    ) -> Dict[str, Any]:
         try:
-            return await service.switch_model(payload.name.strip())
+            username = getattr(request.state, "dashboard_user", "")
+            return await service.switch_model(payload.name.strip(), username=username)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1449,6 +1481,9 @@ def create_dashboard_app(
         if not text:
             raise HTTPException(status_code=400, detail="text is required")
         username = getattr(request.state, "dashboard_user", "")
+        service._assert_session_access(
+            (payload.session_id or "").strip() or None, username
+        )
         try:
             return await service.chat(
                 text,
@@ -1485,6 +1520,7 @@ def create_dashboard_app(
             raise HTTPException(status_code=400, detail="text is required")
         session_id = (payload.session_id or "").strip() or None
         username = getattr(request.state, "dashboard_user", "")
+        service._assert_session_access(session_id, username)
 
         async def gen() -> AsyncIterator[bytes]:
             try:

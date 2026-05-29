@@ -853,7 +853,7 @@ function renderSessionsDropdowns(sessions, active) {
   const prevActive = activeSel.value;
 
   sessionSel.innerHTML = '<option value="">Select a session…</option>';
-  activeSel.innerHTML = '<option value="">(daemon default)</option>';
+  activeSel.innerHTML = '<option value="">(default session)</option>';
   list.forEach((sid) => {
     const opt = document.createElement("option");
     opt.value = sid;

@@ -52,6 +52,7 @@ automation-logs/
 # Env / Config
 .env
 config/config.yaml
+config/dashboard_auth.yaml
 config.yaml
 
 # Project-specific private or generated data
@@ -75,3 +76,5 @@ run_automation.sh
 MagicMock/
 config/llm/providers.d/custom.yaml
 config/llm/providers.d/right_code.yaml
+# Plans & roadmaps (local working docs, not committed)
+plan/

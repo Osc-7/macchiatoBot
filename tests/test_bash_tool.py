@@ -682,6 +682,22 @@ class TestBashToolExecution:
         finally:
             await rt.close()
 
+    async def test_sync_wait_for_completion_blocks_until_done(self, tmp_path):
+        tool, rt = _make_tool(base_dir=str(tmp_path))
+        await rt.start()
+        try:
+            result = await tool.execute(
+                command="sleep 0.4 && echo waited",
+                wait_window_ms=20,
+                wait_for_completion=True,
+                hard_timeout_seconds=5,
+            )
+            assert result.success
+            assert not result.data.get("auto_backgrounded", False)
+            assert "waited" in result.data["stdout"]
+        finally:
+            await rt.close()
+
     async def test_hard_timeout_marks_job_timed_out(self, tmp_path):
         tool, rt = _make_tool(base_dir=str(tmp_path))
         await rt.start()
@@ -777,6 +793,7 @@ class TestBashToolDefinition:
         assert "command" in param_names
         assert "restart" in param_names
         assert "timeout" in param_names
+        assert "wait_for_completion" in param_names
         assert "permission_id" not in param_names
         assert "confirm" not in param_names
 
@@ -908,6 +925,43 @@ class TestBashToolRemoteBackground:
 
 
 class TestBashToolRemoteRecover:
+    async def test_remote_wait_for_completion_passed_to_registry(self, monkeypatch):
+        tool, rt = _make_tool()
+        state = RemoteWorkspaceState(
+            session_id="sid-wait",
+            login="g3",
+            requested_path="/home/osc7",
+            profile="dev",
+            status="active",
+        )
+        only = RemoteCommandResult(
+            request_id="r-wait",
+            command="sleep 1 && echo done",
+            stdout="done\n",
+            exit_code=0,
+            cwd="/workspace",
+        )
+        fake_registry = _FakeRemoteRegistry([only], open_success=True)
+
+        import agent_core.remote.workspace_state as state_mod
+        import agent_core.remote.worker_registry as worker_mod
+
+        monkeypatch.setattr(state_mod, "get_remote_workspace_state", lambda sid: state)
+        monkeypatch.setattr(worker_mod, "get_remote_worker_registry", lambda: fake_registry)
+        await rt.start()
+        try:
+            result = await tool.execute(
+                command="sleep 1 && echo done",
+                wait_window_ms=20,
+                wait_for_completion=True,
+                __execution_context__={"session_id": "sid-wait", "profile_mode": "full"},
+            )
+            assert result.success
+            assert fake_registry.execute_calls == 1
+            assert fake_registry.execute_kwargs[0]["wait_for_completion"] is True
+        finally:
+            await rt.close()
+
     async def test_remote_sleep_without_timeout_passes_inferred_timeout(self, monkeypatch):
         tool, rt = _make_tool()
         state = RemoteWorkspaceState(

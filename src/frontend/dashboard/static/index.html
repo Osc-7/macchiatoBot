@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content" />
+    <title>macchiato Web</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+    <link rel="stylesheet" href="/console/assets/style.css?v=8" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">m.</span>
+          <div class="brand-meta">
+            <strong>macchiato</strong>
+            <small>web console</small>
+          </div>
+        </div>
+
+        <nav class="nav" id="nav">
+          <button class="nav-item active" data-view="chat">
+            <span class="dot"></span>Chat
+          </button>
+          <button class="nav-item" data-view="settings">
+            <span class="dot"></span>Settings
+          </button>
+          <button class="nav-item" data-view="kernel">
+            <span class="dot"></span>Kernel
+          </button>
+          <button class="nav-item" data-view="backups">
+            <span class="dot"></span>Backups
+          </button>
+        </nav>
+
+        <div class="sidebar-foot">
+          <div class="auth-bar hidden" id="authUser"></div>
+          <button class="btn ghost small hidden" id="authLogout" type="button">Sign out</button>
+          <div class="status" id="daemonStatus">
+            <span class="status-dot"></span>
+            <span class="status-text">connecting…</span>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="topbar-left">
+            <h1 id="pageTitle">Chat</h1>
+            <p class="muted" id="pageSubtitle">Talk to the running macchiato daemon.</p>
+          </div>
+          <div class="topbar-right">
+            <label class="topbar-field">
+              <span>Session</span>
+              <select id="activeSessionSelect" class="control">
+                <option value="">(daemon default)</option>
+              </select>
+            </label>
+            <button class="btn-icon" id="globalRefresh" title="Refresh">↻</button>
+          </div>
+        </header>
+
+        <!-- ============== Chat ============== -->
+        <section class="view view-chat active" data-view="chat">
+          <div class="chat-window" id="chatWindow">
+            <div class="empty">
+              <p>No messages yet.</p>
+              <p class="muted">
+                <kbd>Enter</kbd> sends · <kbd>⌘/Ctrl + Enter</kbd> or <kbd>Shift + Enter</kbd> inserts a newline.
+                Slash commands like <code>/help</code>, <code>/clear</code>, <code>/session</code> are supported.
+                Permission prompts appear inline when the agent needs approval.
+              </p>
+            </div>
+          </div>
+          <div class="chat-statusbar" id="chatStatusbar">
+            <span class="chat-status-item" id="statusModel">—</span>
+            <span class="chat-status-sep">·</span>
+            <span class="chat-status-safe" id="statusDanger" title="Safe mode"></span>
+            <span class="chat-status-item ctx-ring-wrap" id="statusContext">
+              <svg class="ctx-ring-svg" viewBox="0 0 40 40">
+                <g transform="rotate(-90 20 20)">
+                  <circle class="ctx-ring-track" cx="20" cy="20" r="16" />
+                  <circle class="ctx-ring-fill" cx="20" cy="20" r="16" id="ctxRingFill" />
+                </g>
+                <text x="20" y="21" class="ctx-ring-text" id="ctxRingText">—</text>
+              </svg>
+            </span>
+          </div>
+          <form class="chat-input" id="chatForm">
+            <div class="slash-suggest hidden" id="slashSuggest"></div>
+            <div class="chat-attachments hidden" id="chatAttachments"></div>
+            <div class="chat-input-pill">
+              <textarea
+                id="chatText"
+                rows="3"
+                placeholder="Ask macchiato anything… (try /help)"
+              ></textarea>
+              <div class="chat-actions">
+                <div class="chat-actions-left">
+                  <input type="checkbox" id="streamToggle" checked class="hidden" />
+                  <input type="file" id="chatFileInput" class="hidden" multiple />
+                  <button type="button" class="btn-icon" id="chatAttachBtn" title="Attach file">+</button>
+                </div>
+                <span class="muted" id="chatHint">
+                  Streaming via daemon IPC · <kbd>Enter</kbd> sends · slash commands supported
+                </span>
+                <button type="submit" class="btn primary" id="chatSendBtn">Send</button>
+              </div>
+            </div>
+          </form>
+        </section>
+
+        <!-- ============== Settings ============== -->
+        <section class="view view-settings" data-view="settings">
+          <div class="callout">
+            <strong>How saving works.</strong>
+            <span class="muted">
+              Reload re-reads <code id="settingsPath">config.yaml</code> from disk.
+              Save writes back to that file (an auto backup is created first).
+              The running daemon caches config in memory, so a daemon restart is
+              required for changes to take effect.
+            </span>
+          </div>
+
+          <div class="settings-toolbar">
+            <input
+              id="settingsSearch"
+              type="search"
+              class="control"
+              placeholder="Search settings, e.g. llm.active"
+            />
+            <span class="muted" id="settingsDiff">0 changed / 0 total</span>
+            <div class="spacer"></div>
+            <button class="btn ghost" id="settingsRevertAllBtn" disabled>Revert all</button>
+            <button class="btn ghost" id="settingsReloadBtn">Reload from disk</button>
+            <button class="btn primary" id="settingsSaveBtn">Save to file</button>
+          </div>
+
+          <details class="settings-diff hidden" id="settingsDiffPanel">
+            <summary>Pending changes (<span id="settingsDiffCount">0</span>)</summary>
+            <div class="settings-diff-body" id="settingsDiffBody"></div>
+          </details>
+
+          <div class="settings-layout">
+            <aside class="settings-nav" id="settingsNav"></aside>
+            <div class="settings-main">
+              <div id="settingsList" class="settings-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============== Kernel ============== -->
+        <section class="view view-kernel" data-view="kernel">
+          <div class="kernel-overview">
+          <div class="callout kernel-intro">
+            <strong>Kernel control plane.</strong>
+            <span class="muted">
+              The <em>daemon</em> hosts one or more <em>cores</em> — live agent processes tied to a
+              <em>session</em> (conversation + memory). Chat uses the session picked in the top bar.
+              Use the panels for everyday actions; use the console for diagnostics and power-user commands.
+            </span>
+          </div>
+
+          <div class="kpi-grid">
+            <div class="kpi" title="Can the dashboard reach automation_daemon?">
+              <span class="kpi-label">Daemon</span>
+              <strong class="kpi-value" id="kpiConnected">—</strong>
+              <span class="kpi-hint">IPC connection</span>
+            </div>
+            <div class="kpi" title="Agent processes currently loaded in memory">
+              <span class="kpi-label">Active cores</span>
+              <strong class="kpi-value" id="kpiActiveCores">—</strong>
+              <span class="kpi-hint">running agents</span>
+            </div>
+            <div class="kpi" title="Requests waiting for a free core slot">
+              <span class="kpi-label">Queue</span>
+              <strong class="kpi-value" id="kpiQueue">—</strong>
+              <span class="kpi-hint">pending turns</span>
+            </div>
+            <div class="kpi" title="Turns currently being processed">
+              <span class="kpi-label">In-flight</span>
+              <strong class="kpi-value" id="kpiInflight">—</strong>
+              <span class="kpi-hint">active now</span>
+            </div>
+            <div class="kpi" title="Session Chat and slash commands will target">
+              <span class="kpi-label">Active session</span>
+              <strong class="kpi-value mono" id="kpiActiveSession">—</strong>
+              <span class="kpi-hint">Chat target</span>
+            </div>
+            <div class="kpi" title="Conversation rounds in the active session">
+              <span class="kpi-label">Turns</span>
+              <strong class="kpi-value" id="kpiTurns">—</strong>
+              <span class="kpi-hint">this session</span>
+            </div>
+          </div>
+
+          <div class="kernel-layout">
+            <div class="kernel-side">
+              <div class="panel">
+                <header class="panel-head">
+                  <div>
+                    <h2>Session</h2>
+                    <p class="panel-desc">Pick which conversation the dashboard (and Chat) talks to.</p>
+                  </div>
+                  <button class="btn ghost small" id="kernelRefreshBtn">Refresh</button>
+                </header>
+                <div class="row">
+                  <label>Conversation</label>
+                  <select id="sessionSelect" class="control">
+                    <option value="">Select a session…</option>
+                  </select>
+                </div>
+                <div class="btn-row">
+                  <button class="btn primary" id="switchSessionBtn">Use this session</button>
+                  <button class="btn ghost" id="clearContextBtn" title="Wipe message history, keep the session">Clear history</button>
+                  <button class="btn ghost" id="spawnBtn" title="Start an agent core for the selected session">Start core</button>
+                </div>
+              </div>
+
+              <div class="panel">
+                <header class="panel-head">
+                  <div>
+                    <h2>Model</h2>
+                    <p class="panel-desc">Switch the LLM provider for the active session.</p>
+                  </div>
+                </header>
+                <div class="row">
+                  <label>Provider</label>
+                  <select id="modelSelect" class="control">
+                    <option value="">Select a model…</option>
+                  </select>
+                </div>
+                <div class="btn-row">
+                  <button class="btn primary" id="switchModelBtn">Switch model</button>
+                </div>
+              </div>
+
+              <div class="panel">
+                <header class="panel-head">
+                  <div>
+                    <h2>Token usage</h2>
+                    <p class="panel-desc">Accumulated cost for the active session.</p>
+                  </div>
+                </header>
+                <ul class="kv kv-compact">
+                  <li><span>prompt</span><b id="tuPrompt">0</b></li>
+                  <li><span>completion</span><b id="tuCompletion">0</b></li>
+                  <li><span>total</span><b id="tuTotal">0</b></li>
+                  <li><span>calls</span><b id="tuCalls">0</b></li>
+                  <li><span>cost (¥)</span><b id="tuCost">0</b></li>
+                  <li><span>cache hit</span><b id="tuCacheHit">0</b></li>
+                </ul>
+              </div>
+            </div>
+
+            <div class="panel kernel-cores-panel">
+              <header class="panel-head">
+                <div>
+                  <h2>Running cores</h2>
+                  <p class="panel-desc">
+                    Each core is a loaded agent process. <strong>Cancel</strong> stops the current turn;
+                    <strong>Kill</strong> tears down the process entirely.
+                  </p>
+                </div>
+              </header>
+              <div id="coreList" class="core-list">
+                <p class="muted small">Loading…</p>
+              </div>
+              <p class="muted small kernel-console-tip">
+                Tip: run <button type="button" class="link-btn" data-console-cmd="ps">ps</button> or
+                <button type="button" class="link-btn" data-console-cmd="inspect SESSION">inspect &lt;id&gt;</button>
+                in the console for full details.
+              </p>
+            </div>
+          </div>
+          </div>
+
+          <div class="panel kernel-console" id="kernelConsole">
+            <header class="panel-head">
+              <div>
+                <h2>Console</h2>
+                <p class="panel-desc">CLI-style diagnostics. Same commands as <code>kernel&gt;</code> in the daemon shell.</p>
+              </div>
+              <div class="console-meta">
+                <button class="btn ghost small" id="consoleClearBtn">Clear</button>
+              </div>
+            </header>
+            <div class="console-quick" id="consoleQuick">
+              <span class="console-quick-label">Quick:</span>
+              <button type="button" class="console-chip" data-console-cmd="ps">ps</button>
+              <button type="button" class="console-chip" data-console-cmd="top">top</button>
+              <button type="button" class="console-chip" data-console-cmd="queue">queue</button>
+              <button type="button" class="console-chip" data-console-cmd="sessions">sessions</button>
+              <button type="button" class="console-chip" data-console-cmd="models">models</button>
+              <button type="button" class="console-chip" data-console-cmd="jobs">jobs</button>
+              <button type="button" class="console-chip" data-console-cmd="tasks">tasks</button>
+              <button type="button" class="console-chip" data-console-cmd="usage">usage</button>
+              <button type="button" class="console-chip" data-console-cmd="/help">/help</button>
+            </div>
+            <div class="console-output" id="consoleOutput">
+              <div class="console-welcome">
+                Type <code>help</code> for commands · <kbd>↑</kbd>/<kbd>↓</kbd> history · <kbd>Tab</kbd> complete session ids
+              </div>
+            </div>
+            <form class="console-input" id="consoleForm" autocomplete="off">
+              <span class="console-prompt">›</span>
+              <input
+                id="consoleInput"
+                class="control"
+                type="text"
+                placeholder="ps  ·  inspect cli:root  ·  attach cli:root hello  ·  user list"
+                spellcheck="false"
+              />
+              <div class="console-suggest hidden" id="consoleSuggest"></div>
+            </form>
+          </div>
+        </section>
+
+        <!-- ============== Backups ============== -->
+        <section class="view view-backups" data-view="backups">
+          <div class="settings-toolbar">
+            <span class="muted" id="backupCount">0 backups</span>
+            <div class="spacer"></div>
+            <button class="btn ghost" id="backupsReloadBtn">Refresh</button>
+            <button class="btn primary" id="backupCreateBtn">Create backup</button>
+          </div>
+          <div class="backup-list" id="backupList">
+            <p class="muted">No backups yet.</p>
+          </div>
+        </section>
+
+        <div class="toast hidden" id="toast"></div>
+      </main>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+    <script src="/console/assets/app.js?v=9"></script>
+  </body>
+</html>

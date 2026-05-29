@@ -22,10 +22,6 @@ from agent_core.interfaces import (
     InjectMessageCommand,
 )
 from agent_core.permissions.ask_user_registry import ask_user_ipc_stream_notify_scope
-from agent_core.permissions.wait_registry import (
-    permission_ipc_stream_notify_scope,
-    permission_session_notify_scope,
-)
 
 from .core_gateway import AutomationCoreGateway
 
@@ -190,7 +186,7 @@ class AutomationIPCServer:
                         continue
                     result = await self._dispatch(method, params)
                     payload = {"id": req_id, "ok": True, "result": result}
-                except Exception as exc:
+                except (Exception, asyncio.CancelledError) as exc:
                     payload = {
                         "id": req_id,
                         "ok": False,
@@ -301,20 +297,20 @@ class AutomationIPCServer:
                     len(_ci),
                     [str(i.get("type")) for i in _ci[:3]],
                 )
-            async with permission_session_notify_scope(
-                active_session, _forward_permission_stream
-            ):
-                async with ask_user_ipc_stream_notify_scope(_forward_ask_user_stream):
-                    async with permission_ipc_stream_notify_scope(
-                        _forward_permission_stream
-                    ):
-                        result = await self._gateway.inject_message(
-                            InjectMessageCommand(
-                                session_id=active_session,
-                                input=AgentRunInput(text=text, metadata=meta_dict),
-                            ),
-                            hooks=hooks,
-                        )
+            # Pass IPC stream forward functions through metadata to the scheduler,
+            # where ContextVars will be properly restored (scheduler dispatches via
+            # create_task which does NOT inherit ContextVars from this scope).
+            meta_dict["_ipc_ask_user_forward"] = _forward_ask_user_stream
+            meta_dict["_ipc_permission_forward"] = _forward_permission_stream
+            meta_dict["_ipc_permission_session_id"] = active_session
+
+            result = await self._gateway.inject_message(
+                InjectMessageCommand(
+                    session_id=active_session,
+                    input=AgentRunInput(text=text, metadata=meta_dict),
+                ),
+                hooks=hooks,
+            )
             if stream_closed:
                 recovery_sent = True
                 self._buffer_stream_recovery(active_session, req_id, meta_dict, result)
@@ -340,6 +336,20 @@ class AutomationIPCServer:
             # 客户端在流式对话过程中主动断开连接（例如用户 Ctrl+C 或退出 CLI），
             # writer 已失效，继续写入只会产生噪音日志。此处记录一条调试信息后静默结束。
             _mark_stream_disconnected(exc)
+        except asyncio.CancelledError as exc:
+            # 业务级取消（如 session 被 scheduler skip），需要给客户端明确的 final 事件
+            try:
+                await _send_event(
+                    "final", {"ok": False, "error": _format_ipc_error(exc)}
+                )
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                logger.warning(
+                    "failed to send cancel final event to disconnected client "
+                    "(session_id=%s, client_id=%s, error=%s)",
+                    active_session,
+                    client_id,
+                    exc,
+                )
         except Exception as exc:
             # 非连接类错误：尽量向仍然存活的客户端发送 final 错误事件；
             # 若此时连接也已断开，则忽略第二次 BrokenPipe/ConnectionReset。
@@ -807,11 +817,14 @@ class AutomationIPCClient:
         *,
         owner_id: str = "root",
         source: str = "cli",
+        username: str = "",
+        client_id: str | None = None,
         socket_path: Optional[str] = None,
         timeout_seconds: float = 300.0,
     ) -> None:
         self.owner_id = owner_id.strip() or "root"
         self.source = source.strip() or "cli"
+        self.username = username.strip()
         self.active_session_id = f"{self.source}:{self.owner_id}"
         self._socket_path = socket_path or default_socket_path()
         self._timeout_seconds = float(timeout_seconds)
@@ -825,7 +838,7 @@ class AutomationIPCClient:
             "prompt_cache_miss_tokens": 0,
         }
         self._turn_count_cache = 0
-        self._client_id = f"{os.getpid()}-{id(self)}"
+        self._client_id = client_id or f"{os.getpid()}-{id(self)}"
 
     @property
     def config(self) -> Any:

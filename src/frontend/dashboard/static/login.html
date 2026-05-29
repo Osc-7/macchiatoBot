@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>登录 · macchiato</title>
+    <link rel="stylesheet" href="/console/assets/style.css" />
+  </head>
+  <body class="login-body">
+    <div class="login-shell">
+      <div class="login-card">
+        <div class="login-brand">
+          <span class="brand-mark">m.</span>
+          <div>
+            <strong>macchiato</strong>
+            <p class="muted small">Web console sign in</p>
+          </div>
+        </div>
+
+        <form id="loginForm" class="login-form">
+          <label class="login-field">
+            <span>用户名</span>
+            <input id="username" name="username" type="text" autocomplete="username" placeholder="admin" />
+          </label>
+          <label class="login-field">
+            <span>密码 / Token</span>
+            <input
+              id="password"
+              name="password"
+              type="password"
+              autocomplete="current-password"
+              placeholder="password"
+              required
+            />
+          </label>
+          <p id="loginError" class="login-error hidden"></p>
+          <button type="submit" class="btn primary login-submit" id="loginSubmit">登录</button>
+        </form>
+
+        <p class="muted small login-hint">
+          账号白名单配置在服务器 <code>config/dashboard_auth.yaml</code>。登录后进入
+          <code>/console</code>。
+        </p>
+      </div>
+    </div>
+
+    <script>
+      const CONSOLE_BASE = "/console";
+      const params = new URLSearchParams(window.location.search);
+      const next = params.get("next") || `${CONSOLE_BASE}/`;
+      const form = document.getElementById("loginForm");
+      const errorEl = document.getElementById("loginError");
+      const submitBtn = document.getElementById("loginSubmit");
+
+      async function checkAlreadySignedIn() {
+        try {
+          const resp = await fetch(`${CONSOLE_BASE}/api/auth/status`, { credentials: "same-origin" });
+          const data = await resp.json();
+          if (!data.auth_required || data.authenticated) {
+            window.location.replace(next);
+          }
+        } catch (_) {
+          /* ignore */
+        }
+      }
+
+      form.addEventListener("submit", async (evt) => {
+        evt.preventDefault();
+        errorEl.classList.add("hidden");
+        submitBtn.disabled = true;
+        submitBtn.textContent = "登录中…";
+        try {
+          const resp = await fetch(`${CONSOLE_BASE}/api/auth/login`, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              username: document.getElementById("username").value.trim(),
+              password: document.getElementById("password").value,
+            }),
+          });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok) {
+            throw new Error(data.detail || "登录失败");
+          }
+          window.location.replace(next);
+        } catch (err) {
+          errorEl.textContent = err.message || "登录失败";
+          errorEl.classList.remove("hidden");
+        } finally {
+          submitBtn.disabled = false;
+          submitBtn.textContent = "登录";
+        }
+      });
+
+      checkAlreadySignedIn();
+    </script>
+  </body>
+</html>

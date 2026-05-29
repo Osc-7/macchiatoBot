@@ -527,25 +527,40 @@ class KernelScheduler:
             extra={"request_id": request.request_id, "session_id": request.session_id},
         )
 
-    def cancel_session_tasks(self, session_id: str) -> bool:
+    async def cancel_session_tasks(self, session_id: str) -> bool:
         """取消指定 session 的所有活跃执行任务并标记为已取消。
 
         同时处理两种情况：
         - 请求已在执行 (_session_active_tasks) -> 直接 cancel 所有 Tasks
         - 请求仍在队列中等待 dispatch -> 加入 _cancelled_sessions，
           _run_and_route 开头会检查并跳过
+
+        **重要**：cancel 后 await 被取消任务完成（finally / _cleanup 回调跑完），
+        确保 _cancelled_sessions 标记在返回前被已取消任务正确清理，
+        避免新入队请求在取消窗口内被误判为 cancelled 而 skip。
         """
         self._cancelled_sessions.add(session_id)
         tasks = self._session_active_tasks.get(session_id, set())
-        cancelled_any = False
-        for task in list(tasks):
-            if not task.done():
-                task.cancel()
-                cancelled_any = True
+        active_tasks = [t for t in list(tasks) if not t.done()]
+        cancelled_any = bool(active_tasks)
+        for task in active_tasks:
+            task.cancel()
+        # 等待被取消的任务实际完成（finally 块跑完、done 回调 fired），
+        # 消除「标记 cancelled → task.cancel()（异步调度）→ finally 尚未跑」的竞态窗口。
+        if active_tasks:
+            done, pending = await asyncio.wait(active_tasks, timeout=300.0)
+            if pending:
+                logger.error(
+                    "KernelScheduler: cancel timeout for session_id=%s after 300s, "
+                    "%d task(s) still pending, forcing clear_cancelled",
+                    session_id,
+                    len(pending),
+                )
+                self.clear_cancelled(session_id)
         if cancelled_any:
             logger.info(
                 "KernelScheduler: cancelled %d active task(s) for session_id=%s",
-                len(tasks),
+                len(active_tasks),
                 session_id,
             )
         else:
@@ -584,13 +599,14 @@ class KernelScheduler:
                     task_set.discard(t)
                     if not task_set:
                         self._session_active_tasks.pop(sid, None)
-                        # 仅「跳过派发」类任务不会走 _run_and_route 的 inflight finally；
-                        # 在全部路由任务结束后清除 cancel 标记，避免会话永久拒收新请求。
-                        if (
-                            sid in self._cancelled_sessions
-                            and self.session_inflight_request_count(sid) == 0
-                        ):
-                            self.clear_cancelled(sid)
+                # 无论 task_set 是否为空，只要该 session 无已派发的 inflight 任务，
+                # 就清除 cancel 标记。否则 skip 型任务的 _cleanup 会让 task_set
+                # 永远非空，cancel 标记无法被清理，会话永久拒收新请求。
+                if (
+                    sid in self._cancelled_sessions
+                    and self.session_inflight_request_count(sid) == 0
+                ):
+                    self.clear_cancelled(sid)
 
             task.add_done_callback(_cleanup)
             # task_done() 使 queue.join() 能正确追踪完成状态
@@ -685,6 +701,13 @@ class KernelScheduler:
                 request.request_id,
                 asyncio.CancelledError("session cancelled before dispatch"),
             )
+            # 兜底：如果已经没有真正在跑的 task，说明 cancel 标记已 stale，主动清理
+            # 避免「cancel_session_tasks 超时时没有 active task」导致永久 skip
+            if not any(
+                not t.done()
+                for t in self._session_active_tasks.get(session_id, set())
+            ):
+                self.clear_cancelled(session_id)
             return
 
         if _should_suppress_reaped_subagent_parent_notify(request, self._core_pool):
@@ -797,15 +820,60 @@ class KernelScheduler:
                     for _k in ("feishu_chat_id", "feishu_open_id"):
                         if _k in request.metadata and request.metadata[_k]:
                             md_ch[_k] = request.metadata[_k]
-                run_result = await self._kernel.run(
-                    agent,
-                    turn_id=turn_id,
-                    hooks=hooks,
-                    on_signal=_on_signal,
-                    channel_metadata=md_ch or None,
-                )
-                if feishu_hook_ctx is not None:
-                    run_result = await feishu_hook_ctx.finalize_after_run(run_result)
+
+                # Restore IPC stream ContextVars lost during scheduler dispatch.
+                # Scheduler's _dispatch_loop creates tasks via asyncio.create_task,
+                # which inherits ContextVars from _dispatch_loop, not from the IPC handler.
+                # Forward functions are passed through metadata instead.
+                ipc_ask_fwd = md.pop("_ipc_ask_user_forward", None)
+                ipc_perm_fwd = md.pop("_ipc_permission_forward", None)
+                ipc_perm_sid = md.pop("_ipc_permission_session_id", None)
+
+                _run_result_holder: Dict[str, Any] = {}
+
+                async def _do_run() -> None:
+                    nonlocal feishu_hook_ctx
+                    r = await self._kernel.run(
+                        agent,
+                        turn_id=turn_id,
+                        hooks=hooks,
+                        on_signal=_on_signal,
+                        channel_metadata=md_ch or None,
+                    )
+                    if feishu_hook_ctx is not None:
+                        r = await feishu_hook_ctx.finalize_after_run(r)
+                    _run_result_holder["result"] = r
+
+                if ipc_ask_fwd or ipc_perm_fwd or ipc_perm_sid:
+                    from contextlib import AsyncExitStack
+                    from agent_core.permissions.ask_user_registry import (
+                        ask_user_ipc_stream_notify_scope,
+                    )
+                    from agent_core.permissions.wait_registry import (
+                        permission_ipc_stream_notify_scope,
+                        permission_session_notify_scope,
+                    )
+
+                    async with AsyncExitStack() as stack:
+                        if ipc_perm_sid and ipc_perm_fwd:
+                            await stack.enter_async_context(
+                                permission_session_notify_scope(
+                                    ipc_perm_sid, ipc_perm_fwd
+                                )
+                            )
+                        if ipc_ask_fwd:
+                            await stack.enter_async_context(
+                                ask_user_ipc_stream_notify_scope(ipc_ask_fwd)
+                            )
+                        if ipc_perm_fwd:
+                            await stack.enter_async_context(
+                                permission_ipc_stream_notify_scope(ipc_perm_fwd)
+                            )
+                        await _do_run()
+                else:
+                    await _do_run()
+
+                run_result = _run_result_holder["result"]
 
                 # 后处理
                 await agent._finalize_turn(run_result)

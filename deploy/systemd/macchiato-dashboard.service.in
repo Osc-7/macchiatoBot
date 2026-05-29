@@ -1,0 +1,22 @@
+[Unit]
+Description=macchiatoBot web dashboard (config / kernel / chat)
+After=network.target macchiato-automation.service
+Wants=macchiato-automation.service
+
+[Service]
+Type=simple
+User=__MACCHIATO_USER__
+Group=__MACCHIATO_USER__
+WorkingDirectory=__MACCHIATO_ROOT__
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=__MACCHIATO_ROOT__/src
+# 仅本机监听，公网由 Nginx 反代（与 remote worker 9380 同一套路）
+Environment=MACCHIATO_DASHBOARD_HOST=127.0.0.1
+Environment=MACCHIATO_DASHBOARD_PORT=18765
+ExecStart=__MACCHIATO_ROOT__/.venv/bin/macchiato-dashboard
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

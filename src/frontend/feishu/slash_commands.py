@@ -185,6 +185,19 @@ def _help_text() -> str:
 
 def _can_toggle_dangerous_mode(client: Any) -> bool:
     cfg = get_config().feishu
+
+    # 统一用户名检查（dashboard / 未来多端共用）
+    username = _string_attr(client, "username")
+    if username:
+        allow_usernames = {
+            str(v).strip()
+            for v in getattr(cfg, "dangerous_mode_allowed_usernames", []) or []
+            if str(v).strip()
+        }
+        if username in allow_usernames:
+            return True
+
+    # 飞书特有 ID 检查（向后兼容，未来统一用户名后废弃）
     allow_open_ids = {
         str(v).strip()
         for v in getattr(cfg, "dangerous_mode_allowed_open_ids", []) or []
@@ -370,7 +383,7 @@ async def try_handle_slash_command(
         if cancelled:
             return (
                 True,
-                "Chat session interrupted.",
+                "已中断当前会话。",
             )
         return (
             True,

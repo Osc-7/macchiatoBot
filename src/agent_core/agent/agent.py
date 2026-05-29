@@ -1122,6 +1122,7 @@ class AgentCore:
         while iteration < self._max_iterations:
             iteration += 1
             previous_messages = self._context.get_messages()
+            await self._inject_background_job_notifications(turn_id=turn_id)
 
             try:
                 # ── 上下文压缩检查（信号机制：Core 检测 → Kernel 执行）──────
@@ -1961,6 +1962,47 @@ class AgentCore:
             unseen_media=self._last_unseen_media,
             turn_id=self._current_turn_id,
         )
+
+    async def _inject_background_job_notifications(self, *, turn_id: int) -> None:
+        """在每轮 LLM 请求前注入后台任务终态通知（每个任务仅通知一次）。"""
+        session_id = str(self._session_id or "").strip()
+        if not session_id:
+            return
+        try:
+            from agent_core.tools.bash_job_notify import poll_completed_notifications
+
+            notifications = await poll_completed_notifications(
+                session_id=session_id,
+                max_items=3,
+            )
+        except Exception:
+            return
+        if not notifications:
+            return
+        for note in notifications:
+            status = str(note.get("status") or "unknown")
+            job_id = str(note.get("job_id") or "")
+            exit_code = note.get("exit_code")
+            duration = note.get("duration_seconds")
+            timed_out = bool(note.get("timed_out", False))
+            remote = bool(note.get("remote", False))
+            login = str(note.get("remote_login") or "").strip()
+            scope = "远程" if remote else "本地"
+            if remote and login:
+                scope = f"{scope}({login})"
+            parts: list[str] = []
+            if exit_code is not None:
+                parts.append(f"exit={exit_code}")
+            if isinstance(duration, (int, float)):
+                parts.append(f"duration={float(duration):.1f}s")
+            if timed_out:
+                parts.append("timed_out=true")
+            suffix = f"（{', '.join(parts)}）" if parts else ""
+            text = (
+                f"[后台任务完成通知] {scope}任务 {job_id} 状态={status}{suffix}。"
+                "如需详情可继续调用 bash 的 job_status/job_tail。"
+            )
+            self._context.add_user_message(text, turn_id=turn_id)
 
     async def finalize_session(self) -> Optional[SessionSummary]:
         """

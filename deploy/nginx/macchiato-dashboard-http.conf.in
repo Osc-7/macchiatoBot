@@ -1,0 +1,52 @@
+# macchiato web dashboard — HTTP reverse proxy (no TLS)
+#
+# Use this when your server already exposes services on plain HTTP :80
+# (same pattern as deploy/nginx/sites on this host: /remote/ -> 9380, / -> 8765).
+#
+# Public:  http://YOUR_IP:18766/
+# Backend: macchiato-dashboard on 127.0.0.1:18765 (systemd)
+#
+# Install:
+#   sudo cp deploy/nginx/macchiato-dashboard-http.conf.in /etc/nginx/sites-available/macchiato-dashboard
+#   sudo ln -sf /etc/nginx/sites-available/macchiato-dashboard /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+#
+# dashboard_auth.yaml: secure_cookies: false  (true only behind HTTPS)
+
+upstream macchiato_dashboard {
+    server 127.0.0.1:18765;
+    keepalive 8;
+}
+
+server {
+    listen 18766;
+    listen [::]:18766;
+    server_name _;
+
+    client_max_body_size 32m;
+
+    location /api/chat/stream {
+        proxy_pass http://macchiato_dashboard;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location / {
+        proxy_pass http://macchiato_dashboard;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_read_timeout 300s;
+    }
+}

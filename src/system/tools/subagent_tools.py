@@ -334,7 +334,7 @@ async def _run_subagent_task(
                 submit_handle, timeout_seconds=float(subagent_max_seconds)
             )
         except asyncio.TimeoutError:
-            scheduler.cancel_session_tasks(sub_session_id)
+            await scheduler.cancel_session_tasks(sub_session_id)
             log_dir = getattr(
                 getattr(config, "logging", None), "session_log_dir", "./logs/sessions"
             )
@@ -2015,7 +2015,7 @@ class CancelSubagentTool(BaseTool):
         if denied is not None:
             return denied
 
-        cancelled = self._core_pool.cancel_sub(sub_session_id)
+        cancelled = await self._core_pool.cancel_sub(sub_session_id)
         final_status = self._core_pool.get_sub_info(sub_session_id)
         status_str = final_status.sub_status if final_status and final_status.sub_status else "unknown"
         parent_session_id = info.parent_session_id if info else ""

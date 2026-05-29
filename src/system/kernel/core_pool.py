@@ -794,7 +794,7 @@ class CorePool:
             f"[子任务 {self._subagent_id(sub_session_id)} 失败]\n错误：{error}",
         )
 
-    def cancel_sub(self, sub_session_id: str) -> bool:
+    async def cancel_sub(self, sub_session_id: str) -> bool:
         entry = self._pool.get(sub_session_id) or self._zombies.get(sub_session_id)
         if entry is None:
             logger.warning("CorePool.cancel_sub: unknown session_id=%s", sub_session_id)
@@ -836,7 +836,7 @@ class CorePool:
                 },
             )
         if self._scheduler is not None:
-            self._scheduler.cancel_session_tasks(sub_session_id)
+            await self._scheduler.cancel_session_tasks(sub_session_id)
         entry.sub_status = "cancelled"
         entry.sub_completed_at = time.time()
         if self._scheduler is not None:

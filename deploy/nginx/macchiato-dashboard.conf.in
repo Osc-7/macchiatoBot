@@ -1,0 +1,67 @@
+# macchiato web dashboard — Nginx reverse proxy template
+#
+# Install (edit domain + cert paths first):
+#   sudo cp deploy/nginx/macchiato-dashboard.conf.in /etc/nginx/sites-available/macchiato-dashboard
+#   sudo sed -i 's/__DASHBOARD_DOMAIN__/dashboard.example.com/g' /etc/nginx/sites-available/macchiato-dashboard
+#   sudo sed -i 's|__SSL_CERT_PATH__|/etc/letsencrypt/live/dashboard.example.com/fullchain.pem|g' /etc/nginx/sites-available/macchiato-dashboard
+#   sudo sed -i 's|__SSL_KEY_PATH__|/etc/letsencrypt/live/dashboard.example.com/privkey.pem|g' /etc/nginx/sites-available/macchiato-dashboard
+#   sudo ln -sf /etc/nginx/sites-available/macchiato-dashboard /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+#
+# Backend: macchiato-dashboard on 127.0.0.1:18765 (see deploy/systemd/macchiato-dashboard.service.in)
+# Auth: config/dashboard_auth.yaml (set secure_cookies: true when using HTTPS)
+
+upstream macchiato_dashboard {
+    server 127.0.0.1:18765;
+    keepalive 8;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __DASHBOARD_DOMAIN__;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name __DASHBOARD_DOMAIN__;
+
+    ssl_certificate     __SSL_CERT_PATH__;
+    ssl_certificate_key __SSL_KEY_PATH__;
+
+    client_max_body_size 32m;
+
+    location /api/chat/stream {
+        proxy_pass http://macchiato_dashboard;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location / {
+        proxy_pass http://macchiato_dashboard;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_read_timeout 300s;
+    }
+}

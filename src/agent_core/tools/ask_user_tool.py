@@ -150,12 +150,10 @@ class AskUserTool(BaseTool):
                 data={"ask_user_id": batch_id},
             )
         except asyncio.CancelledError as exc:
-            return ToolResult(
-                success=False,
-                error="ASK_USER_CANCELLED",
-                message=str(exc),
-                data={"ask_user_id": batch_id},
-            )
+            # 清理等待状态后重新抛出，确保 scheduler.cancel_session_tasks 能正确结束 task
+            from agent_core.permissions.ask_user_registry import cancel_ask_user_wait
+            cancel_ask_user_wait(batch_id, reason="turn cancelled")
+            raise
 
         answers_out: List[Dict[str, Any]] = []
         for a in decision.answers:

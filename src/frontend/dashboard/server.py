@@ -532,14 +532,58 @@ class DashboardBackend:
         cfg_path.write_text(yaml_text, encoding="utf-8")
         return cfg_path
 
+    # ------------------------------------------------------------------
+    # Session isolation helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _is_admin(username: str) -> bool:
+        return username.strip().lower() == "admin"
+
+    @staticmethod
+    def _web_session_prefix(username: str) -> str:
+        return f"web:{username.strip()}" if username.strip() else "web:root"
+
+    def _filter_sessions_for_user(
+        self, sessions: list[str], username: str
+    ) -> list[str]:
+        if self._is_admin(username):
+            return list(sessions)
+        prefix = self._web_session_prefix(username)
+        filtered = [s for s in sessions if s.startswith(prefix)]
+        # Ensure the user's default session always appears in the dropdown
+        # even if it hasn't been created yet on the gateway.
+        if prefix not in filtered:
+            filtered.append(prefix)
+        return filtered
+
+    def _filter_cores_for_user(
+        self, cores: list[dict], username: str
+    ) -> list[dict]:
+        if self._is_admin(username):
+            return list(cores)
+        prefix = self._web_session_prefix(username)
+        return [c for c in cores if str(c.get("session_id") or "").startswith(prefix)]
+
+    def _assert_session_access(self, session_id: str | None, username: str) -> None:
+        """Raise 403 if the user is not allowed to touch this session."""
+        if not session_id:
+            return
+        if self._is_admin(username):
+            return
+        prefix = self._web_session_prefix(username)
+        if not session_id.startswith(prefix):
+            raise HTTPException(status_code=403, detail="Access denied to this session")
+
     async def _with_client(
         self, username: str = "", timeout_seconds: float | None = None
     ) -> AutomationIPCClient:
+        owner_id = username.strip() or "root"
+        source = "web" if username.strip() else "dashboard"
         kwargs: Dict[str, Any] = {
-            "source": "dashboard",
-            "owner_id": "root",
+            "source": source,
+            "owner_id": owner_id,
             "username": username,
-            "client_id": "dashboard",
+            "client_id": f"dashboard-{owner_id}",
         }
         if timeout_seconds is not None:
             kwargs["timeout_seconds"] = timeout_seconds
@@ -547,8 +591,8 @@ class DashboardBackend:
         await client.connect()
         return client
 
-    async def kernel_snapshot(self) -> Dict[str, Any]:
-        client = await self._with_client()
+    async def kernel_snapshot(self, username: str = "") -> Dict[str, Any]:
+        client = await self._with_client(username=username)
         try:
             top = await client.terminal_top()
             queue = await client.terminal_queue()
@@ -559,6 +603,15 @@ class DashboardBackend:
             token_usage = await client.get_token_usage()
             turn_count = await client.get_turn_count()
             dangerous_mode = await client.get_dangerous_mode()
+            active_session_id = client.active_session_id
+            # Filter visibility for non-admin users
+            if not self._is_admin(username):
+                sessions = self._filter_sessions_for_user(sessions, username)
+                cores = self._filter_cores_for_user(cores, username)
+                # If the active session is outside the user's scope, pin it to the
+                # user's default web session so the frontend dropdown stays consistent.
+                if not active_session_id.startswith(self._web_session_prefix(username)):
+                    active_session_id = self._web_session_prefix(username)
             return {
                 "connected": True,
                 "top": top,
@@ -566,7 +619,7 @@ class DashboardBackend:
                 "cores": cores,
                 "users": users,
                 "sessions": sessions,
-                "active_session_id": client.active_session_id,
+                "active_session_id": active_session_id,
                 "models": models,
                 "token_usage": token_usage,
                 "turn_count": turn_count,
@@ -596,16 +649,18 @@ class DashboardBackend:
         finally:
             await client.close()
 
-    async def switch_session(self, session_id: str) -> Dict[str, Any]:
-        client = await self._with_client()
+    async def switch_session(
+        self, session_id: str, *, username: str = ""
+    ) -> Dict[str, Any]:
+        client = await self._with_client(username=username)
         try:
             created = await client.switch_session(session_id=session_id)
             return {"active_session_id": client.active_session_id, "created": created}
         finally:
             await client.close()
 
-    async def clear_context(self) -> None:
-        client = await self._with_client()
+    async def clear_context(self, *, username: str = "") -> None:
+        client = await self._with_client(username=username)
         try:
             await client.clear_context()
         finally:
@@ -812,6 +867,18 @@ class DashboardBackend:
                     task.cancel()
                     try:
                         await task
+                    except Exception:  # noqa: BLE001
+                        pass
+                # 前端主动断开（刷新/关闭/Safari 超时）时，通知 gateway 取消当轮对话，
+                # 避免旧 turn 长期占着 session_lock 导致新请求被阻塞。
+                if _http_disconnect and not task.done():
+                    try:
+                        sid = session_id or client.active_session_id
+                        cancel_client = await self._with_client(
+                            username=username, timeout_seconds=10.0
+                        )
+                        await cancel_client.terminal_cancel(sid)
+                        await cancel_client.close()
                     except Exception:  # noqa: BLE001
                         pass
         finally:
@@ -1271,9 +1338,10 @@ def create_dashboard_app(
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @console.get("/api/kernel")
-    async def get_kernel_api() -> JSONResponse:
+    async def get_kernel_api(request: Request) -> JSONResponse:
         try:
-            data = await service.kernel_snapshot()
+            username = getattr(request.state, "dashboard_user", "")
+            data = await service.kernel_snapshot(username=username)
             return JSONResponse(data)
         except Exception as exc:  # noqa: BLE001
             logger.warning("dashboard kernel snapshot failed: %s", exc)
@@ -1296,33 +1364,51 @@ def create_dashboard_app(
             )
 
     @console.post("/api/kernel/kill")
-    async def post_kernel_kill(payload: SessionActionRequest) -> Dict[str, Any]:
+    async def post_kernel_kill(
+        payload: SessionActionRequest, request: Request
+    ) -> Dict[str, Any]:
         try:
+            username = getattr(request.state, "dashboard_user", "")
+            service._assert_session_access(payload.session_id.strip(), username)
             await service.kernel_kill(payload.session_id.strip())
             return {"ok": True}
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @console.post("/api/kernel/cancel")
-    async def post_kernel_cancel(payload: SessionActionRequest) -> Dict[str, Any]:
+    async def post_kernel_cancel(
+        payload: SessionActionRequest, request: Request
+    ) -> Dict[str, Any]:
         try:
+            username = getattr(request.state, "dashboard_user", "")
+            service._assert_session_access(payload.session_id.strip(), username)
             cancelled = await service.kernel_cancel(payload.session_id.strip())
             return {"ok": True, "cancelled": cancelled}
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @console.post("/api/kernel/spawn")
-    async def post_kernel_spawn(payload: SessionActionRequest) -> Dict[str, Any]:
+    async def post_kernel_spawn(
+        payload: SessionActionRequest, request: Request
+    ) -> Dict[str, Any]:
         try:
+            username = getattr(request.state, "dashboard_user", "")
+            service._assert_session_access(payload.session_id.strip(), username)
             core = await service.kernel_spawn(payload.session_id.strip())
             return {"ok": True, "core": core}
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @console.post("/api/kernel/session/switch")
-    async def post_kernel_session_switch(payload: SessionActionRequest) -> Dict[str, Any]:
+    async def post_kernel_session_switch(
+        payload: SessionActionRequest, request: Request
+    ) -> Dict[str, Any]:
         try:
-            return await service.switch_session(payload.session_id.strip())
+            username = getattr(request.state, "dashboard_user", "")
+            service._assert_session_access(payload.session_id.strip(), username)
+            return await service.switch_session(
+                payload.session_id.strip(), username=username
+            )
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 

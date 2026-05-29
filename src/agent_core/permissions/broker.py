@@ -188,12 +188,7 @@ class PermissionBroker:
             )
         except asyncio.CancelledError as exc:
             cancel_permission_wait(pid, reason=str(exc) or "cancelled")
-            return PermissionBrokerResult(
-                allowed=False,
-                permission_id=pid,
-                error="PERMISSION_CANCELLED",
-                message=str(exc),
-            )
+            raise
 
         if getattr(decision, "clarify_requested", False):
             ui = str(getattr(decision, "user_instruction", None) or "").strip()

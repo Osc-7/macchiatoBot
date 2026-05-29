@@ -186,7 +186,7 @@ class AutomationIPCServer:
                         continue
                     result = await self._dispatch(method, params)
                     payload = {"id": req_id, "ok": True, "result": result}
-                except Exception as exc:
+                except (Exception, asyncio.CancelledError) as exc:
                     payload = {
                         "id": req_id,
                         "ok": False,
@@ -336,6 +336,20 @@ class AutomationIPCServer:
             # 客户端在流式对话过程中主动断开连接（例如用户 Ctrl+C 或退出 CLI），
             # writer 已失效，继续写入只会产生噪音日志。此处记录一条调试信息后静默结束。
             _mark_stream_disconnected(exc)
+        except asyncio.CancelledError as exc:
+            # 业务级取消（如 session 被 scheduler skip），需要给客户端明确的 final 事件
+            try:
+                await _send_event(
+                    "final", {"ok": False, "error": _format_ipc_error(exc)}
+                )
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                logger.warning(
+                    "failed to send cancel final event to disconnected client "
+                    "(session_id=%s, client_id=%s, error=%s)",
+                    active_session,
+                    client_id,
+                    exc,
+                )
         except Exception as exc:
             # 非连接类错误：尽量向仍然存活的客户端发送 final 错误事件；
             # 若此时连接也已断开，则忽略第二次 BrokenPipe/ConnectionReset。

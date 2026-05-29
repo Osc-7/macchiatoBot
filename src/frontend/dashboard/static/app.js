@@ -849,6 +849,9 @@ function renderSessionsDropdowns(sessions, active) {
   const list = Array.isArray(sessions) ? sessions.slice(0, 200) : [];
   const sessionSel = $("sessionSelect");
   const activeSel = $("activeSessionSelect");
+  const prevSession = sessionSel.value;
+  const prevActive = activeSel.value;
+
   sessionSel.innerHTML = '<option value="">Select a session…</option>';
   activeSel.innerHTML = '<option value="">(daemon default)</option>';
   list.forEach((sid) => {
@@ -860,10 +863,22 @@ function renderSessionsDropdowns(sessions, active) {
     const opt2 = opt.cloneNode(true);
     activeSel.appendChild(opt2);
   });
-  // Restore the locally-persisted active session selection across re-renders.
-  if (activeSessionId && list.includes(activeSessionId)) {
-    activeSel.value = activeSessionId;
-    sessionSel.value = activeSessionId;
+
+  // Trust the backend's active session as the source of truth.
+  if (active && list.includes(active)) {
+    activeSessionId = active;
+  }
+
+  // Restore previous selection if still valid, otherwise fall back to active.
+  if (prevActive && list.includes(prevActive)) {
+    activeSel.value = prevActive;
+  } else if (active) {
+    activeSel.value = active;
+  }
+  if (prevSession && list.includes(prevSession)) {
+    sessionSel.value = prevSession;
+  } else if (active) {
+    sessionSel.value = active;
   }
 }
 
@@ -996,6 +1011,7 @@ $("switchSessionBtn").addEventListener("click", async () => {
     await callKernelAction("/api/kernel/session/switch", { session_id: sid }, `Active session is now ${sid}.`);
     activeSessionId = sid;
     $("activeSessionSelect").value = sid;
+    restoreChatMessages(sid);
   } catch (e) { showToast(`Switch failed: ${e.message}`); }
 });
 
@@ -2341,9 +2357,27 @@ async function boot() {
 }
 
 // Reload chat history when the user picks a different session
-$("activeSessionSelect")?.addEventListener("change", () => {
-  const sid = activeSessionId || $("activeSessionSelect").value || "";
-  restoreChatMessages(sid);
+$("activeSessionSelect")?.addEventListener("change", async () => {
+  const sid = $("activeSessionSelect").value;
+  if (!sid) {
+    restoreChatMessages("");
+    return;
+  }
+  try {
+    await requestJson("/api/kernel/session/switch", {
+      method: "POST",
+      body: JSON.stringify({ session_id: sid }),
+    });
+    activeSessionId = sid;
+    $("sessionSelect").value = sid;
+    showToast(`Active session is now ${sid}.`);
+    await loadKernel();
+    restoreChatMessages(sid);
+  } catch (e) {
+    showToast(`Switch failed: ${e.message}`);
+    // Revert dropdown to the last known good value
+    $("activeSessionSelect").value = activeSessionId || "";
+  }
 });
 
 $("authLogout")?.addEventListener("click", async () => {

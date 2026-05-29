@@ -548,7 +548,15 @@ class KernelScheduler:
         # 等待被取消的任务实际完成（finally 块跑完、done 回调 fired），
         # 消除「标记 cancelled → task.cancel()（异步调度）→ finally 尚未跑」的竞态窗口。
         if active_tasks:
-            await asyncio.wait(active_tasks, timeout=30.0)
+            done, pending = await asyncio.wait(active_tasks, timeout=300.0)
+            if pending:
+                logger.error(
+                    "KernelScheduler: cancel timeout for session_id=%s after 300s, "
+                    "%d task(s) still pending, forcing clear_cancelled",
+                    session_id,
+                    len(pending),
+                )
+                self.clear_cancelled(session_id)
         if cancelled_any:
             logger.info(
                 "KernelScheduler: cancelled %d active task(s) for session_id=%s",
@@ -693,6 +701,13 @@ class KernelScheduler:
                 request.request_id,
                 asyncio.CancelledError("session cancelled before dispatch"),
             )
+            # 兜底：如果已经没有真正在跑的 task，说明 cancel 标记已 stale，主动清理
+            # 避免「cancel_session_tasks 超时时没有 active task」导致永久 skip
+            if not any(
+                not t.done()
+                for t in self._session_active_tasks.get(session_id, set())
+            ):
+                self.clear_cancelled(session_id)
             return
 
         if _should_suppress_reaped_subagent_parent_notify(request, self._core_pool):

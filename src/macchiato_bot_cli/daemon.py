@@ -526,7 +526,7 @@ async def _bash_job_notify_loop(
             for note in notes:
                 try:
                     text = format_notification(note)
-                    await deliver_via_inject(
+                    deliver_via_inject(
                         session_id=note["session_id"],
                         text=text,
                         scheduler=scheduler,

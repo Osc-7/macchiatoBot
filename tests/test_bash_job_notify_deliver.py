@@ -142,11 +142,55 @@ async def test_deliver_stages_when_inflight(tmp_path):
     assert ok is True
     assert len(scheduler.injected) == 0
 
-    # flush 后注入
+    # flush 后注入并标记已通知
     scheduler.inflight["sid-1"] = 0
     flush_pending_for_session("sid-1")
     assert len(scheduler.injected) == 1
     assert scheduler.injected[0].session_id == "sid-1"
+    # 同一 job 不会再次 poll 到
+    notes_after = await poll_terminal_jobs(max_items=10)
+    assert len(notes_after) == 0
+
+
+async def test_staging_deduplicates_while_inflight(tmp_path):
+    clear_all_tracking_for_tests()
+    scheduler = _FakeScheduler()
+    pool = _FakeCorePool()
+    set_notify_dependencies(scheduler=scheduler, core_pool=pool)
+
+    ws = str(tmp_path)
+    register_local_job(
+        session_id="sid-1",
+        job_id="job-1",
+        command="echo done",
+        cwd=ws,
+        log_path=f"{ws}/job.log",
+        workspace_root=ws,
+    )
+
+    notes = await poll_terminal_jobs(max_items=10)
+    assert len(notes) == 1
+    note = notes[0]
+    scheduler.inflight["sid-1"] = 1
+
+    # 模拟 inflight 期间 watcher 多次 poll，同一 job 只应被暂存一次
+    for _ in range(3):
+        ok = deliver_via_inject(
+            session_id="sid-1",
+            text=format_notification(note),
+            note=note,
+        )
+        assert ok is True
+        # 已 staged，后续 poll 应返回空
+        later = await poll_terminal_jobs(max_items=10)
+        assert len(later) == 0
+
+    assert len(scheduler.injected) == 0
+
+    # flush 后只注入一次，并标记已通知
+    scheduler.inflight["sid-1"] = 0
+    flush_pending_for_session("sid-1")
+    assert len(scheduler.injected) == 1
 
 
 async def test_deliver_returns_false_without_scheduler():
@@ -154,6 +198,17 @@ async def test_deliver_returns_false_without_scheduler():
     set_notify_dependencies(scheduler=None, core_pool=None)
     ok = deliver_via_inject(session_id="sid-1", text="hello")
     assert ok is False
+
+
+async def test_deliver_via_inject_is_synchronous():
+    """daemon watcher 直接同步调用 deliver_via_inject，不能是 coroutine。"""
+    clear_all_tracking_for_tests()
+    scheduler = _FakeScheduler()
+    set_notify_dependencies(scheduler=scheduler, core_pool=None)
+
+    ok = deliver_via_inject(session_id="sid-1", text="hello")
+    assert isinstance(ok, bool)
+    assert not asyncio.iscoroutine(ok)
 
 
 async def test_stage_notification_fifo():

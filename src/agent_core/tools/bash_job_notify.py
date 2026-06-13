@@ -44,12 +44,15 @@ class _TrackedJob:
     metadata: Dict[str, Any] = field(default_factory=dict)
     # 终态已通知后设为 True，并从注册表移除
     notified: bool = False
+    # 已暂存待 flush（父会话 inflight>0），避免同一 job 被重复 poll/暂存
+    staged: bool = False
 
 
 _LOCK = Lock()
 _TRACKED_BY_SESSION: Dict[str, Dict[str, _TrackedJob]] = {}
-# session_id -> 待注入通知正文列表（父会话 inflight>0 时暂存）
-_PENDING_BY_SESSION: Dict[str, List[str]] = {}
+# session_id -> 待注入通知条目列表（父会话 inflight>0 时暂存）
+# 每个条目为 {"text": str, "note": Optional[Dict]}，flush 时需保留 note 以标记已通知
+_PENDING_BY_SESSION: Dict[str, List[Dict[str, Any]]] = {}
 
 # daemon 启动时注入的依赖（避免模块级 import scheduler/core_pool 单例）
 _notify_dependencies: Dict[str, Any] = {}
@@ -163,7 +166,7 @@ async def poll_terminal_jobs(*, max_items: int = 20) -> List[Dict[str, Any]]:
         for key, rec in list(jobs.items()):
             if len(out) >= max_items:
                 break
-            if rec.notified:
+            if rec.notified or rec.staged:
                 continue
             status_payload = await _query_job_status(rec)
             if status_payload is None:
@@ -274,13 +277,26 @@ def format_notification(note: Dict[str, Any]) -> str:
     )
 
 
-def stage_notification(session_id: str, text: str) -> None:
-    """父会话 inflight>0 时，将通知正文暂存到 session 级队列。"""
+def stage_notification(
+    session_id: str, text: str, note: Optional[Dict[str, Any]] = None
+) -> None:
+    """父会话 inflight>0 时，将通知正文暂存到 session 级队列。
+
+    如果提供了 note，会将对应 job 标记为 staged，避免同一 job 在 flush 前被重复 poll/暂存。
+    """
     sid = str(session_id or "").strip()
     if not sid or not text:
         return
     with _LOCK:
-        _PENDING_BY_SESSION.setdefault(sid, []).append(text)
+        if note is not None:
+            jid = str(note.get("job_id") or "").strip()
+            if jid:
+                jobs = _TRACKED_BY_SESSION.get(sid, {})
+                key = _job_key(jid, remote=bool(note.get("remote", False)))
+                rec = jobs.get(key)
+                if rec is not None:
+                    rec.staged = True
+        _PENDING_BY_SESSION.setdefault(sid, []).append({"text": text, "note": note})
 
 
 def flush_pending_for_session(session_id: str) -> None:
@@ -295,18 +311,27 @@ def flush_pending_for_session(session_id: str) -> None:
     deps = get_notify_dependencies()
     scheduler = deps.get("scheduler")
     core_pool = deps.get("core_pool")
-    for text in pending:
+    for item in pending:
+        text = item.get("text", "")
+        note = item.get("note")
         try:
             deliver_via_inject(
                 session_id=sid,
                 text=text,
                 scheduler=scheduler,
                 core_pool=core_pool,
+                note=note,
             )
         except Exception as exc:
             logger.warning(
                 "bash_job_notify: flush deliver failed session=%s: %s", sid, exc
             )
+            if note is not None:
+                _reset_staged(
+                    sid,
+                    str(note.get("job_id") or ""),
+                    remote=bool(note.get("remote", False)),
+                )
 
 
 def build_feishu_inject_metadata(
@@ -384,7 +409,17 @@ def deliver_via_inject(
             inflight = 0
 
     if inflight > 0:
-        stage_notification(sid, text)
+        jid = str(note.get("job_id") or "").strip() if note else ""
+        if jid and _is_staged(sid, jid, remote=bool(note.get("remote", False))):
+            logger.info(
+                "bash_job_notify: already-staged session=%s job=%s status=%s inflight=%d",
+                sid,
+                jid,
+                note.get("status") if note else "?",
+                inflight,
+            )
+            return True
+        stage_notification(sid, text, note=note)
         logger.info(
             "bash_job_notify: staged session=%s job=%s status=%s inflight=%d",
             sid,
@@ -444,6 +479,25 @@ def _mark_notified(session_id: str, job_id: str, *, remote: bool) -> None:
         jobs.pop(key, None)
         if not jobs:
             _TRACKED_BY_SESSION.pop(session_id, None)
+
+
+def _reset_staged(session_id: str, job_id: str, *, remote: bool) -> None:
+    """flush 失败时重置 staged 标记，允许后续 poll 重新尝试投递。"""
+    with _LOCK:
+        jobs = _TRACKED_BY_SESSION.get(session_id, {})
+        key = _job_key(job_id, remote=remote)
+        rec = jobs.get(key)
+        if rec is None:
+            return
+        rec.staged = False
+
+
+def _is_staged(session_id: str, job_id: str, *, remote: bool) -> bool:
+    with _LOCK:
+        jobs = _TRACKED_BY_SESSION.get(session_id, {})
+        key = _job_key(job_id, remote=remote)
+        rec = jobs.get(key)
+        return rec is not None and rec.staged
 
 
 # ── 旧版兼容 API（保留供现有测试/调用方过渡）───────────────────────────

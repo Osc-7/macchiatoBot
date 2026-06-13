@@ -151,7 +151,7 @@ def provision_system_user(
 
 
 def chown_tree_to_user(paths: List[Path], posix_name: str) -> None:
-    """将路径及其内容递归 chown 为 posix 用户的主 UID/GID。"""
+    """将路径及其内容递归 chown 为 posix 用户的主 UID/GID。需 root；非 root 时静默跳过。"""
     try:
         pw = pwd.getpwnam(posix_name)
     except KeyError as exc:

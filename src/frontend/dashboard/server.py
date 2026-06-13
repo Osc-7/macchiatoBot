@@ -7,9 +7,10 @@ import json
 import logging
 import os
 import shlex
+import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict
+from typing import Any, AsyncIterator, Dict, List
 
 import yaml
 import uuid
@@ -457,6 +458,48 @@ class DashboardBackend:
     def _backup_dir(self) -> Path:
         return self.resolve_config_path().parent / ".dashboard_backups"
 
+    # ── Chat history: read directly from the daemon's canonical DB ──
+    def _daemon_chat_db_path(self, session_id: str | None = None) -> Path | None:
+        """Locate the daemon's chat_history.db for a given session.
+
+        Session IDs follow the pattern ``{frontend}:{owner_id}`` (e.g.
+        ``cli:root``, ``feishu:ou_xxx``, ``web:admin``).  The canonical DB
+        lives under ``data/memory/{frontend}/{owner_id}/chat_history.db``.
+        """
+        project_root = Path(os.environ.get("MACCHIATO_PROJECT_ROOT", "/home/ubuntu/macchiatoBot"))
+
+        if session_id:
+            parts = session_id.split(":", 1)
+            if len(parts) == 2:
+                frontend, owner_id = parts
+                daemon_db = project_root / "data" / "memory" / frontend / owner_id / "chat_history.db"
+                if daemon_db.exists():
+                    return daemon_db
+
+        # Fallback to legacy cli/root for backward compatibility
+        fallback = project_root / "data" / "memory" / "cli" / "root" / "chat_history.db"
+        return fallback if fallback.exists() else None
+
+    def get_chat_history(self, session_id: str, limit: int = 100) -> List[Dict[str, str]]:
+        """Return user/assistant messages for a session from the daemon's DB."""
+        db_path = self._daemon_chat_db_path(session_id)
+        if not db_path:
+            return []
+        try:
+            with sqlite3.connect(str(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute(
+                    "SELECT role, content, timestamp FROM messages"
+                    " WHERE session_id = ? AND role IN ('user', 'assistant')"
+                    " ORDER BY id DESC LIMIT ?",
+                    (session_id, limit),
+                )
+                rows = [dict(row) for row in cur.fetchall()]
+                rows.reverse()
+                return rows
+        except Exception:
+            return []
+
     def _validate_backup_name(self, backup_name: str) -> str:
         name = backup_name.strip()
         if not name or "/" in name or "\\" in name:
@@ -873,18 +916,10 @@ class DashboardBackend:
                         await task
                     except Exception:  # noqa: BLE001
                         pass
-                # 前端主动断开（刷新/关闭/Safari 超时）时，通知 gateway 取消当轮对话，
-                # 避免旧 turn 长期占着 session_lock 导致新请求被阻塞。
-                if _http_disconnect and not task.done():
-                    try:
-                        sid = session_id or client.active_session_id
-                        cancel_client = await self._with_client(
-                            username=username, timeout_seconds=10.0
-                        )
-                        await cancel_client.terminal_cancel(sid)
-                        await cancel_client.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+                # NOTE: 不再在 HTTP 被动断开时取消 turn。
+                # Safari 切后台/网络抖动属于“被动离开”，应让 turn 跑完并将结果
+                # 存入对话历史；用户重新进页面时通过 /chat/history 即可看到完整
+                # 回复。若此处强制 cancel，会导致回复丢失（用户看到 Load failed）。
         finally:
             await client.close()
 
@@ -1528,8 +1563,6 @@ def create_dashboard_app(
                     text, session_id=session_id, username=username
                 ):
                     if event.get("type") == "_keepalive":
-                        # SSE comment line – keeps mobile proxies / Safari from
-                        # dropping the connection during long turns.
                         yield b": \n"
                         continue
                     yield (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
@@ -1572,6 +1605,34 @@ def create_dashboard_app(
             "path": str(dest),
             "size": len(content),
         }
+
+    @console.get("/api/chat/history")
+    async def get_chat_history_api(request: Request) -> JSONResponse:
+        username = getattr(request.state, "dashboard_user", "")
+        session_id = (request.query_params.get("session_id") or "").strip()
+        limit = request.query_params.get("limit", "100")
+        try:
+            limit_num = int(limit)
+        except ValueError:
+            limit_num = 100
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id is required")
+        service._assert_session_access(session_id, username)
+        try:
+            history = service.get_chat_history(session_id, limit=limit_num)
+            return JSONResponse({"history": history})
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @console.post("/api/chat/history/clear")
+    async def post_chat_history_clear_api(request: Request) -> JSONResponse:
+        username = getattr(request.state, "dashboard_user", "")
+        session_id = (request.query_params.get("session_id") or "").strip()
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id is required")
+        service._assert_session_access(session_id, username)
+        # Daemon owns the canonical DB; dashboard only clears its own view.
+        return JSONResponse({"ok": True})
 
     app.include_router(console)
 

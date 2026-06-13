@@ -17,6 +17,21 @@ import time
 from pathlib import Path
 from typing import Any
 
+from agent_core import AgentCore, CoreSessionAdapter
+from agent_core.bash_os_user import reconcile_admin_linux_users
+from agent_core.config import get_config
+from agent_core.interfaces import AgentHooks
+from agent_core.llm.client import LLMClient
+from agent_core.tools.bash_job_notify import (
+    deliver_via_inject,
+    format_notification,
+    poll_terminal_jobs,
+    set_notify_dependencies,
+)
+from frontend.feishu.ask_user_notify import install_feishu_ask_user_notify_hook
+from frontend.feishu.client import FeishuClient
+from frontend.feishu.permission_notify import install_feishu_permission_notify_hook
+from frontend.feishu.reply_dispatch import send_feishu_agent_reply
 from system.automation import (
     AgentTaskQueue,
     AutomationCoreGateway,
@@ -27,14 +42,14 @@ from system.automation import (
     SessionRegistry,
     default_socket_path,
 )
-from system.automation.config_sync import sync_job_definitions_from_config
 from system.automation.agent_task import TaskStatus
+from system.automation.config_sync import sync_job_definitions_from_config
 from system.automation.logging_utils import AutomationTaskLogger
+from system.automation.remote_worker_server import (
+    remote_server_enabled,
+    run_remote_worker_server_until_stopped,
+)
 from system.automation.repositories import JobDefinitionRepository, JobRunRepository
-from agent_core.bash_os_user import reconcile_admin_linux_users
-from agent_core.config import get_config
-from agent_core import AgentCore, CoreSessionAdapter
-from agent_core.interfaces import AgentHooks
 from system.kernel import (
     AgentKernel,
     CorePool,
@@ -44,19 +59,8 @@ from system.kernel import (
     KernelTerminal,
     SessionSummarizer,
 )
-from agent_core.llm.client import LLMClient
-from system.tools import build_tool_registry
+from system.tools import build_tool_registry, get_default_tools
 
-from frontend.feishu.client import FeishuClient
-from frontend.feishu.ask_user_notify import install_feishu_ask_user_notify_hook
-from frontend.feishu.permission_notify import install_feishu_permission_notify_hook
-from frontend.feishu.reply_dispatch import send_feishu_agent_reply
-
-from system.tools import get_default_tools
-from system.automation.remote_worker_server import (
-    remote_server_enabled,
-    run_remote_worker_server_until_stopped,
-)
 
 def _repo_root() -> Path:
     """Repository root when running from checkout; else current working directory."""
@@ -161,14 +165,19 @@ async def _consume_loop(
     scheduler: KernelScheduler,
     stop_event: asyncio.Event,
 ) -> None:
-    logger.info("consume: consumer loop started, poll_interval=%ss", POLL_INTERVAL_SECONDS)
+    logger.info(
+        "consume: consumer loop started, poll_interval=%ss", POLL_INTERVAL_SECONDS
+    )
     _idle_polls = 0
     _ALIVE_LOG_INTERVAL = 120  # 每 120 次空轮询(~10min)打一次存活日志
     while not stop_event.is_set():
         try:
             task = queue.pop_pending()
         except Exception:
-            logger.exception("consume: pop_pending() raised, will retry in %ss", POLL_INTERVAL_SECONDS)
+            logger.exception(
+                "consume: pop_pending() raised, will retry in %ss",
+                POLL_INTERVAL_SECONDS,
+            )
             task = None
         if task is None:
             _idle_polls += 1
@@ -207,11 +216,11 @@ async def _consume_loop(
             if isinstance(task.metadata, dict):
                 remote_login = str(task.metadata.get("remote_login") or "").strip()
                 if remote_login:
-                    from agent_core.remote.workspace_state import (
-                        activate_remote_workspace,
-                    )
                     from agent_core.remote.worker_registry import (
                         get_remote_worker_registry,
+                    )
+                    from agent_core.remote.workspace_state import (
+                        activate_remote_workspace,
                     )
 
                     remote_path = (
@@ -359,7 +368,9 @@ async def _consume_loop(
                 tt = str(task.metadata.get("tool_template") or "").strip()
                 if tt:
                     req_meta["tool_template"] = tt
-                explicit_chat_id = str(task.metadata.get("feishu_chat_id") or "").strip()
+                explicit_chat_id = str(
+                    task.metadata.get("feishu_chat_id") or ""
+                ).strip()
                 resolved_chat_id = _resolve_feishu_chat_id_for_automation_task(
                     raw_owner=mo,
                     explicit_chat_id=explicit_chat_id,
@@ -408,8 +419,8 @@ async def _consume_loop(
             queue.update_status(task.task_id, TaskStatus.FAILED, error=str(exc))
         finally:
             if remote_bound:
-                from agent_core.remote.workspace_state import release_remote_workspace
                 from agent_core.remote.worker_registry import get_remote_worker_registry
+                from agent_core.remote.workspace_state import release_remote_workspace
 
                 old = release_remote_workspace(task.session_id)
                 if old is not None:
@@ -497,6 +508,49 @@ async def _maybe_notify_feishu_activity(record: dict[str, Any]) -> None:
     )
 
 
+async def _bash_job_notify_loop(
+    stop_event: asyncio.Event,
+    scheduler: "KernelScheduler",
+    core_pool: "CorePool",
+    poll_interval: float,
+) -> None:
+    """daemon 后台 watcher：轮询 bash job 终态并通过 inject_turn 主动通知。"""
+    logger.info("bash_job_notify: watcher started poll_interval=%.1fs", poll_interval)
+    try:
+        while not stop_event.is_set():
+            try:
+                notes = await poll_terminal_jobs(max_items=20)
+            except Exception as exc:
+                logger.warning("bash_job_notify: poll_terminal_jobs failed: %s", exc)
+                notes = []
+            for note in notes:
+                try:
+                    text = format_notification(note)
+                    await deliver_via_inject(
+                        session_id=note["session_id"],
+                        text=text,
+                        scheduler=scheduler,
+                        core_pool=core_pool,
+                        note=note,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "bash_job_notify: deliver failed session=%s job=%s: %s",
+                        note.get("session_id"),
+                        note.get("job_id"),
+                        exc,
+                    )
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(), timeout=max(0.1, poll_interval)
+                )
+            except asyncio.TimeoutError:
+                pass
+    except asyncio.CancelledError:
+        logger.info("bash_job_notify: watcher cancelled")
+        raise
+
+
 async def _main() -> None:
     cfg = get_config()
     reconcile_admin_linux_users(cfg.command_tools)
@@ -534,6 +588,7 @@ async def _main() -> None:
         session_logger=None,
     )
     scheduler_runtime = KernelScheduler(kernel=kernel, core_pool=core_pool)
+    set_notify_dependencies(scheduler=scheduler_runtime, core_pool=core_pool)
     kernel_terminal = KernelTerminal(
         scheduler=scheduler_runtime,
         core_pool=core_pool,
@@ -611,6 +666,25 @@ async def _main() -> None:
         )
 
         await scheduler_runtime.start()
+
+        notify_enabled = bool(
+            getattr(cfg.command_tools, "bash_job_notify_inject_enabled", True)
+        )
+        notify_poll = float(
+            getattr(cfg.command_tools, "bash_job_notify_poll_seconds", 3.0) or 3.0
+        )
+        notify_task: asyncio.Task[Any] | None = None
+        if notify_enabled:
+            notify_task = asyncio.create_task(
+                _bash_job_notify_loop(
+                    stop_event=stop_event,
+                    scheduler=scheduler_runtime,
+                    core_pool=core_pool,
+                    poll_interval=notify_poll,
+                ),
+                name="bash-job-notify-watcher",
+            )
+
         await scheduler.start()
         await ipc.start()
         logger.info("Automation daemon started. socket=%s", ipc.socket_path)
@@ -627,9 +701,7 @@ async def _main() -> None:
             finally:
                 await core_agent.close_mcp_only()
 
-        mcp_task = asyncio.create_task(
-            _mcp_lifecycle_task(), name="daemon-mcp-connect"
-        )
+        mcp_task = asyncio.create_task(_mcp_lifecycle_task(), name="daemon-mcp-connect")
 
         try:
             while True:
@@ -646,6 +718,9 @@ async def _main() -> None:
             if remote_server_task is not None:
                 remote_server_task.cancel()
                 await asyncio.gather(remote_server_task, return_exceptions=True)
+            if notify_task is not None:
+                notify_task.cancel()
+                await asyncio.gather(notify_task, return_exceptions=True)
             await ipc.stop()
             await scheduler.stop()
             await scheduler_runtime.stop()

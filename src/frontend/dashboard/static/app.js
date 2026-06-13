@@ -1454,35 +1454,53 @@ function clearChatHistory(sessionId) {
   } catch { /* ignore */ }
 }
 
-function restoreChatMessages(sessionId) {
+async function loadChatHistoryFromServer(sessionId) {
+  if (!sessionId) return [];
+  try {
+    const resp = await fetch(apiUrl(`/api/chat/history?session_id=${encodeURIComponent(sessionId)}&limit=100`), {
+      credentials: "same-origin",
+    });
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    return Array.isArray(data.history) ? data.history : [];
+  } catch {
+    return [];
+  }
+}
+
+function renderHistoryEntry(entry) {
+  const text = entry.content || entry.text || "";
+  if (entry.role === "user") {
+    const wrap = makeMessage("user");
+    const bubble = document.createElement("div");
+    bubble.className = "bubble user";
+    bubble.innerHTML = `<span class="role">you</span><div class="body"></div>`;
+    bubble.querySelector(".body").textContent = text;
+    wrap.appendChild(bubble);
+    chatWindow.appendChild(wrap);
+  } else {
+    const wrap = makeMessage("assistant");
+    wrap.innerHTML = `
+      <div class="bubble assistant">
+        <span class="role">macchiato</span>
+        <div class="body"></div>
+      </div>
+    `;
+    const body = wrap.querySelector(".body");
+    body.innerHTML = renderMarkdown(text);
+    chatWindow.appendChild(wrap);
+  }
+}
+
+async function restoreChatMessages(sessionId) {
   // Remove the empty state if present
   const empty = chatWindow.querySelector(".empty");
   if (empty) empty.remove();
   // Clear existing messages
   chatWindow.querySelectorAll(".message").forEach((el) => el.remove());
-  const history = loadChatHistory(sessionId);
-  history.forEach((entry) => {
-    if (entry.role === "user") {
-      const wrap = makeMessage("user");
-      const bubble = document.createElement("div");
-      bubble.className = "bubble user";
-      bubble.innerHTML = `<span class="role">you</span><div class="body"></div>`;
-      bubble.querySelector(".body").textContent = entry.text;
-      wrap.appendChild(bubble);
-      chatWindow.appendChild(wrap);
-    } else {
-      const wrap = makeMessage("assistant");
-      wrap.innerHTML = `
-        <div class="bubble assistant">
-          <span class="role">macchiato</span>
-          <div class="body"></div>
-        </div>
-      `;
-      const body = wrap.querySelector(".body");
-      body.innerHTML = renderMarkdown(entry.text);
-      chatWindow.appendChild(wrap);
-    }
-  });
+  // Only load from server; localStorage is device-local and may contain stale data.
+  const history = await loadChatHistoryFromServer(sessionId);
+  history.forEach(renderHistoryEntry);
   chatWindow.scrollTop = chatWindow.scrollHeight;
 }
 
@@ -2126,9 +2144,15 @@ $("chatForm").addEventListener("submit", async (evt) => {
   $("chatText").value = "";
   hideSuggest();
 
-  // Handle /clear: also wipe history from localStorage
+  // Handle /clear: also wipe history from localStorage and server
   if (text.startsWith("/clear")) {
     clearChatHistory(sessionId);
+    try {
+      await fetch(apiUrl(`/api/chat/history/clear?session_id=${encodeURIComponent(sessionId)}`), {
+        method: "POST",
+        credentials: "same-origin",
+      });
+    } catch { /* ignore */ }
   }
 
   const ctx = makeAssistantBubble();

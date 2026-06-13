@@ -180,11 +180,16 @@ def resolve_workspace_owner_dir(
     fe = validate_logic_namespace_segment(_ns_segment(source, "cli"), what="frontend")
     uid = validate_logic_namespace_segment(_ns_segment(user_id, "root"), what="user_id")
     if should_use_os_home_for_logic_user(cmd_cfg, source=fe, user_id=uid, profile=None):
-        posix_name = logic_os_user_name(
-            fe,
-            uid,
-            prefix=str(getattr(cmd_cfg, "bash_os_tenant_user_prefix", "m_")),
-        )
+        from agent_core.bash_os_user import resolve_admin_system_user
+        admin_user = resolve_admin_system_user(cmd_cfg, source=fe, user_id=uid)
+        if admin_user:
+            posix_name = admin_user
+        else:
+            posix_name = logic_os_user_name(
+                fe,
+                uid,
+                prefix=str(getattr(cmd_cfg, "bash_os_tenant_user_prefix", "m_")),
+            )
         return str(resolve_os_user_home(cmd_cfg, posix_name))
     base = Path((cmd_cfg.workspace_base_dir or "./data/workspace").strip())
     return str(base / fe / uid)

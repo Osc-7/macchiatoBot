@@ -8,7 +8,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Literal
+from typing import Any, Dict, List, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -697,6 +697,20 @@ class CommandToolsConfig(BaseModel):
             "为 True 时租户首次会话对 logic 映射的 Linux 用户执行 useradd（不存在则创建）；"
             "管理员使用同一个 logic Linux 用户，并在 root daemon 对账时补齐 sudo/admin 能力"
         ),
+    )
+    bash_job_notify_poll_seconds: float = Field(
+        default=3.0,
+        gt=0,
+        description="daemon 后台 bash job 完成通知 watcher 轮询间隔（秒）",
+    )
+    bash_job_status_min_interval_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description="同一 bash job_status 查询的最小节流间隔（秒）",
+    )
+    bash_job_notify_inject_enabled: bool = Field(
+        default=True,
+        description="是否启用 bash job 完成主动 inject_turn 通知总开关",
     )
 
 
@@ -1479,8 +1493,10 @@ def _merge_llm_provider_files(raw_config: dict, config_path: Path) -> None:
             return None
         if frag is None:
             return {}
-        if isinstance(frag, dict) and "providers" in frag and isinstance(
-            frag["providers"], dict
+        if (
+            isinstance(frag, dict)
+            and "providers" in frag
+            and isinstance(frag["providers"], dict)
         ):
             return dict(frag["providers"])
         if isinstance(frag, dict):
@@ -1572,9 +1588,7 @@ def _expand_env_vars_in_providers(providers_map: Any) -> None:
 
     def _replace(value: Any) -> Any:
         if isinstance(value, str):
-            return pattern.sub(
-                lambda m: os.environ.get(m.group(1), m.group(0)), value
-            )
+            return pattern.sub(lambda m: os.environ.get(m.group(1), m.group(0)), value)
         if isinstance(value, dict):
             return {k: _replace(v) for k, v in value.items()}
         if isinstance(value, list):
@@ -1792,9 +1806,9 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         raw_config["feishu"]["encrypt_key"] = env_feishu_encrypt_key
     env_feishu_automation_chat_id = os.environ.get("FEISHU_AUTOMATION_CHAT_ID")
     if env_feishu_automation_chat_id:
-        raw_config["feishu"]["automation_activity_chat_id"] = (
-            env_feishu_automation_chat_id
-        )
+        raw_config["feishu"][
+            "automation_activity_chat_id"
+        ] = env_feishu_automation_chat_id
 
     # 水源社区配置支持环境变量覆盖
     if "shuiyuan" not in raw_config:

@@ -17,16 +17,20 @@ from __future__ import annotations
 import asyncio
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from macchiato_remote.protocol import REMOTE_WORKSPACE_MOUNT
-
+from agent_core.permissions.broker import (
+    PathGrant,
+    PermissionBroker,
+    PermissionBrokerResult,
+    PermissionRequest,
+)
+from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from agent_core.tools.bash_job_notify import (
     register_local_job,
     register_remote_job,
 )
-from agent_core.permissions.broker import PathGrant, PermissionBroker, PermissionBrokerResult, PermissionRequest
-from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from macchiato_remote.protocol import REMOTE_WORKSPACE_MOUNT
 
 if TYPE_CHECKING:
     from agent_core.bash_runtime import BashRuntime
@@ -54,6 +58,9 @@ class BashTool(BaseTool):
             re.IGNORECASE,
         )
         self._default_wait_window_ms = 30_000
+        self._max_inferred_foreground_wait_seconds = 600.0
+        # (session_id, job_id) -> (monotonic_ts, payload) 用于 job_status 5s 节流
+        self._job_status_cache: Dict[tuple[str, str], tuple[float, dict]] = {}
 
     @property
     def name(self) -> str:
@@ -90,6 +97,12 @@ class BashTool(BaseTool):
                     name="command",
                     type="string",
                     description="要执行的 shell 命令",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="await_seconds",
+                    type="number",
+                    description="显式前台等待（秒）：不启动 shell 进程，阻塞当前工具调用直到时间到。适用于等待日志落盘、服务就绪等短等待；无需写 sleep 命令，也不会触发自动后台化",
                     required=False,
                 ),
                 ToolParameter(
@@ -186,8 +199,16 @@ class BashTool(BaseTool):
                     "params": {"command": "export MY_VAR=hello"},
                 },
                 {
+                    "description": "显式等待 30 秒（不启动 shell，不转后台）",
+                    "params": {"await_seconds": 30},
+                },
+                {
                     "description": "后台安装依赖（不阻塞会话）",
-                    "params": {"command": "pip install torch", "background": True, "hard_timeout_seconds": 300},
+                    "params": {
+                        "command": "pip install torch",
+                        "background": True,
+                        "hard_timeout_seconds": 300,
+                    },
                 },
                 {
                     "description": "同步命令超过前台窗口后自动后台化",
@@ -227,9 +248,11 @@ class BashTool(BaseTool):
                 "这是持久化 bash 会话：cd、export 等在后续命令中生效",
                 "危险命令和工作区外写入会自动申请人类批准，批准后继续执行同一条命令",
                 "同步 command 先在前台等待 wait_window_ms，窗口到期仅会自动转后台，不会返回 COMMAND_TIMEOUT",
+                "命令中含 sleep 且未显式指定 wait_window_ms 时，会自动按 sleep 总时长放宽前台等待，避免 sleep 60 在 30s 就被转后台",
+                "短等待优先用 await_seconds（秒），无需 sleep 命令或 job_status 轮询",
                 "wait_for_completion=true 时会忽略 wait_window_ms 的自动后台化，前台等待到完成或 hard_timeout",
                 "仅当任务超过 hard_timeout_seconds 才会被标记为 timed_out（可通过 job_status 查看）",
-                "当返回 data.job_id/status/log_path 时，表示任务已后台化，可继续用 job_status/job_tail/job_stop",
+                "当返回 data.job_id/status/log_path 时，表示任务已后台化；系统会在完成时主动推送通知，勿频繁 job_status 轮询",
                 "使用 restart=true 可手动重置会话（清除所有状态）",
                 "长任务（安装依赖、下载大文件、编译、训练等）建议用 background=true 走独立后台进程，避免阻塞会话",
                 "后台任务日志写入工作区 .macchiato/jobs/ 目录，可用 job_tail 读取",
@@ -245,15 +268,28 @@ class BashTool(BaseTool):
         if param_err is not None:
             return param_err
 
+        await_seconds_raw = kwargs.get("await_seconds")
+        if await_seconds_raw is not None:
+            return await self._execute_await_seconds(
+                await_seconds_raw,
+                has_command=bool(str(kwargs.get("command") or "").strip()),
+                has_background=bool(kwargs.get("background")),
+                has_job=any(
+                    str(kwargs.get(k) or "").strip()
+                    for k in ("job_status", "job_tail", "job_stop")
+                ),
+                restart=bool(kwargs.get("restart")),
+            )
+
         restart = kwargs.get("restart", False)
         if restart:
             session_id = str(exec_ctx.get("session_id") or "").strip()
             if session_id:
-                from agent_core.remote.workspace_state import (
-                    get_remote_workspace_state,
-                )
                 from agent_core.remote.worker_registry import (
                     get_remote_worker_registry,
+                )
+                from agent_core.remote.workspace_state import (
+                    get_remote_workspace_state,
                 )
 
                 remote_state = get_remote_workspace_state(session_id)
@@ -314,6 +350,8 @@ class BashTool(BaseTool):
             wait_window_ms=kwargs.get("wait_window_ms"),
             wait_for_completion=kwargs.get("wait_for_completion"),
             command=command,
+            explicit_wait_window=kwargs.get("wait_window_ms") is not None,
+            explicit_wait_for_completion=kwargs.get("wait_for_completion") is not None,
         )
         if controls_err is not None:
             return controls_err
@@ -359,7 +397,9 @@ class BashTool(BaseTool):
             return security_result
 
         if self._is_stateful_shell_command(command):
-            return await self._execute_stateful_sync(command=command, timeout=hard_timeout)
+            return await self._execute_stateful_sync(
+                command=command, timeout=hard_timeout
+            )
 
         return await self._execute_local_sync_via_job(
             command=command,
@@ -507,7 +547,11 @@ class BashTool(BaseTool):
         return ToolResult(
             success=True,
             data=data,
-            message=f"前台等待窗口已到，任务已转后台继续执行: {job_id}",
+            message=(
+                f"前台等待窗口已到，任务已转后台继续执行: {job_id}。"
+                "系统会在任务完成时主动推送通知，无需 job_status 轮询；"
+                "需要日志时用 job_tail，需要阻塞等待请用 await_seconds 或 wait_for_completion=true"
+            ),
             metadata=metadata,
         )
 
@@ -575,6 +619,52 @@ class BashTool(BaseTool):
             return True
         return "() {" in raw
 
+    async def _execute_await_seconds(
+        self,
+        raw_seconds: object,
+        *,
+        has_command: bool,
+        has_background: bool,
+        has_job: bool,
+        restart: bool,
+    ) -> ToolResult:
+        if has_command or has_background or has_job or restart:
+            return ToolResult(
+                success=False,
+                error="CONFLICTING_PARAMS",
+                message="await_seconds 不能与 command、background、job_* 或 restart 同时使用",
+            )
+        try:
+            seconds = float(raw_seconds)
+        except (TypeError, ValueError):
+            return ToolResult(
+                success=False,
+                error="INVALID_AWAIT_SECONDS",
+                message="await_seconds 必须是数字（秒）",
+            )
+        if seconds < 0:
+            return ToolResult(
+                success=False,
+                error="INVALID_AWAIT_SECONDS",
+                message="await_seconds 不能为负数",
+            )
+        if seconds > self._max_inferred_foreground_wait_seconds:
+            return ToolResult(
+                success=False,
+                error="AWAIT_SECONDS_TOO_LONG",
+                message=(
+                    f"await_seconds 不能超过 {int(self._max_inferred_foreground_wait_seconds)} 秒；"
+                    "更长等待请用 background=true 启动任务并依赖完成通知"
+                ),
+            )
+        if seconds > 0:
+            await asyncio.sleep(seconds)
+        return ToolResult(
+            success=True,
+            data={"await_seconds": seconds, "waited": True},
+            message=f"已等待 {seconds:g} 秒",
+        )
+
     def _parse_timeout_controls(
         self,
         *,
@@ -583,6 +673,8 @@ class BashTool(BaseTool):
         wait_window_ms: object,
         wait_for_completion: object,
         command: str,
+        explicit_wait_window: bool = False,
+        explicit_wait_for_completion: bool = False,
     ) -> tuple[dict[str, Any], Optional[ToolResult]]:
         legacy_timeout, timeout_err = self._parse_timeout(timeout)
         if timeout_err is not None:
@@ -606,14 +698,27 @@ class BashTool(BaseTool):
                 )
         wait_forever = bool(wait_for_completion)
         hard_timeout_seconds = (
-            hard_timeout_s
-            if hard_timeout_s is not None
-            else legacy_timeout
+            hard_timeout_s if hard_timeout_s is not None else legacy_timeout
         )
         if hard_timeout_seconds is None:
             hard_timeout_seconds = self._infer_timeout_from_command(command)
         if wait_window_seconds is None:
             wait_window_seconds = self._default_wait_window_ms / 1000.0
+        inferred_sleep = self._infer_sleep_seconds_from_command(command)
+        if inferred_sleep > 0 and not explicit_wait_window:
+            buffered = max(3.0, inferred_sleep + 5.0)
+            wait_window_seconds = max(wait_window_seconds, buffered)
+            wait_window_seconds = min(
+                wait_window_seconds,
+                self._max_inferred_foreground_wait_seconds,
+            )
+        if (
+            inferred_sleep > 0
+            and not explicit_wait_for_completion
+            and not explicit_wait_window
+            and inferred_sleep <= self._max_inferred_foreground_wait_seconds
+        ):
+            wait_forever = True
         return (
             {
                 "hard_timeout_seconds": hard_timeout_seconds,
@@ -634,18 +739,25 @@ class BashTool(BaseTool):
             str(kwargs.get(k) or "").strip()
             for k in ("job_status", "job_tail", "job_stop")
         )
+        has_await = kwargs.get("await_seconds") is not None
 
-        if restart and (has_command or background or has_job):
+        if restart and (has_command or background or has_job or has_await):
             return ToolResult(
                 success=False,
                 error="CONFLICTING_PARAMS",
-                message="restart 不能与 command、background 或 job_* 同时使用",
+                message="restart 不能与 command、background、job_* 或 await_seconds 同时使用",
             )
-        if has_job and (has_command or background):
+        if has_job and (has_command or background or has_await):
             return ToolResult(
                 success=False,
                 error="CONFLICTING_PARAMS",
-                message="job_status/job_tail/job_stop 不能与 command 或 background 同时使用",
+                message="job_status/job_tail/job_stop 不能与 command、background 或 await_seconds 同时使用",
+            )
+        if has_await and (has_command or background):
+            return ToolResult(
+                success=False,
+                error="CONFLICTING_PARAMS",
+                message="await_seconds 不能与 command 或 background 同时使用",
             )
         if background and not has_command:
             return ToolResult(
@@ -668,13 +780,7 @@ class BashTool(BaseTool):
                 message="timeout 必须是数字（秒）",
             )
 
-    def _infer_timeout_from_command(self, command: str) -> Optional[float]:
-        """Best-effort timeout inference for sleep-heavy commands.
-
-        Agent 经常会执行 `sleep N && tail ...` 这类“等待后读取”的模式。
-        当用户/模型未显式给 timeout 时，按 sleep 总时长 + 缓冲自动放宽，
-        避免将正常等待误判成超时并触发 shell 重启。
-        """
+    def _infer_sleep_seconds_from_command(self, command: str) -> float:
         total_sleep = 0.0
         unit_scale = {
             "": 1.0,
@@ -692,6 +798,16 @@ class BashTool(BaseTool):
                 continue
             unit = (match.group(2) or "").lower()
             total_sleep += value * unit_scale.get(unit, 1.0)
+        return total_sleep
+
+    def _infer_timeout_from_command(self, command: str) -> Optional[float]:
+        """Best-effort timeout inference for sleep-heavy commands.
+
+        Agent 经常会执行 `sleep N && tail ...` 这类“等待后读取”的模式。
+        当用户/模型未显式给 timeout 时，按 sleep 总时长 + 缓冲自动放宽，
+        避免将正常等待误判成超时并触发 shell 重启。
+        """
+        total_sleep = self._infer_sleep_seconds_from_command(command)
         if total_sleep <= 0:
             return None
         # 给 sleep 留安全缓冲，避免边界时间抖动导致误超时。
@@ -756,17 +872,13 @@ class BashTool(BaseTool):
                     roots.append(s)
         return roots
 
-    def _normalize_command_for_security(
-        self, command: str, remote_state: Any
-    ) -> str:
+    def _normalize_command_for_security(self, command: str, remote_state: Any) -> str:
         jail = self._remote_jail_root(remote_state)
         if jail and REMOTE_WORKSPACE_MOUNT in command:
             return command.replace(REMOTE_WORKSPACE_MOUNT, jail)
         return command
 
-    def _security_for(
-        self, exec_ctx: dict, remote_state: Any = None
-    ) -> "BashSecurity":
+    def _security_for(self, exec_ctx: dict, remote_state: Any = None) -> "BashSecurity":
         from agent_core.config import get_config
 
         cfg = get_config()
@@ -825,7 +937,9 @@ class BashTool(BaseTool):
 
         if verdict.needs_confirmation:
             if remote_state is not None:
-                cwd = self._remote_jail_root(remote_state) or remote_state.workspace_mount
+                cwd = (
+                    self._remote_jail_root(remote_state) or remote_state.workspace_mount
+                )
             else:
                 cwd = await self._current_cwd()
             broker_result = await self._request_bash_permission(
@@ -843,7 +957,9 @@ class BashTool(BaseTool):
             for grant in broker_result.applied_grants:
                 if grant.access_mode == "write":
                     try:
-                        security._workspace_extra_write_roots.append(Path(grant.path_prefix))
+                        security._workspace_extra_write_roots.append(
+                            Path(grant.path_prefix)
+                        )
                     except Exception:
                         pass
             if getattr(security, "_workspace_jail_root", None):
@@ -939,14 +1055,76 @@ class BashTool(BaseTool):
                 "command": handle.command,
                 "cwd": handle.cwd,
             },
-            message=f"后台任务已启动: {handle.job_id} (pid={handle.pid})",
+            message=(
+                f"后台任务已启动: {handle.job_id} (pid={handle.pid})。"
+                "系统会在任务完成时主动推送通知，无需频繁 job_status 轮询"
+            ),
+        )
+
+    def _job_status_min_interval_seconds(self) -> float:
+        try:
+            from agent_core.config import get_config
+
+            cfg = get_config()
+            return float(
+                getattr(
+                    cfg.command_tools,
+                    "bash_job_status_min_interval_seconds",
+                    5.0,
+                )
+                or 5.0
+            )
+        except Exception:
+            return 5.0
+
+    def _check_job_status_throttle(
+        self, *, exec_ctx: dict, job_id: str
+    ) -> Optional[ToolResult]:
+        """同一 session 的同一 job 在配置间隔内重复查询返回缓存 payload（running 状态可节流，终态不节流）。"""
+        if not job_id:
+            return None
+        session_id = str(exec_ctx.get("session_id") or "").strip()
+        if not session_id:
+            # 无 session_id 时不节流（兼容旧测试 / 直接工具调用）
+            return None
+        key = (session_id, job_id)
+        now = asyncio.get_running_loop().time()
+        cached = self._job_status_cache.get(key)
+        if cached is None:
+            return None
+        ts, payload = cached
+        min_interval = self._job_status_min_interval_seconds()
+        if now - ts >= min_interval:
+            return None
+        status = str(payload.get("status") or "").lower()
+        if status not in {"running"}:
+            # 终态始终返回最新，不节流
+            return None
+        data = dict(payload)
+        return ToolResult(
+            success=True,
+            data=data,
+            message="任务状态未变，请勿频繁轮询；完成后系统会主动通知",
+            metadata={"throttled": True},
+        )
+
+    def _cache_job_status(self, exec_ctx: dict, job_id: str, payload: dict) -> None:
+        if not job_id:
+            return
+        session_id = str(exec_ctx.get("session_id") or "").strip()
+        if not session_id:
+            return
+        self._job_status_cache[(session_id, job_id)] = (
+            asyncio.get_running_loop().time(),
+            dict(payload),
         )
 
     # ── job management helpers ───────────────────────────────
 
     def _job_manager(self) -> "JobManager":
-        from agent_core.job_manager import get_job_manager
         from pathlib import Path
+
+        from agent_core.job_manager import get_job_manager
 
         ws_root = str(Path(self._bash._config.base_dir).resolve())
         return get_job_manager(workspace_root=ws_root)
@@ -979,6 +1157,12 @@ class BashTool(BaseTool):
         manager = self._job_manager()
 
         if job_status_id:
+            throttled = self._check_job_status_throttle(
+                exec_ctx=exec_ctx, job_id=job_status_id
+            )
+            if throttled is not None:
+                return throttled
+
             handle = await manager.job_status(job_status_id)
             if handle is None:
                 return ToolResult(
@@ -996,26 +1180,57 @@ class BashTool(BaseTool):
                 "duration_seconds": round(handle.duration_seconds, 2),
                 "log_path": str(handle.log_path),
             }
+            self._cache_job_status(exec_ctx, job_status_id, data)
             if handle.status == "running":
-                return ToolResult(success=True, data=data, message=f"任务正在运行（已运行 {handle.duration_seconds:.1f}s）")
+                return ToolResult(
+                    success=True,
+                    data=data,
+                    message=f"任务正在运行（已运行 {handle.duration_seconds:.1f}s）",
+                )
             elif handle.status == "finished":
-                return ToolResult(success=True, data=data, message=f"任务已完成，耗时 {handle.duration_seconds:.1f}s，返回码 {handle.exit_code}")
+                return ToolResult(
+                    success=True,
+                    data=data,
+                    message=f"任务已完成，耗时 {handle.duration_seconds:.1f}s，返回码 {handle.exit_code}",
+                )
             elif handle.status == "timed_out":
-                return ToolResult(success=False, data=data, error="JOB_TIMED_OUT", message=f"任务已超时（运行了 {handle.duration_seconds:.1f}s）")
+                return ToolResult(
+                    success=False,
+                    data=data,
+                    error="JOB_TIMED_OUT",
+                    message=f"任务已超时（运行了 {handle.duration_seconds:.1f}s）",
+                )
             elif handle.status == "cancelled":
-                return ToolResult(success=False, data=data, error="JOB_CANCELLED", message="任务已被取消")
+                return ToolResult(
+                    success=False,
+                    data=data,
+                    error="JOB_CANCELLED",
+                    message="任务已被取消",
+                )
             else:
-                return ToolResult(success=False, data=data, error="JOB_FAILED", message=f"任务失败，返回码 {handle.exit_code}")
+                return ToolResult(
+                    success=False,
+                    data=data,
+                    error="JOB_FAILED",
+                    message=f"任务失败，返回码 {handle.exit_code}",
+                )
 
         if job_tail_id:
-            result = await manager.job_tail(job_tail_id, lines=max(1, int(lines)), offset=max(0, int(offset)))
+            result = await manager.job_tail(
+                job_tail_id, lines=max(1, int(lines)), offset=max(0, int(offset))
+            )
             if result is None:
-                return ToolResult(success=False, error="JOB_NOT_FOUND", message=f"未找到后台任务: {job_tail_id}")
+                return ToolResult(
+                    success=False,
+                    error="JOB_NOT_FOUND",
+                    message=f"未找到后台任务: {job_tail_id}",
+                )
             data = {
                 "job_id": job_tail_id,
                 "status": result.get("status"),
                 "total_lines": result.get("total_lines", 0),
-                "read_lines": len(result.get("head_lines", [])) + len(result.get("tail_lines", [])),
+                "read_lines": len(result.get("head_lines", []))
+                + len(result.get("tail_lines", [])),
                 "offset": result.get("offset", 0),
                 "log_path": result.get("log_path"),
                 "head_lines": result.get("head_lines", []),
@@ -1030,7 +1245,11 @@ class BashTool(BaseTool):
         if job_stop_id:
             ok = await manager.stop_job(job_stop_id, signal_name=signal_name)
             if not ok:
-                return ToolResult(success=False, error="STOP_FAILED", message=f"终止任务失败（任务可能不存在或已结束）: {job_stop_id}")
+                return ToolResult(
+                    success=False,
+                    error="STOP_FAILED",
+                    message=f"终止任务失败（任务可能不存在或已结束）: {job_stop_id}",
+                )
             return ToolResult(success=True, message=f"后台任务已终止: {job_stop_id}")
 
         return ToolResult(success=False, error="NO_ACTION", message="未指定 job 操作")
@@ -1152,7 +1371,10 @@ class BashTool(BaseTool):
         )
         tool_result = self._remote_command_tool_result(result, remote_state, metadata)
         data = tool_result.data if isinstance(tool_result.data, dict) else {}
-        if bool(data.get("auto_backgrounded")) and str(data.get("job_id") or "").strip():
+        if (
+            bool(data.get("auto_backgrounded"))
+            and str(data.get("job_id") or "").strip()
+        ):
             self._track_remote_background_job(
                 exec_ctx=exec_ctx,
                 remote_login=remote_state.login,
@@ -1218,7 +1440,10 @@ class BashTool(BaseTool):
                 "cwd": job_cwd,
                 "remote": True,
             },
-            message=f"远程后台任务已启动: {start.job_id}",
+            message=(
+                f"远程后台任务已启动: {start.job_id}。"
+                "系统会在任务完成时主动推送通知，无需频繁 job_status 轮询"
+            ),
             metadata={
                 "workspace_backend": "remote",
                 "remote_login": remote_state.login,
@@ -1243,6 +1468,12 @@ class BashTool(BaseTool):
         registry = get_remote_worker_registry()
 
         if job_status_id:
+            throttled = self._check_job_status_throttle(
+                exec_ctx=exec_ctx, job_id=job_status_id
+            )
+            if throttled is not None:
+                return throttled
+
             res = await registry.job_status(
                 login=remote_state.login,
                 session_id=session_id,
@@ -1265,6 +1496,7 @@ class BashTool(BaseTool):
                 "log_path": res.log_path,
                 "remote": True,
             }
+            self._cache_job_status(exec_ctx, job_status_id, data)
             if res.status == "running":
                 return ToolResult(
                     success=True,
@@ -1342,7 +1574,9 @@ class BashTool(BaseTool):
                     error="STOP_FAILED",
                     message=f"终止远程任务失败: {job_stop_id}",
                 )
-            return ToolResult(success=True, message=f"远程后台任务已终止: {job_stop_id}")
+            return ToolResult(
+                success=True, message=f"远程后台任务已终止: {job_stop_id}"
+            )
 
         return ToolResult(success=False, error="NO_ACTION", message="未指定 job 操作")
 
@@ -1381,9 +1615,7 @@ class BashTool(BaseTool):
                     login=remote_state.login,
                     session_id=session_id,
                     requested_path=(
-                        remote_state.requested_path
-                        or remote_state.resolved_path
-                        or "~"
+                        remote_state.requested_path or remote_state.resolved_path or "~"
                     ),
                     profile=remote_state.profile,
                 )
@@ -1485,6 +1717,10 @@ class BashTool(BaseTool):
             cwd=cwd,
             log_path=log_path,
             workspace_root=ws_root,
+            frontend_id=str(exec_ctx.get("frontend_id") or "cli").strip() or "cli",
+            source=str(exec_ctx.get("source") or "cli").strip() or "cli",
+            user_id=str(exec_ctx.get("user_id") or "root").strip() or "root",
+            metadata=self._job_notify_metadata(exec_ctx),
         )
 
     @staticmethod
@@ -1507,7 +1743,21 @@ class BashTool(BaseTool):
             command=command,
             cwd=cwd,
             log_path=log_path,
+            frontend_id=str(exec_ctx.get("frontend_id") or "cli").strip() or "cli",
+            source=str(exec_ctx.get("source") or "cli").strip() or "cli",
+            user_id=str(exec_ctx.get("user_id") or "root").strip() or "root",
+            metadata=BashTool._job_notify_metadata(exec_ctx),
         )
+
+    @staticmethod
+    def _job_notify_metadata(exec_ctx: dict) -> dict:
+        """保留可能用于 inject_turn 推送的元数据（如飞书 chat_id）。"""
+        md: dict = {}
+        for key in ("feishu_chat_id",):
+            value = exec_ctx.get(key)
+            if value:
+                md[key] = str(value).strip()
+        return md
 
     @staticmethod
     def _is_remote_session_not_open_result(result: object) -> bool:

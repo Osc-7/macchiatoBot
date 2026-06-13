@@ -202,15 +202,23 @@ def _resolve_os_home_memory_owner_dir(
     from agent_core.bash_os_user import (
         logic_os_user_name,
         resolve_os_user_home,
+        resolve_admin_system_user,
     )
 
     cmd_cfg = config.command_tools
-    posix_name = logic_os_user_name(
-        source,
-        user_id,
-        prefix=str(getattr(cmd_cfg, "bash_os_tenant_user_prefix", "m_")),
-    )
+    # 优先使用管理员指定的系统用户映射
+    admin_user = resolve_admin_system_user(cmd_cfg, source=source, user_id=user_id)
+    if admin_user:
+        posix_name = admin_user
+    else:
+        posix_name = logic_os_user_name(
+            source,
+            user_id,
+            prefix=str(getattr(cmd_cfg, "bash_os_tenant_user_prefix", "m_")),
+        )
     home_dir = resolve_os_user_home(cmd_cfg, posix_name)
+    return home_dir / "data" / "memory"
+
     return home_dir / "data" / "memory"
 
 

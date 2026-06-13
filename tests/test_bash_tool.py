@@ -14,11 +14,11 @@ import asyncio
 
 import pytest
 
-from agent_core.bash_runtime import BashRuntime, BashRuntimeConfig
 from agent_core.agent.writable_ephemeral_grants import (
     clear_ephemeral_writable_grants_for_tests,
 )
 from agent_core.agent.writable_roots_store import load_user_writable_prefixes
+from agent_core.bash_runtime import BashRuntime, BashRuntimeConfig
 from agent_core.bash_security import (
     BashSecurity,
 )
@@ -168,6 +168,22 @@ class TestBashSecurity:
     def test_dangerous_eval(self):
         sec = self._sec()
         v = sec.check("eval 'rm -rf /'")
+        assert v.needs_confirmation
+
+    def test_eval_in_filename_not_flagged(self):
+        sec = self._sec()
+        for cmd in [
+            "python scripts/run_eval.py",
+            "cat experiments/ddv_llada/eval_results.json",
+            "ls /data/models/eval/checkpoint",
+            "pytest tests/test_retrieval.py -q",
+        ]:
+            v = sec.check(cmd)
+            assert v.allowed, f"should allow: {cmd}"
+
+    def test_dangerous_subshell_eval_still_flagged(self):
+        sec = self._sec()
+        v = sec.check("echo $(eval 'echo pwned')")
         assert v.needs_confirmation
 
     def test_dangerous_printf_octal_pipe_to_bash(self):
@@ -651,7 +667,9 @@ class TestBashToolExecution:
         try:
             result = await tool.execute(command="sleep 0.4 && echo woke")
             assert result.success
-            assert "woke" in result.data["stdout"] or result.data.get("auto_backgrounded")
+            assert "woke" in result.data["stdout"] or result.data.get(
+                "auto_backgrounded"
+            )
         finally:
             await rt.close()
 
@@ -677,7 +695,9 @@ class TestBashToolExecution:
             assert st.data["status"] == "finished"
             tail = await tool.execute(job_tail=job_id, lines=200, offset=0)
             assert tail.success
-            out = "\n".join(tail.data.get("head_lines", []) + tail.data.get("tail_lines", []))
+            out = "\n".join(
+                tail.data.get("head_lines", []) + tail.data.get("tail_lines", [])
+            )
             assert "bgdone" in out
         finally:
             await rt.close()
@@ -695,6 +715,42 @@ class TestBashToolExecution:
             assert result.success
             assert not result.data.get("auto_backgrounded", False)
             assert "waited" in result.data["stdout"]
+        finally:
+            await rt.close()
+
+    async def test_sleep_command_auto_waits_without_explicit_wait_window(
+        self, tmp_path
+    ):
+        tool, rt = _make_tool(base_dir=str(tmp_path))
+        await rt.start()
+        try:
+            result = await tool.execute(command="sleep 0.35 && echo slept")
+            assert result.success
+            assert not result.data.get("auto_backgrounded", False)
+            assert "slept" in result.data["stdout"]
+        finally:
+            await rt.close()
+
+    async def test_await_seconds_blocks_without_shell(self, tmp_path):
+        tool, rt = _make_tool(base_dir=str(tmp_path))
+        await rt.start()
+        try:
+            started = asyncio.get_running_loop().time()
+            result = await tool.execute(await_seconds=0.15)
+            elapsed = asyncio.get_running_loop().time() - started
+            assert result.success
+            assert result.data["await_seconds"] == 0.15
+            assert elapsed >= 0.12
+        finally:
+            await rt.close()
+
+    async def test_await_seconds_conflicts_with_command(self, tmp_path):
+        tool, rt = _make_tool(base_dir=str(tmp_path))
+        await rt.start()
+        try:
+            result = await tool.execute(await_seconds=1, command="echo hi")
+            assert not result.success
+            assert result.error == "CONFLICTING_PARAMS"
         finally:
             await rt.close()
 
@@ -723,7 +779,9 @@ class TestBashToolExecution:
 
 
 class TestBashToolBackground:
-    async def test_background_dangerous_command_rejected(self, permission_config, tmp_path):
+    async def test_background_dangerous_command_rejected(
+        self, permission_config, tmp_path
+    ):
         touched = tmp_path / "bg_should_not_exist"
         _auto_resolve(PermissionDecision(allowed=False, note="no"))
         tool, rt = _make_tool(base_dir=str(tmp_path))
@@ -781,6 +839,61 @@ class TestBashToolBackground:
             await rt.close()
 
 
+class TestBashJobStatusThrottle:
+    async def test_job_status_throttled_within_interval(self, tmp_path):
+        tool, rt = _make_tool(base_dir=str(tmp_path))
+        await rt.start()
+        try:
+            ctx = {"session_id": "sid-throttle-1"}
+            start = await tool.execute(
+                command="sleep 1 && echo done",
+                wait_window_ms=20,
+                hard_timeout_seconds=5,
+                __execution_context__=ctx,
+            )
+            job_id = start.data["job_id"]
+
+            first = await tool.execute(job_status=job_id, __execution_context__=ctx)
+            assert first.success
+            assert first.data["status"] == "running"
+            assert first.metadata.get("throttled") is not True
+
+            second = await tool.execute(job_status=job_id, __execution_context__=ctx)
+            assert second.success
+            assert second.metadata.get("throttled") is True
+            assert "请勿频繁轮询" in second.message
+            assert second.data["status"] == "running"
+        finally:
+            await rt.close()
+
+    async def test_terminal_status_not_throttled(self, tmp_path):
+        tool, rt = _make_tool(base_dir=str(tmp_path))
+        await rt.start()
+        try:
+            ctx = {"session_id": "sid-throttle-2"}
+            start = await tool.execute(
+                command="sleep 0.3 && echo done",
+                wait_window_ms=20,
+                hard_timeout_seconds=5,
+                __execution_context__=ctx,
+            )
+            assert start.data.get("auto_backgrounded") is True
+            job_id = start.data["job_id"]
+
+            # 等任务自然完成后再查，避免 running 状态被节流导致看不到终态
+            await asyncio.sleep(0.5)
+            st = await tool.execute(job_status=job_id, __execution_context__=ctx)
+            assert st.data["status"] == "finished"
+
+            # 终态查询不节流
+            again = await tool.execute(job_status=job_id, __execution_context__=ctx)
+            assert again.success
+            assert again.metadata.get("throttled") is not True
+            assert again.data["status"] == "finished"
+        finally:
+            await rt.close()
+
+
 class TestBashToolDefinition:
     def test_name(self):
         tool, _ = _make_tool()
@@ -799,7 +912,9 @@ class TestBashToolDefinition:
 
 
 class _FakeRemoteRegistry:
-    def __init__(self, results: list[RemoteCommandResult], open_success: bool = True) -> None:
+    def __init__(
+        self, results: list[RemoteCommandResult], open_success: bool = True
+    ) -> None:
         self._results = list(results)
         self.open_workspace_calls = 0
         self.execute_calls = 0
@@ -873,8 +988,8 @@ class TestBashToolRemoteBackground:
         )
         fake = _FakeRemoteRegistryWithJobs()
 
-        import agent_core.remote.workspace_state as state_mod
         import agent_core.remote.worker_registry as worker_mod
+        import agent_core.remote.workspace_state as state_mod
 
         monkeypatch.setattr(state_mod, "get_remote_workspace_state", lambda sid: state)
         monkeypatch.setattr(worker_mod, "get_remote_worker_registry", lambda: fake)
@@ -906,8 +1021,8 @@ class TestBashToolRemoteBackground:
         )
         fake = _FakeRemoteRegistryWithJobs()
 
-        import agent_core.remote.workspace_state as state_mod
         import agent_core.remote.worker_registry as worker_mod
+        import agent_core.remote.workspace_state as state_mod
 
         monkeypatch.setattr(state_mod, "get_remote_workspace_state", lambda sid: state)
         monkeypatch.setattr(worker_mod, "get_remote_worker_registry", lambda: fake)
@@ -943,18 +1058,23 @@ class TestBashToolRemoteRecover:
         )
         fake_registry = _FakeRemoteRegistry([only], open_success=True)
 
-        import agent_core.remote.workspace_state as state_mod
         import agent_core.remote.worker_registry as worker_mod
+        import agent_core.remote.workspace_state as state_mod
 
         monkeypatch.setattr(state_mod, "get_remote_workspace_state", lambda sid: state)
-        monkeypatch.setattr(worker_mod, "get_remote_worker_registry", lambda: fake_registry)
+        monkeypatch.setattr(
+            worker_mod, "get_remote_worker_registry", lambda: fake_registry
+        )
         await rt.start()
         try:
             result = await tool.execute(
                 command="sleep 1 && echo done",
                 wait_window_ms=20,
                 wait_for_completion=True,
-                __execution_context__={"session_id": "sid-wait", "profile_mode": "full"},
+                __execution_context__={
+                    "session_id": "sid-wait",
+                    "profile_mode": "full",
+                },
             )
             assert result.success
             assert fake_registry.execute_calls == 1
@@ -962,7 +1082,9 @@ class TestBashToolRemoteRecover:
         finally:
             await rt.close()
 
-    async def test_remote_sleep_without_timeout_passes_inferred_timeout(self, monkeypatch):
+    async def test_remote_sleep_without_timeout_passes_inferred_timeout(
+        self, monkeypatch
+    ):
         tool, rt = _make_tool()
         state = RemoteWorkspaceState(
             session_id="sid-sleep",
@@ -980,16 +1102,21 @@ class TestBashToolRemoteRecover:
         )
         fake_registry = _FakeRemoteRegistry([only], open_success=True)
 
-        import agent_core.remote.workspace_state as state_mod
         import agent_core.remote.worker_registry as worker_mod
+        import agent_core.remote.workspace_state as state_mod
 
         monkeypatch.setattr(state_mod, "get_remote_workspace_state", lambda sid: state)
-        monkeypatch.setattr(worker_mod, "get_remote_worker_registry", lambda: fake_registry)
+        monkeypatch.setattr(
+            worker_mod, "get_remote_worker_registry", lambda: fake_registry
+        )
         await rt.start()
         try:
             result = await tool.execute(
                 command="sleep 45 && tail -n 20 app.log",
-                __execution_context__={"session_id": "sid-sleep", "profile_mode": "full"},
+                __execution_context__={
+                    "session_id": "sid-sleep",
+                    "profile_mode": "full",
+                },
             )
             assert result.success
             assert fake_registry.execute_calls == 1
@@ -1023,11 +1150,13 @@ class TestBashToolRemoteRecover:
         )
         fake_registry = _FakeRemoteRegistry([first, second], open_success=True)
 
-        import agent_core.remote.workspace_state as state_mod
         import agent_core.remote.worker_registry as worker_mod
+        import agent_core.remote.workspace_state as state_mod
 
         monkeypatch.setattr(state_mod, "get_remote_workspace_state", lambda sid: state)
-        monkeypatch.setattr(worker_mod, "get_remote_worker_registry", lambda: fake_registry)
+        monkeypatch.setattr(
+            worker_mod, "get_remote_worker_registry", lambda: fake_registry
+        )
         await rt.start()
         try:
             result = await tool.execute(
@@ -1063,11 +1192,13 @@ class TestBashToolRemoteRecover:
         )
         fake_registry = _FakeRemoteRegistry([first], open_success=False)
 
-        import agent_core.remote.workspace_state as state_mod
         import agent_core.remote.worker_registry as worker_mod
+        import agent_core.remote.workspace_state as state_mod
 
         monkeypatch.setattr(state_mod, "get_remote_workspace_state", lambda sid: state)
-        monkeypatch.setattr(worker_mod, "get_remote_worker_registry", lambda: fake_registry)
+        monkeypatch.setattr(
+            worker_mod, "get_remote_worker_registry", lambda: fake_registry
+        )
         await rt.start()
         try:
             result = await tool.execute(
@@ -1107,11 +1238,13 @@ class TestBashToolRemoteWaitWindow:
         )
         fake_registry = _FakeRemoteRegistry([bg], open_success=True)
 
-        import agent_core.remote.workspace_state as state_mod
         import agent_core.remote.worker_registry as worker_mod
+        import agent_core.remote.workspace_state as state_mod
 
         monkeypatch.setattr(state_mod, "get_remote_workspace_state", lambda sid: state)
-        monkeypatch.setattr(worker_mod, "get_remote_worker_registry", lambda: fake_registry)
+        monkeypatch.setattr(
+            worker_mod, "get_remote_worker_registry", lambda: fake_registry
+        )
         await rt.start()
         try:
             result = await tool.execute(

@@ -21,7 +21,7 @@ from agent_core.config import (
 from agent_core.agent import AgentCore
 from agent_core.kernel_interface.profile import CoreProfile
 from agent_core.context import ConversationContext
-from agent_core.llm import LLMResponse, ToolCall
+from agent_core.llm import LLMResponse, ToolCall, TokenUsage
 from agent_core.tools import (
     BaseTool,
     ToolDefinition,
@@ -1490,3 +1490,91 @@ class TestRunLoopToolResultOverflow:
         tool_msgs = [m for m in agent._context.get_messages() if m.get("role") == "tool"]
         assert len(tool_msgs) == 1
         assert "已截断" not in tool_msgs[0]["content"]
+
+
+class TestMissingToolReasoningCompat:
+    """Kimi Code 等 Anthropic 兼容端点：tool_use 无 thinking 时不应 abort。"""
+
+    @staticmethod
+    def _kimi_code_provider():
+        from agent_core.llm.capabilities import Capabilities
+        from agent_core.llm.providers import AnthropicCompatProvider
+
+        return AnthropicCompatProvider(
+            name="kimi_code",
+            base_url="https://api.kimi.com/coding/v1",
+            api_key="sk-test",
+            model="kimi-for-coding",
+            capabilities=Capabilities(reasoning_content=True),
+            vendor_params={"thinking": {"type": "enabled", "budget_tokens": 1024}},
+            stream=False,
+        )
+
+    @staticmethod
+    def _agent_with_provider(provider) -> AgentCore:
+        config = Config(
+            llm=LLMConfig(api_key="test", model="test"),
+            agent=AgentConfig(max_iterations=5),
+        )
+        agent = AgentCore(config=config, tools=[])
+        llm = MagicMock()
+        llm.capabilities = provider.capabilities
+        llm._active_provider = MagicMock(return_value=provider)
+        agent._llm_client = llm
+        return agent
+
+    def test_kimi_tool_response_without_reasoning_synthesizes_empty(self):
+        provider = self._kimi_code_provider()
+        agent = self._agent_with_provider(provider)
+        response = LLMResponse(
+            content=None,
+            tool_calls=[ToolCall(id="t1", name="bash", arguments={"command": "ls"})],
+            finish_reason="tool_use",
+        )
+
+        assert agent._should_retry_missing_tool_reasoning(response) is True
+        assert agent._should_synthesize_empty_tool_reasoning(response) is True
+
+    def test_kimi_tool_response_with_reasoning_not_synthesized(self):
+        provider = self._kimi_code_provider()
+        agent = self._agent_with_provider(provider)
+        response = LLMResponse(
+            content=None,
+            reasoning_content="planning",
+            tool_calls=[ToolCall(id="t1", name="bash", arguments={})],
+            finish_reason="tool_use",
+        )
+
+        assert agent._should_retry_missing_tool_reasoning(response) is False
+        assert agent._should_synthesize_empty_tool_reasoning(response) is False
+
+    def test_openai_kimi_excluded_from_empty_reasoning_synthesis(self):
+        """OpenAI 协议 Moonshot 仍走原 DeepSeek 启发式，不因 kimi 字样误合成。"""
+        from agent_core.llm.capabilities import Capabilities
+        from agent_core.llm.providers import OpenAICompatProvider
+
+        provider = OpenAICompatProvider(
+            name="kimi_k26",
+            base_url="https://api.moonshot.cn/v1",
+            api_key="sk-test",
+            model="kimi-k2.6",
+            capabilities=Capabilities(reasoning_content=True),
+            vendor_params={"thinking": {"type": "enabled"}},
+            stream=False,
+        )
+
+        agent = self._agent_with_provider(provider)
+        response = LLMResponse(
+            content=None,
+            tool_calls=[ToolCall(id="t1", name="bash", arguments={})],
+            finish_reason="tool_use",
+            usage=TokenUsage(
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+                prompt_cache_hit_tokens=0,
+                prompt_cache_miss_tokens=0,
+            ),
+        )
+
+        assert agent._should_synthesize_empty_tool_reasoning(response) is False

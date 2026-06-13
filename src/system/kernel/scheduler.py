@@ -23,13 +23,16 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional, Union
 
 from agent_core.interfaces import AgentHooks, AgentRunResult
 from agent_core.kernel_interface import KernelRequest
+from system.multi_agent.constants import (
+    METADATA_KEY_AGENT_MESSAGE,
+    P2P_REQUEST_FRONTEND_TAG,
+)
 
 from .output_bus import OutputBus
-from system.multi_agent.constants import METADATA_KEY_AGENT_MESSAGE, P2P_REQUEST_FRONTEND_TAG
 
 if TYPE_CHECKING:
-    from .kernel import AgentKernel
     from .core_pool import CorePool
+    from .kernel import AgentKernel
 
 logger = logging.getLogger(__name__)
 
@@ -269,9 +272,7 @@ class KernelScheduler:
                     "KernelScheduler: restored %d session(s) from checkpoint", restored
                 )
         except Exception as exc:
-            logger.warning(
-                "KernelScheduler: restore_from_checkpoints failed: %s", exc
-            )
+            logger.warning("KernelScheduler: restore_from_checkpoints failed: %s", exc)
 
         self._dispatch_task = asyncio.create_task(
             self._dispatch_loop(), name="kernel-scheduler-dispatch"
@@ -299,11 +300,14 @@ class KernelScheduler:
         # 关闭前写入 kernel 关闭时间戳，供下次启动用「关闭时间 - checkpoint 时间」判断是否过期
         try:
             from agent_core.agent.memory_paths import get_kernel_shutdown_at_path
+
             path = get_kernel_shutdown_at_path(self._core_pool._config.memory)
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_text(str(time.time()), encoding="utf-8")
         except Exception as exc:
-            logger.warning("KernelScheduler: write kernel_last_shutdown_at failed: %s", exc)
+            logger.warning(
+                "KernelScheduler: write kernel_last_shutdown_at failed: %s", exc
+            )
         # Kernel 级停止时，确保回收所有仍在 CorePool 中的会话，避免遗留 active Core。
         # cancel_all() 必须在 try/finally 中，确保即使 evict_all() 抛出异常也能执行，
         # 否则所有挂起 Future 将永久悬挂。
@@ -352,9 +356,15 @@ class KernelScheduler:
 
     def _subagent_terminal_result_dict(self, sub_session_id: str) -> Dict[str, Any]:
         entry = self._core_pool.get_sub_info(sub_session_id)
-        sid = sub_session_id[4:] if sub_session_id.startswith("sub:") else sub_session_id
+        sid = (
+            sub_session_id[4:] if sub_session_id.startswith("sub:") else sub_session_id
+        )
         if entry is None:
-            return {"status": "unknown", "subagent_id": sid, "sub_session_id": sub_session_id}
+            return {
+                "status": "unknown",
+                "subagent_id": sid,
+                "sub_session_id": sub_session_id,
+            }
         out: Dict[str, Any] = {
             "status": entry.sub_status,
             "subagent_id": sid,
@@ -366,7 +376,9 @@ class KernelScheduler:
             out["error"] = entry.sub_error
         return out
 
-    def register_subagent_terminal_waiter(self, sub_session_id: str) -> asyncio.Future[Dict[str, Any]]:
+    def register_subagent_terminal_waiter(
+        self, sub_session_id: str
+    ) -> asyncio.Future[Dict[str, Any]]:
         """父会话 wait_subagent：阻塞直至子进入终态（或已终态则立即完成）。"""
         loop = asyncio.get_running_loop()
         entry = self._core_pool.get_sub_info(sub_session_id)
@@ -397,7 +409,9 @@ class KernelScheduler:
         fut.set_result(self._subagent_terminal_result_dict(sub_session_id))
         return True
 
-    def register_agent_inbox_waiter(self, session_id: str) -> asyncio.Future[Dict[str, Any]]:
+    def register_agent_inbox_waiter(
+        self, session_id: str
+    ) -> asyncio.Future[Dict[str, Any]]:
         """子 Agent wait_for_agent_message：下一条 P2P 投递前注册（同 session 仅保留最新 waiter）。"""
         loop = asyncio.get_running_loop()
         old = self._agent_inbox_waiters.get(session_id)
@@ -478,10 +492,16 @@ class KernelScheduler:
         return SubmitHandle(request.request_id, self)
 
     async def wait_result(
-        self, request_id: Union[str, SubmitHandle], timeout_seconds: Optional[float] = None
+        self,
+        request_id: Union[str, SubmitHandle],
+        timeout_seconds: Optional[float] = None,
     ) -> AgentRunResult:
         """等待指定 request_id 的执行结果。"""
-        rid = request_id.request_id if isinstance(request_id, SubmitHandle) else request_id
+        rid = (
+            request_id.request_id
+            if isinstance(request_id, SubmitHandle)
+            else request_id
+        )
         return await self._out_bus.wait_result(rid, timeout_seconds=timeout_seconds)
 
     def subscribe_out(
@@ -704,14 +724,15 @@ class KernelScheduler:
             # 兜底：如果已经没有真正在跑的 task，说明 cancel 标记已 stale，主动清理
             # 避免「cancel_session_tasks 超时时没有 active task」导致永久 skip
             if not any(
-                not t.done()
-                for t in self._session_active_tasks.get(session_id, set())
+                not t.done() for t in self._session_active_tasks.get(session_id, set())
             ):
                 self.clear_cancelled(session_id)
             return
 
         if _should_suppress_reaped_subagent_parent_notify(request, self._core_pool):
-            child_sid = _child_sub_session_from_subagent_lifecycle_request(request) or ""
+            child_sid = (
+                _child_sub_session_from_subagent_lifecycle_request(request) or ""
+            )
             logger.info(
                 "KernelScheduler: suppress subagent lifecycle inject (child already reaped) "
                 "parent_session_id=%s child_session_id=%s request_id=%s",
@@ -786,7 +807,9 @@ class KernelScheduler:
                         "_parent_session_id",
                         str(getattr(entry, "parent_session_id", "") or "").strip(),
                     )
-                core_logger = getattr(entry, "logger", None) if entry is not None else None
+                core_logger = (
+                    getattr(entry, "logger", None) if entry is not None else None
+                )
                 if core_logger is not None and agent._session_logger is None:
                     agent._session_logger = core_logger  # type: ignore[assignment]
 
@@ -846,6 +869,7 @@ class KernelScheduler:
 
                 if ipc_ask_fwd or ipc_perm_fwd or ipc_perm_sid:
                     from contextlib import AsyncExitStack
+
                     from agent_core.permissions.ask_user_registry import (
                         ask_user_ipc_stream_notify_scope,
                     )
@@ -907,13 +931,18 @@ class KernelScheduler:
                         pass
                 # 异常/取消路径：记录 turn_end，保证每轮都有结束记录
                 entry = self._core_pool.get_live_entry(session_id)
-                core_logger = getattr(entry, "logger", None) if entry is not None else None
+                core_logger = (
+                    getattr(entry, "logger", None) if entry is not None else None
+                )
                 if core_logger is not None:
                     try:
                         core_logger.on_turn_end(
                             turn_id,
                             output_text="",
-                            metadata={"cancelled": True, "reason": "kernel task cancelled"},
+                            metadata={
+                                "cancelled": True,
+                                "reason": "kernel task cancelled",
+                            },
                             request_id=request.request_id,
                         )
                     except Exception:
@@ -933,7 +962,9 @@ class KernelScheduler:
                         pass
                 # 异常路径：记录 turn_end，保证每轮都有结束记录
                 entry = self._core_pool.get_live_entry(session_id)
-                core_logger = getattr(entry, "logger", None) if entry is not None else None
+                core_logger = (
+                    getattr(entry, "logger", None) if entry is not None else None
+                )
                 if core_logger is not None:
                     try:
                         err_output = f"[后台任务处理出错] {err_detail}"
@@ -963,7 +994,9 @@ class KernelScheduler:
                         output_text=f"[后台任务处理出错] {err_detail}",
                         metadata={"_push_error": err_detail},
                     )
-                    await self._out_bus.publish(session_id, request.request_id, err_result)
+                    await self._out_bus.publish(
+                        session_id, request.request_id, err_result
+                    )
             finally:
                 remaining = self._inflight_sessions.get(session_id, 0) - 1
                 if remaining > 0:
@@ -973,10 +1006,25 @@ class KernelScheduler:
                 # 仅当该 session 已无任何已派发的 _run_and_route 在途时 flush（含队列里排在后面的任务）
                 if remaining == 0:
                     try:
-                        self._core_pool.flush_pending_subagent_lifecycle_for_parent(session_id)
+                        self._core_pool.flush_pending_subagent_lifecycle_for_parent(
+                            session_id
+                        )
                     except Exception as exc:
                         logger.debug(
                             "KernelScheduler: flush_pending_subagent_lifecycle_for_parent failed "
+                            "session_id=%s: %s",
+                            session_id,
+                            exc,
+                        )
+                    try:
+                        from agent_core.tools.bash_job_notify import (
+                            flush_pending_for_session,
+                        )
+
+                        flush_pending_for_session(session_id)
+                    except Exception as exc:
+                        logger.debug(
+                            "KernelScheduler: flush_pending_for_session failed "
                             "session_id=%s: %s",
                             session_id,
                             exc,

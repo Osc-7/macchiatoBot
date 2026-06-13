@@ -294,11 +294,12 @@ class OpenAICompatProvider(BaseProvider):
 
         # 支持自定义 HTTP headers（如 Kimi Code 需要 User-Agent: claude-code/0.1.0）
         if headers:
-            http_client = httpx.AsyncClient(headers=headers, timeout=request_timeout_seconds)
+            http_client = httpx.AsyncClient(timeout=request_timeout_seconds)
             self._client = AsyncOpenAI(
                 api_key=api_key,
                 base_url=base_url,
                 http_client=http_client,
+                default_headers=headers,
             )
         else:
             self._client = AsyncOpenAI(
@@ -335,8 +336,19 @@ class OpenAICompatProvider(BaseProvider):
         return self._max_tokens
 
     def _apply_vendor_extra_body(self, request_params: Dict[str, Any]) -> None:
-        if self._vendor_params:
-            request_params["extra_body"] = self._vendor_params
+        if not self._vendor_params:
+            return
+        vendor = dict(self._vendor_params)
+        # vendor_params 中显式指定的顶层参数可直接覆盖或移除
+        for key in ("temperature", "max_tokens"):
+            if key in vendor:
+                val = vendor.pop(key)
+                if val is None:
+                    request_params.pop(key, None)
+                else:
+                    request_params[key] = val
+        if vendor:
+            request_params["extra_body"] = vendor
 
     def _is_likely_gemini_openai_target(self) -> bool:
         """是否对请求消息做 Gemini thought_signature 占位符注入（中途切模型 / 跨模型历史）。"""

@@ -53,6 +53,7 @@ automation-logs/
 .env
 config/config.yaml
 config/dashboard_auth.yaml
+config/.dashboard_backups/
 config.yaml
 
 # Project-specific private or generated data

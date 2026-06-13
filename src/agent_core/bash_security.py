@@ -75,7 +75,6 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"\|\s*(?:env\s+)?(?:ba|da|k|z)?sh(?:\s|$)", re.I),
         "pipe script to shell",
     ),
-    (re.compile(r"\beval\b", re.I), "eval 动态执行"),
     (re.compile(r">\s*/etc/", re.I), "写入 /etc/ 系统目录"),
     (re.compile(r"\bkill\s+-9\s", re.I), "kill -9 强制终止"),
     (re.compile(r"\bshutdown\b", re.I), "shutdown 关机"),
@@ -558,9 +557,25 @@ class BashSecurity:
     def _check_dangerous(command: str) -> Optional[str]:
         """检测危险命令模式，返回匹配的描述或 None。"""
         for candidate in BashSecurity._iter_danger_scan_variants(command):
+            eval_hit = BashSecurity._check_eval_invocation(candidate)
+            if eval_hit is not None:
+                return eval_hit
             for pattern, description in _DANGEROUS_PATTERNS:
                 if pattern.search(candidate):
                     return description
+        return None
+
+    @staticmethod
+    def _check_eval_invocation(command: str) -> Optional[str]:
+        """仅在 eval 作为 shell 内建/命令被调用时告警，忽略路径或文件名中的 eval 子串。"""
+        for segment in BashSecurity._split_command_segments(command):
+            tokens = BashSecurity._tokenize_segment(segment)
+            if not tokens:
+                continue
+            if Path(tokens[0]).name.lower() == "eval":
+                return "eval 动态执行"
+        if re.search(r"\$\(\s*eval\b", command, re.I):
+            return "eval 动态执行"
         return None
 
     @staticmethod

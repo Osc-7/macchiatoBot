@@ -147,6 +147,10 @@ command_tools:
   # workspace_admin_memory_owners grants sudo/admin capability to the same logic Linux user
   # (for example cli:root -> m_cli_root), not to a shared admin account.
   allow_run_for_subagent: false
+  # 后台 bash job 主动通知配置
+  # bash_job_notify_poll_seconds: 3
+  # bash_job_status_min_interval_seconds: 5
+  # bash_job_notify_inject_enabled: true
   # subagent_command_whitelist: ["ls", "pwd", "cat", "head", "tail", "grep", "find", "echo", "which", "file", "stat", "wc", "date", "whoami", "id", "env", "printenv"]
   workspace_base_dir: "./data/workspace"
   workspace_isolation_enabled: true   # false: shared cwd, weaker cd guard

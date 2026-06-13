@@ -280,6 +280,7 @@ macchiatoBot 是一个 daemon-first 的 Python 项目。核心运行时是 `auto
 - 测试不依赖外部服务或 API key，可直接 `uv run pytest tests/` 运行全部测试
 - 有 11 个测试因测试间状态泄漏会在全量运行时失败，但单独运行通过（pre-existing issue）
 - daemon 启动后 socket 位于 `data/automation/automation.sock`；CLI 会自动找到它
+- bash 后台任务完成后由 daemon watcher 主动 `inject_turn` 推送通知，相关配置见 `command_tools.bash_job_notify_poll_seconds` / `bash_job_status_min_interval_seconds` / `bash_job_notify_inject_enabled`
 - 没有 LLM API key 时 daemon 可正常启动，但 `run_turn`（实际对话）会报 401；IPC ping 和 model_list 等管理命令不受影响
 - `source init.sh` 是便捷脚本，会设置 PATH、PYTHONPATH 并 source `.env`；非必需但推荐在交互 shell 中使用
 

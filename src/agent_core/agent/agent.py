@@ -17,18 +17,25 @@ from datetime import timezone as dt_timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
 
-from agent_core.config import Config, MemoryConfig, MCPServerConfig, get_config
-from agent_core.kernel_interface.profile import core_profile_to_checkpoint_dict
+from agent_core.config import Config, MCPServerConfig, MemoryConfig, get_config
 from agent_core.context import ConversationContext, apply_user_message_time_prefix
-from agent_core.utils.billing import compute_cost_from_calls
-from agent_core.mcp import MCPClientManager
-from agent_core.orchestrator import ToolSnapshot, ToolWorkingSetManager
+from agent_core.kernel_interface.profile import core_profile_to_checkpoint_dict
 from agent_core.llm import (
     LLMClient,
     LLMResponse,
     ToolCall,
 )
-from agent_core.utils.media import resolve_media_to_content_item
+from agent_core.mcp import MCPClientManager
+from agent_core.memory import (
+    ChatHistoryDB,
+    ContentMemory,
+    LongTermMemory,
+    RecallPolicy,
+    RecallResult,
+    SessionSummary,
+    WorkingMemory,
+)
+from agent_core.orchestrator import ToolSnapshot, ToolWorkingSetManager
 from agent_core.tools import (
     BaseTool,
     CallToolTool,
@@ -36,28 +43,22 @@ from agent_core.tools import (
     ToolResult,
     VersionedToolRegistry,
 )
+from agent_core.utils.billing import compute_cost_from_calls
+from agent_core.utils.media import resolve_media_to_content_item
 from system.tools.chat_history_tools import (
-    ChatSearchTool,
     ChatContextTool,
     ChatScrollTool,
+    ChatSearchTool,
 )
 from system.tools.web_extractor_tool import WebExtractorTool
 from system.tools.web_search_tool import WebSearchTool
-from agent_core.memory import (
-    WorkingMemory,
-    LongTermMemory,
-    ContentMemory,
-    RecallPolicy,
-    RecallResult,
-    SessionSummary,
-    ChatHistoryDB,
-)
+
+from .checkpoint import CoreCheckpoint, CoreCheckpointManager
 from .media_helpers import (
     append_pending_multimodal_messages,
     collect_outgoing_attachment,
     queue_media_for_next_call,
 )
-from .checkpoint import CoreCheckpoint, CoreCheckpointManager
 from .memory_paths import new_session_id, resolve_memory_owner_paths
 from .prompt_builder import build_agent_system_prompt
 
@@ -92,7 +93,9 @@ logger = logging.getLogger(__name__)
 
 
 # region agent log
-def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: Dict[str, Any]) -> None:
+def _agent_debug_log(
+    hypothesis_id: str, location: str, message: str, data: Dict[str, Any]
+) -> None:
     """Append minimal NDJSON debug evidence for the current Cursor debug session."""
     try:
         payload = {
@@ -104,10 +107,14 @@ def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: Dict
             "data": data,
             "timestamp": int(time.time() * 1000),
         }
-        with open("/home/ubuntu/macchiatoBot/.cursor/debug-972f2b.log", "a", encoding="utf-8") as f:
+        with open(
+            "/home/ubuntu/macchiatoBot/.cursor/debug-972f2b.log", "a", encoding="utf-8"
+        ) as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
     except Exception:
         pass
+
+
 # endregion
 
 
@@ -447,7 +454,9 @@ class AgentCore:
                 api_model = self._llm_client.providers[name].model
                 entry = prov_cfg.get(name)
                 label = getattr(entry, "label", None) if entry is not None else None
-                base_url = getattr(entry, "base_url", None) if entry is not None else None
+                base_url = (
+                    getattr(entry, "base_url", None) if entry is not None else None
+                )
                 out.append(
                     {
                         # 配置名：传给 /model <name> 的标识
@@ -458,13 +467,16 @@ class AgentCore:
                         "label": label,
                         "base_url": base_url,
                         "vision": bool(getattr(caps, "vision", False)),
-                        "function_calling": bool(getattr(caps, "function_calling", True)),
+                        "function_calling": bool(
+                            getattr(caps, "function_calling", True)
+                        ),
                         "reasoning_content": bool(
                             getattr(caps, "reasoning_content", False)
                         ),
                         "context_window": getattr(caps, "context_window", None),
                         "is_active": name == self._llm_client.active_provider_name,
-                        "is_vision_provider": name == self._llm_client.vision_provider_name,
+                        "is_vision_provider": name
+                        == self._llm_client.vision_provider_name,
                     }
                 )
         except Exception as exc:
@@ -537,9 +549,7 @@ class AgentCore:
         if isinstance(vendor_params, dict):
             th = vendor_params.get("thinking")
             if isinstance(th, dict):
-                thinking_enabled = (
-                    str(th.get("type", "")).strip().lower() == "enabled"
-                )
+                thinking_enabled = str(th.get("type", "")).strip().lower() == "enabled"
             if not thinking_enabled:
                 out_cfg = vendor_params.get("output_config")
                 if isinstance(out_cfg, dict) and str(out_cfg.get("effort", "")).strip():
@@ -561,13 +571,35 @@ class AgentCore:
         return "deepseek" in name or "deepseek" in model or "deepseek" in base
 
     @staticmethod
+    def _provider_anthropic_compat_thinking_enabled(provider: Any) -> bool:
+        """Anthropic 兼容端点（Kimi Code 等）开启 extended thinking 时的画像。"""
+        if provider is None or type(provider).__name__ != "AnthropicCompatProvider":
+            return False
+        vendor_params = getattr(provider, "_vendor_params", None)
+        if not isinstance(vendor_params, dict):
+            return False
+        th = vendor_params.get("thinking")
+        if not isinstance(th, dict):
+            return False
+        return str(th.get("type", "")).strip().lower() == "enabled"
+
+    @staticmethod
     def _looks_like_vendor_excluded_from_ds_empty_reasoning(provider: Any) -> bool:
-        """对明确非 DeepSeek 的厂商不重试写入空 reasoning（例如 Kimi/GPT）。"""
+        """对明确非 DeepSeek 的厂商不重试写入空 reasoning（例如 GPT）。"""
         model = str(getattr(provider, "model", "") or "").lower()
         base = str(getattr(provider, "_base_url", "") or "").lower()
         name = str(getattr(provider, "name", "") or "").lower()
         hay = f"{model} {base} {name}"
-        for tok in ("kimi", "moonshot", "openai.com", "api.openai", "gpt-4", "gpt-5", "glm", "dashscope"):
+        for tok in (
+            "kimi",
+            "moonshot",
+            "openai.com",
+            "api.openai",
+            "gpt-4",
+            "gpt-5",
+            "glm",
+            "dashscope",
+        ):
             if tok in hay:
                 return True
         return False
@@ -584,7 +616,9 @@ class AgentCore:
             return False
         return (hit + miss) > 0
 
-    def _provider_eligible_for_empty_reasoning_synthesis(self, response: LLMResponse) -> bool:
+    def _provider_eligible_for_empty_reasoning_synthesis(
+        self, response: LLMResponse
+    ) -> bool:
         """是否应对缺字段的合成 ``reasoning_content=\"\"``（provider 画像与用量启发式）。"""
         provider = None
         try:
@@ -595,13 +629,19 @@ class AgentCore:
             return False
         if self._looks_like_deepseek_api(provider):
             return True
+        # Kimi Code 等 Anthropic 兼容端点：tool_use 常无 thinking 块；回放时
+        # anthropic_compat 会注入占位 thinking，故可安全合成空 reasoning_content。
+        if self._provider_anthropic_compat_thinking_enabled(provider):
+            return True
         if self._looks_like_vendor_excluded_from_ds_empty_reasoning(provider):
             return False
         if type(provider).__name__ != "OpenAICompatProvider":
             return False
         return self._looks_like_deepseek_usage_cache_split(response)
 
-    def _thinking_final_response_missing_reasoning_content(self, response: LLMResponse) -> bool:
+    def _thinking_final_response_missing_reasoning_content(
+        self, response: LLMResponse
+    ) -> bool:
         """thinking + 仅有正文、无 tool_calls 时，模型也可能不返回 ``reasoning_content``。"""
         if response.tool_calls:
             return False
@@ -621,9 +661,7 @@ class AgentCore:
         if isinstance(vendor_params, dict):
             th = vendor_params.get("thinking")
             if isinstance(th, dict):
-                thinking_enabled = (
-                    str(th.get("type", "")).strip().lower() == "enabled"
-                )
+                thinking_enabled = str(th.get("type", "")).strip().lower() == "enabled"
             if not thinking_enabled:
                 out_cfg = vendor_params.get("output_config")
                 if isinstance(out_cfg, dict) and str(out_cfg.get("effort", "")).strip():
@@ -642,11 +680,12 @@ class AgentCore:
 
     def _should_synthesize_empty_tool_reasoning(self, response: LLMResponse) -> bool:
         """
-        DeepSeek thinking + tool_calls 偶发不返回 ``reasoning_content``。
+        thinking + tool_calls 偶发不返回 ``reasoning_content``。
 
         DeepSeek API 的实际校验要求是字段存在；直连探针已验证空字符串可通过。
-        因此对 DeepSeek 缺字段响应合成 ``reasoning_content=""``，避免重试同一
-        payload 反复得到同样的不完整响应并中断本轮。
+        Kimi Code（AnthropicCompatProvider）在简单 tool 调用时也常省略 thinking 块，
+        多轮回放由 anthropic_compat 注入占位 thinking。因此对上述 provider 合成
+        ``reasoning_content=""``，避免重试同一 payload 并中断本轮。
         """
         if not self._should_retry_missing_tool_reasoning(response):
             return False
@@ -788,6 +827,7 @@ class AgentCore:
                 estimate_messages_tokens,
                 estimate_tokens,
             )
+
             est = 0
             sys_text = getattr(payload, "system", None) or ""
             est += estimate_tokens(sys_text)
@@ -989,14 +1029,19 @@ class AgentCore:
             file_preface, adapted_items = adapt_content_items_for_provider(
                 merged_items,
                 supported_file_mime_types=list(
-                    getattr(self._llm_client.capabilities, "file_input_mime_types", ()) or ()
+                    getattr(self._llm_client.capabilities, "file_input_mime_types", ())
+                    or ()
                 ),
                 enable_native_file_blocks=bool(
                     getattr(self._llm_client, "supports_native_file_blocks", False)
                 ),
             )
             if file_preface:
-                effective_text = f"{effective_text}\n\n{file_preface}" if effective_text else file_preface
+                effective_text = (
+                    f"{effective_text}\n\n{file_preface}"
+                    if effective_text
+                    else file_preface
+                )
             effective_media_items = adapted_items or None
 
         try:
@@ -1109,11 +1154,11 @@ class AgentCore:
         由 AgentKernel.run() 驱动，不应直接调用。
         """
         from agent_core.kernel_interface import (
+            ContextOverflowAction,
+            InternalLoader,
             ReturnAction,
             ToolCallAction,
             ToolResultEvent,
-            InternalLoader,
-            ContextOverflowAction,
         )
 
         loader = InternalLoader()
@@ -1149,12 +1194,16 @@ class AgentCore:
                             message_count=len(payload.messages),
                             tool_count=len(payload.tools),
                             system_prompt_len=len(payload.system),
-                            system_prompt=payload.system
-                            if self._session_logger.enable_detailed_log
-                            else None,
-                            messages=payload.messages
-                            if self._session_logger.enable_detailed_log
-                            else None,
+                            system_prompt=(
+                                payload.system
+                                if self._session_logger.enable_detailed_log
+                                else None
+                            ),
+                            messages=(
+                                payload.messages
+                                if self._session_logger.enable_detailed_log
+                                else None
+                            ),
                         )
 
                     # Trace 事件
@@ -1220,7 +1269,7 @@ class AgentCore:
                         response.reasoning_content = ""
                         tool_names = [tc.name for tc in response.tool_calls]
                         logger.warning(
-                            "DeepSeek thinking tool response missing reasoning_content; "
+                            "Thinking tool response missing reasoning_content; "
                             "synthesizing empty field: session=%s turn=%s iteration=%s tools=%s",
                             self._session_id,
                             turn_id,
@@ -1231,7 +1280,7 @@ class AgentCore:
                         _agent_debug_log(
                             "H1-H5",
                             "src/agent_core/agent/agent.py:run_loop:synthesize_empty_tool_reasoning",
-                            "synthesized empty reasoning_content for DeepSeek tool-call response",
+                            "synthesized empty reasoning_content for tool-call response",
                             {
                                 "session_id": self._session_id,
                                 "turn_id": turn_id,
@@ -1272,12 +1321,16 @@ class AgentCore:
                             ),
                             "provider_cls": type(_prov).__name__ if _prov else None,
                             "provider_key": str(getattr(_prov, "name", "") or ""),
-                            "cache_hit": getattr(_u, "prompt_cache_hit_tokens", None)
-                            if _u
-                            else None,
-                            "cache_miss": getattr(_u, "prompt_cache_miss_tokens", None)
-                            if _u
-                            else None,
+                            "cache_hit": (
+                                getattr(_u, "prompt_cache_hit_tokens", None)
+                                if _u
+                                else None
+                            ),
+                            "cache_miss": (
+                                getattr(_u, "prompt_cache_miss_tokens", None)
+                                if _u
+                                else None
+                            ),
                         },
                     )
                     # endregion
@@ -1333,9 +1386,7 @@ class AgentCore:
                 ):
                     limit = profile.max_total_tokens
                     if self._token_usage["total_tokens"] >= limit:
-                        reason = (
-                            f"子任务已达到 token 上限（{self._token_usage['total_tokens']} >= {limit}），已强制结束"
-                        )
+                        reason = f"子任务已达到 token 上限（{self._token_usage['total_tokens']} >= {limit}），已强制结束"
                         log_path = (
                             getattr(self._session_logger, "file_path", None)
                             if self._session_logger
@@ -1382,7 +1433,9 @@ class AgentCore:
                             "iteration": iteration,
                             "tool_call_count": len(response.tool_calls),
                             "reasoning_present": response.reasoning_content is not None,
-                            "reasoning_nonempty": bool((response.reasoning_content or "").strip()),
+                            "reasoning_nonempty": bool(
+                                (response.reasoning_content or "").strip()
+                            ),
                             "content_present": bool(response.content),
                         },
                     )
@@ -1424,9 +1477,9 @@ class AgentCore:
                         )
                         duration_ms = int((time.perf_counter() - t0) * 1000)
 
-                        assert isinstance(tool_event, ToolResultEvent), (
-                            f"run_loop: expected ToolResultEvent, got {type(tool_event)}"
-                        )
+                        assert isinstance(
+                            tool_event, ToolResultEvent
+                        ), f"run_loop: expected ToolResultEvent, got {type(tool_event)}"
                         result = tool_event.result
 
                         # Trace 事件（收到结果后记录，含耗时）
@@ -1516,7 +1569,9 @@ class AgentCore:
                             "turn_id": turn_id,
                             "iteration": iteration,
                             "reasoning_present": response.reasoning_content is not None,
-                            "reasoning_nonempty": bool((response.reasoning_content or "").strip()),
+                            "reasoning_nonempty": bool(
+                                (response.reasoning_content or "").strip()
+                            ),
                             "content_present": bool(response.content),
                         },
                     )
@@ -1626,6 +1681,7 @@ class AgentCore:
                 )
             except Exception as exc:
                 import logging as _logging
+
                 _logging.getLogger(__name__).warning(
                     "AgentCore: checkpoint write failed: %s", exc
                 )
@@ -1741,7 +1797,10 @@ class AgentCore:
         Returns:
             工具执行结果
         """
-        if self._current_visible_tools and tool_call.name not in self._current_visible_tools:
+        if (
+            self._current_visible_tools
+            and tool_call.name not in self._current_visible_tools
+        ):
             return ToolResult(
                 success=False,
                 error="TOOL_NOT_VISIBLE",
@@ -1776,15 +1835,19 @@ class AgentCore:
             profile,
         )
         kwargs["__execution_context__"] = {
-            "profile_mode": getattr(profile, "mode", "full") if profile is not None else "full",
-            "tool_template": getattr(profile, "tool_template", "default")
-            if profile is not None
-            else "default",
-            "allow_dangerous_commands": getattr(
-                profile, "allow_dangerous_commands", False
-            )
-            if profile is not None
-            else False,
+            "profile_mode": (
+                getattr(profile, "mode", "full") if profile is not None else "full"
+            ),
+            "tool_template": (
+                getattr(profile, "tool_template", "default")
+                if profile is not None
+                else "default"
+            ),
+            "allow_dangerous_commands": (
+                getattr(profile, "allow_dangerous_commands", False)
+                if profile is not None
+                else False
+            ),
             "bash_workspace_admin": bash_workspace_admin,
             "source": self._source,
             "user_id": self._user_id,
@@ -1847,7 +1910,9 @@ class AgentCore:
         )
         kimi_files = self._build_kimi_files_client()
         if kimi_files is not None and self._pending_multimodal_items:
-            from agent_core.agent.media_helpers import persist_kimi_ms_urls_in_media_items
+            from agent_core.agent.media_helpers import (
+                persist_kimi_ms_urls_in_media_items,
+            )
 
             persist_kimi_ms_urls_in_media_items(
                 self._pending_multimodal_items, kimi_files=kimi_files
@@ -1924,9 +1989,9 @@ class AgentCore:
                     original_tokens=outcome.original_tokens,
                     kept_tokens=outcome.kept_tokens,
                     max_tokens=int(max_tokens),
-                    overflow_path=str(outcome.overflow_path)
-                    if outcome.overflow_path
-                    else "",
+                    overflow_path=(
+                        str(outcome.overflow_path) if outcome.overflow_path else ""
+                    ),
                     display_path=outcome.display_path,
                 )
             except Exception:  # session_logger 写失败不应影响主路径
@@ -1964,45 +2029,9 @@ class AgentCore:
         )
 
     async def _inject_background_job_notifications(self, *, turn_id: int) -> None:
-        """在每轮 LLM 请求前注入后台任务终态通知（每个任务仅通知一次）。"""
-        session_id = str(self._session_id or "").strip()
-        if not session_id:
-            return
-        try:
-            from agent_core.tools.bash_job_notify import poll_completed_notifications
-
-            notifications = await poll_completed_notifications(
-                session_id=session_id,
-                max_items=3,
-            )
-        except Exception:
-            return
-        if not notifications:
-            return
-        for note in notifications:
-            status = str(note.get("status") or "unknown")
-            job_id = str(note.get("job_id") or "")
-            exit_code = note.get("exit_code")
-            duration = note.get("duration_seconds")
-            timed_out = bool(note.get("timed_out", False))
-            remote = bool(note.get("remote", False))
-            login = str(note.get("remote_login") or "").strip()
-            scope = "远程" if remote else "本地"
-            if remote and login:
-                scope = f"{scope}({login})"
-            parts: list[str] = []
-            if exit_code is not None:
-                parts.append(f"exit={exit_code}")
-            if isinstance(duration, (int, float)):
-                parts.append(f"duration={float(duration):.1f}s")
-            if timed_out:
-                parts.append("timed_out=true")
-            suffix = f"（{', '.join(parts)}）" if parts else ""
-            text = (
-                f"[后台任务完成通知] {scope}任务 {job_id} 状态={status}{suffix}。"
-                "如需详情可继续调用 bash 的 job_status/job_tail。"
-            )
-            self._context.add_user_message(text, turn_id=turn_id)
+        """后台任务通知已迁移到 daemon watcher + inject_turn，AgentCore 内不再被动注入。"""
+        # 保留方法签名以兼容旧调用点；实际逻辑由 system.kernel.scheduler + daemon 主动通知接管。
+        return
 
     async def finalize_session(self) -> Optional[SessionSummary]:
         """
@@ -2291,10 +2320,6 @@ class AgentCore:
         # 启动持久化 Bash 会话并注册 BashTool
         cmd_cfg = self._config.command_tools
         if cmd_cfg.enabled and cmd_cfg.allow_run:
-            from agent_core.bash_runtime import BashRuntime, BashRuntimeConfig
-            from agent_core.bash_security import BashSecurity
-            from agent_core.tools.bash_tool import BashTool
-
             from agent_core.agent.memory_paths import resolve_memory_owner_paths
             from agent_core.agent.session_capabilities import (
                 resolve_session_capabilities,
@@ -2303,8 +2328,8 @@ class AgentCore:
                 build_bash_admin_bootstrap_init,
                 build_bash_workspace_guard_init,
                 ensure_workspace_owner_layout,
-                migrate_legacy_workspace_and_memory_to_home,
                 merged_bash_write_root_paths,
+                migrate_legacy_workspace_and_memory_to_home,
                 resolve_project_root,
             )
             from agent_core.bash_os_user import (
@@ -2312,6 +2337,9 @@ class AgentCore:
                 minimal_subprocess_env_for_runuser,
                 provision_system_user,
             )
+            from agent_core.bash_runtime import BashRuntime, BashRuntimeConfig
+            from agent_core.bash_security import BashSecurity
+            from agent_core.tools.bash_tool import BashTool
 
             profile = self._core_profile
             caps = resolve_session_capabilities(
@@ -2357,9 +2385,7 @@ class AgentCore:
                         config=self._config,
                         source=self._source,
                     )
-                    ch_paths.append(
-                        Path(mp0["chat_history_db_path"]).parent.resolve()
-                    )
+                    ch_paths.append(Path(mp0["chat_history_db_path"]).parent.resolve())
                 chown_tree_to_user(ch_paths, posix_run_as)
             mem_lt: Optional[str] = None
             mem_owner_dir: Optional[str] = None
@@ -2395,9 +2421,7 @@ class AgentCore:
                 )
             else:
                 guard_init = []
-            jail_root = (
-                str(Path(bash_cwd).resolve()) if ws_restricted else None
-            )
+            jail_root = str(Path(bash_cwd).resolve()) if ws_restricted else None
             tmp_root = str(caps.tmp_root) if ws_restricted else None
             extra_write_roots = (
                 merged_bash_write_root_paths(
@@ -2439,7 +2463,9 @@ class AgentCore:
                 allow_run_for_restricted=cmd_cfg.allow_run_for_subagent,
                 workspace_jail_root=jail_root,
                 workspace_tmp_root=tmp_root,
-                workspace_extra_write_roots=extra_write_roots if ws_restricted else None,
+                workspace_extra_write_roots=(
+                    extra_write_roots if ws_restricted else None
+                ),
             )
             if not self._tool_registry.has("bash"):
                 self._tool_registry.register(
@@ -2456,6 +2482,7 @@ class AgentCore:
                 )
             except AttributeError:
                 import copy as _copy_mod
+
                 runtime_mcp_cfg = _copy_mod.copy(self._config.mcp)
                 runtime_mcp_cfg.servers = runtime_servers
             self._mcp_manager = MCPClientManager(runtime_mcp_cfg)

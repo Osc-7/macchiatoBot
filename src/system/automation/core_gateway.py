@@ -531,15 +531,21 @@ class AutomationCoreGateway:
         autostart: bool = True,
     ) -> Dict[str, Any]:
         """为指定 session 创建 Agent 目标；可选 inject_turn 启动执行。"""
+        from agent_core.tools.bash_job_notify import build_feishu_inject_metadata
+        from system.kernel.scheduler import _infer_memory_owner_from_session_id
+
         text = str(instruction or "").strip()
         if not text:
             raise ValueError("instruction 不能为空")
 
-        await self.ensure_session(session_id, create_if_missing=True)
+        sid = str(session_id or "").strip()
+        mem_source, mem_user_id = _infer_memory_owner_from_session_id(sid)
+
+        await self.ensure_session(sid, create_if_missing=True)
         agent = await self._kernel_scheduler.core_pool.acquire(
-            session_id,
-            source=self._source,
-            user_id=self._owner_id,
+            sid,
+            source=mem_source,
+            user_id=mem_user_id,
             create_if_missing=True,
         )
         create_fn = getattr(agent, "create_user_goal", None)
@@ -557,26 +563,34 @@ class AutomationCoreGateway:
                 f"任务：{text}\n\n"
                 "请先 goal_update 拆解步骤（若尚无步骤），然后开始执行。"
             )
-            self._ensure_subscribed(session_id)
+            self._ensure_subscribed(sid)
+            inject_md: Dict[str, Any] = {
+                "source": mem_source,
+                "user_id": mem_user_id,
+                "kind": "goal_start",
+            }
+            feishu_md = build_feishu_inject_metadata(
+                sid,
+                self._kernel_scheduler.core_pool,
+                markdown_header_title="Goal 执行",
+            )
+            if feishu_md:
+                inject_md.update(feishu_md)
             request = KernelRequest.create(
                 text=start_text,
-                session_id=session_id,
-                frontend_id=self._source,
-                metadata={
-                    "source": self._source,
-                    "user_id": self._owner_id,
-                    "kind": "goal_start",
-                },
+                session_id=sid,
+                frontend_id="goal_start",
+                metadata=inject_md,
             )
             self._kernel_scheduler.inject_turn(request)
             autostart_queued = True
 
-        self.mark_activity(session_id)
+        self.mark_activity(sid)
         return {
             "ok": True,
             "goal": goal,
             "autostart_queued": autostart_queued,
-            "session_id": session_id,
+            "session_id": sid,
         }
 
     async def list_goals_for_session(
@@ -586,17 +600,20 @@ class AutomationCoreGateway:
         include_completed: bool = False,
     ) -> Dict[str, Any]:
         """列出指定 session 的 Agent 目标（session 未驻留时尝试加载）。"""
+        from system.kernel.scheduler import _infer_memory_owner_from_session_id
+
         sid = str(session_id or "").strip()
         if not sid:
             raise ValueError("session_id 不能为空")
+        mem_source, mem_user_id = _infer_memory_owner_from_session_id(sid)
         await self.ensure_session(sid, create_if_missing=False)
         entry = self._kernel_scheduler.core_pool.get_entry(sid)
         if entry is None or entry.agent is None:
             try:
                 agent = await self._kernel_scheduler.core_pool.acquire(
                     sid,
-                    source=self._source,
-                    user_id=self._owner_id,
+                    source=mem_source,
+                    user_id=mem_user_id,
                     create_if_missing=False,
                 )
             except KeyError:

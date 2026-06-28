@@ -198,6 +198,16 @@ async def try_handle_slash_command_via_ipc(
                     user_id=feishu_user_id,
                     session_id=active.strip(),
                 )
+        # /goal 等斜杠命令会 inject_turn 异步执行；须注册 push 转发，否则结果不会回到飞书。
+        chat_id = (feishu_chat_id or "").strip()
+        active_sid = str(getattr(client, "active_session_id", "") or effective_session).strip()
+        if chat_id and active_sid:
+            get_feishu_push_forwarder().start()
+            register_feishu_push_session(
+                session_id=active_sid,
+                chat_id=chat_id,
+                ttl_seconds=600.0,
+            )
     return reply if handled else None
 
 

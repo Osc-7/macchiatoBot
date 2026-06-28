@@ -72,3 +72,112 @@ def test_agent_create_user_goal() -> None:
     goal = agent.create_user_goal("重构模块")
     assert goal["title"] == "重构模块"
     assert agent._goal_store.has_active_goals()
+
+
+@pytest.mark.asyncio
+async def test_slash_command_via_ipc_registers_feishu_push(monkeypatch) -> None:
+    from frontend.feishu import ipc_bridge
+
+    registered: list[tuple[str, str, float]] = []
+
+    class _Forwarder:
+        def start(self) -> None:
+            pass
+
+        def register(self, session_id: str, chat_id: str, ttl_seconds: float = 300.0) -> None:
+            registered.append((session_id, chat_id, ttl_seconds))
+
+    monkeypatch.setattr(ipc_bridge, "get_feishu_push_forwarder", lambda: _Forwarder())
+    monkeypatch.setattr(
+        ipc_bridge,
+        "register_feishu_push_session",
+        lambda session_id, chat_id, ttl_seconds=300.0: registered.append(
+            (session_id, chat_id, ttl_seconds)
+        ),
+    )
+
+    client = MagicMock()
+    client.ping = AsyncMock(return_value=True)
+    client.switch_session = AsyncMock()
+    client.active_session_id = "feishu:user:ou_test:123"
+    client.create_goal = AsyncMock(
+        return_value={
+            "goal": {"id": "goal-x", "title": "watch training"},
+            "autostart_queued": True,
+        }
+    )
+
+    def _fake_ipc_client(**kwargs):
+        return client
+
+    monkeypatch.setattr(ipc_bridge, "AutomationIPCClient", _fake_ipc_client)
+    monkeypatch.setattr(
+        ipc_bridge,
+        "try_handle_slash_command",
+        AsyncMock(return_value=(True, "已创建目标 goal-x")),
+    )
+
+    reply = await ipc_bridge.try_handle_slash_command_via_ipc(
+        session_id="feishu:user:ou_test:123",
+        text="/goal watch training",
+        feishu_chat_id="oc_test_chat",
+    )
+    assert reply == "已创建目标 goal-x"
+    assert registered
+    assert registered[0][0] == "feishu:user:ou_test:123"
+    assert registered[0][1] == "oc_test_chat"
+
+
+@pytest.mark.asyncio
+async def test_create_goal_for_feishu_session_injects_feishu_metadata(monkeypatch) -> None:
+    from system.automation.core_gateway import AutomationCoreGateway
+
+    feishu_sid = "feishu:user:ou_test:999"
+    captured: dict = {}
+
+    mock_agent = MagicMock()
+    mock_agent.create_user_goal = MagicMock(
+        return_value={"id": "goal-abc", "title": "task"}
+    )
+    mock_agent._finalize_turn = AsyncMock()
+
+    mock_pool = MagicMock()
+    mock_pool.acquire = AsyncMock(return_value=mock_agent)
+
+    mock_scheduler = MagicMock()
+    mock_scheduler.core_pool = mock_pool
+
+    def _capture_inject(request):
+        captured["request"] = request
+
+    mock_scheduler.inject_turn = MagicMock(side_effect=_capture_inject)
+
+    gateway = AutomationCoreGateway(
+        MagicMock(),
+        kernel_scheduler=mock_scheduler,
+        session_id="cli:root",
+        owner_id="root",
+        source="cli",
+    )
+    gateway.ensure_session = AsyncMock()
+    gateway._ensure_subscribed = MagicMock()
+    gateway.mark_activity = MagicMock()
+
+    monkeypatch.setattr(
+        "agent_core.tools.bash_job_notify.build_feishu_inject_metadata",
+        lambda sid, pool, **kw: {"feishu_chat_id": "oc_chat", "_hooks": object()},
+    )
+
+    res = await gateway.create_goal_for_session(feishu_sid, "task", autostart=True)
+    assert res["autostart_queued"] is True
+    mock_pool.acquire.assert_awaited_once_with(
+        feishu_sid,
+        source="feishu",
+        user_id="user:ou_test:999",
+        create_if_missing=True,
+    )
+    req = captured["request"]
+    assert req.session_id == feishu_sid
+    assert req.metadata["source"] == "feishu"
+    assert req.metadata["kind"] == "goal_start"
+    assert req.metadata.get("feishu_chat_id") == "oc_chat"

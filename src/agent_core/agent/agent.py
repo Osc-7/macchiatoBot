@@ -53,6 +53,8 @@ from system.tools.chat_history_tools import (
 from system.tools.web_extractor_tool import WebExtractorTool
 from system.tools.web_search_tool import WebSearchTool
 
+from agent_core.goals import GoalStore
+
 from .checkpoint import CoreCheckpoint, CoreCheckpointManager
 from .media_helpers import (
     append_pending_multimodal_messages,
@@ -284,6 +286,8 @@ class AgentCore:
         self._last_history_id: int = 0
         # CoreProfile — Kernel 注入的权限配置；None 表示无限制（向后兼容）
         self._core_profile: Optional[Any] = core_profile
+        # 会话内 Agent 工作目标（复杂多步骤任务的结构化计划）
+        self._goal_store = GoalStore()
 
         # 四层记忆系统
         mem_cfg: MemoryConfig = self._config.memory
@@ -382,6 +386,8 @@ class AgentCore:
 
             self._tool_registry.register(AskUserTool())
 
+        self._register_goal_tools()
+
         # MCP 客户端（在 __aenter__ 中连接，或 defer 时由 ensure_mcp_connected 连接）
         self._mcp_manager: Optional[MCPClientManager] = None
         self._mcp_connected = False
@@ -444,6 +450,21 @@ class AgentCore:
             tool: 工具实例
         """
         self._tool_registry.register(tool)
+
+    def _register_goal_tools(self) -> None:
+        """注册绑定本会话 GoalStore 的目标追踪工具（full/sub 模式）。"""
+        profile = getattr(self, "_core_profile", None)
+        mode = getattr(profile, "mode", None) or "full"
+        if mode == "background":
+            return
+        from system.tools.goal_tools import build_goal_tools
+
+        for tool in build_goal_tools(self._goal_store):
+            if not self._tool_registry.has(tool.name):
+                self._tool_registry.register(tool)
+            catalog = getattr(self, "_tool_catalog", None)
+            if catalog is not None and not catalog.has(tool.name):
+                catalog.register(tool)
 
     def list_models(self) -> List[Dict[str, Any]]:
         """列出当前 LLMClient 可用的 provider 及其能力，给 CLI / IPC 用。"""
@@ -1677,6 +1698,7 @@ class AgentCore:
                         token_usage=dict(self._token_usage),
                         compression_round=self._working_memory.compression_round,
                         core_profile=core_profile_to_checkpoint_dict(profile),
+                        active_goals=self._goal_store.to_checkpoint_data(),
                     )
                 )
             except Exception as exc:
@@ -1719,6 +1741,7 @@ class AgentCore:
                     token_usage=dict(self._token_usage),
                     compression_round=self._working_memory.compression_round,
                     core_profile=core_profile_to_checkpoint_dict(profile),
+                    active_goals=self._goal_store.to_checkpoint_data(),
                 )
             )
         except Exception as exc:
@@ -2207,6 +2230,9 @@ class AgentCore:
         self._working_memory.running_summary = checkpoint.running_summary
         self._working_memory.compression_round = getattr(
             checkpoint, "compression_round", 0
+        )
+        self._goal_store.load_from_checkpoint(
+            getattr(checkpoint, "active_goals", None)
         )
 
     async def _sync_external_session_updates(self) -> None:

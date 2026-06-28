@@ -404,5 +404,7 @@ def build_system_prompt(
             _maybe_append(parts, load("runtime_file_tools"))
         if config.memory.enabled:
             _maybe_append(parts, load("runtime_memory"))
+        if mode == "full":
+            _maybe_append(parts, load("runtime_goals"))
 
     return "\n\n".join(parts)

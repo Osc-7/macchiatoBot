@@ -145,6 +145,15 @@ def build_agent_system_prompt(agent: Any) -> str:
     if recipe.include_digest and digest_sections:
         prompt += "\n\n# 自动化摘要\n\n" + "\n".join(digest_sections)
 
+    profile = getattr(agent, "_core_profile", None)
+    mode = getattr(profile, "mode", None) or "full"
+    if mode != "background":
+        goal_store = getattr(agent, "_goal_store", None)
+        if goal_store is not None:
+            goals_text = goal_store.to_prompt_string()
+            if goals_text:
+                prompt += "\n\n# 当前目标\n\n" + goals_text
+
     try:
         from agent_core.remote.workspace_state import (
             format_remote_workspace_prompt_suffix,

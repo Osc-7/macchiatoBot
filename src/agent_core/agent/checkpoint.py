@@ -51,6 +51,8 @@ class CoreCheckpoint:
     expired: bool = False
     # CoreProfile 全量 JSON（与 CoreEntry.profile 一致）；缺省为旧版 checkpoint
     core_profile: Optional[Dict[str, Any]] = None
+    # Agent 工作目标（goal_create 等工具维护的会话内计划）
+    active_goals: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class CoreCheckpointManager:
@@ -95,6 +97,12 @@ class CoreCheckpointManager:
             core_profile: Optional[Dict[str, Any]] = None
             if isinstance(raw_profile, dict):
                 core_profile = dict(raw_profile)
+            raw_goals = data.get("active_goals")
+            active_goals: List[Dict[str, Any]] = []
+            if isinstance(raw_goals, list):
+                active_goals = [
+                    dict(item) for item in raw_goals if isinstance(item, dict)
+                ]
             return CoreCheckpoint(
                 session_id=str(data.get("session_id", "")),
                 owner_id=str(data.get("owner_id", "")),
@@ -110,6 +118,7 @@ class CoreCheckpointManager:
                 saved_at=float(data.get("saved_at", 0.0)),
                 expired=bool(data.get("expired", False)),
                 core_profile=core_profile,
+                active_goals=active_goals,
             )
         except Exception as exc:
             logger.warning("CoreCheckpointManager: read failed (%s): %s", self._path, exc)

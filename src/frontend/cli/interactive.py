@@ -96,6 +96,8 @@ def print_help():
 
 - `/quit` / `exit` &nbsp;&nbsp;退出程序
 - `/clear` &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;清空对话历史
+- `/goal <instruction>` &nbsp;创建 Agent 工作目标并开始执行
+- `/goal list` &nbsp;列出当前活跃目标
 - `/compress [N]` &nbsp;&nbsp;主动折叠上下文为摘要；可选 `N` 指定保留最近几轮
 - `/help` &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;显示此帮助
 - `/usage` / `/stats` &nbsp;&nbsp;本会话 token 用量
@@ -134,6 +136,8 @@ def print_help():
         print("可用命令:")
         print("  /quit 或 exit        退出程序")
         print("  /clear               清空对话历史")
+        print("  /goal <instruction>  创建 Agent 工作目标并开始执行")
+        print("  /goal list           列出当前活跃目标")
         print("  /compress [N]        主动折叠上下文为摘要（可选 N 指定保留最近几轮）")
         print("  /help                显示此帮助")
         print("  /usage 或 /stats     本会话 token 用量")
@@ -759,6 +763,64 @@ async def run_interactive_loop(agent: Any) -> str:
                 print(thin_separator())
                 continue
 
+            if cmd_lower == "goal" or cmd_text.lower().startswith("goal "):
+                parts_g = cmd_text.strip().split(maxsplit=1)
+                sub_g = parts_g[1].strip() if len(parts_g) > 1 else ""
+                sub_gl = sub_g.lower()
+                if not sub_g or sub_gl in ("help", "-h", "?"):
+                    print(hint("  /goal <instruction>  创建目标并开始执行"))
+                    print(hint("  /goal list           列出活跃目标"))
+                    print(thin_separator())
+                    continue
+                create_fn = getattr(agent, "create_goal", None)
+                list_fn = getattr(agent, "list_goals", None)
+                if not callable(create_fn):
+                    print(hint("  当前 agent 不支持 /goal（需连接 daemon IPC）。"))
+                    print(thin_separator())
+                    continue
+                if sub_gl in ("list", "ls"):
+                    if not callable(list_fn):
+                        print(hint("  当前 agent 不支持 /goal list。"))
+                        print(thin_separator())
+                        continue
+                    try:
+                        res = await _maybe_await(list_fn())
+                    except Exception as exc:
+                        print(accent("  列出目标失败: ") + str(exc))
+                        print(thin_separator())
+                        continue
+                    goals = (res or {}).get("goals") if isinstance(res, dict) else []
+                    if not goals:
+                        print(hint("  当前没有活跃的 Agent 目标。"))
+                    else:
+                        print(hint("  当前 Agent 目标："))
+                        for g in goals:
+                            if not isinstance(g, dict):
+                                continue
+                            print(
+                                hint(
+                                    f"    - {g.get('id', '—')} [{g.get('status', '?')}] "
+                                    f"{g.get('title', '')}"
+                                )
+                            )
+                    print(thin_separator())
+                    continue
+                try:
+                    res = await _maybe_await(create_fn(sub_g, autostart=True))
+                except Exception as exc:
+                    print(accent("  创建目标失败: ") + str(exc))
+                    print(thin_separator())
+                    continue
+                if isinstance(res, dict) and res.get("goal"):
+                    g = res["goal"]
+                    print(hint(f"  已创建目标 {g.get('id', '—')}: {g.get('title', '')}"))
+                    if res.get("autostart_queued"):
+                        print(hint("  Agent 已开始执行此目标。"))
+                else:
+                    print(hint("  目标已创建。"))
+                print(thin_separator())
+                continue
+
             if cmd_lower == "help":
                 print_help()
                 print(thin_separator())
@@ -939,6 +1001,11 @@ async def run_interactive_loop(agent: Any) -> str:
                         print(
                             hint(
                                 "Usage: /model <model name> (e.g., /model Qwen3.5 Plus)"
+                            )
+                        )
+                        print(
+                            hint(
+                                "       /model add help  — register new base_url/api_key/model at runtime"
                             )
                         )
                         print()

@@ -1073,6 +1073,15 @@ class AgentConfig(BaseModel):
         ge=0,
         description="工具工作集大小（search_tools 将命中的工具加入该 LRU 集合）",
     )
+    goal_auto_continue: bool = Field(
+        default=True,
+        description="模型准备结束本轮且仍有活跃 Agent 目标时，注入目标自检消息",
+    )
+    goal_auto_continue_max_nudges: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="单轮内目标自检注入上限；None 表示与 max_iterations 相同",
+    )
 
 
 class LoggingConfig(BaseModel):

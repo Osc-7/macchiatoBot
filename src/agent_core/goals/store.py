@@ -112,6 +112,41 @@ class GoalStore:
         goal.touch()
         return goal
 
+    def has_active_goals(self) -> bool:
+        """是否存在尚未 goal_complete 的活跃目标。"""
+        return bool(self.list_goals(include_completed=False))
+
+    def should_auto_continue(self) -> bool:
+        """是否仍需目标检查/跨轮继续（与 has_active_goals 同义，供 wake 等调用）。"""
+        return self.has_active_goals()
+
+    def build_goal_check_prompt(self) -> str:
+        """模型准备结束本轮时注入的自检提示。"""
+        active = self.list_goals(include_completed=False)
+        lines = [
+            "[目标检查] 你刚才准备结束本轮。请先对照当前 Agent 目标自检：",
+            "",
+            "- **已全部达成**：先调用 goal_complete 标记完成，再向用户给出最终答复。",
+            "- **尚未达成**：不要结束；用 goal_update 更新步骤状态，并继续调用工具推进。",
+            "- **因 blocked 需等待用户**：向用户说明阻塞点后可结束，等待用户下一条消息。",
+            "",
+            "不要口头声称完成却未调用 goal_complete。当前活跃目标：",
+        ]
+        for goal in active:
+            lines.append(f"- {goal.id}: {goal.title}")
+            if goal.steps:
+                for step in goal.steps:
+                    lines.append(
+                        f"  · [{step.status.value}] {step.id}: {step.description}"
+                    )
+            else:
+                lines.append("  · （尚无步骤）")
+        return "\n".join(lines)
+
+    def build_continuation_nudge(self) -> str:
+        """跨轮唤醒时复用目标检查文案。"""
+        return self.build_goal_check_prompt()
+
     def to_prompt_string(self) -> str:
         active = self.list_goals(include_completed=False)
         if not active:

@@ -88,6 +88,33 @@ class TestGoalStore:
         assert restored.title == "持久化"
         assert len(restored.steps) == 1
 
+    def test_has_active_goals(self, store: GoalStore) -> None:
+        store.create_goal(title="任务", steps=["一步", "二步"])
+        assert store.has_active_goals() is True
+
+    def test_has_active_goals_when_blocked(self, store: GoalStore) -> None:
+        goal = store.create_goal(title="任务", steps=["一步"])
+        step_id = goal.steps[0].id
+        store.update_goal(
+            goal.id,
+            step_id=step_id,
+            step_status=GoalStepStatus.BLOCKED,
+        )
+        assert store.has_active_goals() is True
+
+    def test_no_active_goals_when_all_done(self, store: GoalStore) -> None:
+        goal = store.create_goal(title="任务", steps=["一步"])
+        store.complete(goal.id)
+        assert store.has_active_goals() is False
+
+    def test_build_goal_check_prompt(self, store: GoalStore) -> None:
+        goal = store.create_goal(title="写报告", steps=["调研", "撰写"])
+        prompt = store.build_goal_check_prompt()
+        assert "[目标检查]" in prompt
+        assert "goal_complete" in prompt
+        assert goal.id in prompt
+        assert "调研" in prompt
+
 
 class TestGoalTools:
     @pytest.mark.asyncio

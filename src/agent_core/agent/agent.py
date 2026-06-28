@@ -288,6 +288,7 @@ class AgentCore:
         self._core_profile: Optional[Any] = core_profile
         # 会话内 Agent 工作目标（复杂多步骤任务的结构化计划）
         self._goal_store = GoalStore()
+        self._goal_continuation_nudges = 0
 
         # 四层记忆系统
         mem_cfg: MemoryConfig = self._config.memory
@@ -465,6 +466,76 @@ class AgentCore:
             catalog = getattr(self, "_tool_catalog", None)
             if catalog is not None and not catalog.has(tool.name):
                 catalog.register(tool)
+
+    def _goal_auto_continue_enabled(self) -> bool:
+        profile = getattr(self, "_core_profile", None)
+        if profile is not None and getattr(profile, "mode", None) == "background":
+            return False
+        return bool(getattr(self._config.agent, "goal_auto_continue", True))
+
+    def _goal_auto_continue_max_nudges(self) -> int:
+        configured = getattr(self._config.agent, "goal_auto_continue_max_nudges", None)
+        if configured is not None:
+            return int(configured)
+        return int(self._max_iterations or 10)
+
+    def _try_inject_goal_check(self, turn_id: int) -> bool:
+        """模型准备结束且仍有活跃目标时，注入自检提示并返回 True（run_loop 继续迭代）。"""
+        if not self._goal_auto_continue_enabled():
+            return False
+        if not self._goal_store.has_active_goals():
+            return False
+        if self._goal_continuation_nudges >= self._goal_auto_continue_max_nudges():
+            return False
+
+        check_msg = self._goal_store.build_goal_check_prompt()
+        self._goal_continuation_nudges += 1
+        self._context.add_user_message(check_msg)
+        self._last_prompt_tokens = None
+        if self._memory_enabled:
+            msg_id = self._require_chat_history_db().write_message(
+                session_id=self._session_id,
+                role="user",
+                content=check_msg,
+                source=self._source,
+            )
+            self._last_history_id = max(self._last_history_id, int(msg_id))
+        if self._session_logger:
+            self._session_logger.on_user_message(turn_id, check_msg)
+        logger.info(
+            "AgentCore: goal check injection %s/%s session=%s turn=%s",
+            self._goal_continuation_nudges,
+            self._goal_auto_continue_max_nudges(),
+            self._session_id,
+            turn_id,
+        )
+        return True
+
+    def _maybe_schedule_goal_continuation_wake(self) -> None:
+        """单轮迭代耗尽但仍有活跃目标时，登记即时唤醒以跨轮继续自检。"""
+        if not self._goal_auto_continue_enabled():
+            return
+        if not self._goal_store.has_active_goals():
+            return
+        try:
+            from agent_core.tools.agent_wake import register_wake
+        except ImportError:
+            return
+        try:
+            register_wake(
+                session_id=self._session_id,
+                fire_at=time.time() + 1.0,
+                message=self._goal_store.build_goal_check_prompt(),
+                label="goal-check",
+                frontend_id=self._source,
+                source=self._source,
+                user_id=self._user_id,
+                metadata={"kind": "goal_check"},
+            )
+        except Exception as exc:
+            logger.warning(
+                "AgentCore: schedule goal check wake failed: %s", exc
+            )
 
     def list_models(self) -> List[Dict[str, Any]]:
         """列出当前 LLMClient 可用的 provider 及其能力，给 CLI / IPC 用。"""
@@ -727,6 +798,26 @@ class AgentCore:
     def clear_context(self) -> None:
         """清空对话上下文"""
         self._context.clear()
+
+    def create_user_goal(self, instruction: str) -> Dict[str, Any]:
+        """用户通过 /goal 指令创建 Agent 工作目标（写入 GoalStore）。"""
+        text = str(instruction or "").strip()
+        if not text:
+            raise ValueError("instruction 不能为空")
+        title = text
+        description: Optional[str] = None
+        if len(text) > 200:
+            title = text[:200].rstrip()
+            description = text
+        goal = self._goal_store.create_goal(title=title, description=description)
+        return goal.to_dict()
+
+    def list_user_goals(self, *, include_completed: bool = False) -> List[Dict[str, Any]]:
+        """列出当前会话的 Agent 工作目标。"""
+        return [
+            g.to_dict()
+            for g in self._goal_store.list_goals(include_completed=include_completed)
+        ]
 
     def delete_session_history(self, session_id: Optional[str] = None) -> int:
         """
@@ -1003,6 +1094,7 @@ class AgentCore:
         """
         await self._sync_external_session_updates()
         self._context.repair_dangling_assistant_tool_calls()
+        self._goal_continuation_nudges = 0
         self._current_turn_id += 1
         turn_id = self._current_turn_id
 
@@ -1621,6 +1713,9 @@ class AgentCore:
                         )
                         self._last_history_id = max(self._last_history_id, int(msg_id))
 
+                    if self._try_inject_goal_check(turn_id):
+                        break
+
                     yield ReturnAction(
                         message=response.content,
                         status="completed",
@@ -1643,9 +1738,16 @@ class AgentCore:
                 raise
 
         # 超出最大迭代次数
-        overflow_msg = (
-            "抱歉，处理您的请求时超出了最大迭代次数。请简化您的问题或稍后重试。"
-        )
+        if self._goal_store.has_active_goals() and self._goal_auto_continue_enabled():
+            self._maybe_schedule_goal_continuation_wake()
+            overflow_msg = (
+                "本轮已达到最大迭代次数，但 Agent 目标尚未标记完成；"
+                "系统将注入目标检查并继续。"
+            )
+        else:
+            overflow_msg = (
+                "抱歉，处理您的请求时超出了最大迭代次数。请简化您的问题或稍后重试。"
+            )
         if self._session_logger:
             self._session_logger.on_assistant_message(turn_id, overflow_msg)
         yield ReturnAction(message=overflow_msg, status="overflow")
@@ -1676,6 +1778,12 @@ class AgentCore:
         用「kernel 关闭时间戳 - last_active_at」计算 elapsed 判断。
         """
         self._context.repair_dangling_assistant_tool_calls()
+        if (
+            run_result is not None
+            and getattr(run_result, "status", None) == "completed"
+            and self._goal_store.has_active_goals()
+        ):
+            self._maybe_schedule_goal_continuation_wake()
         # 每轮结束后写入检查点（last_active_at = now）；过期判断在 kernel 启动时用关闭时间戳计算
         if self._checkpoint_manager is not None:
             try:

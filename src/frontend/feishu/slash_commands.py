@@ -162,9 +162,55 @@ def _format_token_usage(u: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _goal_help_text() -> str:
+    return """Goal 指令（Agent 会话内工作目标）：
+/goal <instruction>  创建目标并开始执行（例：/goal 重构 auth 模块并补测试）
+/goal list           列出当前活跃目标
+/goal help           显示此帮助
+
+与用户待办 add_task 不同：goal 是 Agent 当前会话的工作计划。"""
+
+
+def _format_goal_create_result(res: Dict[str, Any]) -> str:
+    goal = res.get("goal") if isinstance(res.get("goal"), dict) else {}
+    gid = str(goal.get("id") or "—")
+    title = str(goal.get("title") or "—")
+    lines = [f"已创建目标 {gid}", f"标题: {title}"]
+    if res.get("autostart_queued"):
+        lines.append("Agent 已开始执行此目标。")
+    return "\n".join(lines)
+
+
+def _format_goal_list_result(res: Dict[str, Any]) -> str:
+    if not res.get("session_loaded", True):
+        return "当前会话尚未加载，请先发送任意消息或执行 /goal <instruction>。"
+    goals_raw = res.get("goals")
+    goals = list(goals_raw) if isinstance(goals_raw, list) else []
+    if not goals:
+        return "当前没有活跃的 Agent 目标。"
+    lines = ["当前 Agent 目标："]
+    for g in goals:
+        if not isinstance(g, dict):
+            continue
+        gid = str(g.get("id") or "—")
+        title = str(g.get("title") or "—")
+        status = str(g.get("status") or "active")
+        lines.append(f"- {gid} [{status}] {title}")
+        steps = g.get("steps") or []
+        if isinstance(steps, list):
+            for step in steps[:5]:
+                if isinstance(step, dict):
+                    lines.append(
+                        f"    · [{step.get('status', '?')}] {step.get('description', '')}"
+                    )
+    return "\n".join(lines)
+
+
 def _help_text() -> str:
     return """可用指令：
 /clear - 清空对话历史
+/goal <instruction> - 创建 Agent 工作目标并开始执行
+/goal list - 列出当前活跃目标
 /interrupt 或 /cancel 或 /stop - 中断当前正在执行的内核任务（等同 CLI 中 Ctrl+C 正在处理时）
 /compress [N] - 主动折叠上下文为摘要（可选 N 指定保留最近几轮）
 /usage 或 /stats - 本会话 token 用量
@@ -430,6 +476,24 @@ async def try_handle_slash_command(
             "Human approval is required again.\n"
             f"Session: {sid}"
         )
+
+    # /goal — 直接创建 Agent 工作目标
+    if cmd_lower == "goal" or (parts and parts[0].lower() == "goal"):
+        sub = cmd_text.split(maxsplit=1)[1].strip() if len(parts) > 1 else ""
+        sub_l = sub.lower()
+        if not sub or sub_l in ("help", "-h", "?"):
+            return True, _goal_help_text()
+        if sub_l in ("list", "ls"):
+            try:
+                res = await client.list_goals()
+            except Exception as exc:
+                return True, f"列出目标失败: {exc}"
+            return True, _format_goal_list_result(res or {})
+        try:
+            res = await client.create_goal(sub, autostart=True)
+        except Exception as exc:
+            return True, f"创建目标失败: {exc}"
+        return True, _format_goal_create_result(res or {})
 
     # /help
     if cmd_lower == "help":

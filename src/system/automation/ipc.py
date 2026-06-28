@@ -508,6 +508,26 @@ class AutomationIPCServer:
             )
             return {"ok": True, "result": result}
 
+        if method == "goal_create":
+            instruction = str(params.get("instruction") or "").strip()
+            if not instruction:
+                raise ValueError("instruction 不能为空")
+            autostart = bool(params.get("autostart", True))
+            result = await self._gateway.create_goal_for_session(
+                active_session,
+                instruction,
+                autostart=autostart,
+            )
+            return result
+
+        if method == "goal_list":
+            include_completed = bool(params.get("include_completed", False))
+            result = await self._gateway.list_goals_for_session(
+                active_session,
+                include_completed=include_completed,
+            )
+            return result
+
         if method == "get_token_usage":
             usage = self._gateway.get_token_usage(session_id=active_session)
             return {"usage": usage}
@@ -951,6 +971,31 @@ class AutomationIPCClient:
         data = await self._request("compress_context", params)
         result = data.get("result")
         return dict(result) if isinstance(result, dict) else {}
+
+    async def create_goal(
+        self,
+        instruction: str,
+        *,
+        autostart: bool = True,
+    ) -> Dict[str, Any]:
+        """为当前 session 创建 Agent 工作目标（/goal 命令）。"""
+        data = await self._request(
+            "goal_create",
+            {"instruction": instruction, "autostart": autostart},
+        )
+        return dict(data)
+
+    async def list_goals(
+        self,
+        *,
+        include_completed: bool = False,
+    ) -> Dict[str, Any]:
+        """列出当前 session 的 Agent 工作目标。"""
+        data = await self._request(
+            "goal_list",
+            {"include_completed": include_completed},
+        )
+        return dict(data)
 
     async def list_models(self) -> List[Dict[str, Any]]:
         """列出 daemon 侧当前 session 可用的 LLM provider。"""

@@ -523,6 +523,97 @@ class AutomationCoreGateway:
             return result
         return {"compressed": False, "session_loaded": True, "supported": True}
 
+    async def create_goal_for_session(
+        self,
+        session_id: str,
+        instruction: str,
+        *,
+        autostart: bool = True,
+    ) -> Dict[str, Any]:
+        """为指定 session 创建 Agent 目标；可选 inject_turn 启动执行。"""
+        text = str(instruction or "").strip()
+        if not text:
+            raise ValueError("instruction 不能为空")
+
+        await self.ensure_session(session_id, create_if_missing=True)
+        agent = await self._kernel_scheduler.core_pool.acquire(
+            session_id,
+            source=self._source,
+            user_id=self._owner_id,
+            create_if_missing=True,
+        )
+        create_fn = getattr(agent, "create_user_goal", None)
+        if not callable(create_fn):
+            raise RuntimeError("当前 Agent 不支持 goal 创建")
+        goal = create_fn(text)
+        await agent._finalize_turn(None)
+
+        autostart_queued = False
+        if autostart:
+            from agent_core.kernel_interface import KernelRequest
+
+            start_text = (
+                f"[Goal] 用户通过 /goal 创建了目标 {goal.get('id', '')}。\n"
+                f"任务：{text}\n\n"
+                "请先 goal_update 拆解步骤（若尚无步骤），然后开始执行。"
+            )
+            self._ensure_subscribed(session_id)
+            request = KernelRequest.create(
+                text=start_text,
+                session_id=session_id,
+                frontend_id=self._source,
+                metadata={
+                    "source": self._source,
+                    "user_id": self._owner_id,
+                    "kind": "goal_start",
+                },
+            )
+            self._kernel_scheduler.inject_turn(request)
+            autostart_queued = True
+
+        self.mark_activity(session_id)
+        return {
+            "ok": True,
+            "goal": goal,
+            "autostart_queued": autostart_queued,
+            "session_id": session_id,
+        }
+
+    async def list_goals_for_session(
+        self,
+        session_id: str,
+        *,
+        include_completed: bool = False,
+    ) -> Dict[str, Any]:
+        """列出指定 session 的 Agent 目标（session 未驻留时尝试加载）。"""
+        sid = str(session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id 不能为空")
+        await self.ensure_session(sid, create_if_missing=False)
+        entry = self._kernel_scheduler.core_pool.get_entry(sid)
+        if entry is None or entry.agent is None:
+            try:
+                agent = await self._kernel_scheduler.core_pool.acquire(
+                    sid,
+                    source=self._source,
+                    user_id=self._owner_id,
+                    create_if_missing=False,
+                )
+            except KeyError:
+                return {"ok": True, "goals": [], "session_loaded": False}
+        else:
+            agent = entry.agent
+        list_fn = getattr(agent, "list_user_goals", None)
+        if not callable(list_fn):
+            return {"ok": False, "goals": [], "session_loaded": True, "supported": False}
+        goals = list_fn(include_completed=include_completed)
+        return {
+            "ok": True,
+            "goals": goals,
+            "session_loaded": True,
+            "supported": True,
+        }
+
     def clear_context(self) -> None:
         entry = self._kernel_scheduler.core_pool.get_entry(self._active_session_id)
         if entry is not None:

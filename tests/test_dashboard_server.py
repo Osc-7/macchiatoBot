@@ -105,7 +105,7 @@ class FakeBackend(DashboardBackend):
     async def ping_daemon(self):
         return {"connected": True}
 
-    async def kernel_exec(self, command: str, *, session_id: str | None = None):
+    async def kernel_exec(self, command: str, *, session_id: str | None = None, username: str = ""):
         cmd = (command or "").strip()
         if cmd == "help":
             return {"ok": True, "kind": "text", "output": "Available commands: …"}

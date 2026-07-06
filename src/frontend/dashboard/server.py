@@ -930,11 +930,20 @@ class DashboardBackend:
         client = await self._with_client(username=username)
         try:
             recoveries = await client.poll_stream_recoveries()
+            if not isinstance(recoveries, list):
+                return []
             if session_id:
                 recoveries = [
                     r for r in recoveries if r.get("session_id") == session_id
                 ]
-            return recoveries if isinstance(recoveries, list) else []
+            elif username and not self._is_admin(username):
+                prefix = self._web_session_prefix(username)
+                recoveries = [
+                    r
+                    for r in recoveries
+                    if str(r.get("session_id") or "").startswith(prefix)
+                ]
+            return recoveries
         finally:
             await client.close()
 
@@ -977,6 +986,8 @@ class DashboardBackend:
         raw = (command or "").strip()
         if not raw:
             return {"ok": False, "kind": "error", "output": "(empty command)"}
+
+        self._assert_session_access(session_id, username)
 
         client = await self._with_client(username=username)
         try:
@@ -1497,12 +1508,16 @@ def create_dashboard_app(
     @console.post("/api/kernel/exec")
     async def post_kernel_exec(payload: KernelExecRequest, request: Request) -> Dict[str, Any]:
         username = getattr(request.state, "dashboard_user", "")
+        session_id = (payload.session_id or "").strip() or None
+        service._assert_session_access(session_id, username)
         try:
             return await service.kernel_exec(
                 payload.command,
-                session_id=(payload.session_id or "").strip() or None,
+                session_id=session_id,
                 username=username,
             )
+        except HTTPException:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 

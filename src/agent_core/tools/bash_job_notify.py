@@ -315,7 +315,7 @@ def flush_pending_for_session(session_id: str) -> None:
         text = item.get("text", "")
         note = item.get("note")
         try:
-            deliver_via_inject(
+            ok = deliver_via_inject(
                 session_id=sid,
                 text=text,
                 scheduler=scheduler,
@@ -326,12 +326,15 @@ def flush_pending_for_session(session_id: str) -> None:
             logger.warning(
                 "bash_job_notify: flush deliver failed session=%s: %s", sid, exc
             )
-            if note is not None:
-                _reset_staged(
-                    sid,
-                    str(note.get("job_id") or ""),
-                    remote=bool(note.get("remote", False)),
-                )
+            ok = False
+        if ok:
+            continue
+        if note is not None:
+            _reset_staged(
+                sid,
+                str(note.get("job_id") or ""),
+                remote=bool(note.get("remote", False)),
+            )
 
 
 def build_feishu_inject_metadata(

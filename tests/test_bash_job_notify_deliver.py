@@ -222,6 +222,51 @@ async def test_stage_notification_fifo():
     assert [r.text for r in scheduler.injected] == ["first", "second"]
 
 
+async def test_flush_resets_staged_when_inject_fails(tmp_path):
+    """inject 失败时必须解除 staged，否则 watcher 永远不再 poll 该 job。"""
+    clear_all_tracking_for_tests()
+
+    class _FailingScheduler(_FakeScheduler):
+        def inject_turn(self, request: KernelRequest) -> None:
+            raise RuntimeError("inject failed")
+
+    scheduler = _FailingScheduler()
+    pool = _FakeCorePool()
+    set_notify_dependencies(scheduler=scheduler, core_pool=pool)
+
+    ws = str(tmp_path)
+    register_local_job(
+        session_id="sid-1",
+        job_id="job-1",
+        command="echo done",
+        cwd=ws,
+        log_path=f"{ws}/job.log",
+        workspace_root=ws,
+    )
+
+    notes = await poll_terminal_jobs(max_items=10)
+    assert len(notes) == 1
+    note = notes[0]
+    scheduler.inflight["sid-1"] = 1
+
+    ok = deliver_via_inject(
+        session_id="sid-1",
+        text=format_notification(note),
+        note=note,
+    )
+    assert ok is True
+    assert len(scheduler.injected) == 0
+
+    scheduler.inflight["sid-1"] = 0
+    flush_pending_for_session("sid-1")
+    assert len(scheduler.injected) == 0
+
+    # staged 已解除，job 仍可被 poll 并重试投递
+    notes_after = await poll_terminal_jobs(max_items=10)
+    assert len(notes_after) == 1
+    assert notes_after[0]["job_id"] == "job-1"
+
+
 async def test_poll_terminal_jobs_limits_max_items(tmp_path):
     clear_all_tracking_for_tests()
     ws = str(tmp_path)

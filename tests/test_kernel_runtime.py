@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent_core.interfaces import AgentRunResult
 from agent_core.config import CommandToolsConfig, Config, LLMConfig
 from agent_core.context import ConversationContext
 from agent_core.kernel_interface import CoreProfile, CoreStatsAction, KernelRequest
@@ -473,6 +474,66 @@ async def test_scheduler_concurrent_requests_same_session_serialized() -> None:
     await asyncio.gather(t1, t2)
 
     assert execution_order == ["first_start", "first_end", "second_start", "second_end"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_session_tasks_skips_still_queued_requests() -> None:
+    """取消标记生效时，dispatch 应跳过仍在队列中的同 session 请求。"""
+    routed: list[str] = []
+
+    core_pool = MagicMock()
+    core_pool.scan_expired = MagicMock(return_value=[])
+    core_pool.restore_from_checkpoints = AsyncMock(return_value=0)
+    core_pool.evict_all = AsyncMock(return_value=None)
+
+    scheduler = KernelScheduler(kernel=MagicMock(), core_pool=core_pool)
+
+    async def fast_route(request: KernelRequest) -> None:
+        routed.append(request.text)
+        await scheduler._out_bus.publish(
+            request.session_id,
+            request.request_id,
+            AgentRunResult(output_text="ok"),
+        )
+
+    scheduler._run_and_route = fast_route  # type: ignore[method-assign]
+    await scheduler.start()
+    try:
+        sid = "web:alice"
+        req1 = KernelRequest.create(text="first", session_id=sid)
+        handle1 = await scheduler.submit(req1)
+        await asyncio.wait_for(scheduler.wait_result(handle1), timeout=5.0)
+        assert routed == ["first"]
+
+        scheduler._cancelled_sessions.add(sid)
+        scheduler._track_enqueue(sid)
+        queued = KernelRequest.create(text="queued-after-cancel", session_id=sid)
+        await scheduler._queue.put(queued)
+
+        await asyncio.sleep(0.05)
+        assert routed == ["first"]
+        assert sid not in scheduler._cancelled_sessions  # type: ignore[attr-defined]
+    finally:
+        await scheduler.stop()
+
+
+def test_maybe_clear_cancelled_waits_for_queued_requests() -> None:
+    """cancel 标记仅在 inflight 与排队深度均为 0 时清除。"""
+    scheduler = KernelScheduler(kernel=MagicMock(), core_pool=MagicMock())
+    sid = "web:alice"
+    scheduler._cancelled_sessions.add(sid)
+    scheduler._queued_by_session[sid] = 2
+
+    scheduler._maybe_clear_cancelled(sid)
+    assert sid in scheduler._cancelled_sessions
+
+    scheduler._track_dequeue(sid)
+    scheduler._maybe_clear_cancelled(sid)
+    assert sid in scheduler._cancelled_sessions
+
+    scheduler._track_dequeue(sid)
+    scheduler._maybe_clear_cancelled(sid)
+    assert sid not in scheduler._cancelled_sessions
 
 
 @pytest.mark.asyncio

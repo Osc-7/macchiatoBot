@@ -479,11 +479,28 @@ class AgentCore:
             return int(configured)
         return int(self._max_iterations or 10)
 
+    def _session_has_deferred_wake(self) -> bool:
+        """Agent 已 schedule_wake 登记 future 唤醒时，goal 系统续跑应让路。"""
+        try:
+            from agent_core.tools.agent_wake import session_has_deferred_agent_wake
+
+            return session_has_deferred_agent_wake(self._session_id)
+        except ImportError:
+            return False
+
+    def _goal_auto_continue_suppressed(self) -> bool:
+        """goal 系统续跑被 schedule_wake 或 blocked 等待态抑制。"""
+        if self._session_has_deferred_wake():
+            return True
+        return self._goal_store.goals_defer_auto_continue()
+
     def _try_inject_goal_check(self, turn_id: int) -> bool:
         """模型准备结束且仍有活跃目标时，注入自检提示并返回 True（run_loop 继续迭代）。"""
         if not self._goal_auto_continue_enabled():
             return False
         if not self._goal_store.has_active_goals():
+            return False
+        if self._goal_auto_continue_suppressed():
             return False
         if self._goal_continuation_nudges >= self._goal_auto_continue_max_nudges():
             return False
@@ -516,6 +533,8 @@ class AgentCore:
         if not self._goal_auto_continue_enabled():
             return
         if not self._goal_store.has_active_goals():
+            return
+        if self._goal_auto_continue_suppressed():
             return
         try:
             from agent_core.tools.agent_wake import register_wake
@@ -1739,11 +1758,22 @@ class AgentCore:
 
         # 超出最大迭代次数
         if self._goal_store.has_active_goals() and self._goal_auto_continue_enabled():
-            self._maybe_schedule_goal_continuation_wake()
-            overflow_msg = (
-                "本轮已达到最大迭代次数，但 Agent 目标尚未标记完成；"
-                "系统将注入目标检查并继续。"
-            )
+            if self._goal_auto_continue_suppressed():
+                if self._session_has_deferred_wake():
+                    overflow_msg = (
+                        "本轮已达到最大迭代次数；活跃目标将由已登记的定时唤醒继续推进。"
+                    )
+                else:
+                    overflow_msg = (
+                        "本轮已达到最大迭代次数；活跃目标步骤已标记 blocked，"
+                        "等待用户或外部条件后再继续。"
+                    )
+            else:
+                self._maybe_schedule_goal_continuation_wake()
+                overflow_msg = (
+                    "本轮已达到最大迭代次数，但 Agent 目标尚未标记完成；"
+                    "系统将注入目标检查并继续。"
+                )
         else:
             overflow_msg = (
                 "抱歉，处理您的请求时超出了最大迭代次数。请简化您的问题或稍后重试。"

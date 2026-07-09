@@ -28,6 +28,11 @@ from agent_core.tools.bash_job_notify import (
     poll_terminal_jobs,
     set_notify_dependencies,
 )
+from agent_core.tools.agent_wake import (
+    deliver_wake_via_inject,
+    format_wake_notification,
+    poll_due_wakes,
+)
 from frontend.feishu.ask_user_notify import install_feishu_ask_user_notify_hook
 from frontend.feishu.client import FeishuClient
 from frontend.feishu.permission_notify import install_feishu_permission_notify_hook
@@ -513,9 +518,15 @@ async def _bash_job_notify_loop(
     scheduler: "KernelScheduler",
     core_pool: "CorePool",
     poll_interval: float,
+    *,
+    agent_wake_enabled: bool = True,
 ) -> None:
-    """daemon 后台 watcher：轮询 bash job 终态并通过 inject_turn 主动通知。"""
-    logger.info("bash_job_notify: watcher started poll_interval=%.1fs", poll_interval)
+    """daemon 后台 watcher：轮询 bash job 终态与会话定时唤醒，通过 inject_turn 主动通知。"""
+    logger.info(
+        "bash_job_notify: watcher started poll_interval=%.1fs agent_wake=%s",
+        poll_interval,
+        agent_wake_enabled,
+    )
     try:
         while not stop_event.is_set():
             try:
@@ -540,6 +551,27 @@ async def _bash_job_notify_loop(
                         note.get("job_id"),
                         exc,
                     )
+            if agent_wake_enabled:
+                try:
+                    wakes = poll_due_wakes(max_items=20)
+                except Exception as exc:
+                    logger.warning("agent_wake: poll_due_wakes failed: %s", exc)
+                    wakes = []
+                for wake in wakes:
+                    try:
+                        deliver_wake_via_inject(
+                            wake=wake,
+                            text=format_wake_notification(wake),
+                            scheduler=scheduler,
+                            core_pool=core_pool,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "agent_wake: deliver failed session=%s wake=%s: %s",
+                            wake.get("session_id"),
+                            wake.get("wake_id"),
+                            exc,
+                        )
             try:
                 await asyncio.wait_for(
                     stop_event.wait(), timeout=max(0.1, poll_interval)
@@ -670,17 +702,21 @@ async def _main() -> None:
         notify_enabled = bool(
             getattr(cfg.command_tools, "bash_job_notify_inject_enabled", True)
         )
+        agent_wake_enabled = bool(
+            getattr(cfg.command_tools, "agent_wake_inject_enabled", True)
+        )
         notify_poll = float(
             getattr(cfg.command_tools, "bash_job_notify_poll_seconds", 3.0) or 3.0
         )
         notify_task: asyncio.Task[Any] | None = None
-        if notify_enabled:
+        if notify_enabled or agent_wake_enabled:
             notify_task = asyncio.create_task(
                 _bash_job_notify_loop(
                     stop_event=stop_event,
                     scheduler=scheduler_runtime,
                     core_pool=core_pool,
                     poll_interval=notify_poll,
+                    agent_wake_enabled=agent_wake_enabled,
                 ),
                 name="bash-job-notify-watcher",
             )

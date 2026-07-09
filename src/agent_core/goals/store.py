@@ -116,9 +116,22 @@ class GoalStore:
         """是否存在尚未 goal_complete 的活跃目标。"""
         return bool(self.list_goals(include_completed=False))
 
+    def goals_defer_auto_continue(self) -> bool:
+        """是否存在「已 blocked、且无 in_progress」的活跃目标（等待用户/外部，不系统续跑）。"""
+        for goal in self.list_goals(include_completed=False):
+            if not goal.steps:
+                continue
+            has_blocked = any(s.status == GoalStepStatus.BLOCKED for s in goal.steps)
+            has_in_progress = any(
+                s.status == GoalStepStatus.IN_PROGRESS for s in goal.steps
+            )
+            if has_blocked and not has_in_progress:
+                return True
+        return False
+
     def should_auto_continue(self) -> bool:
-        """是否仍需目标检查/跨轮继续（与 has_active_goals 同义，供 wake 等调用）。"""
-        return self.has_active_goals()
+        """是否仍需目标检查/跨轮继续。"""
+        return self.has_active_goals() and not self.goals_defer_auto_continue()
 
     def build_goal_check_prompt(self) -> str:
         """模型准备结束本轮时注入的自检提示。"""
@@ -128,7 +141,7 @@ class GoalStore:
             "",
             "- **已全部达成**：先调用 goal_complete 标记完成，再向用户给出最终答复。",
             "- **尚未达成**：不要结束；用 goal_update 更新步骤状态，并继续调用工具推进。",
-            "- **因 blocked 需等待用户**：向用户说明阻塞点后可结束，等待用户下一条消息。",
+            "- **因 blocked 需等待用户/外部**：先将对应步骤标为 blocked（notes 写明原因），再结束本轮；系统不会注入目标检查。",
             "",
             "不要口头声称完成却未调用 goal_complete。当前活跃目标：",
         ]

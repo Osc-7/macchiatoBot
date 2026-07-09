@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+import time
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from system.automation.repositories import (
     AutomationPolicyRepository,
@@ -889,6 +891,302 @@ class ListScheduledJobsTool(BaseTool):
                 "jobs": [j.model_dump(mode="json") for j in items],
                 "total_returned": len(items),
             },
+        )
+
+
+class ScheduleWakeTool(BaseTool):
+    """在当前会话登记定时唤醒，到点后通过 inject_turn 主动继续对话。"""
+
+    @property
+    def name(self) -> str:
+        return "schedule_wake"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self.name,
+            description=(
+                "为**当前会话**设置定时唤醒（闹钟/倒计时），到点后 daemon 会通过 inject_turn "
+                "主动唤醒本会话继续处理，与 bash 后台任务完成通知走同一路径。\n\n"
+                "与 create_scheduled_job 的区别：\n"
+                "- schedule_wake：唤醒**当前**会话，适合「N 分钟后提醒我」「到点继续刚才的事」；\n"
+                "- create_scheduled_job：在独立 cron 会话中执行指令，适合周期性后台自动化。\n\n"
+                "时间语义（至少提供一种）：\n"
+                "- wake_at：绝对时间（ISO-8601，如 2026-06-19T15:30:00+08:00）；\n"
+                "- delay_seconds / delay_minutes：相对当前时间的倒计时。"
+            ),
+            parameters=[
+                ToolParameter(
+                    name="message",
+                    type="string",
+                    description="到点时注入会话的提醒/继续任务说明（必填）。",
+                    required=True,
+                ),
+                ToolParameter(
+                    name="wake_at",
+                    type="string",
+                    description="绝对触发时间（ISO-8601）。与 delay_* 二选一。",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="delay_seconds",
+                    type="integer",
+                    description="倒计时秒数（正整数）。与 wake_at 二选一。",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="delay_minutes",
+                    type="number",
+                    description="倒计时分钟数（正数）。与 wake_at 二选一。",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="label",
+                    type="string",
+                    description="可选简短标签，便于 list_scheduled_wakes 识别。",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="wake_id",
+                    type="string",
+                    description="可选自定义 ID；不提供则自动生成。",
+                    required=False,
+                ),
+            ],
+            usage_notes=[
+                "取消已登记的唤醒请用 cancel_scheduled_wake。",
+                "daemon 未运行时唤醒不会触发。",
+            ],
+            tags=["自动化", "定时", "唤醒"],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        exec_ctx = kwargs.pop("__execution_context__", None) or {}
+        session_id = str(exec_ctx.get("session_id") or "").strip()
+        if not session_id:
+            return ToolResult(
+                success=False,
+                error="MISSING_SESSION",
+                message="无法识别当前会话（缺少 session_id）。",
+            )
+
+        message = str(kwargs.get("message") or "").strip()
+        if not message:
+            return ToolResult(
+                success=False,
+                error="MISSING_MESSAGE",
+                message="请提供到点时的提醒内容 message。",
+            )
+
+        wake_at_raw = str(kwargs.get("wake_at") or "").strip()
+        delay_seconds_raw = kwargs.get("delay_seconds")
+        delay_minutes_raw = kwargs.get("delay_minutes")
+
+        has_absolute = bool(wake_at_raw)
+        has_relative = delay_seconds_raw is not None or delay_minutes_raw is not None
+        if has_absolute == has_relative:
+            return ToolResult(
+                success=False,
+                error="INVALID_TIME",
+                message="请提供 wake_at（绝对时间）或 delay_seconds/delay_minutes（倒计时）之一，且不能同时提供。",
+            )
+
+        fire_at: float
+        fire_at_display: str
+        if has_absolute:
+            try:
+                parsed = datetime.fromisoformat(wake_at_raw.replace("Z", "+00:00"))
+            except Exception:
+                return ToolResult(
+                    success=False,
+                    error="INVALID_WAKE_AT",
+                    message="wake_at 必须是合法的 ISO-8601 时间。",
+                )
+            if parsed.tzinfo is None:
+                try:
+                    cfg = get_config()
+                    tz_name = cfg.time.timezone
+                except Exception:
+                    tz_name = "Asia/Shanghai"
+                parsed = parsed.replace(tzinfo=ZoneInfo(tz_name))
+            fire_at = parsed.timestamp()
+            fire_at_display = parsed.isoformat()
+        else:
+            delay_seconds: float = 0.0
+            if delay_seconds_raw is not None:
+                try:
+                    delay_seconds = float(delay_seconds_raw)
+                except (TypeError, ValueError):
+                    return ToolResult(
+                        success=False,
+                        error="INVALID_DELAY",
+                        message="delay_seconds 必须是正数。",
+                    )
+            elif delay_minutes_raw is not None:
+                try:
+                    delay_seconds = float(delay_minutes_raw) * 60.0
+                except (TypeError, ValueError):
+                    return ToolResult(
+                        success=False,
+                        error="INVALID_DELAY",
+                        message="delay_minutes 必须是正数。",
+                    )
+            if delay_seconds <= 0:
+                return ToolResult(
+                    success=False,
+                    error="INVALID_DELAY",
+                    message="倒计时必须大于 0。",
+                )
+            fire_at = time.time() + delay_seconds
+            fire_at_display = datetime.fromtimestamp(fire_at).isoformat()
+
+        label = str(kwargs.get("label") or "").strip()
+        wake_id = str(kwargs.get("wake_id") or "").strip() or None
+        metadata: dict[str, Any] = {}
+        feishu_chat_id = str(exec_ctx.get("feishu_chat_id") or "").strip()
+        if not feishu_chat_id and session_id.startswith("feishu:"):
+            try:
+                from agent_core.tools.bash_job_notify import get_notify_dependencies
+                from frontend.feishu.feishu_turn_hooks import (
+                    resolve_feishu_chat_id_for_session,
+                )
+
+                deps = get_notify_dependencies()
+                feishu_chat_id = (
+                    resolve_feishu_chat_id_for_session(
+                        session_id, core_pool=deps.get("core_pool")
+                    )
+                    or ""
+                ).strip()
+            except Exception:
+                feishu_chat_id = ""
+        if feishu_chat_id:
+            metadata["feishu_chat_id"] = feishu_chat_id
+
+        from agent_core.tools.agent_wake import (
+            cancel_pending_wakes,
+            list_wakes,
+            register_wake,
+        )
+
+        if wake_id:
+            existing = [w for w in list_wakes() if w.get("wake_id") == wake_id]
+            if existing:
+                return ToolResult(
+                    success=False,
+                    error="DUPLICATE_WAKE_ID",
+                    message=f"wake_id {wake_id!r} 已存在，请换一个或先 cancel_scheduled_wake。",
+                )
+
+        try:
+            assigned_id = register_wake(
+                session_id=session_id,
+                fire_at=fire_at,
+                message=message,
+                wake_id=wake_id,
+                label=label,
+                frontend_id=str(exec_ctx.get("frontend_id") or "cli"),
+                source=str(exec_ctx.get("source") or "cli"),
+                user_id=str(exec_ctx.get("user_id") or "root"),
+                metadata=metadata,
+            )
+            # Agent 主动 schedule_wake 时，取消 goal-check 系统续跑，避免与定时唤醒冲突
+            if str(label or "").strip() != "goal-check":
+                cancel_pending_wakes(session_id, label="goal-check")
+        except ValueError as exc:
+            return ToolResult(success=False, error="REGISTER_FAILED", message=str(exc))
+
+        seconds_until = max(0.0, fire_at - time.time())
+        return ToolResult(
+            success=True,
+            message=(
+                f"已登记定时唤醒，约 {seconds_until:.0f} 秒后触发（{fire_at_display}）。"
+            ),
+            data={
+                "wake_id": assigned_id,
+                "session_id": session_id,
+                "fire_at": fire_at,
+                "fire_at_display": fire_at_display,
+                "seconds_until": seconds_until,
+                "label": label,
+                "message": message,
+            },
+        )
+
+
+class ListScheduledWakesTool(BaseTool):
+    @property
+    def name(self) -> str:
+        return "list_scheduled_wakes"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self.name,
+            description="列出当前会话已登记、尚未触发的定时唤醒。",
+            parameters=[],
+            tags=["自动化", "定时", "唤醒"],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        exec_ctx = kwargs.pop("__execution_context__", None) or {}
+        session_id = str(exec_ctx.get("session_id") or "").strip()
+        if not session_id:
+            return ToolResult(
+                success=False,
+                error="MISSING_SESSION",
+                message="无法识别当前会话。",
+            )
+        from agent_core.tools.agent_wake import list_wakes
+
+        items = list_wakes(session_id=session_id)
+        return ToolResult(
+            success=True,
+            message=f"当前会话有 {len(items)} 条待触发唤醒。",
+            data={"wakes": items, "count": len(items)},
+        )
+
+
+class CancelScheduledWakeTool(BaseTool):
+    @property
+    def name(self) -> str:
+        return "cancel_scheduled_wake"
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self.name,
+            description="取消一条已登记的会话定时唤醒。",
+            parameters=[
+                ToolParameter(
+                    name="wake_id",
+                    type="string",
+                    description="schedule_wake 返回的 wake_id",
+                    required=True,
+                ),
+            ],
+            tags=["自动化", "定时", "唤醒"],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        kwargs.pop("__execution_context__", None)
+        wake_id = str(kwargs.get("wake_id") or "").strip()
+        if not wake_id:
+            return ToolResult(
+                success=False,
+                error="MISSING_WAKE_ID",
+                message="请提供 wake_id。",
+            )
+        from agent_core.tools.agent_wake import cancel_wake
+
+        ok = cancel_wake(wake_id)
+        if not ok:
+            return ToolResult(
+                success=False,
+                error="NOT_FOUND",
+                message=f"未找到唤醒 {wake_id!r}（可能已触发或已取消）。",
+            )
+        return ToolResult(
+            success=True,
+            message=f"已取消定时唤醒 {wake_id!r}。",
+            data={"wake_id": wake_id, "cancelled": True},
         )
 
 

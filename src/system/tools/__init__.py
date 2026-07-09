@@ -83,6 +83,9 @@ from .automation_tools import (
     CreateScheduledJobTool,
     ListScheduledJobsTool,
     DeleteScheduledJobTool,
+    ScheduleWakeTool,
+    ListScheduledWakesTool,
+    CancelScheduledWakeTool,
     NotifyOwnerTool,
 )
 from .sjtu_jw_tools import FetchSjtuUndergradScheduleTool
@@ -326,6 +329,9 @@ def _build_automation_tools(
         ),
         ListScheduledJobsTool(),
         DeleteScheduledJobTool(),
+        ScheduleWakeTool(),
+        ListScheduledWakesTool(),
+        CancelScheduledWakeTool(),
         NotifyOwnerTool(config=config),
     ]
     return tools

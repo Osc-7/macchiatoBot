@@ -101,6 +101,30 @@ class TestGoalStore:
             step_status=GoalStepStatus.BLOCKED,
         )
         assert store.has_active_goals() is True
+        assert store.goals_defer_auto_continue() is True
+        assert store.should_auto_continue() is False
+
+    def test_goals_defer_auto_continue_false_when_in_progress(
+        self, store: GoalStore
+    ) -> None:
+        goal = store.create_goal(title="任务", steps=["等待", "下一步"])
+        store.update_goal(
+            goal.id,
+            step_id=goal.steps[0].id,
+            step_status=GoalStepStatus.IN_PROGRESS,
+        )
+        store.update_goal(
+            goal.id,
+            step_id=goal.steps[1].id,
+            step_status=GoalStepStatus.BLOCKED,
+        )
+        assert store.goals_defer_auto_continue() is False
+
+    def test_goals_defer_auto_continue_false_when_only_pending(
+        self, store: GoalStore
+    ) -> None:
+        store.create_goal(title="任务", steps=["一步", "二步"])
+        assert store.goals_defer_auto_continue() is False
 
     def test_no_active_goals_when_all_done(self, store: GoalStore) -> None:
         goal = store.create_goal(title="任务", steps=["一步"])

@@ -22,12 +22,21 @@
 
 - **goal_create** / **goal_update** / **goal_complete** / **goal_list**
 
+### blocked 与 schedule_wake
+
+| 场景 | 做法 | 系统行为 |
+|------|------|----------|
+| **等用户**（缺 API key、需确认方案） | `goal_update(status=blocked, notes=原因)`，说明阻塞后结束本轮 | **不会**注入 `[目标检查]` / goal-check 唤醒 |
+| **等时间/外部进程**（训练跑完、定时复查） | `schedule_wake(delay_minutes=…)`，可保持步骤 `in_progress` | 由定时唤醒续跑，**不会** goal-check 抢跑 |
+
+`blocked` 必须标在对应步骤上，且该 goal **没有** `in_progress` 步骤时，系统才视为「等待态」并暂停自动续跑。
+
 ### 目标检查（系统自动注入）
 
 当你准备用纯文本结束本轮、且仍有活跃目标时，系统会注入 **`[目标检查]`** 消息。收到后自检：
 
 - **已全部达成** → `goal_complete`，再给用户最终答复
 - **尚未达成** → 继续调用工具推进
-- **blocked 等用户** → 说明阻塞后可结束
+- **blocked 等用户** → `goal_update(status=blocked)` 并说明原因后可结束；系统不会立刻续跑
 
 不要口头说「完成了」却未调用 `goal_complete`。

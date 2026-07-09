@@ -151,6 +151,7 @@ command_tools:
   # bash_job_notify_poll_seconds: 3
   # bash_job_status_min_interval_seconds: 5
   # bash_job_notify_inject_enabled: true
+  # agent_wake_inject_enabled: true
   # subagent_command_whitelist: ["ls", "pwd", "cat", "head", "tail", "grep", "find", "echo", "which", "file", "stat", "wc", "date", "whoami", "id", "env", "printenv"]
   workspace_base_dir: "./data/workspace"
   workspace_isolation_enabled: true   # false: shared cwd, weaker cd guard

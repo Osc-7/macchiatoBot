@@ -337,6 +337,9 @@ def flush_pending_for_session(session_id: str) -> None:
 def build_feishu_inject_metadata(
     session_id: str,
     core_pool: Optional["CorePool"],
+    *,
+    chat_id_hint: Optional[str] = None,
+    markdown_header_title: str = "后台任务通知",
 ) -> Optional[Dict[str, Any]]:
     """为飞书会话构建 inject_turn 所需的 hooks 元数据；非飞书返回 None。"""
     if not session_id.startswith("feishu:"):
@@ -347,12 +350,16 @@ def build_feishu_inject_metadata(
             resolve_feishu_chat_id_for_session,
         )
 
-        chat_id = resolve_feishu_chat_id_for_session(session_id, core_pool=core_pool)
+        chat_id = resolve_feishu_chat_id_for_session(
+            session_id,
+            core_pool=core_pool,
+            chat_id_hint=chat_id_hint,
+        )
         if not chat_id:
             return None
         ctrl = FeishuTurnHooksController(
             chat_id=chat_id,
-            markdown_header_title="后台任务通知",
+            markdown_header_title=markdown_header_title,
         )
         return {
             "_hooks": ctrl.hooks,
@@ -435,7 +442,12 @@ def deliver_via_inject(
         "source": note.get("source") if note else "cli",
         "user_id": note.get("user_id") if note else "root",
     }
-    feishu_md = build_feishu_inject_metadata(sid, core_pool)
+    chat_hint = None
+    if note and isinstance(note.get("metadata"), dict):
+        chat_hint = str(note["metadata"].get("feishu_chat_id") or "").strip() or None
+    feishu_md = build_feishu_inject_metadata(
+        sid, core_pool, chat_id_hint=chat_hint
+    )
     if feishu_md:
         inject_md.update(feishu_md)
 

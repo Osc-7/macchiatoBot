@@ -1,4 +1,4 @@
-openai_official_gpt4o:
+gpt_5.3_codex:
   label: "GPT-5.3 codex"
   base_url: "https://api.openai.com/v1"
   api_key: "${OPENAI_API_KEY}"

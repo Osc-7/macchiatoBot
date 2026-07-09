@@ -1,0 +1,18 @@
+glm5.2:
+  label: "GLM-5.2"
+  base_url: "https://open.bigmodel.cn/api/paas/v4"
+  api_key: "${GLM_API_KEY}"
+  model: "glm-5.2"
+  pricing:
+    currency: "CNY"
+    cny_per_currency_unit: 1.0
+    input_per_million: 8
+    output_per_million: 28
+  vendor_params: {}
+  capabilities:
+    vision: false
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: true
+    thinking_tag_inline: false
+    context_window: 1000000

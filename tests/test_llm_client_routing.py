@@ -98,6 +98,44 @@ def test_switch_model_rejects_unknown():
         client.switch_model("unknown-provider")
 
 
+def test_register_provider_adds_to_client_and_config(tmp_path):
+    cfg = _make_config()
+    with patch("agent_core.llm.providers.openai_compat.AsyncOpenAI"):
+        client = LLMClient(config=cfg)
+    new_entry = {
+        "base_url": "https://glm.example/v1",
+        "api_key": "k-glm",
+        "model": "glm-5.2",
+        "label": "GLM 5.2",
+        "capabilities": {"vision": False, "function_calling": True},
+    }
+    with patch(
+        "agent_core.config.persist_runtime_provider",
+        return_value=tmp_path / "_runtime.yaml",
+    ):
+        pe = client.register_provider("glm52", new_entry, persist=True)
+    assert pe.model == "glm-5.2"
+    assert "glm52" in client.providers
+    assert "glm52" in cfg.llm.providers
+    client.switch_model("glm52")
+    assert client.active_provider_name == "glm52"
+
+
+def test_register_provider_rejects_duplicate_without_overwrite():
+    cfg = _make_config()
+    with patch("agent_core.llm.providers.openai_compat.AsyncOpenAI"):
+        client = LLMClient(config=cfg)
+    entry = {
+        "base_url": "https://example.com/v1",
+        "api_key": "k",
+        "model": "m",
+    }
+    with patch("agent_core.config.persist_runtime_provider"):
+        client.register_provider("extra", entry, persist=False)
+    with pytest.raises(ValueError):
+        client.register_provider("extra", entry, persist=False)
+
+
 def test_constructor_model_override_resolves_to_active_provider():
     """AgentCore 的 summary 客户端：model_override 为另一 provider 名时 chat() 走该端点。"""
     cfg = _make_config()

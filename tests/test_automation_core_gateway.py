@@ -574,3 +574,51 @@ def test_list_models_fallback_when_core_not_in_pool(tmp_path, monkeypatch):
     assert models[0]["api_model"] == "m-id"
     assert models[0]["is_active"] is True
     assert models[0]["is_vision_provider"] is True
+
+
+def test_register_model_updates_global_config_and_list(tmp_path, monkeypatch):
+    """register_model 应写入全局 providers 并出现在 list_models。"""
+    from agent_core.config import CapabilitiesModel, Config, LLMConfig, ProviderEntry
+
+    minimal = Config(
+        llm=LLMConfig(
+            api_key="k",
+            model="m",
+            providers={
+                "p_a": ProviderEntry(
+                    base_url="https://a/v1",
+                    api_key="k",
+                    model="ma",
+                    capabilities=CapabilitiesModel(vision=False),
+                ),
+            },
+            active="p_a",
+        ),
+    )
+    monkeypatch.setattr("agent_core.config.get_config", lambda: minimal)
+
+    scheduler = _make_mock_scheduler(pool_entries={})
+    gateway = _make_gateway(tmp_path, kernel_scheduler=scheduler)
+
+    with monkeypatch.context() as m:
+        m.setattr(
+            "agent_core.config.persist_runtime_provider",
+            lambda *a, **k: tmp_path / "_runtime.yaml",
+        )
+        info = gateway.register_model(
+            "glm52",
+            {
+                "base_url": "https://glm/v1",
+                "api_key": "k-glm",
+                "model": "glm-5.2",
+                "label": "GLM 5.2",
+            },
+            persist=True,
+            session_id="cli:root",
+        )
+
+    assert info["name"] == "glm52"
+    assert info["api_model"] == "glm-5.2"
+    assert "glm52" in minimal.llm.providers
+    models = gateway.list_models(session_id="cli:root")
+    assert any(m["name"] == "glm52" for m in models)

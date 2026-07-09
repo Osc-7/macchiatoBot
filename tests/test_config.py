@@ -5,6 +5,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from agent_core.config import (
     Config,
@@ -801,3 +802,47 @@ class TestFindConfigFile:
 
         with pytest.raises(FileNotFoundError, match="未找到主配置文件"):
             find_config_file()
+
+
+class TestRuntimeProviderRegistration:
+    """运行时 provider 注册与持久化。"""
+
+    def test_persist_runtime_provider_merges_entries(self, tmp_path, monkeypatch):
+        from agent_core.config import (
+            persist_runtime_provider,
+            resolve_runtime_providers_path,
+        )
+
+        cfg_dir = tmp_path / "config"
+        prov_dir = cfg_dir / "llm" / "providers.d"
+        prov_dir.mkdir(parents=True)
+        main = cfg_dir / "config.yaml"
+        main.write_text(
+            "llm:\n  api_key: k\n  model: m\n  providers_dir: llm/providers.d\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        config = load_config(main)
+        monkeypatch.setattr(
+            "agent_core.config.get_config",
+            lambda: config,
+        )
+
+        path = resolve_runtime_providers_path(main)
+        assert path.name == "_runtime.yaml"
+        assert path.parent == prov_dir.resolve()
+
+        persist_runtime_provider(
+            "first",
+            {"base_url": "https://a/v1", "api_key": "k", "model": "ma"},
+            config_path=main,
+        )
+        persist_runtime_provider(
+            "second",
+            {"base_url": "https://b/v1", "api_key": "k", "model": "mb"},
+            config_path=main,
+        )
+        assert path.is_file()
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert set(loaded.keys()) == {"first", "second"}
+        assert loaded["second"]["model"] == "mb"

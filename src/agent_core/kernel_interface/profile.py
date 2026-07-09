@@ -94,6 +94,9 @@ class CoreProfile:
     """
 
     mode: Literal["full", "sub", "background"] = "full"
+    # 权限校验模式：None 时与 mode 相同。子 Agent 可保持 mode=sub（禁止再孵化），
+    # 同时将 permission_mode 设为父会话 mode，以继承 bash/文件/审批策略。
+    permission_mode: Optional[Literal["full", "sub", "background"]] = None
 
     allowed_tools: Optional[List[str]] = None
     deny_tools: List[str] = field(default_factory=list)
@@ -125,6 +128,13 @@ class CoreProfile:
     dialog_window_id: str = ""
     tool_template: str = "default"
     tool_exposure_mode: Literal["pinned", "empty"] = "pinned"
+
+    def effective_permission_mode(self) -> str:
+        """用于 bash / 文件工具 / 审批等安全边界的模式（可与 mode 解耦）。"""
+        pm = self.permission_mode
+        if pm in ("full", "sub", "background"):
+            return pm
+        return self.mode
 
     def is_tool_allowed(self, tool_name: str) -> bool:
         """判断指定工具名是否在该 Profile 的权限范围内。

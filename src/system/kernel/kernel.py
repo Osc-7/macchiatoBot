@@ -186,7 +186,7 @@ class AgentKernel:
                 else:
                     # 注入执行上下文：让 bash / file_tools 等能感知当前 CoreProfile。
                     profile_mode = (
-                        getattr(profile, "mode", "full")
+                        profile.effective_permission_mode()
                         if profile is not None
                         else "full"
                     )

@@ -71,17 +71,43 @@ def _guard_subagent_parent(
 SUBAGENT_COMMUNICATION_TOOLS = ["send_message_to_agent", "reply_to_message"]
 
 
+def _resolve_parent_identity(
+    core_pool: "CorePool",
+    parent_session_id: str,
+) -> tuple[str, str]:
+    """解析父会话的 (source, user_id)，用于子 Agent 继承权限命名空间。"""
+    entry = core_pool.get_entry(parent_session_id)
+    if entry is not None and entry.agent is not None:
+        src = str(getattr(entry.agent, "_source", "") or "").strip()
+        uid = str(getattr(entry.agent, "_user_id", "") or "").strip()
+        if src:
+            return src, uid or "root"
+    sid = (parent_session_id or "").strip()
+    if sid.startswith("feishu:"):
+        return "feishu", sid[7:]
+    if ":" in sid:
+        prefix, rest = sid.split(":", 1)
+        p, r = prefix.strip(), rest.strip()
+        return p or "cli", r or "root"
+    return "cli", "root"
+
+
 def _inherit_tool_policy_from_parent(
     core_pool: "CorePool",
     parent_session_id: str,
     *,
     add_bash: bool,
-) -> tuple[Optional[List[str]], List[str], str, bool]:
+) -> tuple[Optional[List[str]], List[str], str, bool, bool, bool, str, str]:
     """未显式传 allowed_tools 时，从父会话 CoreProfile 继承工具白/黑名单与危险命令策略。
 
     Returns:
-        (effective_allowed_after_merge, deny_tools_copy, tool_template, allow_dangerous_commands)
+        (effective_allowed_after_merge, deny_tools_copy, tool_template, allow_dangerous_commands,
+         approval_bypass_enabled, bash_workspace_admin, permission_mode, memory_owner)
     """
+    parent_source, parent_user_id = _resolve_parent_identity(
+        core_pool, parent_session_id
+    )
+    memory_owner = f"{parent_source}:{parent_user_id}"
     entry = core_pool.get_entry(parent_session_id)
     if entry is None:
         logger.warning(
@@ -90,14 +116,24 @@ def _inherit_tool_policy_from_parent(
             extra={"parent_session_id": parent_session_id},
         )
         merged = _merge_allowed_tools_for_subagent(None, add_bash=add_bash)
-        return merged, [], "default", False
+        return merged, [], "default", False, False, False, "sub", memory_owner
     prof = entry.profile
     merged = _merge_allowed_tools_for_subagent(
         prof.allowed_tools, add_bash=add_bash
     )
     deny = list(prof.deny_tools) if prof.deny_tools else []
     tmpl = (prof.tool_template or "default").strip() or "default"
-    return merged, deny, tmpl, bool(prof.allow_dangerous_commands)
+    perm_mode = prof.effective_permission_mode()
+    return (
+        merged,
+        deny,
+        tmpl,
+        bool(prof.allow_dangerous_commands),
+        bool(prof.approval_bypass_enabled),
+        bool(prof.bash_workspace_admin),
+        perm_mode,
+        memory_owner,
+    )
 
 
 def _merge_allowed_tools_for_subagent(
@@ -197,15 +233,26 @@ async def _run_subagent_task(
     )
     max_iter_override = max_iterations if max_iterations else subagent_max_iterations_default
 
-    # 构造 subagent 的 CoreProfile（mode="sub"，按 allowed_tools 限制 + 时间/token 上限）
+    # 构造 subagent 的 CoreProfile（mode="sub" 防递归孵化；permission_mode 继承父会话）
     # 未传 allowed_tools 时继承父会话工具模板与白/黑名单；显式传参仍以调用方为准
+    parent_source, parent_user_id = _resolve_parent_identity(
+        core_pool, parent_session_id
+    )
+    memory_owner = f"{parent_source}:{parent_user_id}"
     if allowed_tools is None:
-        effective_allowed, deny_copy, tool_tmpl, inherit_dangerous = (
-            _inherit_tool_policy_from_parent(
-                core_pool,
-                parent_session_id,
-                add_bash=allow_run_for_subagent,
-            )
+        (
+            effective_allowed,
+            deny_copy,
+            tool_tmpl,
+            inherit_dangerous,
+            inherit_bypass,
+            inherit_bash_admin,
+            inherit_perm_mode,
+            memory_owner,
+        ) = _inherit_tool_policy_from_parent(
+            core_pool,
+            parent_session_id,
+            add_bash=allow_run_for_subagent,
         )
         allow_cmd = inherit_dangerous or allow_run_for_subagent
         profile = CoreProfile.default_sub(
@@ -220,10 +267,15 @@ async def _run_subagent_task(
             tool_template=tool_tmpl,
             tools_config=getattr(config, "tools", None),
         )
+        profile.approval_bypass_enabled = inherit_bypass
+        profile.bash_workspace_admin = inherit_bash_admin
+        profile.permission_mode = inherit_perm_mode  # type: ignore[assignment]
     else:
         effective_allowed = _merge_allowed_tools_for_subagent(
             allowed_tools, add_bash=allow_run_for_subagent
         )
+        parent_entry = core_pool.get_entry(parent_session_id)
+        parent_prof = parent_entry.profile if parent_entry is not None else None
         profile = CoreProfile.default_sub(
             allowed_tools=effective_allowed,
             frontend_id="subagent",
@@ -234,6 +286,15 @@ async def _run_subagent_task(
             allow_dangerous_commands=allow_run_for_subagent,
             tools_config=getattr(config, "tools", None),
         )
+        if parent_prof is not None:
+            profile.approval_bypass_enabled = bool(
+                parent_prof.approval_bypass_enabled
+            )
+            profile.bash_workspace_admin = bool(parent_prof.bash_workspace_admin)
+            profile.permission_mode = parent_prof.effective_permission_mode()  # type: ignore[assignment]
+            profile.allow_dangerous_commands = bool(
+                parent_prof.allow_dangerous_commands
+            ) or allow_run_for_subagent
     # 24h TTL 保护（任务完成后主动 evict，不依赖 TTL 扫描）
     profile.session_expired_seconds = 86400
 
@@ -264,7 +325,11 @@ async def _run_subagent_task(
         session_id=sub_session_id,
         frontend_id="subagent",
         priority=-1,
-        metadata={"source": "subagent", "user_id": subagent_id},
+        metadata={
+            "source": "subagent",
+            "user_id": subagent_id,
+            "memory_owner": memory_owner,
+        },
         profile=profile,
     )
     try:

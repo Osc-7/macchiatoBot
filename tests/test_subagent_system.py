@@ -899,6 +899,41 @@ class TestMergeAllowedTools:
         assert "reply_to_message" in merged
 
 
+class TestSubagentInheritParentPermissions:
+    def test_inherit_parent_permission_fields(self):
+        from agent_core.kernel_interface import CoreProfile
+        from system.kernel.core_pool import CoreEntry
+        from system.tools.subagent_tools import _inherit_tool_policy_from_parent
+
+        pool, _ = _make_pool()
+        parent_prof = CoreProfile.default_full(
+            frontend_id="feishu",
+            dialog_window_id="ou_test",
+        )
+        parent_prof.approval_bypass_enabled = True
+        parent_prof.bash_workspace_admin = True
+        parent_prof.allow_dangerous_commands = True
+        pool._pool["feishu:ou_test"] = CoreEntry(agent=None, profile=parent_prof)
+
+        (
+            _allowed,
+            _deny,
+            _tmpl,
+            dangerous,
+            bypass,
+            bash_admin,
+            perm_mode,
+            memory_owner,
+        ) = _inherit_tool_policy_from_parent(
+            pool, "feishu:ou_test", add_bash=True
+        )
+        assert bypass is True
+        assert bash_admin is True
+        assert dangerous is True
+        assert perm_mode == "full"
+        assert memory_owner == "feishu:ou_test"
+
+
 class TestCreateSubagentTool:
     @pytest.mark.asyncio
     async def test_create_subagent_registers_entry(self):

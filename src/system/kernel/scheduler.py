@@ -18,8 +18,9 @@ import logging
 import re
 import time
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional, Union
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, Mapping, Optional, Union
 
 from agent_core.interfaces import AgentHooks, AgentRunResult
 from agent_core.kernel_interface import KernelRequest
@@ -482,6 +483,38 @@ class KernelScheduler:
                 self._session_locks[session_id] = asyncio.Lock()
             return self._session_locks[session_id]
 
+    @asynccontextmanager
+    async def hold_session_lock(self, session_id: str) -> AsyncIterator[None]:
+        """与 _run_and_route 共用 per-session 锁，供网关侧 goal 等直接改 AgentCore 时串行化。"""
+        lock = await self._get_session_lock(session_id)
+        async with lock:
+            yield
+
+    @staticmethod
+    def _finalize_agent_wake_delivery(
+        request: KernelRequest, *, confirmed: bool
+    ) -> None:
+        md = request.metadata if isinstance(request.metadata, dict) else {}
+        wid = str(md.get("_wake_id") or "").strip()
+        if not wid:
+            return
+        try:
+            from agent_core.tools.agent_wake import (
+                abort_wake_delivery,
+                confirm_wake_delivered,
+            )
+
+            if confirmed:
+                confirm_wake_delivered(wid)
+            else:
+                abort_wake_delivery(wid)
+        except Exception as exc:
+            logger.debug(
+                "KernelScheduler: finalize agent_wake delivery failed wake_id=%s: %s",
+                wid,
+                exc,
+            )
+
     async def submit(
         self,
         request: KernelRequest,
@@ -737,6 +770,7 @@ class KernelScheduler:
             # 会导致永远不满足条件；inflight 才是「真正占用 session 锁/跑 turn」的计数。
             if self.session_inflight_request_count(session_id) == 0:
                 self.clear_cancelled(session_id)
+            self._finalize_agent_wake_delivery(request, confirmed=False)
             return
 
         if _should_suppress_reaped_subagent_parent_notify(request, self._core_pool):
@@ -755,6 +789,7 @@ class KernelScheduler:
                     "request_id": request.request_id,
                 },
             )
+            self._finalize_agent_wake_delivery(request, confirmed=False)
             return
 
         self._maybe_wake_agent_inbox_waiter(request)
@@ -924,6 +959,7 @@ class KernelScheduler:
                     # - submit 等待者通过 Future 获取结果
                     # - 所有 subscriber 通过 listener 回调获取结果
                     await self._out_bus.publish(session_id, request.request_id, run_result)
+                    self._finalize_agent_wake_delivery(request, confirmed=True)
 
                 except asyncio.CancelledError:
                     # 取消时也写 checkpoint，保证 daemon 重启后可恢复
@@ -954,6 +990,7 @@ class KernelScheduler:
                         request.request_id,
                         asyncio.CancelledError("kernel task cancelled"),
                     )
+                    self._finalize_agent_wake_delivery(request, confirmed=False)
                     raise
                 except Exception as exc:
                     err_detail = _kernel_task_exception_detail(exc)
@@ -992,6 +1029,7 @@ class KernelScheduler:
                     # - 无 waiter（inject_turn 路径）→ publish 包装后的 AgentRunResult 给订阅者
                     if self._out_bus.has_waiter(request.request_id):
                         await self._out_bus.publish_error(request.request_id, exc)
+                        self._finalize_agent_wake_delivery(request, confirmed=False)
                     else:
                         err_result = AgentRunResult(
                             output_text=f"[后台任务处理出错] {err_detail}",
@@ -1000,6 +1038,7 @@ class KernelScheduler:
                         await self._out_bus.publish(
                             session_id, request.request_id, err_result
                         )
+                        self._finalize_agent_wake_delivery(request, confirmed=True)
         finally:
             remaining = self._inflight_sessions.get(session_id, 0) - 1
             if remaining > 0:

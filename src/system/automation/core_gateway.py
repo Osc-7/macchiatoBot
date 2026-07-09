@@ -543,17 +543,18 @@ class AutomationCoreGateway:
         mem_source, mem_user_id = _infer_memory_owner_from_session_id(sid)
 
         await self.ensure_session(sid, create_if_missing=True)
-        agent = await self._kernel_scheduler.core_pool.acquire(
-            sid,
-            source=mem_source,
-            user_id=mem_user_id,
-            create_if_missing=True,
-        )
-        create_fn = getattr(agent, "create_user_goal", None)
-        if not callable(create_fn):
-            raise RuntimeError("当前 Agent 不支持 goal 创建")
-        goal = create_fn(text)
-        await agent._finalize_turn(None)
+        async with self._kernel_scheduler.hold_session_lock(sid):
+            agent = await self._kernel_scheduler.core_pool.acquire(
+                sid,
+                source=mem_source,
+                user_id=mem_user_id,
+                create_if_missing=True,
+            )
+            create_fn = getattr(agent, "create_user_goal", None)
+            if not callable(create_fn):
+                raise RuntimeError("当前 Agent 不支持 goal 创建")
+            goal = create_fn(text)
+            await agent._finalize_turn(None)
 
         autostart_queued = False
         if autostart:

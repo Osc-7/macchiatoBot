@@ -105,7 +105,10 @@ async def test_deliver_inject_when_no_inflight():
     assert "继续写代码" in req.text
     assert (req.metadata or {}).get("feishu_chat_id") == "oc_wake_chat"
     assert (req.metadata or {}).get("_hooks") is not None
-    assert list_wakes() == []
+    assert (req.metadata or {}).get("_wake_id") == wake["wake_id"]
+    items = list_wakes()
+    assert len(items) == 1
+    assert items[0]["staged"] is True
 
 
 async def test_deliver_inject_when_no_inflight_cli():
@@ -126,7 +129,9 @@ async def test_deliver_inject_when_no_inflight_cli():
     assert req.session_id == "cli:root"
     assert req.frontend_id == "agent_wake"
     assert "继续写代码" in req.text
-    assert list_wakes() == []
+    items = list_wakes()
+    assert len(items) == 1
+    assert items[0]["staged"] is True
 
 
 async def test_deliver_stages_when_inflight():
@@ -151,6 +156,38 @@ async def test_deliver_stages_when_inflight():
     flush_pending_wakes_for_session("cli:root")
     assert len(scheduler.injected) == 1
     assert "staged" in scheduler.injected[0].text
+    items = list_wakes()
+    assert len(items) == 1
+    assert items[0]["staged"] is True
+
+
+async def test_wake_staged_until_kernel_confirms_delivery():
+    """inject 后仅 staged；abort 可重试，confirm 后才从注册表移除。"""
+    from agent_core.tools.agent_wake import abort_wake_delivery, confirm_wake_delivered
+
+    clear_all_wakes_for_tests()
+    scheduler = _FakeScheduler()
+    set_notify_dependencies(scheduler=scheduler, core_pool=None)
+
+    wid = register_wake(
+        session_id="cli:root",
+        fire_at=time.time() - 1,
+        message="retry me",
+        wake_id="wake-retry-1",
+    )
+    wake = poll_due_wakes()[0]
+    ok = deliver_wake_via_inject(wake=wake, scheduler=scheduler)
+    assert ok is True
+    assert len(list_wakes()) == 1
+    assert list_wakes()[0]["staged"] is True
+
+    abort_wake_delivery(wid)
+    due = poll_due_wakes()
+    assert len(due) == 1
+    assert due[0]["wake_id"] == wid
+
+    confirm_wake_delivered(wid)
+    assert list_wakes() == []
 
 
 async def test_cancel_wake():

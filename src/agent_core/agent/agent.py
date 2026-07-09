@@ -1808,9 +1808,12 @@ class AgentCore:
         用「kernel 关闭时间戳 - last_active_at」计算 elapsed 判断。
         """
         self._context.repair_dangling_assistant_tool_calls()
+        run_status = None
+        if run_result is not None:
+            run_status = (run_result.metadata or {}).get("status")
         if (
             run_result is not None
-            and getattr(run_result, "status", None) == "completed"
+            and run_status == "completed"
             and self._goal_store.has_active_goals()
         ):
             self._maybe_schedule_goal_continuation_wake()

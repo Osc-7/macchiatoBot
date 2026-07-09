@@ -231,6 +231,57 @@ def test_hydrate_messages_drops_legacy_file_media_ref(tmp_path: Path):
     assert all(p.get("type") != "media_ref" for p in parts if isinstance(p, dict))
 
 
+def test_hydrate_strips_media_ref_when_vision_not_supported(tmp_path: Path) -> None:
+    """切到无 vision 主模型时，历史 user 消息不得残留 media_ref（否则 GLM 等报 type 错误）。"""
+    png = tmp_path / "chart.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    stored = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "请看图"},
+                {
+                    "type": "media_ref",
+                    "media_type": "image",
+                    "path": str(png),
+                    "name": "chart.png",
+                    "mime_type": "image/png",
+                },
+            ],
+            "_turn_id": 1,
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "还有视频"},
+                {
+                    "type": "video_url",
+                    "video_url": {"url": "https://example.com/v.mp4"},
+                    "path": str(tmp_path / "v.mp4"),
+                },
+            ],
+            "_turn_id": 2,
+        },
+    ]
+
+    hydrated = hydrate_messages_for_api(
+        stored,
+        current_turn_id=2,
+        vision_supported=False,
+    )
+
+    for msg in hydrated:
+        content = msg["content"]
+        if isinstance(content, list):
+            types = {p.get("type") for p in content if isinstance(p, dict)}
+            assert "media_ref" not in types
+            assert "video_url" not in types
+            assert "image_url" not in types
+        elif isinstance(content, str):
+            assert content  # 纯文本保留
+
+
 def test_adapt_content_items_never_returns_inline_file_data():
     preface, adapted = adapt_content_items_for_provider(
         [

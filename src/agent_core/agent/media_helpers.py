@@ -408,7 +408,15 @@ def _hydrate_user_content_for_api(
             if vision_supported:
                 hydrated.append(part)
             continue
+        if part.get("type") in ("video_url", "file") or (
+            not vision_supported
+            and part.get("type") not in ("text",)
+        ):
+            # 非 vision 模型 / 非 OpenAI content 类型：丢弃（路径信息应在 text preface 里）
+            continue
         hydrated.append(part)
+    if not hydrated:
+        return ""
     return hydrated
 
 
@@ -496,11 +504,7 @@ def hydrate_messages_for_api(
         content = msg_copy.get("content")
         if isinstance(content, list):
             msg_copy["content"] = _strip_binary_from_content_parts(content)
-        if (
-            msg.get("role") == "user"
-            and vision_supported
-            and isinstance(msg_copy.get("content"), list)
-        ):
+        if msg.get("role") == "user" and isinstance(msg_copy.get("content"), list):
             msg_copy["content"] = _hydrate_user_content_for_api(
                 msg_copy["content"],
                 vision_supported=vision_supported,

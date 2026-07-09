@@ -7,7 +7,7 @@ import inspect
 import json
 import logging
 import os
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -98,8 +98,9 @@ class AutomationIPCServer:
         self._expire_task: Optional[asyncio.Task[Any]] = None
         self._stopped = asyncio.Event()
         self._client_active_session: Dict[str, str] = {}
-        self._stream_recoveries: deque[Dict[str, Any]] = deque(
-            maxlen=_STREAM_RECOVERY_MAXLEN
+        # Per IPC client_id: stream disconnect recoveries must not leak across users.
+        self._stream_recoveries_by_client: Dict[str, deque[Dict[str, Any]]] = (
+            defaultdict(lambda: deque(maxlen=_STREAM_RECOVERY_MAXLEN))
         )
 
     @property
@@ -313,7 +314,9 @@ class AutomationIPCServer:
             )
             if stream_closed:
                 recovery_sent = True
-                self._buffer_stream_recovery(active_session, req_id, meta_dict, result)
+                self._buffer_stream_recovery(
+                    active_session, req_id, meta_dict, result, client_id=client_id
+                )
             usage = self._gateway.get_token_usage(session_id=active_session)
             turn_count = self._gateway.get_turn_count(session_id=active_session)
             sent_final = await _send_event(
@@ -331,7 +334,9 @@ class AutomationIPCServer:
                 },
             )
             if not sent_final and not recovery_sent:
-                self._buffer_stream_recovery(active_session, req_id, meta_dict, result)
+                self._buffer_stream_recovery(
+                    active_session, req_id, meta_dict, result, client_id=client_id
+                )
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as exc:
             # 客户端在流式对话过程中主动断开连接（例如用户 Ctrl+C 或退出 CLI），
             # writer 已失效，继续写入只会产生噪音日志。此处记录一条调试信息后静默结束。
@@ -372,6 +377,8 @@ class AutomationIPCServer:
         request_id: Any,
         metadata: Dict[str, Any],
         result: AgentRunResult,
+        *,
+        client_id: str,
     ) -> None:
         """Keep a completed result available after its streaming IPC client disconnects."""
         result_meta = result.metadata if isinstance(result.metadata, dict) else {}
@@ -387,7 +394,7 @@ class AutomationIPCServer:
         recovery_meta.update(result_meta)
         recovery_meta["_stream_recovery"] = True
 
-        self._stream_recoveries.append(
+        self._stream_recoveries_by_client[client_id].append(
             {
                 "request_id": str(request_id or ""),
                 "session_id": session_id,
@@ -398,16 +405,19 @@ class AutomationIPCServer:
         )
         logger.info(
             "buffered stream recovery result "
-            "(session_id=%s, request_id=%s, queue_size=%d)",
+            "(session_id=%s, request_id=%s, client_id=%s, queue_size=%d)",
             session_id,
             str(request_id or "")[:8],
-            len(self._stream_recoveries),
+            client_id,
+            len(self._stream_recoveries_by_client[client_id]),
         )
 
-    def _poll_stream_recoveries(self) -> list[Dict[str, Any]]:
-        results: list[Dict[str, Any]] = []
-        while self._stream_recoveries:
-            results.append(self._stream_recoveries.popleft())
+    def _poll_stream_recoveries(self, client_id: str) -> list[Dict[str, Any]]:
+        queue = self._stream_recoveries_by_client.get(client_id)
+        if not queue:
+            return []
+        results = list(queue)
+        queue.clear()
         return results
 
     def _serialize_run_result_for_push(
@@ -725,7 +735,7 @@ class AutomationIPCServer:
             return {"ok": bool(ok), "detail": detail, "card": card}
 
         if method == "poll_stream_recoveries":
-            return {"results": self._poll_stream_recoveries()}
+            return {"results": self._poll_stream_recoveries(client_id)}
 
         if method == "poll_push":
             # 非阻塞轮询：批量取出该 session 所有 [out] 队列结果（统一出口）

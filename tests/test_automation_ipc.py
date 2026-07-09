@@ -166,7 +166,9 @@ async def test_run_turn_stream_client_disconnect_buffers_recoverable_result(
         DisconnectingWriter(),  # type: ignore[arg-type]
     )
 
-    data = await server._dispatch("poll_stream_recoveries", {})
+    data = await server._dispatch(
+        "poll_stream_recoveries", {"client_id": "client-a"}
+    )
     assert data["results"] == [
         {
             "request_id": "req-1",
@@ -180,7 +182,84 @@ async def test_run_turn_stream_client_disconnect_buffers_recoverable_result(
             "attachments": [{"type": "file", "path": "/tmp/a.pdf"}],
         }
     ]
-    assert await server._dispatch("poll_stream_recoveries", {}) == {"results": []}
+    assert await server._dispatch(
+        "poll_stream_recoveries", {"client_id": "client-a"}
+    ) == {"results": []}
+    assert await server._dispatch(
+        "poll_stream_recoveries", {"client_id": "client-b"}
+    ) == {"results": []}
+
+
+@pytest.mark.asyncio
+async def test_stream_recoveries_isolated_per_client_id(tmp_path: Path):
+    class DisconnectingWriter:
+        def write(self, _data: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            raise ConnectionResetError("Connection lost")
+
+    class Gateway:
+        async def inject_message(self, command, hooks=None):  # type: ignore[no-untyped-def]
+            _ = hooks
+            sid = command.session_id if hasattr(command, "session_id") else "cli:root"
+            return AgentRunResult(output_text=f"secret-{sid}")
+
+        def get_token_usage(self, *, session_id: str) -> dict:
+            return {}
+
+        def get_turn_count(self, *, session_id: str) -> int:
+            return 0
+
+    server = AutomationIPCServer(
+        Gateway(),  # type: ignore[arg-type]
+        owner_id="root",
+        source="cli",
+        socket_path=str(tmp_path / "automation.sock"),
+    )
+    server._client_active_session["client-a"] = "web:alice"
+    server._client_active_session["client-b"] = "web:bob"
+
+    await server._handle_run_turn_stream(
+        "req-a",
+        {"client_id": "client-a", "text": "hello", "metadata": {}},
+        DisconnectingWriter(),  # type: ignore[arg-type]
+    )
+    await server._handle_run_turn_stream(
+        "req-b",
+        {"client_id": "client-b", "text": "hello", "metadata": {}},
+        DisconnectingWriter(),  # type: ignore[arg-type]
+    )
+
+    alice = await server._dispatch(
+        "poll_stream_recoveries", {"client_id": "client-a"}
+    )
+    assert alice["results"] == [
+        {
+            "request_id": "req-a",
+            "session_id": "web:alice",
+            "output_text": "secret-web:alice",
+            "metadata": {"_stream_recovery": True},
+            "attachments": [],
+        }
+    ]
+
+    bob = await server._dispatch(
+        "poll_stream_recoveries", {"client_id": "client-b"}
+    )
+    assert bob["results"] == [
+        {
+            "request_id": "req-b",
+            "session_id": "web:bob",
+            "output_text": "secret-web:bob",
+            "metadata": {"_stream_recovery": True},
+            "attachments": [],
+        }
+    ]
+
+    assert await server._dispatch(
+        "poll_stream_recoveries", {"client_id": "client-a"}
+    ) == {"results": []}
 
 
 @pytest.mark.asyncio

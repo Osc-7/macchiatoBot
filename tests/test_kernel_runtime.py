@@ -44,12 +44,37 @@ def test_memory_owner_agent_msg_uses_session_id_not_frontend_tag() -> None:
     )
     assert memory_owner_for_kernel_acquire(req2) == ("feishu", "ou_test")
 
+    req2b = KernelRequest.create(
+        text="hi",
+        session_id="feishu:user:ou_test:1779373360",
+        frontend_id=P2P_REQUEST_FRONTEND_TAG,
+        metadata={},
+    )
+    assert memory_owner_for_kernel_acquire(req2b) == ("feishu", "ou_test")
+
     req3 = KernelRequest.create(
         text="hi",
         session_id="cli:root",
         frontend_id=P2P_REQUEST_FRONTEND_TAG,
     )
     assert memory_owner_for_kernel_acquire(req3) == ("cli", "root")
+
+
+def test_subagent_memory_owner_inherits_parent_namespace() -> None:
+    """子 Agent 可通过 metadata.memory_owner 继承父会话的权限/工作区命名空间。"""
+    profile = CoreProfile.default_sub(
+        allowed_tools=None,
+        frontend_id="subagent",
+        dialog_window_id="abc-uuid",
+    )
+    req = KernelRequest.create(
+        text="task",
+        session_id="sub:abc-uuid",
+        frontend_id="subagent",
+        metadata={"memory_owner": "feishu:ou_parent"},
+        profile=profile,
+    )
+    assert memory_owner_for_kernel_acquire(req) == ("feishu", "ou_parent")
 
 
 @pytest.mark.asyncio
@@ -838,3 +863,110 @@ def test_kernel_task_exception_detail_httpx_read_timeout_includes_url() -> None:
     assert "timed out" in detail
     assert "GET https://api.example.com/v1/x" in detail
     assert "超时" in detail
+
+
+def _minimal_scheduler_for_cancel_tests() -> KernelScheduler:
+    core_pool = SimpleNamespace(
+        acquire=AsyncMock(),
+        get_live_entry=lambda _sid: None,
+        touch=lambda _sid: None,
+        flush_pending_subagent_lifecycle_for_parent=lambda _sid: None,
+        restore_from_checkpoints=AsyncMock(return_value=0),
+    )
+    return KernelScheduler(
+        kernel=SimpleNamespace(run=AsyncMock()),  # type: ignore[arg-type]
+        core_pool=core_pool,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_inflight_decremented_when_cancelled_waiting_for_session_lock() -> None:
+    """在 session 锁排队时被 cancel 必须回收 inflight，否则会永久拒收新消息。"""
+    scheduler = _minimal_scheduler_for_cancel_tests()
+    session_id = "feishu:user:test"
+    lock = await scheduler._get_session_lock(session_id)
+    await lock.acquire()
+
+    req = KernelRequest.create(text="queued", session_id=session_id)
+
+    async def _wait_for_lock() -> None:
+        await scheduler._run_and_route(req)
+
+    waiter = asyncio.create_task(_wait_for_lock())
+    for _ in range(50):
+        if scheduler.session_inflight_request_count(session_id) == 1:
+            break
+        await asyncio.sleep(0.01)
+    assert scheduler.session_inflight_request_count(session_id) == 1
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    assert scheduler.session_inflight_request_count(session_id) == 0
+    lock.release()
+
+
+@pytest.mark.asyncio
+async def test_cancel_clears_stale_flag_after_skip_when_no_inflight() -> None:
+    """idle cancel 后 skip 型请求应清掉 cancel 标记，后续请求不再被拒。"""
+    scheduler = _minimal_scheduler_for_cancel_tests()
+    session_id = "feishu:user:test2"
+    scheduler._cancelled_sessions.add(session_id)
+
+    skipped = KernelRequest.create(text="skip-me", session_id=session_id)
+    await scheduler._run_and_route(skipped)
+
+    assert session_id not in scheduler._cancelled_sessions
+    assert scheduler.session_inflight_request_count(session_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_session_tasks_clears_mark_when_lock_waiter_aborted() -> None:
+    """stop 时若第二个请求在等锁，cancel 后 session 应恢复可投递。"""
+    scheduler = _minimal_scheduler_for_cancel_tests()
+    session_id = "feishu:user:test3"
+
+    hold = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_run(*_a: Any, **_k: Any) -> Any:
+        from agent_core.interfaces import AgentRunResult
+
+        hold.set()
+        await release.wait()
+        return AgentRunResult(output_text="done")
+
+    scheduler._kernel.run = AsyncMock(side_effect=_slow_run)  # type: ignore[attr-defined]
+    scheduler._core_pool.acquire = AsyncMock(  # type: ignore[attr-defined]
+        return_value=SimpleNamespace(
+            prepare_turn=AsyncMock(return_value=1),
+            _finalize_turn=AsyncMock(),
+            _session_logger=None,
+        )
+    )
+
+    await scheduler.start()
+    req1 = KernelRequest.create(text="first", session_id=session_id)
+    req2 = KernelRequest.create(text="second", session_id=session_id)
+    await scheduler.submit(req1)
+    for _ in range(100):
+        if hold.is_set():
+            break
+        await asyncio.sleep(0.01)
+    await scheduler.submit(req2)
+    await asyncio.sleep(0.05)
+    assert scheduler.session_inflight_request_count(session_id) >= 1
+
+    await scheduler.cancel_session_tasks(session_id)
+    release.set()
+
+    assert scheduler.session_inflight_request_count(session_id) == 0
+    assert session_id not in scheduler._cancelled_sessions
+
+    req3 = KernelRequest.create(text="third", session_id=session_id)
+    h3 = await scheduler.submit(req3)
+    result = await asyncio.wait_for(scheduler.wait_result(h3), timeout=5.0)
+    assert result.output_text == "done"
+
+    await scheduler.stop()

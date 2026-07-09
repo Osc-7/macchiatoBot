@@ -143,12 +143,23 @@ def _infer_memory_owner_from_session_id(session_id: str) -> tuple[str, str]:
     P2P 工具使用 KernelRequest.frontend_id=P2P_REQUEST_FRONTEND_TAG 仅作投递标签，不得作为
     CoreProfile / CoreLifecycleLogger 的 source；此时用 session_id 反推真实 owner。
     与 CorePool.register_sub(default_sub: frontend_id=subagent, dialog_window_id=uuid) 对齐。
+
+    飞书 session_id 形如 ``feishu:user:{open_id}`` 或 ``feishu:user:{open_id}:{ts}``；
+    记忆 user_id 取 open_id/chat_id，不含 ``user:`` 前缀与时间戳后缀。
     """
     sid = (session_id or "").strip()
     if sid.startswith("sub:"):
         return "subagent", sid[4:]
     if sid.startswith("feishu:"):
-        return "feishu", sid[7:]
+        rest = sid[7:]
+        parts = rest.split(":")
+        if len(parts) >= 2 and parts[0] in ("user", "chat"):
+            key = (parts[1] or "").strip()
+            if key:
+                return "feishu", key
+        # 非标准 feishu session_id：去掉冒号以满足 memory_paths 约束
+        safe = rest.replace(":", "_").strip()
+        return "feishu", safe or "unknown"
     if ":" in sid:
         prefix, rest = sid.split(":", 1)
         p, r = prefix.strip(), rest.strip()
@@ -721,11 +732,10 @@ class KernelScheduler:
                 request.request_id,
                 asyncio.CancelledError("session cancelled before dispatch"),
             )
-            # 兜底：如果已经没有真正在跑的 task，说明 cancel 标记已 stale，主动清理
-            # 避免「cancel_session_tasks 超时时没有 active task」导致永久 skip
-            if not any(
-                not t.done() for t in self._session_active_tasks.get(session_id, set())
-            ):
+            # 兜底：无 inflight 内核路由时清除 stale cancel 标记。
+            # 不用 _session_active_tasks 判断——skip 型 task 自身仍在 set 里且未 done，
+            # 会导致永远不满足条件；inflight 才是「真正占用 session 锁/跑 turn」的计数。
+            if self.session_inflight_request_count(session_id) == 0:
                 self.clear_cancelled(session_id)
             return
 
@@ -753,284 +763,290 @@ class KernelScheduler:
         try:
             # 同 session 的并发请求在此排队，确保 context/turn_id/DB 写入不竞争
             session_lock = await self._get_session_lock(session_id)
-        except BaseException:
-            pending = self._inflight_sessions.get(session_id, 0) - 1
-            if pending > 0:
-                self._inflight_sessions[session_id] = pending
-            else:
-                self._inflight_sessions.pop(session_id, None)
-            raise
-        async with session_lock:
-            agent = None
-            turn_id = 0
-            run_result = None
-            try:
-                # 准备钩子（inject_turn 可经 metadata 注入 Feishu 流式/trace，见 _feishu_hook_ctx finalize）
-                hooks = None
-                feishu_hook_ctx = None
-                if self._hooks_factory:
-                    hooks = self._hooks_factory(request)
-                elif isinstance(request.metadata, dict):
-                    feishu_hook_ctx = request.metadata.pop("_feishu_hook_ctx", None)
-                    raw_hooks = request.metadata.pop("_hooks", None)
-                    if isinstance(raw_hooks, AgentHooks):
-                        hooks = raw_hooks
+            async with session_lock:
+                agent = None
+                turn_id = 0
+                run_result = None
+                try:
+                    # 准备钩子（inject_turn 可经 metadata 注入 Feishu 流式/trace，见 _feishu_hook_ctx finalize）
+                    hooks = None
+                    feishu_hook_ctx = None
+                    if self._hooks_factory:
+                        hooks = self._hooks_factory(request)
+                    elif isinstance(request.metadata, dict):
+                        feishu_hook_ctx = request.metadata.pop("_feishu_hook_ctx", None)
+                        raw_hooks = request.metadata.pop("_hooks", None)
+                        if isinstance(raw_hooks, AgentHooks):
+                            hooks = raw_hooks
 
-                # 获取 AgentCore（懒加载）
-                # 记忆路径：优先 metadata.memory_owner（feishu:uid），与 job 配置一致；
-                # 否则用 CoreProfile.frontend_id/dialog_window_id；再否则 metadata.source/user_id。
-                # frontend_id=P2P 标签仅为投递语义，不得作为 mem_source（见 memory_owner_for_kernel_acquire）。
-                md = request.metadata if isinstance(request.metadata, dict) else {}
-                mo_raw = str(md.get("memory_owner") or "").strip()
-                profile = request.profile
-                mem_source, mem_user_id = memory_owner_for_kernel_acquire(request)
+                    # 获取 AgentCore（懒加载）
+                    # 记忆路径：优先 metadata.memory_owner（feishu:uid），与 job 配置一致；
+                    # 否则用 CoreProfile.frontend_id/dialog_window_id；再否则 metadata.source/user_id。
+                    # frontend_id=P2P 标签仅为投递语义，不得作为 mem_source（见 memory_owner_for_kernel_acquire）。
+                    md = request.metadata if isinstance(request.metadata, dict) else {}
+                    mo_raw = str(md.get("memory_owner") or "").strip()
+                    profile = request.profile
+                    mem_source, mem_user_id = memory_owner_for_kernel_acquire(request)
 
-                agent = await self._core_pool.acquire(
-                    request.session_id,
-                    source=mem_source,
-                    user_id=mem_user_id,
-                    profile=profile,
-                )
-                # 供工具层解析 MEMORY.md / 与任务 owner 对齐（即使 agent._source 曾为 cron:job）
-                setattr(agent, "_job_memory_owner", mo_raw or None)
-
-                # Core 级生命周期日志接入（在 prepare_turn 之前注入，确保用户消息被记录）
-                entry = self._core_pool.get_live_entry(session_id)
-                # 飞书 chat_id：供私聊 inject_turn 与工具 execution_context
-                if isinstance(request.metadata, dict) and entry is not None:
-                    fcid = str(request.metadata.get("feishu_chat_id") or "").strip()
-                    if fcid:
-                        entry.feishu_chat_id = fcid
-                if entry is not None:
-                    setattr(
-                        agent,
-                        "_parent_session_id",
-                        str(getattr(entry, "parent_session_id", "") or "").strip(),
+                    agent = await self._core_pool.acquire(
+                        request.session_id,
+                        source=mem_source,
+                        user_id=mem_user_id,
+                        profile=profile,
                     )
-                core_logger = (
-                    getattr(entry, "logger", None) if entry is not None else None
-                )
-                if core_logger is not None and agent._session_logger is None:
-                    agent._session_logger = core_logger  # type: ignore[assignment]
+                    # 供工具层解析 MEMORY.md / 与任务 owner 对齐（即使 agent._source 曾为 cron:job）
+                    setattr(agent, "_job_memory_owner", mo_raw or None)
 
-                content_items = request.metadata.get("content_items")
-                if content_items:
-                    logger.info(
-                        "scheduler: injecting %d content_items into LLM context for session=%s (types=%s)",
-                        len(content_items),
-                        session_id,
-                        [str(i.get("type")) for i in content_items[:3]],
-                    )
-
-                # 前置处理：同步外部更新、memory recall、写入用户消息
-                turn_id = await agent.prepare_turn(request.text, content_items)
-
-                # Core 级生命周期日志：记录本轮输入（在 prepare_turn 之后可获得 turn_id）
-                if core_logger is not None:
-                    try:
-                        core_logger.on_turn_start(
-                            turn_id, request.text, request_id=request.request_id
+                    # Core 级生命周期日志接入（在 prepare_turn 之前注入，确保用户消息被记录）
+                    entry = self._core_pool.get_live_entry(session_id)
+                    # 飞书 chat_id：供私聊 inject_turn 与工具 execution_context
+                    if isinstance(request.metadata, dict) and entry is not None:
+                        fcid = str(request.metadata.get("feishu_chat_id") or "").strip()
+                        if fcid:
+                            entry.feishu_chat_id = fcid
+                    if entry is not None:
+                        setattr(
+                            agent,
+                            "_parent_session_id",
+                            str(getattr(entry, "parent_session_id", "") or "").strip(),
                         )
-                    except Exception:
-                        pass
+                    core_logger = (
+                        getattr(entry, "logger", None) if entry is not None else None
+                    )
+                    if core_logger is not None and agent._session_logger is None:
+                        agent._session_logger = core_logger  # type: ignore[assignment]
 
-                # 驱动 AgentCore（on_signal: 每次 Return/Tool_call 时刷新 TTL）
-                def _on_signal() -> None:
+                    content_items = request.metadata.get("content_items")
+                    if content_items:
+                        logger.info(
+                            "scheduler: injecting %d content_items into LLM context for session=%s (types=%s)",
+                            len(content_items),
+                            session_id,
+                            [str(i.get("type")) for i in content_items[:3]],
+                        )
+
+                    # 前置处理：同步外部更新、memory recall、写入用户消息
+                    turn_id = await agent.prepare_turn(request.text, content_items)
+
+                    # Core 级生命周期日志：记录本轮输入（在 prepare_turn 之后可获得 turn_id）
+                    if core_logger is not None:
+                        try:
+                            core_logger.on_turn_start(
+                                turn_id, request.text, request_id=request.request_id
+                            )
+                        except Exception:
+                            pass
+
+                    # 驱动 AgentCore（on_signal: 每次 Return/Tool_call 时刷新 TTL）
+                    def _on_signal() -> None:
+                        self._core_pool.touch(session_id)
+
+                    md_ch: Dict[str, Any] = {}
+                    if isinstance(request.metadata, dict):
+                        for _k in ("feishu_chat_id", "feishu_open_id"):
+                            if _k in request.metadata and request.metadata[_k]:
+                                md_ch[_k] = request.metadata[_k]
+
+                    # Restore IPC stream ContextVars lost during scheduler dispatch.
+                    # Scheduler's _dispatch_loop creates tasks via asyncio.create_task,
+                    # which inherits ContextVars from _dispatch_loop, not from the IPC handler.
+                    # Forward functions are passed through metadata instead.
+                    ipc_ask_fwd = md.pop("_ipc_ask_user_forward", None)
+                    ipc_perm_fwd = md.pop("_ipc_permission_forward", None)
+                    ipc_perm_sid = md.pop("_ipc_permission_session_id", None)
+
+                    _run_result_holder: Dict[str, Any] = {}
+
+                    async def _do_run() -> None:
+                        nonlocal feishu_hook_ctx
+                        r = await self._kernel.run(
+                            agent,
+                            turn_id=turn_id,
+                            hooks=hooks,
+                            on_signal=_on_signal,
+                            channel_metadata=md_ch or None,
+                        )
+                        if feishu_hook_ctx is not None:
+                            r = await feishu_hook_ctx.finalize_after_run(r)
+                        _run_result_holder["result"] = r
+
+                    if ipc_ask_fwd or ipc_perm_fwd or ipc_perm_sid:
+                        from contextlib import AsyncExitStack
+
+                        from agent_core.permissions.ask_user_registry import (
+                            ask_user_ipc_stream_notify_scope,
+                        )
+                        from agent_core.permissions.wait_registry import (
+                            permission_ipc_stream_notify_scope,
+                            permission_session_notify_scope,
+                        )
+
+                        async with AsyncExitStack() as stack:
+                            if ipc_perm_sid and ipc_perm_fwd:
+                                await stack.enter_async_context(
+                                    permission_session_notify_scope(
+                                        ipc_perm_sid, ipc_perm_fwd
+                                    )
+                                )
+                            if ipc_ask_fwd:
+                                await stack.enter_async_context(
+                                    ask_user_ipc_stream_notify_scope(ipc_ask_fwd)
+                                )
+                            if ipc_perm_fwd:
+                                await stack.enter_async_context(
+                                    permission_ipc_stream_notify_scope(ipc_perm_fwd)
+                                )
+                            await _do_run()
+                    else:
+                        await _do_run()
+
+                    run_result = _run_result_holder["result"]
+
+                    # 后处理
+                    await agent._finalize_turn(run_result)
+
+                    # Core 级生命周期日志：记录本轮输出（正常路径）
+                    if core_logger is not None:
+                        try:
+                            core_logger.on_turn_end(
+                                turn_id,
+                                output_text=run_result.output_text,
+                                metadata=run_result.metadata,
+                                request_id=request.request_id,
+                            )
+                        except Exception:
+                            pass
+
+                    # 刷新 TTL（每次请求完成后更新活跃时间）
                     self._core_pool.touch(session_id)
 
-                md_ch: Dict[str, Any] = {}
-                if isinstance(request.metadata, dict):
-                    for _k in ("feishu_chat_id", "feishu_open_id"):
-                        if _k in request.metadata and request.metadata[_k]:
-                            md_ch[_k] = request.metadata[_k]
+                    # 统一发布到 OutputBus（唯一出口）：
+                    # - submit 等待者通过 Future 获取结果
+                    # - 所有 subscriber 通过 listener 回调获取结果
+                    await self._out_bus.publish(session_id, request.request_id, run_result)
 
-                # Restore IPC stream ContextVars lost during scheduler dispatch.
-                # Scheduler's _dispatch_loop creates tasks via asyncio.create_task,
-                # which inherits ContextVars from _dispatch_loop, not from the IPC handler.
-                # Forward functions are passed through metadata instead.
-                ipc_ask_fwd = md.pop("_ipc_ask_user_forward", None)
-                ipc_perm_fwd = md.pop("_ipc_permission_forward", None)
-                ipc_perm_sid = md.pop("_ipc_permission_session_id", None)
-
-                _run_result_holder: Dict[str, Any] = {}
-
-                async def _do_run() -> None:
-                    nonlocal feishu_hook_ctx
-                    r = await self._kernel.run(
-                        agent,
-                        turn_id=turn_id,
-                        hooks=hooks,
-                        on_signal=_on_signal,
-                        channel_metadata=md_ch or None,
+                except asyncio.CancelledError:
+                    # 取消时也写 checkpoint，保证 daemon 重启后可恢复
+                    if agent is not None:
+                        try:
+                            await agent._finalize_turn(None)
+                        except Exception:
+                            pass
+                    # 异常/取消路径：记录 turn_end，保证每轮都有结束记录
+                    entry = self._core_pool.get_live_entry(session_id)
+                    core_logger = (
+                        getattr(entry, "logger", None) if entry is not None else None
                     )
-                    if feishu_hook_ctx is not None:
-                        r = await feishu_hook_ctx.finalize_after_run(r)
-                    _run_result_holder["result"] = r
-
-                if ipc_ask_fwd or ipc_perm_fwd or ipc_perm_sid:
-                    from contextlib import AsyncExitStack
-
-                    from agent_core.permissions.ask_user_registry import (
-                        ask_user_ipc_stream_notify_scope,
-                    )
-                    from agent_core.permissions.wait_registry import (
-                        permission_ipc_stream_notify_scope,
-                        permission_session_notify_scope,
-                    )
-
-                    async with AsyncExitStack() as stack:
-                        if ipc_perm_sid and ipc_perm_fwd:
-                            await stack.enter_async_context(
-                                permission_session_notify_scope(
-                                    ipc_perm_sid, ipc_perm_fwd
-                                )
+                    if core_logger is not None:
+                        try:
+                            core_logger.on_turn_end(
+                                turn_id,
+                                output_text="",
+                                metadata={
+                                    "cancelled": True,
+                                    "reason": "kernel task cancelled",
+                                },
+                                request_id=request.request_id,
                             )
-                        if ipc_ask_fwd:
-                            await stack.enter_async_context(
-                                ask_user_ipc_stream_notify_scope(ipc_ask_fwd)
-                            )
-                        if ipc_perm_fwd:
-                            await stack.enter_async_context(
-                                permission_ipc_stream_notify_scope(ipc_perm_fwd)
-                            )
-                        await _do_run()
-                else:
-                    await _do_run()
-
-                run_result = _run_result_holder["result"]
-
-                # 后处理
-                await agent._finalize_turn(run_result)
-
-                # Core 级生命周期日志：记录本轮输出（正常路径）
-                if core_logger is not None:
-                    try:
-                        core_logger.on_turn_end(
-                            turn_id,
-                            output_text=run_result.output_text,
-                            metadata=run_result.metadata,
-                            request_id=request.request_id,
-                        )
-                    except Exception:
-                        pass
-
-                # 刷新 TTL（每次请求完成后更新活跃时间）
-                self._core_pool.touch(session_id)
-
-                # 统一发布到 OutputBus（唯一出口）：
-                # - submit 等待者通过 Future 获取结果
-                # - 所有 subscriber 通过 listener 回调获取结果
-                await self._out_bus.publish(session_id, request.request_id, run_result)
-
-            except asyncio.CancelledError:
-                # 取消时也写 checkpoint，保证 daemon 重启后可恢复
-                if agent is not None:
-                    try:
-                        await agent._finalize_turn(None)
-                    except Exception:
-                        pass
-                # 异常/取消路径：记录 turn_end，保证每轮都有结束记录
-                entry = self._core_pool.get_live_entry(session_id)
-                core_logger = (
-                    getattr(entry, "logger", None) if entry is not None else None
-                )
-                if core_logger is not None:
-                    try:
-                        core_logger.on_turn_end(
-                            turn_id,
-                            output_text="",
-                            metadata={
-                                "cancelled": True,
-                                "reason": "kernel task cancelled",
-                            },
-                            request_id=request.request_id,
-                        )
-                    except Exception:
-                        pass
-                await self._out_bus.publish_error(
-                    request.request_id,
-                    asyncio.CancelledError("kernel task cancelled"),
-                )
-                raise
-            except Exception as exc:
-                err_detail = _kernel_task_exception_detail(exc)
-                # 异常时也写 checkpoint，保证 daemon 重启后可从未完成状态恢复
-                if agent is not None:
-                    try:
-                        await agent._finalize_turn(None)
-                    except Exception:
-                        pass
-                # 异常路径：记录 turn_end，保证每轮都有结束记录
-                entry = self._core_pool.get_live_entry(session_id)
-                core_logger = (
-                    getattr(entry, "logger", None) if entry is not None else None
-                )
-                if core_logger is not None:
-                    try:
-                        err_output = f"[后台任务处理出错] {err_detail}"
-                        core_logger.on_turn_end(
-                            turn_id,
-                            output_text=err_output,
-                            metadata={
-                                "error": err_detail,
-                                "error_type": type(exc).__name__,
-                            },
-                            request_id=request.request_id,
-                        )
-                    except Exception:
-                        pass
-                logger.exception(
-                    "KernelScheduler: error processing request_id=%s: %s",
-                    request.request_id[:8],
-                    exc,
-                )
-                # 区分两种错误投递路径：
-                # - 有 waiter（submit 路径）→ publish_error 以异常形式交给 await 方
-                # - 无 waiter（inject_turn 路径）→ publish 包装后的 AgentRunResult 给订阅者
-                if self._out_bus.has_waiter(request.request_id):
-                    await self._out_bus.publish_error(request.request_id, exc)
-                else:
-                    err_result = AgentRunResult(
-                        output_text=f"[后台任务处理出错] {err_detail}",
-                        metadata={"_push_error": err_detail},
+                        except Exception:
+                            pass
+                    await self._out_bus.publish_error(
+                        request.request_id,
+                        asyncio.CancelledError("kernel task cancelled"),
                     )
-                    await self._out_bus.publish(
-                        session_id, request.request_id, err_result
+                    raise
+                except Exception as exc:
+                    err_detail = _kernel_task_exception_detail(exc)
+                    # 异常时也写 checkpoint，保证 daemon 重启后可从未完成状态恢复
+                    if agent is not None:
+                        try:
+                            await agent._finalize_turn(None)
+                        except Exception:
+                            pass
+                    # 异常路径：记录 turn_end，保证每轮都有结束记录
+                    entry = self._core_pool.get_live_entry(session_id)
+                    core_logger = (
+                        getattr(entry, "logger", None) if entry is not None else None
                     )
-            finally:
-                remaining = self._inflight_sessions.get(session_id, 0) - 1
-                if remaining > 0:
-                    self._inflight_sessions[session_id] = remaining
-                else:
-                    self._inflight_sessions.pop(session_id, None)
-                # 仅当该 session 已无任何已派发的 _run_and_route 在途时 flush（含队列里排在后面的任务）
-                if remaining == 0:
-                    try:
-                        self._core_pool.flush_pending_subagent_lifecycle_for_parent(
-                            session_id
+                    if core_logger is not None:
+                        try:
+                            err_output = f"[后台任务处理出错] {err_detail}"
+                            core_logger.on_turn_end(
+                                turn_id,
+                                output_text=err_output,
+                                metadata={
+                                    "error": err_detail,
+                                    "error_type": type(exc).__name__,
+                                },
+                                request_id=request.request_id,
+                            )
+                        except Exception:
+                            pass
+                    logger.exception(
+                        "KernelScheduler: error processing request_id=%s: %s",
+                        request.request_id[:8],
+                        exc,
+                    )
+                    # 区分两种错误投递路径：
+                    # - 有 waiter（submit 路径）→ publish_error 以异常形式交给 await 方
+                    # - 无 waiter（inject_turn 路径）→ publish 包装后的 AgentRunResult 给订阅者
+                    if self._out_bus.has_waiter(request.request_id):
+                        await self._out_bus.publish_error(request.request_id, exc)
+                    else:
+                        err_result = AgentRunResult(
+                            output_text=f"[后台任务处理出错] {err_detail}",
+                            metadata={"_push_error": err_detail},
                         )
-                    except Exception as exc:
-                        logger.debug(
-                            "KernelScheduler: flush_pending_subagent_lifecycle_for_parent failed "
-                            "session_id=%s: %s",
-                            session_id,
-                            exc,
+                        await self._out_bus.publish(
+                            session_id, request.request_id, err_result
                         )
-                    try:
-                        from agent_core.tools.bash_job_notify import (
-                            flush_pending_for_session,
-                        )
+        finally:
+            remaining = self._inflight_sessions.get(session_id, 0) - 1
+            if remaining > 0:
+                self._inflight_sessions[session_id] = remaining
+            else:
+                self._inflight_sessions.pop(session_id, None)
+            # 仅当该 session 已无任何已派发的 _run_and_route 在途时 flush（含队列里排在后面的任务）
+            if remaining == 0:
+                try:
+                    self._core_pool.flush_pending_subagent_lifecycle_for_parent(
+                        session_id
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "KernelScheduler: flush_pending_subagent_lifecycle_for_parent failed "
+                        "session_id=%s: %s",
+                        session_id,
+                        exc,
+                    )
+                try:
+                    from agent_core.tools.bash_job_notify import (
+                        flush_pending_for_session,
+                    )
 
-                        flush_pending_for_session(session_id)
-                    except Exception as exc:
-                        logger.debug(
-                            "KernelScheduler: flush_pending_for_session failed "
-                            "session_id=%s: %s",
-                            session_id,
-                            exc,
-                        )
-                    # 一轮内核路由完全结束后允许该 session 再次入队（与 terminal_cancel 配对）
-                    self.clear_cancelled(session_id)
+                    flush_pending_for_session(session_id)
+                except Exception as exc:
+                    logger.debug(
+                        "KernelScheduler: flush_pending_for_session failed "
+                        "session_id=%s: %s",
+                        session_id,
+                        exc,
+                    )
+                try:
+                    from agent_core.tools.agent_wake import (
+                        flush_pending_wakes_for_session,
+                    )
+
+                    flush_pending_wakes_for_session(session_id)
+                except Exception as exc:
+                    logger.debug(
+                        "KernelScheduler: flush_pending_wakes_for_session failed "
+                        "session_id=%s: %s",
+                        session_id,
+                        exc,
+                    )
+                # 一轮内核路由完全结束后允许该 session 再次入队（与 terminal_cancel 配对）
+                self.clear_cancelled(session_id)
 
     def session_inflight_request_count(self, session_id: str) -> int:
         """已为该 session 派发且尚未在 finally 中结案的 _run_and_route 数量（可能含等 session 锁的任务）。"""

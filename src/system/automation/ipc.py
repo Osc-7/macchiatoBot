@@ -513,10 +513,12 @@ class AutomationIPCServer:
             if not instruction:
                 raise ValueError("instruction 不能为空")
             autostart = bool(params.get("autostart", True))
+            feishu_chat_id = str(params.get("feishu_chat_id") or "").strip() or None
             result = await self._gateway.create_goal_for_session(
                 active_session,
                 instruction,
                 autostart=autostart,
+                feishu_chat_id=feishu_chat_id,
             )
             return result
 
@@ -977,12 +979,17 @@ class AutomationIPCClient:
         instruction: str,
         *,
         autostart: bool = True,
+        feishu_chat_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """为当前 session 创建 Agent 工作目标（/goal 命令）。"""
-        data = await self._request(
-            "goal_create",
-            {"instruction": instruction, "autostart": autostart},
-        )
+        params: Dict[str, Any] = {
+            "instruction": instruction,
+            "autostart": autostart,
+        }
+        cid = str(feishu_chat_id or "").strip()
+        if cid:
+            params["feishu_chat_id"] = cid
+        data = await self._request("goal_create", params)
         return dict(data)
 
     async def list_goals(

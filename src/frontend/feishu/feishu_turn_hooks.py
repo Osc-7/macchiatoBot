@@ -37,15 +37,26 @@ def resolve_feishu_chat_id_for_session(
     session_id: str,
     *,
     core_pool: Optional["CorePool"] = None,
+    chat_id_hint: Optional[str] = None,
 ) -> Optional[str]:
-    """群聊 session_id 自带 chat_id；私聊依赖 CoreEntry.feishu_chat_id（由首轮用户消息写入）。"""
+    """群聊 session_id 自带 chat_id；私聊依赖 CoreEntry.feishu_chat_id（含 zombie）或显式 hint。"""
+    hint = str(chat_id_hint or "").strip()
+    if hint:
+        return hint
     sid = (session_id or "").strip()
     if sid.startswith("feishu:chat:"):
         rest = sid.split(":", 2)
         if len(rest) >= 3:
             return rest[2].strip() or None
     if core_pool is not None:
-        ent = core_pool.get_live_entry(sid)
+        ent = None
+        get_entry = getattr(core_pool, "get_entry", None)
+        if callable(get_entry):
+            ent = get_entry(sid)
+        else:
+            get_live = getattr(core_pool, "get_live_entry", None)
+            if callable(get_live):
+                ent = get_live(sid)
         if ent is not None:
             fc = getattr(ent, "feishu_chat_id", None)
             if fc:

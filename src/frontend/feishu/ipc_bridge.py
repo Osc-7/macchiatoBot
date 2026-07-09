@@ -175,6 +175,7 @@ async def try_handle_slash_command_via_ipc(
     setattr(client, "feishu_base_session_id", base_session or session_id)
     setattr(client, "feishu_open_id", (feishu_open_id or "").strip())
     setattr(client, "feishu_user_id", (feishu_user_id or "").strip())
+    setattr(client, "feishu_chat_id", (feishu_chat_id or "").strip())
     setattr(client, "session_list_limit", 30)
     await client.switch_session(effective_session, create_if_missing=True)
     handled, reply = await try_handle_slash_command(client, text)
@@ -203,10 +204,12 @@ async def try_handle_slash_command_via_ipc(
         active_sid = str(getattr(client, "active_session_id", "") or effective_session).strip()
         if chat_id and active_sid:
             get_feishu_push_forwarder().start()
+            # Goal 可能长时间运行；与 agent_wake 一致保持 push 转发注册
+            is_goal = text.strip().lower().startswith("/goal")
             register_feishu_push_session(
                 session_id=active_sid,
                 chat_id=chat_id,
-                ttl_seconds=600.0,
+                ttl_seconds=3600.0 if is_goal else 600.0,
             )
     return reply if handled else None
 
@@ -371,6 +374,20 @@ class FeishuPushForwarder:
             )
             if not await client.ping():
                 return
+            try:
+                from agent_core.tools.agent_wake import (
+                    load_feishu_push_watch_targets_from_file,
+                )
+
+                for item in load_feishu_push_watch_targets_from_file():
+                    sid = str(item.get("session_id") or "").strip()
+                    cid = str(item.get("chat_id") or "").strip()
+                    if not sid or not cid:
+                        continue
+                    ttl = float(item.get("ttl_seconds") or self._session_ttl_seconds)
+                    self.register(sid, cid, ttl_seconds=max(60.0, ttl))
+            except Exception as exc:
+                logger.debug("FeishuPushForwarder wake watch load failed: %s", exc)
             feishu_client = FeishuClient(timeout_seconds=self._timeout)
             recovery_results = await client.poll_stream_recoveries()
             for pr in recovery_results or []:

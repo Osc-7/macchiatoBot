@@ -529,6 +529,7 @@ class AutomationCoreGateway:
         instruction: str,
         *,
         autostart: bool = True,
+        feishu_chat_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """为指定 session 创建 Agent 目标；可选 inject_turn 启动执行。"""
         from agent_core.tools.bash_job_notify import build_feishu_inject_metadata
@@ -564,14 +565,21 @@ class AutomationCoreGateway:
                 "请先 goal_update 拆解步骤（若尚无步骤），然后开始执行。"
             )
             self._ensure_subscribed(sid)
+            chat_hint = str(feishu_chat_id or "").strip() or None
             inject_md: Dict[str, Any] = {
                 "source": mem_source,
                 "user_id": mem_user_id,
                 "kind": "goal_start",
             }
+            if chat_hint:
+                inject_md["feishu_chat_id"] = chat_hint
+                entry = self._kernel_scheduler.core_pool.get_entry(sid)
+                if entry is not None:
+                    entry.feishu_chat_id = chat_hint
             feishu_md = build_feishu_inject_metadata(
                 sid,
                 self._kernel_scheduler.core_pool,
+                chat_id_hint=chat_hint,
                 markdown_header_title="Goal 执行",
             )
             if feishu_md:

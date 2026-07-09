@@ -489,8 +489,14 @@ async def try_handle_slash_command(
             except Exception as exc:
                 return True, f"列出目标失败: {exc}"
             return True, _format_goal_list_result(res or {})
+        raw_chat = getattr(client, "feishu_chat_id", "")
+        chat_id = raw_chat.strip() if isinstance(raw_chat, str) else ""
         try:
-            res = await client.create_goal(sub, autostart=True)
+            res = await client.create_goal(
+                sub,
+                autostart=True,
+                feishu_chat_id=chat_id or None,
+            )
         except Exception as exc:
             return True, f"创建目标失败: {exc}"
         return True, _format_goal_create_result(res or {})

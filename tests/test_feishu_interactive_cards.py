@@ -136,10 +136,21 @@ def test_resolve_feishu_chat_id_for_session() -> None:
         feishu_chat_id = "oc_from_entry"
 
     class _Pool:
-        def get_live_entry(self, sid: str):
+        def get_entry(self, sid: str):
             return _E() if sid == "feishu:user:ou_x" else None
+
+        def get_live_entry(self, sid: str):
+            return self.get_entry(sid)
 
     assert (
         resolve_feishu_chat_id_for_session("feishu:user:ou_x", core_pool=_Pool())
         == "oc_from_entry"
+    )
+    assert (
+        resolve_feishu_chat_id_for_session(
+            "feishu:user:ou_x",
+            core_pool=_Pool(),
+            chat_id_hint="oc_hint",
+        )
+        == "oc_hint"
     )

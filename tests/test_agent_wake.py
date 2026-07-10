@@ -329,3 +329,96 @@ async def test_cancel_pending_wakes_by_label() -> None:
     )
     assert result.success is False
     assert result.error == "INVALID_TIME"
+
+
+class _FakeGoalAgent:
+    def __init__(self, store) -> None:
+        self._goal_store = store
+
+
+class _FakeCorePoolEntry:
+    def __init__(self, agent) -> None:
+        self.agent = agent
+
+
+class _FakeCorePool:
+    def __init__(self, agent) -> None:
+        self._entry = _FakeCorePoolEntry(agent)
+
+    def get_entry(self, session_id: str):
+        return self._entry
+
+
+async def test_cancel_staged_wake_not_flushed() -> None:
+    """取消已暂存的 wake 后 flush 不应再投递。"""
+    clear_all_wakes_for_tests()
+    scheduler = _FakeScheduler()
+    scheduler.inflight["cli:root"] = 1
+    set_notify_dependencies(scheduler=scheduler, core_pool=None)
+
+    register_wake(
+        session_id="cli:root",
+        fire_at=time.time() - 1,
+        message="goal nudge",
+        label="goal-check",
+        wake_id="wake-staged-cancel",
+    )
+    wake = poll_due_wakes()[0]
+    assert deliver_wake_via_inject(wake=wake) is True
+    assert len(scheduler.injected) == 0
+
+    cancel_pending_wakes("cli:root", label="goal-check")
+    scheduler.inflight["cli:root"] = 0
+    flush_pending_wakes_for_session("cli:root")
+    assert len(scheduler.injected) == 0
+
+
+async def test_stale_goal_check_wake_skipped_when_no_active_goals() -> None:
+    from agent_core.goals.store import GoalStore
+
+    clear_all_wakes_for_tests()
+    pool = _FakeCorePool(_FakeGoalAgent(GoalStore()))
+    scheduler = _FakeScheduler()
+    set_notify_dependencies(scheduler=scheduler, core_pool=pool)
+
+    register_wake(
+        session_id="cli:root",
+        fire_at=time.time() - 1,
+        message="check",
+        label="goal-check",
+    )
+    wake = poll_due_wakes()[0]
+    ok = deliver_wake_via_inject(wake=wake)
+    assert ok is False
+    assert len(scheduler.injected) == 0
+    assert list_wakes() == []
+
+
+async def test_stale_goal_check_wake_skipped_when_deferred() -> None:
+    from agent_core.goals.store import GoalStore
+    from agent_core.goals.types import GoalStepStatus
+
+    clear_all_wakes_for_tests()
+    store = GoalStore()
+    goal = store.create_goal(title="训练监控", steps=["等待 GPU"])
+    store.update_goal(
+        goal.id,
+        step_id=goal.steps[0].id,
+        step_status=GoalStepStatus.BLOCKED,
+        step_notes="缺 API key",
+    )
+    pool = _FakeCorePool(_FakeGoalAgent(store))
+    scheduler = _FakeScheduler()
+    set_notify_dependencies(scheduler=scheduler, core_pool=pool)
+
+    register_wake(
+        session_id="cli:root",
+        fire_at=time.time() - 1,
+        message="check",
+        label="goal-check",
+    )
+    wake = poll_due_wakes()[0]
+    ok = deliver_wake_via_inject(wake=wake)
+    assert ok is False
+    assert len(scheduler.injected) == 0
+    assert list_wakes() == []

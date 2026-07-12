@@ -517,6 +517,20 @@ class CorePool:
                     "CorePool: summarizer failed (session=%s): %s", session_id, exc
                 )
 
+        # ── Step 2.5: remote workspace / MCP cleanup ───────────────────────
+        # TTL evict、主动 expire 或 daemon 关闭时都必须通知 worker 关闭会话；
+        # 否则远程 shell 与 MCP 子进程会泄漏，且 daemon 侧 remote state 会与已驱逐的 Core 脱节。
+        try:
+            from agent_core.remote.mcp_lifecycle import release_remote_workspace_session
+
+            await release_remote_workspace_session(agent, session_id=session_id)
+        except Exception as exc:
+            logger.warning(
+                "CorePool: remote workspace release failed (session=%s): %s",
+                session_id,
+                exc,
+            )
+
         # ── Step 3: close — 释放资源 ───────────────────────────────────────
         # shutdown=False（TTL 过期 / 主动关闭单个 session）时，标记 checkpoint 为已过期，
         # 由下次 restore_from_checkpoints() 扫描时见到 expired=True 统一清理。

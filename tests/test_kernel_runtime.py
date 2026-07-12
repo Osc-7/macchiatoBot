@@ -111,6 +111,50 @@ async def test_evict_normal_does_not_call_flush_checkpoint() -> None:
 
 
 @pytest.mark.asyncio
+async def test_evict_releases_active_remote_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TTL/主动 evict 必须关闭 worker 远程会话，避免 MCP 子进程与 shell 泄漏。"""
+    from agent_core.remote.workspace_state import (
+        activate_remote_workspace,
+        clear_remote_workspace_state,
+        get_remote_workspace_state,
+    )
+
+    clear_remote_workspace_state()
+    activate_remote_workspace(
+        session_id="cli:root",
+        login="laptop",
+        requested_path="~/Project",
+        ttl_seconds=None,
+    )
+
+    close_workspace = AsyncMock()
+    monkeypatch.setattr(
+        "agent_core.remote.worker_registry.get_remote_worker_registry",
+        lambda: SimpleNamespace(close_workspace=close_workspace),
+    )
+    detach_all = AsyncMock()
+    monkeypatch.setattr(
+        "agent_core.mcp.session_overlay.get_mcp_session_overlay",
+        lambda: SimpleNamespace(detach_all_remote=detach_all),
+    )
+
+    agent = MagicMock()
+    agent.close = AsyncMock()
+    pool = CorePool()
+    profile = CoreProfile.default_full(frontend_id="cli", dialog_window_id="root")
+    pool._pool["cli:root"] = CoreEntry(agent=agent, profile=profile)
+    pool._kernel = MagicMock()
+    pool._kernel.kill = AsyncMock(return_value=None)
+    pool._summarizer = None
+
+    await pool.evict("cli:root", shutdown=False)
+
+    detach_all.assert_awaited_once_with(agent, session_id="cli:root")
+    close_workspace.assert_awaited_once_with(login="laptop", session_id="cli:root")
+    assert get_remote_workspace_state("cli:root") is None
+
+
+@pytest.mark.asyncio
 async def test_evict_passes_normal_system_prompt_to_session_summarizer() -> None:
     agent = MagicMock()
     agent._context.get_messages.return_value = [{"role": "user", "content": "hi"}]

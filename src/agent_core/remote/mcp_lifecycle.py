@@ -48,6 +48,40 @@ async def before_remote_workspace_released(
         )
 
 
+async def release_remote_workspace_session(
+    agent: Optional[Any],
+    *,
+    session_id: str,
+) -> bool:
+    """Detach MCP tools, clear daemon remote state, and close the worker session."""
+    from agent_core.remote.workspace_state import (
+        get_remote_workspace_state,
+        release_remote_workspace,
+    )
+    from agent_core.remote.worker_registry import get_remote_worker_registry
+
+    if get_remote_workspace_state(session_id) is None:
+        return False
+
+    await before_remote_workspace_released(agent, session_id=session_id)
+    old = release_remote_workspace(session_id)
+    if old is not None:
+        try:
+            await get_remote_worker_registry().close_workspace(
+                login=old.login,
+                session_id=session_id,
+            )
+        except Exception:
+            logger.warning(
+                "remote workspace close failed during session release "
+                "session_id=%s login=%s",
+                session_id,
+                old.login,
+                exc_info=True,
+            )
+    return old is not None
+
+
 def format_remote_mcp_notice_line(rows: List[Any]) -> str:
     """Stable one-line summary for workspace notices."""
     if not rows:

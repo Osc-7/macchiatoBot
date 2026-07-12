@@ -204,10 +204,11 @@ class LongTermMemory:
         return new_entries
 
     def _write_entries_as_markdown(self, entries: List[MemoryEntry]) -> None:
-        """将记忆条目写为 Markdown 文件并可选地同步到 QMD。"""
+        """将记忆条目写为 Markdown 文件并可选地同步到 QMD / 统一语料库。"""
         for entry in entries:
             md_path = self._md_dir / f"{entry.id}.md"
             md_path.write_text(entry.to_markdown(), encoding="utf-8")
+            self._sync_entry_to_corpus(entry)
 
         if self._qmd_enabled:
             _write_to_qmd_collection(self._md_dir, self._qmd_command)
@@ -377,7 +378,6 @@ class LongTermMemory:
         # 这样 recent_topic 与 distill() 生成的长期记忆在物理存储上保持一致，
         # 便于统一检索与人工查看。
         self._write_entries_as_markdown([entry])
-        self._sync_entry_to_corpus(entry)
 
         return entry
 

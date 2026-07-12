@@ -258,10 +258,49 @@ class TestLoadSkillTool:
         assert "shared admin home" not in r.message
 
     @pytest.mark.asyncio
+    async def test_execute_prefers_macchiato_skills_over_agents(self, tmp_path):
+        """本地：同名技能优先 .macchiato/skills。"""
+        ws_root = tmp_path / "workspace_parent"
+        owner = ws_root / "feishu" / "u9"
+        mac = owner / ".macchiato" / "skills" / "example"
+        agents = owner / ".agents" / "skills" / "example"
+        mac.mkdir(parents=True)
+        agents.mkdir(parents=True)
+        (mac / "SKILL.md").write_text(
+            "---\nname: Mac\ndescription: d\n---\n\nmacchiato body\n",
+            encoding="utf-8",
+        )
+        (agents / "SKILL.md").write_text(
+            "---\nname: Agents\ndescription: d\n---\n\nagents body\n",
+            encoding="utf-8",
+        )
+        cfg = Config(
+            llm=LLMConfig(api_key="k", model="m"),
+            skills=SkillsConfig(enabled=["example"]),
+            command_tools=CommandToolsConfig(
+                base_dir=str(tmp_path),
+                workspace_base_dir=str(ws_root),
+                workspace_isolation_enabled=True,
+            ),
+        )
+        tool = LoadSkillTool(config=cfg)
+        r = await tool.execute(
+            skill_name="example",
+            __execution_context__={
+                "source": "feishu",
+                "user_id": "u9",
+                "bash_workspace_admin": False,
+            },
+        )
+        assert r.success is True
+        assert "macchiato body" in r.message
+        assert "agents body" not in r.message
+
+    @pytest.mark.asyncio
     async def test_execute_loads_from_remote_workspace_when_active(
         self, tmp_path, monkeypatch
     ):
-        """远程工作区下 load_skill 读取远程 ~/.agents/skills，而不是 daemon 本地路径。"""
+        """远程工作区下 load_skill 读远程 .macchiato/.agents，不回退 daemon 本地。"""
         pytest.importorskip("agent_core.remote.pathmap")
         pytest.importorskip("agent_core.remote.worker_registry")
 
@@ -271,9 +310,18 @@ class TestLoadSkillTool:
 
             async def file_read(self, **kwargs):
                 self.calls.append(kwargs)
+                path = kwargs["path"]
+                if path.startswith(".macchiato/"):
+                    return RemoteFileReadResult(
+                        request_id="r0",
+                        path=path,
+                        content="",
+                        encoding="utf-8",
+                        error="FILE_NOT_FOUND",
+                    )
                 return RemoteFileReadResult(
                     request_id="r1",
-                    path=kwargs["path"],
+                    path=path,
                     content="---\nname: 远程技能\ndescription: d\n---\n\nremote body",
                     encoding="utf-8",
                 )
@@ -317,7 +365,53 @@ class TestLoadSkillTool:
         assert "remote body" in r.message
         assert fake.calls[0]["login"] == "local-dev"
         assert fake.calls[0]["session_id"] == "feishu:u9"
-        assert fake.calls[0]["path"] == ".agents/skills/example/SKILL.md"
+        assert fake.calls[0]["path"] == ".macchiato/skills/example/SKILL.md"
+        assert fake.calls[1]["path"] == ".agents/skills/example/SKILL.md"
+
+    @pytest.mark.asyncio
+    async def test_execute_remote_prefers_macchiato_skill(self, tmp_path, monkeypatch):
+        class FakeRemoteRegistry:
+            async def file_read(self, **kwargs):
+                path = kwargs["path"]
+                if "macchiato" in path:
+                    return RemoteFileReadResult(
+                        request_id="r1",
+                        path=path,
+                        content="---\nname: R\ndescription: d\n---\n\nremote macchiato",
+                        encoding="utf-8",
+                    )
+                return RemoteFileReadResult(
+                    request_id="r2",
+                    path=path,
+                    content="---\nname: R\ndescription: d\n---\n\nremote agents",
+                    encoding="utf-8",
+                )
+
+        monkeypatch.setattr(
+            "agent_core.remote.worker_registry.get_remote_worker_registry",
+            lambda: FakeRemoteRegistry(),
+        )
+        clear_remote_workspace_state()
+        try:
+            activate_remote_workspace(
+                session_id="feishu:u9",
+                login="local-dev",
+                requested_path="~/proj",
+            )
+            tool = LoadSkillTool(
+                config=Config(
+                    llm=LLMConfig(api_key="k", model="m"),
+                    skills=SkillsConfig(enabled=["example"]),
+                )
+            )
+            r = await tool.execute(
+                skill_name="example",
+                __execution_context__={"session_id": "feishu:u9"},
+            )
+        finally:
+            clear_remote_workspace_state()
+        assert r.success is True
+        assert "remote macchiato" in r.message
 
 
 class TestBuildSystemPromptSkills:
@@ -351,3 +445,88 @@ class TestBuildSystemPromptSkills:
         )
         assert "load_skill" in prompt
         assert "Available Skills" in prompt or "Index" in prompt
+
+    def test_skills_index_override_used_for_remote(self):
+        cfg = Config(
+            llm=LLMConfig(api_key="k", model="m"),
+            skills=SkillsConfig(enabled=[], cli_dir=None),
+        )
+        override = (
+            "## Available Skills (Index)\n\n"
+            "- **Remote** (`remote-skill`): from remote workspace\n"
+        )
+        prompt = build_system_prompt(
+            config=cfg,
+            has_web_extractor=False,
+            mode="full",
+            skills_index_override=override,
+        )
+        assert "remote-skill" in prompt
+        assert "from remote workspace" in prompt
+
+
+class TestRemoteSkillsIndexCache:
+    def test_cached_index_survives_until_release(self):
+        from agent_core.remote.workspace_state import (
+            get_remote_workspace_skills_index,
+            update_remote_workspace_skills_index,
+        )
+
+        clear_remote_workspace_state()
+        try:
+            activate_remote_workspace(
+                session_id="s1",
+                login="dev",
+                requested_path="~",
+            )
+            update_remote_workspace_skills_index(
+                "s1",
+                index="## Available Skills (Index)\n\n- **A** (`a`): d",
+                names=["a"],
+            )
+            assert "(`a`)" in get_remote_workspace_skills_index("s1")
+        finally:
+            clear_remote_workspace_state()
+        assert get_remote_workspace_skills_index("s1") == ""
+
+    @pytest.mark.asyncio
+    async def test_refresh_remote_skills_parses_scan_stdout(self, monkeypatch):
+        from agent_core.remote.skills_index import refresh_remote_workspace_skills_index
+        from agent_core.remote.workspace_state import get_remote_workspace_skills_index
+        from macchiato_remote.protocol import RemoteCommandResult
+
+        class FakeRemoteRegistry:
+            async def execute_command(self, **kwargs):
+                payload = [
+                    {
+                        "name": "remote-skill",
+                        "rel": ".agents/skills/remote-skill/SKILL.md",
+                        "content": "---\nname: Remote\ndescription: hello\n---\n\nbody",
+                    }
+                ]
+                return RemoteCommandResult(
+                    request_id="x",
+                    command=kwargs.get("command") or "",
+                    stdout=__import__("json").dumps(payload),
+                    exit_code=0,
+                )
+
+        monkeypatch.setattr(
+            "agent_core.remote.worker_registry.get_remote_worker_registry",
+            lambda: FakeRemoteRegistry(),
+        )
+        clear_remote_workspace_state()
+        try:
+            activate_remote_workspace(
+                session_id="s1", login="dev", requested_path="~"
+            )
+            out = await refresh_remote_workspace_skills_index(
+                session_id="s1", login="dev"
+            )
+            assert out["ok"] is True
+            assert "remote-skill" in out["names"]
+            idx = get_remote_workspace_skills_index("s1")
+            assert "remote-skill" in idx
+            assert "hello" in idx
+        finally:
+            clear_remote_workspace_state()

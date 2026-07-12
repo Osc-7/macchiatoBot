@@ -399,6 +399,16 @@ class AgentKernel:
         else:
             ctx.messages = list(new_messages)
 
+        # 自动压缩路径与 /compress 一致：远程状态若仍有效，补一条切换提示。
+        try:
+            from agent_core.remote.workspace_notice import (
+                reinject_remote_workspace_notice_if_active,
+            )
+
+            reinject_remote_workspace_notice_if_active(agent)
+        except Exception:
+            pass
+
         kept = len(ctx.messages)
         logger.info(
             "AgentKernel: compressed %d old messages → summary (%d chars), kept %d messages",

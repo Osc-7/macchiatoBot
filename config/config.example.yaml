@@ -185,10 +185,9 @@ tools:
     - "modify_file"
     - "extract_web_content"
     - "attach_media"
-    - "memory_search_long_term"
-    - "memory_search_content"
+    - "memory_search"
     - "memory_store"
-    - "memory_ingest"
+    - "memory_update"
     - "list_scheduled_jobs"
     - "delete_scheduled_job"
   templates:

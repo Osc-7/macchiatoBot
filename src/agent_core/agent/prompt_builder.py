@@ -7,7 +7,11 @@ from typing import Any, List
 from agent_core.memory import RecallResult
 from agent_core.prompts.loader import PromptMode
 from agent_core.prompts.loader import build_system_prompt as build_prompt
-from agent_core.prompts.loader import get_recipe, resolve_skills_cli_path
+from agent_core.prompts.loader import get_recipe, resolve_skills_roots
+from agent_core.remote.workspace_state import (
+    get_remote_workspace_skills_index,
+    get_remote_workspace_state,
+)
 
 
 def _visible_scopes(agent: Any) -> set:
@@ -46,19 +50,33 @@ def build_agent_system_prompt(agent: Any) -> str:
     scopes = _visible_scopes(agent)
 
     recipe = get_recipe(getattr(agent, "_source", "cli") or "cli")
-    skills_cli = resolve_skills_cli_path(
-        agent._config,
-        source=getattr(agent, "_source", "cli") or "cli",
-        user_id=getattr(agent, "_user_id", "root") or "root",
-        profile=getattr(agent, "_core_profile", None),
+    session_id = getattr(agent, "_session_id", "") or ""
+    remote_state = get_remote_workspace_state(session_id)
+    remote_active = remote_state is not None
+    remote_skills_index = (
+        get_remote_workspace_skills_index(session_id) if remote_active else ""
     )
+
+    skills_roots = None
+    skills_override = None
+    if remote_active:
+        # Remote mode: never inject daemon-local skill index.
+        skills_override = remote_skills_index or ""
+    else:
+        skills_roots = resolve_skills_roots(
+            agent._config,
+            source=getattr(agent, "_source", "cli") or "cli",
+            user_id=getattr(agent, "_user_id", "root") or "root",
+            profile=getattr(agent, "_core_profile", None),
+        )
     prompt = build_prompt(
         config=agent._config,
         has_web_extractor=agent._tool_registry.has("extract_web_content"),
         has_file_tools=agent._tool_registry.has("read_file"),
         mode=_loader_prompt_mode(agent),
         recipe=recipe,
-        skills_cli_path=skills_cli,
+        skills_roots=skills_roots,
+        skills_index_override=skills_override,
     )
 
     if agent._memory_enabled:
@@ -154,18 +172,7 @@ def build_agent_system_prompt(agent: Any) -> str:
             if goals_text:
                 prompt += "\n\n# 当前目标\n\n" + goals_text
 
-    try:
-        from agent_core.remote.workspace_state import (
-            format_remote_workspace_prompt_suffix,
-            get_remote_workspace_state,
-        )
-
-        remote_state = get_remote_workspace_state(getattr(agent, "_session_id", ""))
-        if remote_state is not None:
-            prompt += "\n\n" + format_remote_workspace_prompt_suffix(remote_state)
-    except Exception:
-        # Remote mode is optional infrastructure; prompt construction must never
-        # fail because the sidecar state store is unavailable.
-        pass
+    # Remote workspace mode is announced via conversation history notices
+    # (activate / release / post-compress reinject), not a system prompt suffix.
 
     return prompt

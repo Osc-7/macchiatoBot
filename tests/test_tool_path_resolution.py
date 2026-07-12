@@ -34,6 +34,25 @@ def _ws_config(tmp_path):
     )
 
 
+def test_apply_resolves_memory_store_file_path(tmp_path):
+    cfg = _ws_config(tmp_path)
+    uid = "u1"
+    f = tmp_path / "workspace_parent" / "feishu" / uid / "doc.pdf"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"%PDF-1.4")
+
+    args = apply_workspace_path_resolution_to_tool_args(
+        "memory_store",
+        {
+            "file_path": "doc.pdf",
+            "category": "docs",
+            "__execution_context__": {"source": "feishu", "user_id": uid},
+        },
+        cfg,
+    )
+    assert args["file_path"] == str(f.resolve())
+
+
 def test_apply_resolves_memory_ingest_file_path(tmp_path):
     cfg = _ws_config(tmp_path)
     uid = "u1"

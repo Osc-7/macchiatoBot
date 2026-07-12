@@ -56,7 +56,7 @@ def ensure_memory_owner_layout(
     long_term = Path(paths["long_term_dir"])
     content = Path(paths["content_dir"])
     created_paths: List[str] = []
-    for p in (owner, long_term, content):
+    for p in (owner, long_term, content, owner / "corpus"):
         if p.exists():
             if not p.is_dir():
                 raise ValueError(f"路径已存在且不是目录: {p}")
@@ -149,6 +149,7 @@ def resolve_memory_owner_paths(
     # 统一按 data/memory/{frontend}/{user}/ 划分，不使用 data/memory/long_term/shuiyuan
     long_term_dir = owner_dir / "long_term"
     content_dir = owner_dir / "content"
+    corpus_dir = owner_dir / "corpus"
     chat_db_path = owner_dir / "chat_history.db"
     memory_md_path = long_term_dir / "MEMORY.md"
 
@@ -157,6 +158,7 @@ def resolve_memory_owner_paths(
     return {
         "long_term_dir": str(long_term_dir),
         "content_dir": str(content_dir),
+        "corpus_dir": str(corpus_dir),
         "chat_history_db_path": str(chat_db_path),
         "memory_md_path": str(memory_md_path),
         "checkpoint_path": str(checkpoint_path),

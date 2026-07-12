@@ -21,7 +21,9 @@ def build_remote_workspace_guard_init(workspace_root: Path) -> str:
 export MACCHIATO_WORKSPACE_ROOT={q}
 export MACCHIATO_USER_ROOT={q}
 export HOME={q}
+export MACCHIATO_DIR={q}/.macchiato
 export MACCHIATO_REMOTE=1
+mkdir -p "$MACCHIATO_DIR" "$MACCHIATO_DIR/jobs" "$MACCHIATO_DIR/journal" "$MACCHIATO_DIR/rules" "$MACCHIATO_DIR/skills" "$MACCHIATO_DIR/scratch" || true
 unset CDPATH
 cd {q} 2>/dev/null || true
 __macchiato_remote_path_allowed() {{

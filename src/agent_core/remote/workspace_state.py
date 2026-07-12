@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Optional
+from typing import Any, List, Optional
 
 from macchiato_remote.protocol import (
     REMOTE_WORKSPACE_MOUNT,
@@ -15,6 +15,9 @@ from macchiato_remote.protocol import (
 _STATE_BY_SESSION: dict[str, RemoteWorkspaceState] = {}
 _LOCK = threading.RLock()
 _DEFAULT_TTL_SECONDS = 2 * 60 * 60
+
+# Cached progressive-disclosure skills index for remote sessions (daemon-side).
+_SKILLS_INDEX_BY_SESSION: dict[str, dict[str, Any]] = {}
 
 
 def activate_remote_workspace(
@@ -55,6 +58,8 @@ def activate_remote_workspace(
     )
     with _LOCK:
         _STATE_BY_SESSION[sid] = state
+        # New activation invalidates any previous skills index for this session.
+        _SKILLS_INDEX_BY_SESSION.pop(sid, None)
     return state
 
 
@@ -66,6 +71,7 @@ def get_remote_workspace_state(session_id: str) -> Optional[RemoteWorkspaceState
         state = _STATE_BY_SESSION.get(sid)
         if state is not None and state.is_expired():
             _STATE_BY_SESSION.pop(sid, None)
+            _SKILLS_INDEX_BY_SESSION.pop(sid, None)
             return None
         return state
 
@@ -75,6 +81,7 @@ def release_remote_workspace(session_id: str) -> Optional[RemoteWorkspaceState]:
     if not sid:
         return None
     with _LOCK:
+        _SKILLS_INDEX_BY_SESSION.pop(sid, None)
         return _STATE_BY_SESSION.pop(sid, None)
 
 
@@ -82,27 +89,48 @@ def clear_remote_workspace_state() -> None:
     """Clear all remote state; intended for tests."""
     with _LOCK:
         _STATE_BY_SESSION.clear()
+        _SKILLS_INDEX_BY_SESSION.clear()
+
+
+def update_remote_workspace_skills_index(
+    session_id: str,
+    *,
+    index: str,
+    names: Optional[List[str]] = None,
+) -> None:
+    """Cache the remote skills index markdown for prompt injection."""
+    sid = (session_id or "").strip()
+    if not sid:
+        return
+    with _LOCK:
+        if sid not in _STATE_BY_SESSION:
+            return
+        _SKILLS_INDEX_BY_SESSION[sid] = {
+            "index": (index or "").strip(),
+            "names": list(names or []),
+            "updated_at": time.time(),
+        }
+
+
+def get_remote_workspace_skills_index(session_id: str) -> str:
+    """Return cached remote skills index markdown, or empty string."""
+    sid = (session_id or "").strip()
+    if not sid:
+        return ""
+    with _LOCK:
+        state = _STATE_BY_SESSION.get(sid)
+        if state is None or state.is_expired():
+            return ""
+        cached = _SKILLS_INDEX_BY_SESSION.get(sid) or {}
+        return str(cached.get("index") or "").strip()
 
 
 def format_remote_workspace_prompt_suffix(
     state: RemoteWorkspaceState,
 ) -> str:
-    """Build the system prompt suffix used only while remote mode is active."""
-    device = state.device_label or state.login
-    ttl_line = ""
-    if state.expires_at is not None:
-        remaining = max(0, int(state.expires_at - time.time()))
-        ttl_line = f"\n租约剩余: 约 {remaining // 60} 分钟"
-    return f"""
-# 当前远程工作区模式
+    """Deprecated: remote mode is announced via conversation notices, not system.
 
-本会话的 bash、文件工具与 load_skill 当前运行在用户授权的远程机器上，而不是云服务器。
-远程登录: {state.login}
-远程机器: {device}
-权限档位: {state.profile}
-当前工作区: {state.workspace_mount}，对应远程机器授权目录: {state.display_remote_path}{ttl_line}
-
-请像操作普通工作区一样使用 bash、read_file、write_file、modify_file。
-相对路径、~、{state.workspace_mount} 都指向远程工作区。不要假设云服务器项目目录对当前 bash 可见。
-如需访问工作区外路径，必须请求用户授权或提示用户使用 /remote-grant、/remote-elevate。
-""".strip()
+    Kept as a no-op for callers/tests that still import the symbol.
+    """
+    _ = state
+    return ""

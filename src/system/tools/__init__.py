@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 from agent_core.config import Config, get_config
 from agent_core.kernel_interface import CoreProfile
 from agent_core.orchestrator import ToolWorkingSetManager
-from agent_core.memory import ContentMemory, LongTermMemory
+from agent_core.memory import MemoryCorpus
 from agent_core.tools import (
     BaseTool,
     CallToolTool,
@@ -51,10 +51,9 @@ from .storage_tools import (
 )
 from .file_tools import ReadFileTool, WriteFileTool, ModifyFileTool
 from .memory_tools import (
-    MemorySearchLongTermTool,
-    MemorySearchContentTool,
+    MemorySearchTool,
     MemoryStoreTool,
-    MemoryIngestTool,
+    MemoryUpdateTool,
 )
 from .chat_history_tools import (
     ChatContextTool,
@@ -186,22 +185,15 @@ def _build_memory_tools(
 
     paths = resolve_memory_owner_paths(mem_cfg, user_id, config=config, source=source)
 
-    long_term = LongTermMemory(
-        storage_dir=paths["long_term_dir"],
-        memory_md_path=paths["memory_md_path"],
-        qmd_enabled=mem_cfg.qmd_enabled,
-        qmd_command=mem_cfg.qmd_command,
-    )
-    content = ContentMemory(
-        content_dir=paths["content_dir"],
+    corpus = MemoryCorpus(
+        corpus_dir=paths["corpus_dir"],
         qmd_enabled=mem_cfg.qmd_enabled,
         qmd_command=mem_cfg.qmd_command,
     )
     top_n = mem_cfg.recall_top_n
-    tools.append(MemorySearchLongTermTool(long_term, top_n))
-    tools.append(MemorySearchContentTool(content, top_n))
-    tools.append(MemoryStoreTool(content))
-    tools.append(MemoryIngestTool(content))
+    tools.append(MemorySearchTool(corpus, top_n))
+    tools.append(MemoryStoreTool(corpus))
+    tools.append(MemoryUpdateTool(config))
     return tools
 
 

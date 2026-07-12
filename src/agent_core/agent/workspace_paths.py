@@ -247,6 +247,15 @@ def ensure_workspace_owner_layout(
         except Exception as exc:
             logger.warning("ensure_workspace_owner_layout: data/memory graft skipped: %s", exc)
 
+    macchiato_paths: Dict[str, Any] = {}
+    try:
+        from macchiato_remote.runtime.macchiato_dir import ensure_macchiato_layout
+
+        macchiato_paths = ensure_macchiato_layout(owner)
+        created_paths.extend(macchiato_paths.get("created_paths") or [])
+    except Exception as exc:
+        logger.warning("ensure_workspace_owner_layout: .macchiato layout skipped: %s", exc)
+
     return {
         "frontend": fe,
         "user_id": uid,
@@ -254,6 +263,13 @@ def ensure_workspace_owner_layout(
         "owner_dir": str(owner),
         "tmp_dir": str(tmp_dir),
         "created_paths": created_paths,
+        "macchiato": {
+            k: v
+            for k, v in macchiato_paths.items()
+            if k != "created_paths"
+        }
+        if macchiato_paths
+        else {},
     }
 
 
@@ -466,7 +482,8 @@ export MACCHIATO_REAL_HOME={q_real_home}
 export MACCHIATO_WORKSPACE_ROOT={q}
 export MACCHIATO_USER_ROOT="$MACCHIATO_WORKSPACE_ROOT"
 export MACCHIATO_PROJECT_ROOT={q_pr}
-mkdir -p "$MACCHIATO_WORKSPACE_ROOT" || true
+export MACCHIATO_DIR="$MACCHIATO_WORKSPACE_ROOT/.macchiato"
+mkdir -p "$MACCHIATO_WORKSPACE_ROOT" "$MACCHIATO_DIR" "$MACCHIATO_DIR/jobs" "$MACCHIATO_DIR/journal" "$MACCHIATO_DIR/rules" "$MACCHIATO_DIR/skills" "$MACCHIATO_DIR/scratch" || true
 export HOME="$MACCHIATO_WORKSPACE_ROOT"{extra_exports}
 {user_env}
 unset CDPATH
@@ -552,7 +569,8 @@ export MACCHIATO_REAL_HOME={q_real_home}
 export MACCHIATO_WORKSPACE_ROOT={q}
 export MACCHIATO_USER_ROOT="$MACCHIATO_WORKSPACE_ROOT"
 export MACCHIATO_PROJECT_ROOT={q_pr}
-mkdir -p "$MACCHIATO_WORKSPACE_ROOT" || true
+export MACCHIATO_DIR="$MACCHIATO_WORKSPACE_ROOT/.macchiato"
+mkdir -p "$MACCHIATO_WORKSPACE_ROOT" "$MACCHIATO_DIR" "$MACCHIATO_DIR/jobs" "$MACCHIATO_DIR/journal" "$MACCHIATO_DIR/rules" "$MACCHIATO_DIR/skills" "$MACCHIATO_DIR/scratch" || true
 export HOME="$MACCHIATO_WORKSPACE_ROOT"{extra_exports}
 {user_env}
 unset CDPATH

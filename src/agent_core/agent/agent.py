@@ -28,8 +28,8 @@ from agent_core.llm import (
 from agent_core.mcp import MCPClientManager
 from agent_core.memory import (
     ChatHistoryDB,
-    ContentMemory,
     LongTermMemory,
+    MemoryCorpus,
     RecallPolicy,
     RecallResult,
     SessionSummary,
@@ -311,7 +311,7 @@ class AgentCore:
         # 持久化记忆（长期 / 内容 / 对话历史）仅在 memory_enabled 为真时才初始化，
         # 以避免为每个 cron:{job} / heartbeat Core 创建独立 data/memory/{source}/{user}/ 目录。
         self._long_term_memory: Optional[LongTermMemory]
-        self._content_memory: Optional[ContentMemory]
+        self._memory_corpus: Optional[MemoryCorpus]
         self._chat_history_db: Optional[ChatHistoryDB]
         self._checkpoint_manager: Optional[CoreCheckpointManager] = None
         if self._memory_enabled:
@@ -323,9 +323,10 @@ class AgentCore:
                 memory_md_path=source_paths["memory_md_path"],
                 qmd_enabled=mem_cfg.qmd_enabled,
                 qmd_command=mem_cfg.qmd_command,
+                corpus_dir=source_paths["corpus_dir"],
             )
-            self._content_memory = ContentMemory(
-                content_dir=source_paths["content_dir"],
+            self._memory_corpus = MemoryCorpus(
+                corpus_dir=source_paths["corpus_dir"],
                 qmd_enabled=mem_cfg.qmd_enabled,
                 qmd_command=mem_cfg.qmd_command,
             )
@@ -338,7 +339,7 @@ class AgentCore:
             )
         else:
             self._long_term_memory = None
-            self._content_memory = None
+            self._memory_corpus = None
             self._chat_history_db = None
 
         # 注册工具
@@ -1125,8 +1126,7 @@ class AgentCore:
             recall_result = await asyncio.to_thread(
                 self._recall_policy.recall,
                 query=text,
-                long_term_memory=self._long_term_memory,
-                content_memory=self._content_memory,
+                corpus=self._memory_corpus,
             )
             self._last_recall_result = recall_result
         else:
@@ -1732,8 +1732,22 @@ class AgentCore:
                         )
                         self._last_history_id = max(self._last_history_id, int(msg_id))
 
-                    if self._try_inject_goal_check(turn_id):
-                        break
+                    # 仍有迭代余量时注入目标自检并继续本轮；勿 break 到 overflow，
+                    # 否则 ReturnAction 会变成系统提示，飞书终态 PATCH 会盖掉真实回复。
+                    if (
+                        iteration < self._max_iterations
+                        and self._try_inject_goal_check(turn_id)
+                    ):
+                        continue
+
+                    # 本轮迭代已用尽但仍有活跃目标：保留助手原文，跨轮唤醒续跑。
+                    if (
+                        iteration >= self._max_iterations
+                        and self._goal_store.has_active_goals()
+                        and self._goal_auto_continue_enabled()
+                        and not self._goal_auto_continue_suppressed()
+                    ):
+                        self._maybe_schedule_goal_continuation_wake()
 
                     yield ReturnAction(
                         message=response.content,

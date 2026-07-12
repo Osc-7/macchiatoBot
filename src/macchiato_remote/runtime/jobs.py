@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_JOB_LOG_DIR = ".macchiato/jobs"
+from macchiato_remote.runtime.macchiato_dir import JOBS_REL as _JOB_LOG_DIR
 _JOB_KILL_GRACE_SECONDS = 3
 
 

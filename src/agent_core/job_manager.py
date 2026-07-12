@@ -27,7 +27,10 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_JOB_LOG_DIR = ".macchiato/jobs"
+try:
+    from macchiato_remote.runtime.macchiato_dir import JOBS_REL as _JOB_LOG_DIR
+except Exception:  # pragma: no cover - fallback for partial installs
+    _JOB_LOG_DIR = ".macchiato/jobs"
 _JOB_KILL_GRACE_SECONDS = 3
 
 

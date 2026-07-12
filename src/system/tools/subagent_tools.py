@@ -212,6 +212,7 @@ async def _run_subagent_task(
         release_remote_workspace,
     )
     from agent_core.remote.worker_registry import get_remote_worker_registry
+    from agent_core.remote.skills_index import refresh_remote_skills_best_effort
 
     config = get_config()
     agent_cfg = getattr(config, "agent", None)
@@ -370,6 +371,11 @@ async def _run_subagent_task(
                 resolved_path=opened.resolved_path or parent_remote.resolved_path,
                 device_label=opened.device_label or parent_remote.device_label,
             )
+            await refresh_remote_skills_best_effort(
+                session_id=sub_session_id,
+                login=parent_remote.login,
+                enabled=list(getattr(config.skills, "enabled", None) or []),
+            )
             remote_bound = True
             logger.info(
                 "subagent remote workspace inherited subagent_id=%s parent_session_id=%s login=%s",
@@ -378,6 +384,47 @@ async def _run_subagent_task(
                 parent_remote.login,
                 extra={"subagent_id": subagent_id, "parent_session_id": parent_session_id},
             )
+            try:
+                from agent_core.remote.workspace_notice import (
+                    format_remote_workspace_switch_notice,
+                )
+                from agent_core.remote.workspace_state import (
+                    get_remote_workspace_skills_index,
+                    get_remote_workspace_state,
+                )
+
+                rw = get_remote_workspace_state(sub_session_id)
+                if rw is not None:
+                    idx = get_remote_workspace_skills_index(sub_session_id)
+                    skill_count = (
+                        sum(
+                            1
+                            for line in idx.splitlines()
+                            if line.strip().startswith("- **")
+                        )
+                        if idx
+                        else None
+                    )
+                    notice = format_remote_workspace_switch_notice(
+                        rw,
+                        reason="inherited",
+                        skill_count=skill_count,
+                    )
+                    task_text = f"{notice}\n\n{task_text}"
+                    request = KernelRequest.create(
+                        text=task_text,
+                        session_id=sub_session_id,
+                        frontend_id="subagent",
+                        priority=-1,
+                        metadata=request.metadata,
+                        profile=profile,
+                    )
+            except Exception:
+                logger.warning(
+                    "subagent remote workspace notice prepend failed subagent_id=%s",
+                    subagent_id,
+                    exc_info=True,
+                )
         except Exception as exc:
             logger.warning(
                 "subagent remote workspace inherit failed subagent_id=%s parent_session_id=%s: %s",

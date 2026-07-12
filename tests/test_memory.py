@@ -22,6 +22,7 @@ from agent_core.memory.working_memory import (
 from agent_core.memory.short_term import ShortTermMemory
 from agent_core.memory.long_term import LongTermMemory
 from agent_core.memory.content_memory import ContentMemory
+from agent_core.memory.memory_corpus import MemoryCorpus
 from agent_core.memory.recall import RecallPolicy, RecallResult
 from agent_core.context.conversation import ConversationContext
 
@@ -322,27 +323,24 @@ class TestRecallPolicy:
         assert rp.should_recall("根据经验应该怎么做")
         assert not rp.should_recall("今天天气怎么样")
 
-    def test_recall_with_long_term(self):
+    def test_recall_with_corpus(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            ltm = LongTermMemory(tmpdir, memory_md_path=str(Path(tmpdir) / "MEMORY.md"))
+            corpus = MemoryCorpus(tmpdir)
+            corpus.store_text("用户偏好下午开会", "pref1", "notes")
             rp = RecallPolicy(force_recall=True)
-            result = rp.recall("日程", long_term_memory=ltm)
-            assert isinstance(result.long_term, list)
+            result = rp.recall("下午", corpus=corpus)
+            assert not result.is_empty()
+            assert len(result.hits) >= 1
 
     def test_recall_result_to_context_string(self):
         result = RecallResult(
-            long_term=[
-                MemoryEntry(
-                    id="e1",
-                    created_at="",
-                    source_session_ids=[],
-                    content="偏好工作日安排会议",
-                    category="preference",
-                    tags=[],
-                    confidence=0.9,
-                ),
+            hits=[
+                {
+                    "path": "path/to/notes.md",
+                    "snippet": "偏好工作日安排会议",
+                    "source": "corpus",
+                },
             ],
-            content=[("path/to/notes.md", "snippet 内容")],
         )
         ctx = result.to_context_string()
         assert "偏好工作日安排会议" in ctx

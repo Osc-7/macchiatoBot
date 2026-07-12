@@ -32,6 +32,12 @@ from typing import Any, Literal, Optional, Tuple
 import yaml
 
 from agent_core.config import Config
+from agent_core.prompts.skills_roots import (
+    format_skills_index_lines,
+    list_skills_in_roots,
+    merge_skill_roots,
+    resolve_skill_md_path,
+)
 
 PromptMode = Literal["full", "minimal", "none"]
 """系统提示组装模式：
@@ -99,9 +105,37 @@ def resolve_skills_cli_path(
     bash_workspace_admin: Optional[bool] = None,
 ) -> Optional[Path]:
     """
-    当前 Core 使用的 Skills CLI 根目录（各 skill 子目录下含 SKILL.md）。
+    当前 Core 使用的 **主** Skills CLI 根目录（``.agents/skills``）。
 
-    与 bash / write_file / ``session_paths`` 一致：隔离模式下即会话 ``~/.agents/skills`` 实体路径。
+    与 bash / write_file / ``session_paths`` 一致：隔离模式下即会话 ``~/.agents/skills``。
+    完整扫描请用 ``resolve_skills_roots``（还会包含 ``.macchiato/skills``）。
+    """
+    roots = resolve_skills_roots(
+        config,
+        source=source,
+        user_id=user_id,
+        profile=profile,
+        bash_workspace_admin=bash_workspace_admin,
+    )
+    for root in roots:
+        if root.name == "skills" and root.parent.name == ".agents":
+            return root
+    return roots[-1] if roots else None
+
+
+def resolve_skills_roots(
+    config: Config,
+    *,
+    source: str,
+    user_id: str,
+    profile: Optional[Any] = None,
+    bash_workspace_admin: Optional[bool] = None,
+) -> list[Path]:
+    """
+    有序技能根目录：``.macchiato/skills`` → ``.agents/skills``（同名前者优先）。
+
+    非隔离且 session home 即进程 ``Path.home()`` 时，``.agents`` 根使用配置
+    ``skills.cli_dir``（默认 ``~/.agents/skills``）。
     """
     from agent_core.agent.session_paths import session_home_path
 
@@ -113,38 +147,31 @@ def resolve_skills_cli_path(
         profile=profile,
         bash_workspace_admin=bash_workspace_admin,
     )
-    if home.resolve() == Path.home().resolve() and default_cli is not None:
-        return default_cli
-
-    p = (home / ".agents" / "skills").resolve()
-    try:
-        p.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        if not p.is_dir():
-            return None
-    return p if p.is_dir() else None
+    prefer_default = home.resolve() == Path.home().resolve() and default_cli is not None
+    return merge_skill_roots(
+        home=home,
+        default_cli=default_cli,
+        prefer_default_cli_as_agents=prefer_default,
+    )
 
 
 def _resolve_skill_path(
-    skill_name: str, cli_dir_path: Optional[Path] = None
+    skill_name: str,
+    cli_dir_path: Optional[Path] = None,
+    *,
+    skill_roots: Optional[list[Path]] = None,
 ) -> Optional[Path]:
-    """解析技能 SKILL.md 路径。仅从 cli_dir 读取（~/.agents/skills）。"""
+    """解析技能 SKILL.md：优先 ``skill_roots``，否则单根 ``cli_dir_path``。"""
+    if skill_roots:
+        return resolve_skill_md_path(skill_name, skill_roots)
     if cli_dir_path:
-        cand = cli_dir_path / skill_name / "SKILL.md"
-        if cand.exists():
-            return cand
+        return resolve_skill_md_path(skill_name, [cli_dir_path])
     return None
 
 
 def _list_cli_dir_skills(cli_dir_path: Path) -> list[str]:
     """列出 cli_dir 下所有含 SKILL.md 的子目录名。"""
-    names: list[str] = []
-    if not cli_dir_path.is_dir():
-        return names
-    for d in cli_dir_path.iterdir():
-        if d.is_dir() and (d / "SKILL.md").exists():
-            names.append(d.name)
-    return sorted(names)
+    return list_skills_in_roots([cli_dir_path])
 
 
 def _load_section(
@@ -207,14 +234,17 @@ def _parse_skill_frontmatter(content: str) -> Tuple[Optional[str], Optional[str]
 
 
 def _load_skill_metadata(
-    skill_name: str, cli_dir_path: Optional[Path] = None
+    skill_name: str,
+    cli_dir_path: Optional[Path] = None,
+    *,
+    skill_roots: Optional[list[Path]] = None,
 ) -> Optional[str]:
     """
     加载技能 metadata：仅解析 frontmatter 的 name 和 description。
     返回格式：'- **{display_name}** (`{skill_name}`): {description}'
     若解析失败则用 skill_name 作为显示名。
     """
-    path = _resolve_skill_path(skill_name, cli_dir_path)
+    path = _resolve_skill_path(skill_name, cli_dir_path, skill_roots=skill_roots)
     if not path:
         return None
     content = path.read_text(encoding="utf-8").strip()
@@ -229,48 +259,53 @@ def _load_skill_metadata(
 def _format_skills_index(
     enabled: list[str],
     cli_dir_path: Optional[Path] = None,
+    *,
+    skill_roots: Optional[list[Path]] = None,
+    source_note: str = "",
 ) -> str:
     """
     构建技能索引（渐进式披露第一层）。
-    从 cli_dir（~/.agents/skills）读取；enabled 为空则展示全部，非空则仅展示 enabled 中的。
+
+    优先扫描 ``skill_roots``（``.macchiato/skills`` → ``.agents/skills``）；
+    否则回退单根 ``cli_dir_path``。``enabled`` 为空则展示全部，非空则仅展示 enabled。
     """
+    roots = list(skill_roots or [])
+    if not roots and cli_dir_path is not None:
+        roots = [cli_dir_path]
+    if not roots:
+        return ""
     seen: set[str] = set()
     lines: list[str] = []
-    if not cli_dir_path:
-        return ""
-    all_skills = _list_cli_dir_skills(cli_dir_path)
+    all_skills = list_skills_in_roots(roots)
     to_show = enabled if enabled else all_skills
     for skill_name in to_show:
         if skill_name in seen or skill_name not in all_skills:
             continue
         seen.add(skill_name)
-        line = _load_skill_metadata(skill_name, cli_dir_path)
+        line = _load_skill_metadata(skill_name, skill_roots=roots)
         if line:
             lines.append(line)
-    if not lines:
-        return ""
-    index = "\n".join(lines)
-    return (
-        "## Available Skills (Index)\n\n"
-        "**Progressive disclosure**: Only names and brief descriptions are shown here to save context. "
-        "When a task requires a skill, call `load_skill(skill_name)` to load the full SKILL content, then follow its instructions.\n\n"
-        f"{index}\n\n"
-        "> Call `load_skill(skill_name)` to fetch full skill documentation when needed."
+    note = (source_note or "").strip() or (
+        "Skills are listed from `.macchiato/skills` then `.agents/skills` "
+        "(same-name: `.macchiato` wins). `npx skills add -g` installs into `.agents/skills`."
     )
+    return format_skills_index_lines(lines, source_note=note)
 
 
 def load_skill_content(
     skill_name: str,
     max_chars: int = DEFAULT_MAX_SECTION_CHARS,
     cli_dir_path: Optional[Path] = None,
+    *,
+    skill_roots: Optional[list[Path]] = None,
 ) -> str:
     """
     加载技能完整内容（供 load_skill 工具调用）。
 
-    仅从 CLI skills 目录读取（例如 ~/.agents/skills/{skill_name}/SKILL.md），
-    不再从仓库内 prompts/skills/ 读取。超出 max_chars 时截断。
+    从 ``skill_roots`` 或 ``cli_dir_path`` 读取 ``{name}/SKILL.md``。
+    超出 max_chars 时截断。
     """
-    path = _resolve_skill_path(skill_name, cli_dir_path)
+    path = _resolve_skill_path(skill_name, cli_dir_path, skill_roots=skill_roots)
     if not path:
         return ""
     content = path.read_text(encoding="utf-8").strip()
@@ -311,10 +346,14 @@ def build_system_prompt(
     max_section_chars: int = DEFAULT_MAX_SECTION_CHARS,
     recipe: Optional[PromptRecipe] = None,
     skills_cli_path: Optional[Path] = None,
+    skills_roots: Optional[list[Path]] = None,
+    skills_index_override: Optional[str] = None,
 ) -> str:
     """
     构建 Agent 系统提示。先人设与静态时间说明（实时时刻在用户消息前缀）、安全边界，
     再工具长文，渠道 overlay 与 Workspace 由 ``recipe`` 决定。
+
+    ``skills_index_override``：远程工作区激活时注入已扫描的远程技能索引，跳过本机扫描。
     """
     rec = recipe if recipe is not None else PromptRecipe()
     parts: list[str] = []
@@ -369,12 +408,21 @@ def build_system_prompt(
                 else:
                     _maybe_append(parts, load(section))
         if rec.include_skills:
-            cli_path = (
-                skills_cli_path
-                if skills_cli_path is not None
-                else _resolve_cli_dir(getattr(config.skills, "cli_dir", None))
-            )
-            skills_index = _format_skills_index(config.skills.enabled or [], cli_path)
+            # None = scan local roots; "" = explicitly empty (e.g. remote with no skills).
+            if skills_index_override is not None:
+                skills_index = (skills_index_override or "").strip()
+            else:
+                roots = list(skills_roots or [])
+                if not roots and skills_cli_path is not None:
+                    roots = [skills_cli_path]
+                if not roots:
+                    fallback = _resolve_cli_dir(getattr(config.skills, "cli_dir", None))
+                    if fallback is not None:
+                        roots = [fallback]
+                skills_index = _format_skills_index(
+                    config.skills.enabled or [],
+                    skill_roots=roots,
+                )
             if skills_index:
                 if not need_workspace_block:
                     parts.append(

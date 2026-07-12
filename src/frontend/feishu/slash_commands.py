@@ -351,7 +351,7 @@ def _format_remote_state(state: Dict[str, Any]) -> str:
         f"登录: {login}\n"
         f"权限档位: {profile}\n"
         f"工作区: {mount} -> {path}\n"
-        "提示: 当前版本已注入 remote system prompt；实际 bash/file 路由将在下一开发切片接入。"
+        "提示: 已写入对话历史的 [工作区切换] 通知；Available Skills 索引来自远程工作区。"
     )
 
 

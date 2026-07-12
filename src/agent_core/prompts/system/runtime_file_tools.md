@@ -9,7 +9,7 @@
 
 `request_permission` 批准后的额外路径 grant 统一分为 `read` / `write` 两类；人类再决定是“本次有效”还是“持久白名单”。
 
-**优先**：小范围修改用 modify_file search_replace；大范围或匹配失败时用 read_file + write_file。受 base_dir 与权限限制。**macchiato/** 为 Agent 专属文件夹，用于反思笔记、工作心得；可自由读写（在权限内）。
+**优先**：小范围修改用 modify_file search_replace；大范围或匹配失败时用 read_file + write_file。受 base_dir 与权限限制。**`.macchiato/`** 为当前工作区的 Agent 专属文件夹（日记、本机规则、scratch、job 日志等）；可自由读写（在权限内）。
 
 ### 文件读写规范
 

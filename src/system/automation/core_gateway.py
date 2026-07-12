@@ -950,13 +950,15 @@ class AutomationCoreGateway:
         profile: str = "dev",
         ttl_seconds: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Enable remote workspace mode for a session.
-
-        First slice: stores state and prompt context. Runtime routing will
-        consume the same state when the remote worker transport lands.
-        """
+        """Enable remote workspace mode for a session and announce it in history."""
         from agent_core.remote.workspace_state import activate_remote_workspace
         from agent_core.remote.worker_registry import get_remote_worker_registry
+        from agent_core.remote.skills_index import refresh_remote_skills_best_effort
+        from agent_core.remote.workspace_notice import (
+            append_workspace_switch_notice,
+            format_remote_workspace_switch_notice,
+        )
+        from agent_core.remote.workspace_state import get_remote_workspace_skills_index
 
         sid = session_id or self._active_session_id
         prof = (
@@ -979,6 +981,42 @@ class AutomationCoreGateway:
             resolved_path=opened.resolved_path,
             device_label=opened.device_label,
         )
+        enabled = None
+        try:
+            from agent_core.config import get_config
+
+            enabled = list(getattr(get_config().skills, "enabled", None) or [])
+        except Exception:
+            enabled = None
+        await refresh_remote_skills_best_effort(
+            session_id=sid,
+            login=login,
+            enabled=enabled,
+        )
+        skill_count = None
+        idx = get_remote_workspace_skills_index(sid)
+        if idx:
+            skill_count = sum(
+                1 for line in idx.splitlines() if line.strip().startswith("- **")
+            )
+        notice = format_remote_workspace_switch_notice(
+            state, reason="activated", skill_count=skill_count
+        )
+        try:
+            agent = await self._kernel_scheduler.core_pool.acquire(
+                sid,
+                source=self._source,
+                user_id=self._owner_id,
+                create_if_missing=True,
+                profile=None,
+            )
+            append_workspace_switch_notice(agent, notice, persist=True)
+        except Exception:
+            logger.warning(
+                "remote workspace notice inject failed session_id=%s",
+                sid,
+                exc_info=True,
+            )
         self.mark_activity(sid)
         return state.model_dump()
 
@@ -999,6 +1037,10 @@ class AutomationCoreGateway:
     ) -> Dict[str, Any]:
         from agent_core.remote.workspace_state import release_remote_workspace
         from agent_core.remote.worker_registry import get_remote_worker_registry
+        from agent_core.remote.workspace_notice import (
+            append_workspace_switch_notice,
+            format_local_workspace_switch_notice,
+        )
 
         sid = session_id or self._active_session_id
         old = release_remote_workspace(sid)
@@ -1013,6 +1055,22 @@ class AutomationCoreGateway:
                     "remote workspace close failed session_id=%s login=%s",
                     sid,
                     old.login,
+                    exc_info=True,
+                )
+            notice = format_local_workspace_switch_notice(previous=old)
+            try:
+                agent = await self._kernel_scheduler.core_pool.acquire(
+                    sid,
+                    source=self._source,
+                    user_id=self._owner_id,
+                    create_if_missing=True,
+                    profile=None,
+                )
+                append_workspace_switch_notice(agent, notice, persist=True)
+            except Exception:
+                logger.warning(
+                    "local workspace notice inject failed session_id=%s",
+                    sid,
                     exc_info=True,
                 )
         self.mark_activity(sid)

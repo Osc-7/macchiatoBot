@@ -85,7 +85,7 @@ Generated state stays out of source control:
 |---|---|
 | `data/` | persistent app data, sessions, automation repositories |
 | `logs/` | daemon and gateway logs |
-| `.macchiato/` | local command/job runtime state |
+| `.macchiato/` | 工作区本地状态：job 日志、日记、本机 rules/skills、scratch |
 | `dist/`, `build/`, `*.egg-info/` | package build outputs |
 | `.venv/`, `.pytest_cache/`, `__pycache__/` | local development artifacts |
 

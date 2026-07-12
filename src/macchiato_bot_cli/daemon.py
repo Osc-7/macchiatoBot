@@ -227,6 +227,9 @@ async def _consume_loop(
                     from agent_core.remote.workspace_state import (
                         activate_remote_workspace,
                     )
+                    from agent_core.remote.skills_index import (
+                        refresh_remote_skills_best_effort,
+                    )
 
                     remote_path = (
                         str(task.metadata.get("remote_path") or "~").strip() or "~"
@@ -266,6 +269,13 @@ async def _consume_loop(
                             resolved_path=opened.resolved_path,
                             device_label=opened.device_label,
                         )
+                        await refresh_remote_skills_best_effort(
+                            session_id=task.session_id,
+                            login=remote_login,
+                            enabled=list(
+                                getattr(get_config().skills, "enabled", None) or []
+                            ),
+                        )
                         remote_bound = True
                         logger.info(
                             "consume: task_id=%s bound remote workspace login=%s path=%s profile=%s",
@@ -274,6 +284,42 @@ async def _consume_loop(
                             remote_path,
                             remote_profile,
                         )
+                        try:
+                            from agent_core.remote.workspace_notice import (
+                                format_remote_workspace_switch_notice,
+                            )
+                            from agent_core.remote.workspace_state import (
+                                get_remote_workspace_skills_index,
+                                get_remote_workspace_state,
+                            )
+
+                            rw = get_remote_workspace_state(task.session_id)
+                            if rw is not None:
+                                idx = get_remote_workspace_skills_index(task.session_id)
+                                skill_count = (
+                                    sum(
+                                        1
+                                        for line in idx.splitlines()
+                                        if line.strip().startswith("- **")
+                                    )
+                                    if idx
+                                    else None
+                                )
+                                notice = format_remote_workspace_switch_notice(
+                                    rw,
+                                    reason="bound",
+                                    skill_count=skill_count,
+                                )
+                                # Prepend so the first turn sees workspace context.
+                                task.instruction = (
+                                    f"{notice}\n\n{task.instruction}"
+                                )
+                        except Exception:
+                            logger.warning(
+                                "consume: remote workspace notice prepend failed task_id=%s",
+                                task.task_id,
+                                exc_info=True,
+                            )
                     except Exception as exc:
                         if remote_required:
                             raise RuntimeError(
@@ -585,6 +631,7 @@ async def _bash_job_notify_loop(
 
 async def _main() -> None:
     cfg = get_config()
+    logger.info("automation daemon: reconciling linux admin users (if enabled)")
     reconcile_admin_linux_users(cfg.command_tools)
     install_feishu_permission_notify_hook()
     install_feishu_ask_user_notify_hook()

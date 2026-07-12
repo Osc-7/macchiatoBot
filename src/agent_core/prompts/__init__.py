@@ -11,6 +11,7 @@ from .loader import (
     build_system_prompt,
     get_recipe,
     resolve_skills_cli_path,
+    resolve_skills_roots,
 )
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "get_recipe",
     "PromptMode",
     "resolve_skills_cli_path",
+    "resolve_skills_roots",
 ]

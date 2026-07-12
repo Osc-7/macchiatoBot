@@ -164,6 +164,13 @@ def chown_tree_to_user(paths: List[Path], posix_name: str) -> None:
         base_r = base.resolve()
         if not base_r.exists():
             continue
+        try:
+            st = base_r.lstat()
+            if st.st_uid == uid and st.st_gid == gid:
+                # 常见重启路径：home 已属目标用户，跳过整树 walk（大 uploads 目录会卡死启动）。
+                continue
+        except OSError:
+            pass
         for root, dirs, files in os.walk(base_r, topdown=False, followlinks=False):
             for name in files:
                 p = Path(root) / name
@@ -383,8 +390,14 @@ def reconcile_admin_linux_users(cmd_cfg: "CommandToolsConfig") -> None:
         return
 
     desired_usernames = set(_admin_logic_usernames(cmd_cfg).values())
+    if desired_usernames:
+        logger.info(
+            "reconcile_admin_linux_users: reconciling %d admin user(s)",
+            len(desired_usernames),
+        )
 
     for username in sorted(desired_usernames):
+        logger.info("reconcile_admin_linux_users: ensuring %s", username)
         try:
             home = resolve_os_user_home(cmd_cfg, username)
             if getattr(cmd_cfg, "bash_os_auto_provision_users", True):

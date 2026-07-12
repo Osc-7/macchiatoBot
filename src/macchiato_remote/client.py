@@ -395,6 +395,16 @@ class RemoteWorkerClient:
             await session.start()
             self._sessions[req.session_id] = session
             self._jobs.open_session(req.session_id, root)
+            try:
+                from macchiato_remote.runtime.macchiato_dir import ensure_macchiato_layout
+
+                ensure_macchiato_layout(
+                    root,
+                    device_label=platform.node() or self.login,
+                )
+            except Exception:
+                # Layout is best-effort; workspace open must still succeed.
+                pass
             return RemoteWorkspaceOpenResult(
                 request_id=req.request_id,
                 session_id=req.session_id,

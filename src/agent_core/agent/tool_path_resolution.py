@@ -149,6 +149,10 @@ def apply_workspace_path_resolution_to_tool_args(
         out["path"] = _resolve_value(out["path"])
         return out
 
+    if tool_name == "memory_store" and out.get("file_path"):
+        out["file_path"] = _resolve_value(out["file_path"])
+        return out
+
     if tool_name == "memory_ingest" and out.get("file_path"):
         out["file_path"] = _resolve_value(out["file_path"])
         return out

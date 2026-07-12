@@ -11,7 +11,7 @@ from typing import List, Optional
 
 from agent_core.config import Config
 from agent_core.tools.base import BaseTool
-from agent_core.memory import ContentMemory, LongTermMemory
+from agent_core.memory import MemoryCorpus
 
 from .parse_time import ParseTimeTool
 from .planner_tools import GetFreeSlotsTool, PlanTasksTool
@@ -27,10 +27,9 @@ from .storage_tools import (
 from .file_tools import ReadFileTool, WriteFileTool, ModifyFileTool
 from .load_skill_tool import LoadSkillTool
 from .memory_tools import (
-    MemorySearchLongTermTool,
-    MemorySearchContentTool,
+    MemorySearchTool,
     MemoryStoreTool,
-    MemoryIngestTool,
+    MemoryUpdateTool,
 )
 from .media_tools import AttachMediaTool, AttachImageToReplyTool, AttachFileToReplyTool
 from .canvas_tools import (
@@ -122,22 +121,15 @@ def get_default_tools(
             mem_cfg, resolved_user_id, config=config, source=resolved_source
         )
 
-        long_term = LongTermMemory(
-            storage_dir=paths["long_term_dir"],
-            memory_md_path=paths["memory_md_path"],
-            qmd_enabled=mem_cfg.qmd_enabled,
-            qmd_command=mem_cfg.qmd_command,
-        )
-        content = ContentMemory(
-            content_dir=paths["content_dir"],
+        corpus = MemoryCorpus(
+            corpus_dir=paths["corpus_dir"],
             qmd_enabled=mem_cfg.qmd_enabled,
             qmd_command=mem_cfg.qmd_command,
         )
         top_n = mem_cfg.recall_top_n
-        tools.append(MemorySearchLongTermTool(long_term, top_n))
-        tools.append(MemorySearchContentTool(content, top_n))
-        tools.append(MemoryStoreTool(content))
-        tools.append(MemoryIngestTool(content))
+        tools.append(MemorySearchTool(corpus, top_n))
+        tools.append(MemoryStoreTool(corpus))
+        tools.append(MemoryUpdateTool(config))
 
     if config and config.multimodal.enabled:
         tools.append(AttachMediaTool())

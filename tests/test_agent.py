@@ -470,7 +470,7 @@ class TestToolCallExecution:
                 workspace_isolation_enabled=True,
             ),
         )
-        tool = MockTool(name="memory_ingest")
+        tool = MockTool(name="memory_store")
         agent = AgentCore(
             config=cfg,
             tools=[tool],
@@ -486,7 +486,7 @@ class TestToolCallExecution:
         result = await agent._execute_tool_call(
             ToolCall(
                 id="call_123",
-                name="memory_ingest",
+                name="memory_store",
                 arguments={"file_path": "doc.pdf"},
             )
         )
@@ -818,6 +818,68 @@ class TestProcessInput:
             result = await agent.process_input("测试空响应")
 
         assert "无法处理" in result
+
+    @pytest.mark.asyncio
+    async def test_goal_check_continues_instead_of_overflow(self, mock_config):
+        """活跃目标自检应 continue，不能 break 到 overflow 覆盖真实回复。"""
+        mock_config.agent.goal_auto_continue = True
+        mock_config.agent.goal_auto_continue_max_nudges = 1
+        agent = AgentCore(config=mock_config, tools=[], max_iterations=3)
+        agent._goal_store.create_goal(
+            title="推进任务",
+            description="测试目标自检",
+            steps=["步骤一"],
+        )
+
+        responses = [
+            LLMResponse(content="这是真实助手回复", tool_calls=[]),
+            LLMResponse(content="目标检查后的续写", tool_calls=[]),
+        ]
+        llm_mock = AsyncMock(side_effect=responses)
+
+        with (
+            patch.object(agent._llm_client, "chat_with_tools", llm_mock),
+            patch.object(agent, "_maybe_schedule_goal_continuation_wake") as wake_mock,
+        ):
+            result = await agent.process_input("继续目标")
+
+        assert result == "目标检查后的续写"
+        assert "最大迭代次数" not in result
+        assert llm_mock.await_count == 2
+        wake_mock.assert_not_called()
+        msgs = agent.context.get_messages()
+        assert any(
+            m.get("role") == "user"
+            and "目标" in str(m.get("content") or "")
+            for m in msgs
+        )
+
+    @pytest.mark.asyncio
+    async def test_goal_final_iteration_keeps_assistant_content(self, mock_config):
+        """最后一轮有活跃目标时，应返回助手原文并登记跨轮唤醒，而非系统 overflow 文案。"""
+        mock_config.agent.goal_auto_continue = True
+        mock_config.agent.goal_auto_continue_max_nudges = 5
+        agent = AgentCore(config=mock_config, tools=[], max_iterations=1)
+        agent._goal_store.create_goal(
+            title="推进任务",
+            description="测试最后一轮",
+            steps=["步骤一"],
+        )
+
+        with (
+            patch.object(
+                agent._llm_client,
+                "chat_with_tools",
+                new_callable=AsyncMock,
+                return_value=LLMResponse(content="最后一轮真实回复", tool_calls=[]),
+            ),
+            patch.object(agent, "_maybe_schedule_goal_continuation_wake") as wake_mock,
+        ):
+            result = await agent.process_input("继续目标")
+
+        assert result == "最后一轮真实回复"
+        assert "最大迭代次数" not in result
+        wake_mock.assert_called_once()
 
 
 # ============== 上下文管理器测试 ==============

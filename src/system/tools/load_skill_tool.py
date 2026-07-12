@@ -4,20 +4,26 @@
 与 loader 配合：system prompt 仅注入 skill 的 metadata，
 Agent 在需要时调用此工具获取完整 SKILL 说明。
 
-技能目录与当前会话一致：工作区隔离时为 ``{workspace}/{frontend}/{user}/.agents/skills``，
-与 bash / write_file 下的 ``~/.agents/skills`` 为同一树；非隔离或工作区管理员时为配置项 ``skills.cli_dir``（默认进程 ``~/.agents/skills``）。
+技能目录与当前会话一致：
+- 本地：``.macchiato/skills`` → ``.agents/skills``（同名前者优先；
+  ``npx skills add -g`` 安装到后者）
+- 远程：读取当前远程工作区同样两处路径，而不是 daemon 本机技能目录
 """
 
 from agent_core.agent.memory_paths import effective_memory_namespace_from_execution_context
 from agent_core.config import Config
 from agent_core.prompts.loader import (
-    DEFAULT_MAX_SECTION_CHARS,
-    TRUNCATION_MARKER,
     load_skill_content,
-    resolve_skills_cli_path,
+    resolve_skills_roots,
 )
 
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+
+_SOFT_REMOTE_ERRORS = {
+    "",
+    "invalid remote skill path",
+    "skill_name cannot be empty",
+}
 
 
 class LoadSkillTool(BaseTool):
@@ -43,7 +49,9 @@ class LoadSkillTool(BaseTool):
             name=self.name,
             description=(
                 "Load full SKILL.md content for an enabled skill. "
-                "Call when the skills index is insufficient to complete the task."
+                "Call when the skills index is insufficient to complete the task. "
+                "Looks up `.macchiato/skills` then `.agents/skills` in the current "
+                "workspace (remote when remote mode is active)."
             ),
             parameters=[
                 ToolParameter(
@@ -60,7 +68,10 @@ class LoadSkillTool(BaseTool):
                 },
             ],
             usage_notes=[
-                "读取本会话技能目录下的 SKILL.md（隔离模式下与 shell 中 ~/.agents/skills 为同一目录）。"
+                "读取当前工作区技能目录下的 SKILL.md："
+                "`.macchiato/skills` 优先，其次 `.agents/skills`"
+                "（隔离模式下与 shell 中 ~/.agents/skills 为同一树；"
+                "远程模式下读远程工作区）。"
                 f" 技能名：{skill_list}。",
             ],
             tags=["skill", "load", "progressive-disclosure"],
@@ -77,8 +88,7 @@ class LoadSkillTool(BaseTool):
             return "", None, {}
 
         try:
-            from agent_core.remote.pathmap import normalize_remote_workspace_relative_path
-            from agent_core.remote.worker_registry import get_remote_worker_registry
+            from agent_core.remote.skills_index import load_remote_skill_markdown
             from agent_core.remote.workspace_state import get_remote_workspace_state
         except Exception:
             return "", None, {}
@@ -87,41 +97,11 @@ class LoadSkillTool(BaseTool):
         if remote_state is None:
             return "", None, {}
 
-        rel, err = normalize_remote_workspace_relative_path(
-            f"~/.agents/skills/{skill_name}/SKILL.md"
+        return await load_remote_skill_markdown(
+            session_id=session_id,
+            login=remote_state.login,
+            skill_name=skill_name,
         )
-        if err or rel is None:
-            return "", err or "invalid remote skill path", {
-                "workspace_backend": "remote",
-                "remote_login": remote_state.login,
-            }
-
-        metadata = {
-            "workspace_backend": "remote",
-            "remote_login": remote_state.login,
-            "remote_path": rel,
-        }
-        try:
-            result = await get_remote_worker_registry().file_read(
-                login=remote_state.login,
-                session_id=session_id,
-                path=rel,
-                encoding="utf-8",
-            )
-        except Exception as exc:
-            return "", f"远程读取失败: {exc}", metadata
-
-        if result.error:
-            if result.error == "FILE_NOT_FOUND":
-                return "", None, metadata
-            return "", result.error, metadata
-
-        content = (result.content or "").strip()
-        if not content:
-            return "", None, metadata
-        if len(content) > DEFAULT_MAX_SECTION_CHARS:
-            content = content[:DEFAULT_MAX_SECTION_CHARS].rstrip() + TRUNCATION_MARKER
-        return content, None, metadata
 
     async def execute(self, **kwargs) -> ToolResult:
         skill_name = (kwargs.get("skill_name") or "").strip()
@@ -137,30 +117,42 @@ class LoadSkillTool(BaseTool):
             skill_name=skill_name,
             exec_ctx=ctx,
         )
-        if remote_error:
+
+        if remote_metadata.get("workspace_backend") == "remote":
+            if remote_content:
+                return ToolResult(
+                    success=True,
+                    data={"skill_name": skill_name, "content": remote_content},
+                    message=f"Loaded skill `{skill_name}`.\n\n---\n{remote_content}",
+                    metadata=remote_metadata,
+                )
+            err = (remote_error or "").strip()
+            if err and err not in _SOFT_REMOTE_ERRORS:
+                return ToolResult(
+                    success=False,
+                    error="REMOTE_SKILL_READ_FAILED",
+                    message=f"读取远程 SKILL.md 失败: {err}",
+                    metadata=remote_metadata,
+                )
             return ToolResult(
                 success=False,
-                error="REMOTE_SKILL_READ_FAILED",
-                message=f"读取远程 SKILL.md 失败: {remote_error}",
-                metadata=remote_metadata,
-            )
-        if remote_content:
-            return ToolResult(
-                success=True,
-                data={"skill_name": skill_name, "content": remote_content},
-                message=f"Loaded skill `{skill_name}`.\n\n---\n{remote_content}",
+                error="SKILL_NOT_FOUND",
+                message=(
+                    f"SKILL.md not found for '{skill_name}' in remote workspace "
+                    "(.macchiato/skills or .agents/skills)"
+                ),
                 metadata=remote_metadata,
             )
 
         src, uid = effective_memory_namespace_from_execution_context(ctx)
-        cli_path = resolve_skills_cli_path(
+        roots = resolve_skills_roots(
             self._config,
             source=src,
             user_id=uid,
             profile=None,
             bash_workspace_admin=ctx.get("bash_workspace_admin"),
         )
-        content = load_skill_content(skill_name, cli_dir_path=cli_path)
+        content = load_skill_content(skill_name, skill_roots=roots)
         if not content:
             return ToolResult(
                 success=False,

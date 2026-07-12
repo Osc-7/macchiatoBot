@@ -84,6 +84,7 @@ class LongTermMemory:
         memory_md_path: str = "./MEMORY.md",
         qmd_enabled: bool = False,
         qmd_command: str = "qmd",
+        corpus_dir: Optional[str] = None,
     ):
         self._dir = Path(storage_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
@@ -91,6 +92,7 @@ class LongTermMemory:
         self._memory_md = Path(memory_md_path)
         self._qmd_enabled = qmd_enabled
         self._qmd_command = qmd_command
+        self._corpus_dir = Path(corpus_dir) if corpus_dir else None
         self._md_dir = self._dir / "markdown"
         self._md_dir.mkdir(parents=True, exist_ok=True)
         self._entries: List[MemoryEntry] = self._load()
@@ -212,9 +214,13 @@ class LongTermMemory:
 
     def _ensure_memory_md(self) -> None:
         """确保 MEMORY.md 存在，若不存在则创建初始模板。"""
-        if self._memory_md.exists():
+        self._ensure_memory_md_on_path(self._memory_md)
+
+    @staticmethod
+    def _ensure_memory_md_on_path(memory_md: Path) -> None:
+        if memory_md.exists():
             return
-        self._memory_md.parent.mkdir(parents=True, exist_ok=True)
+        memory_md.parent.mkdir(parents=True, exist_ok=True)
         template = """\
 # MEMORY.md - Agent 长期记忆
 
@@ -236,8 +242,7 @@ class LongTermMemory:
 ## 经验教训
 
 """
-        with open(self._memory_md, "w", encoding="utf-8") as f:
-            f.write(template)
+        memory_md.write_text(template, encoding="utf-8")
 
     def _search_qmd(self, query: str, top_n: int) -> List[MemoryEntry]:
         """通过 QMD 语义检索长期记忆（仅命中 _md_dir 下的条目）。"""
@@ -372,8 +377,22 @@ class LongTermMemory:
         # 这样 recent_topic 与 distill() 生成的长期记忆在物理存储上保持一致，
         # 便于统一检索与人工查看。
         self._write_entries_as_markdown([entry])
+        self._sync_entry_to_corpus(entry)
 
         return entry
+
+    def _sync_entry_to_corpus(self, entry: MemoryEntry) -> None:
+        """将会话摘要等条目同步到统一语料库，供 memory_search 检索。"""
+        if self._corpus_dir is None:
+            return
+        from .memory_corpus import MemoryCorpus
+
+        corpus = MemoryCorpus(
+            str(self._corpus_dir),
+            qmd_enabled=self._qmd_enabled,
+            qmd_command=self._qmd_command,
+        )
+        corpus.store_entry_markdown(entry.id, entry.to_markdown(), entry.category)
 
     def get_recent_topics(
         self,

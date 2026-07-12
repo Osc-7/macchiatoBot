@@ -29,6 +29,7 @@ RULES_REL = f"{MACCHIATO_DIR_NAME}/rules"
 SKILLS_REL = f"{MACCHIATO_DIR_NAME}/skills"
 SCRATCH_REL = f"{MACCHIATO_DIR_NAME}/scratch"
 DEVICE_MD_REL = f"{MACCHIATO_DIR_NAME}/DEVICE.md"
+MCP_YAML_REL = f"{MACCHIATO_DIR_NAME}/mcp.yaml"
 
 _DEVICE_MD_TEMPLATE = """# 本机 / 本工作区设备笔记
 {device_line}
@@ -40,6 +41,7 @@ _DEVICE_MD_TEMPLATE = """# 本机 / 本工作区设备笔记
 - 本机 / 本工作区技能：`.macchiato/skills/`
 - 临时稿：`.macchiato/scratch/`
 - 后台 job 日志：`.macchiato/jobs/`
+- 本工作区 MCP：`.macchiato/mcp.yaml`（供 remote worker 启动；与 daemon ``location: remote`` 同名）
 
 跨设备稳定的偏好与约束请写 **MEMORY.md**（由记忆系统映射到 canonical 路径），
 设备相关路径与环境写在本文件或日记里，整理记忆时再提炼进 MEMORY 的「设备笔记」分区。
@@ -64,6 +66,7 @@ def resolve_macchiato_paths(workspace_root: Path | str) -> Dict[str, str]:
         "skills_dir": str(base / "skills"),
         "scratch_dir": str(base / "scratch"),
         "device_md": str(base / "DEVICE.md"),
+        "mcp_yaml": str(base / "mcp.yaml"),
     }
 
 
@@ -111,6 +114,15 @@ def ensure_macchiato_layout(
             encoding="utf-8",
         )
         created_paths.append(str(device_md))
+
+    try:
+        from macchiato_remote.runtime.mcp_config import ensure_mcp_yaml_template
+
+        created_mcp = ensure_mcp_yaml_template(root)
+        if created_mcp:
+            created_paths.append(created_mcp)
+    except Exception as exc:
+        logger.warning("ensure_macchiato_layout: mcp.yaml skipped: %s", exc)
 
     return {
         **paths,

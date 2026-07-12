@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 REMOTE_WORKSPACE_MOUNT = "/workspace"
 
 # 与 daemon 协商能力；worker 包主版本 bump 时递增
-REMOTE_PROTOCOL_VERSION = 2
+REMOTE_PROTOCOL_VERSION = 3
 REMOTE_WORKER_CAPABILITIES = (
     "exec",
     "file_read",
@@ -27,6 +27,10 @@ REMOTE_WORKER_CAPABILITIES = (
     "job_status",
     "job_tail",
     "job_stop",
+    "mcp_ensure",
+    "mcp_list_tools",
+    "mcp_call_tool",
+    "mcp_shutdown",
 )
 
 RemotePermissionProfile = Literal["strict", "dev", "host-user", "host-admin"]
@@ -298,4 +302,77 @@ class RemoteJobStopResult(BaseModel):
     session_id: str
     job_id: str
     success: bool
+    error: Optional[str] = None
+
+
+# ── MCP (protocol v3) ──────────────────────────────────────
+
+
+class RemoteMcpServerRef(BaseModel):
+    name: str
+
+
+class RemoteMcpEnsureRequest(BaseModel):
+    request_id: str
+    session_id: str
+    servers: list[RemoteMcpServerRef] = Field(default_factory=list)
+
+
+class RemoteMcpServerStatus(BaseModel):
+    name: str
+    ok: bool
+    error: Optional[str] = None
+
+
+class RemoteMcpEnsureResult(BaseModel):
+    request_id: str
+    servers: list[RemoteMcpServerStatus] = Field(default_factory=list)
+
+
+class RemoteMcpToolMeta(BaseModel):
+    name: str
+    description: str = ""
+    input_schema: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RemoteMcpListToolsRequest(BaseModel):
+    request_id: str
+    session_id: str
+    server_name: str
+    refresh: bool = False
+
+
+class RemoteMcpListToolsResult(BaseModel):
+    request_id: str
+    server_name: str
+    tools: list[RemoteMcpToolMeta] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
+class RemoteMcpCallToolRequest(BaseModel):
+    request_id: str
+    session_id: str
+    server_name: str
+    tool_name: str
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    timeout_seconds: Optional[float] = None
+
+
+class RemoteMcpCallToolResult(BaseModel):
+    request_id: str
+    is_error: bool = False
+    content: list[Dict[str, Any]] = Field(default_factory=list)
+    structured_content: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+class RemoteMcpShutdownRequest(BaseModel):
+    request_id: str
+    session_id: str
+    server_name: Optional[str] = None
+
+
+class RemoteMcpShutdownResult(BaseModel):
+    request_id: str
+    closed: list[str] = Field(default_factory=list)
     error: Optional[str] = None

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Callable, List, Optional, TYPE_CHECKING
 
 from agent_core.mcp.proxy_tool import MCPProxyTool
+from agent_core.mcp.remote_proxy_tool import RemoteMCPProxyTool
 
 from .base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from .versioned_registry import VersionedToolRegistry
@@ -81,7 +82,8 @@ class SearchToolsTool(BaseTool):
                 "query、tags、name_prefix 至少提供一个；可组合使用。",
                 "检索会同时扫描述、参数、usage_notes、以及工具自带 tags 文本；并做名称子串与中日文子片弱命中。",
                 "若某条带 weak_match=true，表示强关键词未命中，仅为名称/描述相似度或字典序兜底，调用前请核对是否真需要。",
-                "返回项含 tool_source：native=进程内工具，mcp=外部 MCP 代理；mcp_server 为 MCP 配置中的 server 名（若有）。",
+                "返回项含 tool_source：native=进程内工具，mcp=本机 MCP 代理，mcp_remote=远程工作区 MCP；"
+                "mcp_server 为 MCP 配置中的 server 名（若有）；mcp_location 为 local|remote。",
                 "若 callable_in_current_core 为 false，说明当前 CoreProfile 不允许调用。",
                 "命中工具会加入当前会话工具工作集（LRU）。",
             ],
@@ -125,12 +127,20 @@ class SearchToolsTool(BaseTool):
         for item in matches:
             name = str(item.get("name") or "").strip()
             inst = self._registry.get(name)
-            tool_source = "mcp" if isinstance(inst, MCPProxyTool) else "native"
-            mcp_server = (
-                getattr(inst, "_server_name", None)
-                if isinstance(inst, MCPProxyTool)
-                else None
-            )
+            if isinstance(inst, RemoteMCPProxyTool):
+                tool_source = "mcp_remote"
+                mcp_server = getattr(inst, "server_name", None) or getattr(
+                    inst, "_server_name", None
+                )
+                mcp_location = "remote"
+            elif isinstance(inst, MCPProxyTool):
+                tool_source = "mcp"
+                mcp_server = getattr(inst, "_server_name", None)
+                mcp_location = "local"
+            else:
+                tool_source = "native"
+                mcp_server = None
+                mcp_location = None
             callable_in_current_core = (
                 True if profile is None else bool(profile.is_tool_allowed(name))
             )
@@ -141,6 +151,7 @@ class SearchToolsTool(BaseTool):
                     **item,
                     "tool_source": tool_source,
                     "mcp_server": mcp_server,
+                    "mcp_location": mcp_location,
                     "callable_in_current_core": callable_in_current_core,
                     "reason_if_denied": (
                         None

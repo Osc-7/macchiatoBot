@@ -583,6 +583,11 @@ def create_remote_worker_app(*, token: Optional[str] = None) -> FastAPI:
                 message = await websocket.receive_json()
                 if isinstance(message, dict):
                     if message.get("type") == "worker_hello":
+                        conn.hello_meta = {
+                            "protocol_version": message.get("protocol_version"),
+                            "package_version": message.get("package_version"),
+                            "capabilities": list(message.get("capabilities") or []),
+                        }
                         logger.info(
                             "remote worker hello: login=%s protocol=%s package=%s caps=%s",
                             login_s,

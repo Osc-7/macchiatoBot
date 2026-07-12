@@ -225,6 +225,10 @@ def _help_text() -> str:
 /remote-use <login> [path] [--profile dev] - 将当前会话切换到远程工作区模式
 /remote-status - 查看当前会话远程工作区状态
 /remote-release 或 /cloud-use - 释放远程工作区，恢复云端工作区
+/mcp list - 列出已声明的 MCP（location / attach_on / 是否已挂）
+/mcp attach <name> - 将配置中的 MCP 挂到当前会话
+/mcp detach <name> - 从当前会话卸下 MCP
+/mcp reload <name> - 重新加载 MCP
 /dangerously on|off|status - 切换危险放行模式（授权用户可跳过人工审批）
 /help - 显示此帮助"""
 
@@ -534,6 +538,57 @@ async def try_handle_slash_command(
         if released:
             return True, "已释放远程工作区，当前会话将恢复云端工作区模式。"
         return True, "当前会话未启用远程工作区。"
+
+    if cmd_lower == "mcp" or cmd_lower.startswith("mcp "):
+        parts = cmd_text.split()
+        # cmd_text is without leading slash; first token may be "mcp"
+        tokens = parts[1:] if parts and parts[0].lower() == "mcp" else parts
+        sub = (tokens[0].lower() if tokens else "list").strip()
+        name = " ".join(tokens[1:]).strip() if len(tokens) > 1 else ""
+        try:
+            if sub in ("list", "ls", ""):
+                res = await client.mcp_list()
+                servers = res.get("servers") if isinstance(res, dict) else None
+                if not servers:
+                    return True, "未配置任何 MCP server（或 mcp.enabled=false）。"
+                lines = ["MCP servers:"]
+                for s in servers:
+                    if not isinstance(s, dict):
+                        continue
+                    mark = "ON" if s.get("attached") else "off"
+                    lines.append(
+                        f"- {s.get('name')} [{mark}] location={s.get('location')} "
+                        f"attach_on={s.get('attach_on')} tools={s.get('tool_count', 0)}"
+                    )
+                    if s.get("error"):
+                        lines.append(f"    error: {s.get('error')}")
+                return True, "\n".join(lines)
+            if sub == "attach":
+                if not name:
+                    return True, "用法: /mcp attach <server_name>"
+                res = await client.mcp_attach(server_name=name)
+                if res.get("ok"):
+                    tools = res.get("attached_tools") or []
+                    return True, f"已挂载 {name}，工具数 {len(tools)}。"
+                return True, f"挂载失败: {res.get('error') or 'unknown'}"
+            if sub == "detach":
+                if not name:
+                    return True, "用法: /mcp detach <server_name>"
+                res = await client.mcp_detach(server_name=name)
+                if res.get("ok"):
+                    return True, f"已卸载 {name}。"
+                return True, f"卸载失败: {res.get('error') or 'unknown'}"
+            if sub == "reload":
+                if not name:
+                    return True, "用法: /mcp reload <server_name>"
+                res = await client.mcp_reload(server_name=name)
+                if res.get("ok"):
+                    tools = res.get("attached_tools") or []
+                    return True, f"已重载 {name}，工具数 {len(tools)}。"
+                return True, f"重载失败: {res.get('error') or 'unknown'}"
+            return True, "用法: /mcp list|attach|detach|reload"
+        except Exception as exc:
+            return True, f"MCP 命令失败: {exc}"
 
     if cmd_lower.startswith("remote-use"):
         parsed, err = _parse_remote_use_args(cmd_text)

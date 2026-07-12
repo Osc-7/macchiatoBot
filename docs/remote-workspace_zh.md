@@ -56,6 +56,37 @@ uv tool install -e packages/macchiato-remote
 
 仅 worker 的机器不需要 `config/config.yaml`、`.env`、飞书配置、LLM key 或 automation daemon。
 
+## 远程 MCP（协议 v3 / macchiato-remote>=0.2.7）
+
+远程工作区激活后，daemon 可以把声明为 `location: remote` 的 MCP 挂到当前会话；**进程在 worker 机器上启动**，agent 仍像普通工具一样调用。
+
+1. Worker 安装 MCP 能力：`uv tool install 'macchiato-remote[mcp]==0.2.7'`
+2. 在授权工作区写 `{workspace}/.macchiato/mcp.yaml`（`open_workspace` 会生成空模板）：
+
+```yaml
+mcp:
+  servers:
+    - name: local_chrome          # 必须与 daemon 配置同名
+      enabled: true
+      command: npx
+      args: ["-y", "chrome-devtools-mcp@latest"]
+```
+
+3. Daemon `config.yaml` 声明同名 server：
+
+```yaml
+mcp:
+  servers:
+    - name: local_chrome
+      location: remote
+      attach_on: remote_use
+      enabled: true
+      tool_name_prefix: chrome
+```
+
+4. `/remote-use <login> <path>` 后自动挂载；也可用 `/mcp list|attach|detach|reload` 手动管理。
+5. `/remote-use` 登录仍只用现有 worker token；`env` 仅当该 MCP 自己需要第三方 API key 时才填写。
+
 ## 配置登录别名
 
 选择一个稳定别名，例如 `personal`、`work-mbp`、`studio-linux`。这个别名就是 `/remote-use` 使用的值。

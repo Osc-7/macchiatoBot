@@ -276,6 +276,42 @@ async def _consume_loop(
                                 getattr(get_config().skills, "enabled", None) or []
                             ),
                         )
+                        mcp_line = None
+                        try:
+                            from agent_core.remote.mcp_lifecycle import (
+                                after_remote_workspace_activated,
+                                format_remote_mcp_notice_line,
+                            )
+
+                            raw_owner = ""
+                            if isinstance(task.metadata, dict):
+                                raw_owner = str(
+                                    task.metadata.get("memory_owner") or ""
+                                ).strip()
+                            fe_source, fe_uid = (
+                                _workspace_frontend_user_for_automation_task(
+                                    raw_owner=raw_owner,
+                                    task_source=task.source,
+                                    task_user_id=task.user_id,
+                                )
+                            )
+                            agent_for_mcp = await scheduler.core_pool.acquire(
+                                task.session_id,
+                                source=fe_source,
+                                user_id=fe_uid,
+                                create_if_missing=True,
+                                profile=None,
+                            )
+                            mcp_rows = await after_remote_workspace_activated(
+                                agent_for_mcp, session_id=task.session_id
+                            )
+                            mcp_line = format_remote_mcp_notice_line(mcp_rows) or None
+                        except Exception:
+                            logger.debug(
+                                "consume: remote mcp attach skipped task_id=%s",
+                                task.task_id,
+                                exc_info=True,
+                            )
                         remote_bound = True
                         logger.info(
                             "consume: task_id=%s bound remote workspace login=%s path=%s profile=%s",
@@ -309,6 +345,7 @@ async def _consume_loop(
                                     rw,
                                     reason="bound",
                                     skill_count=skill_count,
+                                    mcp_line=mcp_line,
                                 )
                                 # Prepend so the first turn sees workspace context.
                                 task.instruction = (
@@ -472,7 +509,22 @@ async def _consume_loop(
             if remote_bound:
                 from agent_core.remote.worker_registry import get_remote_worker_registry
                 from agent_core.remote.workspace_state import release_remote_workspace
+                from agent_core.remote.mcp_lifecycle import (
+                    before_remote_workspace_released,
+                )
 
+                try:
+                    entry = scheduler.core_pool.get_entry(task.session_id)
+                    agent_for_mcp = entry.agent if entry is not None else None
+                    await before_remote_workspace_released(
+                        agent_for_mcp, session_id=task.session_id
+                    )
+                except Exception:
+                    logger.debug(
+                        "consume: remote mcp detach skipped task_id=%s",
+                        task.task_id,
+                        exc_info=True,
+                    )
                 old = release_remote_workspace(task.session_id)
                 if old is not None:
                     try:

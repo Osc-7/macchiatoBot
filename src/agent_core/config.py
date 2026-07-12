@@ -720,13 +720,28 @@ class MCPServerConfig(BaseModel):
     name: str = Field(..., description="MCP Server 名称，用于工具名前缀和日志定位")
     enabled: bool = Field(default=True, description="是否启用该 MCP Server")
     transport: str = Field(default="stdio", description="传输类型，当前仅支持 stdio")
-    command: str = Field(..., description="启动 MCP Server 的命令")
+    command: Optional[str] = Field(
+        default=None,
+        description="启动 MCP Server 的命令；location=remote 时可省略",
+    )
     args: List[str] = Field(default_factory=list, description="MCP Server 命令参数")
     env: dict = Field(default_factory=dict, description="传递给 MCP Server 的环境变量")
     cwd: Optional[str] = Field(default=None, description="MCP Server 工作目录")
     tool_name_prefix: Optional[str] = Field(
         default=None,
         description="本地工具名前缀，默认使用 name",
+    )
+    location: Literal["local", "remote"] = Field(
+        default="local",
+        description="local=daemon 本机起进程；remote=当前远程工作区 worker 起进程",
+    )
+    attach_on: Literal["boot", "manual", "remote_use"] = Field(
+        default="boot",
+        description=(
+            "boot: ensure_mcp_connected 时挂上（仅 local）；"
+            "remote_use: /remote-use 时自动挂（默认给 remote）；"
+            "manual: 仅 /mcp attach"
+        ),
     )
     init_timeout_seconds: int = Field(
         default=15,
@@ -748,6 +763,28 @@ class MCPServerConfig(BaseModel):
         ge=1,
         description="工具调用超时时间（秒）",
     )
+
+    @model_validator(mode="after")
+    def _validate_location_attach(self) -> "MCPServerConfig":
+        loc = self.location
+        attach = self.attach_on
+        # remote 默认 attach_on=remote_use（若调用方仍写了 boot 则报错）
+        if loc == "remote" and attach == "boot":
+            # Allow implicit default from model: if user omitted attach_on and
+            # pydantic filled "boot", rewrite to remote_use for remote servers.
+            object.__setattr__(self, "attach_on", "remote_use")
+            attach = "remote_use"
+        if loc == "local" and attach == "remote_use":
+            raise ValueError(
+                f"MCP server {self.name!r}: location=local 不能使用 attach_on=remote_use"
+            )
+        if loc == "remote" and attach == "boot":
+            raise ValueError(
+                f"MCP server {self.name!r}: location=remote 不能使用 attach_on=boot"
+            )
+        if loc == "local" and not (self.command or "").strip():
+            raise ValueError(f"MCP server {self.name!r}: location=local 时 command 必填")
+        return self
 
 
 class MCPConfig(BaseModel):

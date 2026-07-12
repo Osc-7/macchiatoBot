@@ -63,6 +63,41 @@ uv tool install -e packages/macchiato-remote
 A worker-only machine does not need `config/config.yaml`, `.env`, Feishu config,
 LLM keys, or the automation daemon.
 
+## Remote MCP (protocol v3 / macchiato-remote>=0.2.7)
+
+After `/remote-use`, the daemon can attach MCP servers declared with
+`location: remote`. Processes run on the worker; the agent calls them like normal
+tools.
+
+1. Install MCP extras on the worker: `uv tool install 'macchiato-remote[mcp]==0.2.7'`
+2. Write `{workspace}/.macchiato/mcp.yaml` (an empty template is created on open):
+
+```yaml
+mcp:
+  servers:
+    - name: local_chrome
+      enabled: true
+      command: npx
+      args: ["-y", "chrome-devtools-mcp@latest"]
+```
+
+3. Declare the same name on the daemon:
+
+```yaml
+mcp:
+  servers:
+    - name: local_chrome
+      location: remote
+      attach_on: remote_use
+      enabled: true
+      tool_name_prefix: chrome
+```
+
+4. `/remote-use` auto-attaches `attach_on: remote_use` servers; manage with
+   `/mcp list|attach|detach|reload`.
+5. Remote login is still the existing worker token. `env` is optional and only
+   needed when that MCP process itself requires an API key.
+
 ## Configure A Login
 
 Choose a stable login alias such as `personal`, `work-mbp`, or `studio-linux`.

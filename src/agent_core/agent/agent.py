@@ -396,6 +396,8 @@ class AgentCore:
         self._defer_mcp_connect = defer_mcp_connect
         # 为 True 表示 MCP 已由“连接所在任务”关闭（用于 daemon 后台任务同任务 close，避免 anyio 跨任务 exit）
         self._mcp_closed_by_owner = False
+        # server_name -> local tool names attached via overlay / boot MCP
+        self._mcp_overlay_tools: Dict[str, set] = {}
 
         # 持久化 Bash 会话（在 __aenter__ 中启动，与 search_tools/call_tool 同为 Core 自注册 meta tool）
         self._bash: Optional["BashRuntime"] = None
@@ -2696,6 +2698,17 @@ class AgentCore:
         cat = self._tool_catalog
         if cat is not None and cat is not self._tool_registry:
             cat.update_tools(cast(List[BaseTool], proxy_tools))
+        overlay = getattr(self, "_mcp_overlay_tools", None)
+        if overlay is None:
+            self._mcp_overlay_tools = {}
+            overlay = self._mcp_overlay_tools
+        for tool in proxy_tools:
+            server_name = getattr(tool, "server_name", None) or getattr(
+                tool, "_server_name", None
+            )
+            if not server_name:
+                continue
+            overlay.setdefault(str(server_name), set()).add(tool.name)
 
     def _build_runtime_mcp_servers(
         self, servers: List[MCPServerConfig]

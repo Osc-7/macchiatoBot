@@ -83,63 +83,84 @@ class MCPClientManager:
         for server in self._config.servers:
             if not server.enabled:
                 continue
+            if getattr(server, "location", "local") != "local":
+                continue
+            if getattr(server, "attach_on", "boot") != "boot":
+                continue
             if server.transport != "stdio":
                 continue
-
-            if should_pool_stdio_server(server):
-                pooled = await pool.acquire(server)
-                if pooled is None:
-                    continue
-                pool_key, runtime, tool_metas = pooled
-                self._servers[server.name] = runtime
-                self._pool_key_by_server[server.name] = pool_key
-                self._pooled_release_keys.append(pool_key)
-
-                for remote_name, description, input_schema in tool_metas:
-                    local_prefix = server.tool_name_prefix or server.name
-                    local_name = self._alloc_proxy_local_name(
-                        str(local_prefix), str(remote_name)
-                    )
-
-                    self._proxy_tools.append(
-                        MCPProxyTool(
-                            manager=self,
-                            local_name=local_name,
-                            server_name=server.name,
-                            remote_name=remote_name,
-                            description=description,
-                            input_schema=input_schema,
-                        )
-                    )
+            if not (server.command or "").strip():
                 continue
 
-            connected = await connect_stdio_mcp_with_retries(server)
-            if connected is None:
-                continue
-            attempt_stack, runtime = connected
+            await self._connect_one_server(server, pool=pool)
+
+        self._connected = True
+        if self._servers:
+            logger.info(
+                "MCP connect done: %d server(s) ready, %d tool(s)",
+                len(self._servers),
+                len(self._proxy_tools),
+            )
+        else:
+            logger.warning("MCP connect done: no servers available (all failed or disabled)")
+
+    async def connect_server(self, server_name: str) -> List[MCPProxyTool]:
+        """Incrementally connect one local MCP server and return new proxy tools."""
+        name = (server_name or "").strip()
+        server = next((s for s in self._config.servers if s.name == name), None)
+        if server is None:
+            raise ValueError(f"未知 MCP server: {name}")
+        if getattr(server, "location", "local") != "local":
+            raise ValueError(f"MCP server {name} 不是 location=local，不能本机 connect_server")
+        if not server.enabled:
+            raise ValueError(f"MCP server {name} 未启用")
+        if name in self._servers:
+            return self.get_proxy_tools_for(name)
+
+        try:
+            from mcp import ClientSession, StdioServerParameters  # noqa: F401
+            from mcp.client.stdio import stdio_client  # noqa: F401
+        except ImportError as e:
+            raise RuntimeError(
+                "未安装 mcp 依赖，请先执行: source init.sh（或 uv sync --all-groups）"
+            ) from e
+
+        before = {t.name for t in self._proxy_tools}
+        await self._connect_one_server(server, pool=get_shared_mcp_pool())
+        self._connected = True
+        return [t for t in self._proxy_tools if t.name not in before]
+
+    async def disconnect_server(self, server_name: str) -> List[str]:
+        """Disconnect one local MCP server and remove its proxy tools."""
+        name = (server_name or "").strip()
+        removed = [t.name for t in self._proxy_tools if t.server_name == name]
+        self._proxy_tools = [t for t in self._proxy_tools if t.server_name != name]
+        pool_key = self._pool_key_by_server.pop(name, None)
+        if pool_key:
+            if pool_key in self._pooled_release_keys:
+                self._pooled_release_keys.remove(pool_key)
+            await get_shared_mcp_pool().release(pool_key)
+        self._servers.pop(name, None)
+        # Non-pooled stacks are closed only on full close(); per-server stack
+        # tracking would require richer bookkeeping. Exclusive servers stay in
+        # _server_stacks until manager.close().
+        return removed
+
+    def get_proxy_tools_for(self, server_name: str) -> List[MCPProxyTool]:
+        name = (server_name or "").strip()
+        return [t for t in self._proxy_tools if t.server_name == name]
+
+    async def _connect_one_server(self, server: MCPServerConfig, *, pool: Any) -> None:
+        if should_pool_stdio_server(server):
+            pooled = await pool.acquire(server)
+            if pooled is None:
+                return
+            pool_key, runtime, tool_metas = pooled
             self._servers[server.name] = runtime
+            self._pool_key_by_server[server.name] = pool_key
+            self._pooled_release_keys.append(pool_key)
 
-            try:
-                tool_resp = await asyncio.wait_for(
-                    runtime.session.list_tools(),
-                    timeout=server.init_timeout_seconds,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "MCP server %s list_tools failed (skipping): %s (%s)",
-                    server.name,
-                    type(exc).__name__,
-                    exc,
-                )
-                await attempt_stack.aclose()
-                del self._servers[server.name]
-                continue
-
-            tools = getattr(tool_resp, "tools", []) or []
-            for tool in tools:
-                remote_name = getattr(tool, "name", "")
-                if not remote_name:
-                    continue
+            for remote_name, description, input_schema in tool_metas:
                 local_prefix = server.tool_name_prefix or server.name
                 local_name = self._alloc_proxy_local_name(
                     str(local_prefix), str(remote_name)
@@ -151,24 +172,58 @@ class MCPClientManager:
                         local_name=local_name,
                         server_name=server.name,
                         remote_name=remote_name,
-                        description=getattr(tool, "description", "") or "MCP 远程工具",
-                        input_schema=getattr(tool, "inputSchema", None)
-                        or getattr(tool, "input_schema", None)
-                        or {"type": "object", "properties": {}},
+                        description=description,
+                        input_schema=input_schema,
                     )
                 )
+            return
 
-            self._server_stacks.append(attempt_stack)
+        connected = await connect_stdio_mcp_with_retries(server)
+        if connected is None:
+            return
+        attempt_stack, runtime = connected
+        self._servers[server.name] = runtime
 
-        self._connected = True
-        if self._servers:
-            logger.info(
-                "MCP connect done: %d server(s) ready, %d tool(s)",
-                len(self._servers),
-                len(self._proxy_tools),
+        try:
+            tool_resp = await asyncio.wait_for(
+                runtime.session.list_tools(),
+                timeout=server.init_timeout_seconds,
             )
-        else:
-            logger.warning("MCP connect done: no servers available (all failed or disabled)")
+        except Exception as exc:
+            logger.warning(
+                "MCP server %s list_tools failed (skipping): %s (%s)",
+                server.name,
+                type(exc).__name__,
+                exc,
+            )
+            await attempt_stack.aclose()
+            del self._servers[server.name]
+            return
+
+        tools = getattr(tool_resp, "tools", []) or []
+        for tool in tools:
+            remote_name = getattr(tool, "name", "")
+            if not remote_name:
+                continue
+            local_prefix = server.tool_name_prefix or server.name
+            local_name = self._alloc_proxy_local_name(
+                str(local_prefix), str(remote_name)
+            )
+
+            self._proxy_tools.append(
+                MCPProxyTool(
+                    manager=self,
+                    local_name=local_name,
+                    server_name=server.name,
+                    remote_name=remote_name,
+                    description=getattr(tool, "description", "") or "MCP 远程工具",
+                    input_schema=getattr(tool, "inputSchema", None)
+                    or getattr(tool, "input_schema", None)
+                    or {"type": "object", "properties": {}},
+                )
+            )
+
+        self._server_stacks.append(attempt_stack)
 
     def get_proxy_tools(self) -> List[MCPProxyTool]:
         """获取已构建的 MCP 代理工具列表。"""

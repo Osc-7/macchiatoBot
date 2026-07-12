@@ -1428,6 +1428,33 @@ class CorePool:
         entry.agent._user_id = user_id
         entry.agent._core_profile = profile
         entry.profile = profile
+        # Preserve / re-apply MCP overlay tools after registry rebuild.
+        try:
+            old_overlay = getattr(entry.agent, "_mcp_overlay_tools", None) or {}
+            entry.agent._mcp_overlay_tools = {
+                k: set(v) for k, v in old_overlay.items()
+            }
+            manager = getattr(entry.agent, "_mcp_manager", None)
+            if manager is not None:
+                proxies = manager.get_proxy_tools()
+                if proxies:
+                    entry.agent._apply_mcp_proxy_tools(list(proxies))
+            from agent_core.remote.workspace_state import get_remote_workspace_state
+            from agent_core.mcp.session_overlay import get_mcp_session_overlay
+
+            sid = next(
+                (k for k, e in self._pool.items() if e is entry),
+                "",
+            )
+            if sid and get_remote_workspace_state(sid) is not None:
+                await get_mcp_session_overlay().attach_defaults_for_remote_use(
+                    entry.agent, session_id=sid
+                )
+        except Exception:
+            logger.debug(
+                "CorePool: mcp overlay restore skipped",
+                exc_info=True,
+            )
         entry.touch()
         logger.info(
             "CorePool: hot-updated profile for session %s (mode=%s)",

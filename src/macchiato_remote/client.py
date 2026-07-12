@@ -31,6 +31,16 @@ from macchiato_remote.protocol import (
     RemoteJobStopResult,
     RemoteJobTailRequest,
     RemoteJobTailResult,
+    RemoteMcpCallToolRequest,
+    RemoteMcpCallToolResult,
+    RemoteMcpEnsureRequest,
+    RemoteMcpEnsureResult,
+    RemoteMcpListToolsRequest,
+    RemoteMcpListToolsResult,
+    RemoteMcpServerStatus,
+    RemoteMcpShutdownRequest,
+    RemoteMcpShutdownResult,
+    RemoteMcpToolMeta,
     RemoteShellCaptureRequest,
     RemoteShellCaptureResult,
     RemoteShellResetRequest,
@@ -46,6 +56,7 @@ from macchiato_remote.runtime.files import (
     write_workspace_text,
 )
 from macchiato_remote.runtime.jobs import RemoteJobRegistry
+from macchiato_remote.runtime.mcp_host import RemoteMcpHost
 from macchiato_remote.runtime.shell import LocalShellConfig, LocalShellSession
 
 
@@ -197,6 +208,7 @@ class RemoteWorkerClient:
         self.shell_path = shell_path
         self._sessions: Dict[str, LocalShellSession] = {}
         self._jobs = RemoteJobRegistry()
+        self._mcp_host = RemoteMcpHost()
 
     async def run_forever(self) -> None:
         try:
@@ -371,6 +383,22 @@ class RemoteWorkerClient:
             req = RemoteJobStopRequest.model_validate(payload)
             result = await self._job_stop(req)
             return {"type": "job_stop_result", "result": result.model_dump()}
+        if msg_type == "mcp_ensure":
+            req = RemoteMcpEnsureRequest.model_validate(payload)
+            result = await self._mcp_ensure(req)
+            return {"type": "mcp_ensure_result", "result": result.model_dump()}
+        if msg_type == "mcp_list_tools":
+            req = RemoteMcpListToolsRequest.model_validate(payload)
+            result = await self._mcp_list_tools(req)
+            return {"type": "mcp_list_tools_result", "result": result.model_dump()}
+        if msg_type == "mcp_call_tool":
+            req = RemoteMcpCallToolRequest.model_validate(payload)
+            result = await self._mcp_call_tool(req)
+            return {"type": "mcp_call_tool_result", "result": result.model_dump()}
+        if msg_type == "mcp_shutdown":
+            req = RemoteMcpShutdownRequest.model_validate(payload)
+            result = await self._mcp_shutdown(req)
+            return {"type": "mcp_shutdown_result", "result": result.model_dump()}
         return None
 
     async def _open_workspace(
@@ -395,6 +423,7 @@ class RemoteWorkerClient:
             await session.start()
             self._sessions[req.session_id] = session
             self._jobs.open_session(req.session_id, root)
+            self._mcp_host.bind_workspace(req.session_id, root)
             try:
                 from macchiato_remote.runtime.macchiato_dir import ensure_macchiato_layout
 
@@ -425,6 +454,10 @@ class RemoteWorkerClient:
     async def _close_workspace(
         self, req: RemoteWorkspaceCloseRequest
     ) -> RemoteWorkspaceCloseResult:
+        try:
+            await self._mcp_host.shutdown(req.session_id)
+        except Exception:
+            pass
         session = self._sessions.pop(req.session_id, None)
         if session is not None:
             await session.close()
@@ -435,6 +468,69 @@ class RemoteWorkerClient:
             success=True,
             message="远程工作区已关闭",
         )
+
+    async def _mcp_ensure(self, req: RemoteMcpEnsureRequest) -> RemoteMcpEnsureResult:
+        names = [s.name for s in req.servers]
+        rows = await self._mcp_host.ensure(req.session_id, names)
+        return RemoteMcpEnsureResult(
+            request_id=req.request_id,
+            servers=[
+                RemoteMcpServerStatus(
+                    name=str(r.get("name") or ""),
+                    ok=bool(r.get("ok")),
+                    error=r.get("error"),
+                )
+                for r in rows
+            ],
+        )
+
+    async def _mcp_list_tools(
+        self, req: RemoteMcpListToolsRequest
+    ) -> RemoteMcpListToolsResult:
+        data = await self._mcp_host.list_tools(
+            req.session_id, req.server_name, refresh=bool(req.refresh)
+        )
+        tools = [
+            RemoteMcpToolMeta(
+                name=str(t.get("name") or ""),
+                description=str(t.get("description") or ""),
+                input_schema=t.get("input_schema")
+                if isinstance(t.get("input_schema"), dict)
+                else {},
+            )
+            for t in (data.get("tools") or [])
+            if isinstance(t, dict)
+        ]
+        return RemoteMcpListToolsResult(
+            request_id=req.request_id,
+            server_name=req.server_name,
+            tools=tools,
+            error=data.get("error"),
+        )
+
+    async def _mcp_call_tool(
+        self, req: RemoteMcpCallToolRequest
+    ) -> RemoteMcpCallToolResult:
+        data = await self._mcp_host.call_tool(
+            req.session_id,
+            req.server_name,
+            req.tool_name,
+            req.arguments,
+            timeout_seconds=req.timeout_seconds,
+        )
+        return RemoteMcpCallToolResult(
+            request_id=req.request_id,
+            is_error=bool(data.get("is_error")),
+            content=list(data.get("content") or []),
+            structured_content=data.get("structured_content"),
+            error=data.get("error"),
+        )
+
+    async def _mcp_shutdown(
+        self, req: RemoteMcpShutdownRequest
+    ) -> RemoteMcpShutdownResult:
+        closed = await self._mcp_host.shutdown(req.session_id, req.server_name)
+        return RemoteMcpShutdownResult(request_id=req.request_id, closed=closed)
 
     async def _execute(self, req: RemoteCommandRequest):
         session = self._sessions.get(req.session_id)

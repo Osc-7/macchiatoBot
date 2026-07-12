@@ -574,6 +574,33 @@ class AutomationIPCServer:
         if method == "remote_workspace_release":
             return await self._gateway.remote_workspace_release(active_session)
 
+        if method == "mcp_list":
+            return await self._gateway.mcp_list(active_session)
+
+        if method == "mcp_attach":
+            server_name = str(params.get("server_name") or "").strip()
+            if not server_name:
+                raise ValueError("server_name 不能为空")
+            return await self._gateway.mcp_attach(
+                server_name=server_name, session_id=active_session
+            )
+
+        if method == "mcp_detach":
+            server_name = str(params.get("server_name") or "").strip()
+            if not server_name:
+                raise ValueError("server_name 不能为空")
+            return await self._gateway.mcp_detach(
+                server_name=server_name, session_id=active_session
+            )
+
+        if method == "mcp_reload":
+            server_name = str(params.get("server_name") or "").strip()
+            if not server_name:
+                raise ValueError("server_name 不能为空")
+            return await self._gateway.mcp_reload(
+                server_name=server_name, session_id=active_session
+            )
+
         if method == "session_set_dangerous_mode":
             enabled = bool(params.get("enabled", False))
             return await self._gateway.set_dangerous_mode(
@@ -1045,6 +1072,18 @@ class AutomationIPCClient:
     async def remote_workspace_release(self) -> Dict[str, Any]:
         """Release remote workspace mode for the current daemon session."""
         return await self._request("remote_workspace_release", {})
+
+    async def mcp_list(self) -> Dict[str, Any]:
+        return await self._request("mcp_list", {})
+
+    async def mcp_attach(self, *, server_name: str) -> Dict[str, Any]:
+        return await self._request("mcp_attach", {"server_name": server_name})
+
+    async def mcp_detach(self, *, server_name: str) -> Dict[str, Any]:
+        return await self._request("mcp_detach", {"server_name": server_name})
+
+    async def mcp_reload(self, *, server_name: str) -> Dict[str, Any]:
+        return await self._request("mcp_reload", {"server_name": server_name})
 
     async def set_dangerous_mode(self, *, enabled: bool) -> Dict[str, Any]:
         """Enable/disable dangerous approval-bypass mode for active session."""

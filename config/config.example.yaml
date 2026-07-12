@@ -239,6 +239,8 @@ mcp:
   servers:
     # Tavily: set TAVILY_API_KEY in .env, then enable this server.
     - name: "tavily"
+      location: local          # local | remote
+      attach_on: boot          # boot | manual | remote_use
       enabled: false
       transport: "stdio"
       command: "npx"
@@ -250,6 +252,13 @@ mcp:
       tool_name_prefix: "tavily"
       init_timeout_seconds: 20
       call_timeout_seconds: 45
+    # Remote example: declare name only; worker starts process from
+    # {workspace}/.macchiato/mcp.yaml with the same name after /remote-use.
+    # - name: "local_chrome"
+    #   location: remote
+    #   attach_on: remote_use
+    #   enabled: true
+    #   tool_name_prefix: "chrome"
 
 skills:
   enabled: []  # empty lists all skills under cli_dir; non-empty filters the index

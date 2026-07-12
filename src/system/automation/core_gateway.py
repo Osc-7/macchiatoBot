@@ -999,9 +999,9 @@ class AutomationCoreGateway:
             skill_count = sum(
                 1 for line in idx.splitlines() if line.strip().startswith("- **")
             )
-        notice = format_remote_workspace_switch_notice(
-            state, reason="activated", skill_count=skill_count
-        )
+
+        agent = None
+        mcp_line = None
         try:
             agent = await self._kernel_scheduler.core_pool.acquire(
                 sid,
@@ -1010,6 +1010,35 @@ class AutomationCoreGateway:
                 create_if_missing=True,
                 profile=None,
             )
+            from agent_core.remote.mcp_lifecycle import (
+                after_remote_workspace_activated,
+                format_remote_mcp_notice_line,
+            )
+
+            mcp_rows = await after_remote_workspace_activated(agent, session_id=sid)
+            mcp_line = format_remote_mcp_notice_line(mcp_rows) or None
+        except Exception:
+            logger.warning(
+                "remote workspace mcp attach failed session_id=%s",
+                sid,
+                exc_info=True,
+            )
+
+        notice = format_remote_workspace_switch_notice(
+            state,
+            reason="activated",
+            skill_count=skill_count,
+            mcp_line=mcp_line,
+        )
+        try:
+            if agent is None:
+                agent = await self._kernel_scheduler.core_pool.acquire(
+                    sid,
+                    source=self._source,
+                    user_id=self._owner_id,
+                    create_if_missing=True,
+                    profile=None,
+                )
             append_workspace_switch_notice(agent, notice, persist=True)
         except Exception:
             logger.warning(
@@ -1043,6 +1072,21 @@ class AutomationCoreGateway:
         )
 
         sid = session_id or self._active_session_id
+        agent = None
+        try:
+            agent = await self._kernel_scheduler.core_pool.acquire(
+                sid,
+                source=self._source,
+                user_id=self._owner_id,
+                create_if_missing=False,
+                profile=None,
+            )
+        except Exception:
+            agent = None
+        from agent_core.remote.mcp_lifecycle import before_remote_workspace_released
+
+        await before_remote_workspace_released(agent, session_id=sid)
+
         old = release_remote_workspace(sid)
         if old is not None:
             try:
@@ -1059,13 +1103,14 @@ class AutomationCoreGateway:
                 )
             notice = format_local_workspace_switch_notice(previous=old)
             try:
-                agent = await self._kernel_scheduler.core_pool.acquire(
-                    sid,
-                    source=self._source,
-                    user_id=self._owner_id,
-                    create_if_missing=True,
-                    profile=None,
-                )
+                if agent is None:
+                    agent = await self._kernel_scheduler.core_pool.acquire(
+                        sid,
+                        source=self._source,
+                        user_id=self._owner_id,
+                        create_if_missing=True,
+                        profile=None,
+                    )
                 append_workspace_switch_notice(agent, notice, persist=True)
             except Exception:
                 logger.warning(
@@ -1077,6 +1122,111 @@ class AutomationCoreGateway:
         return {
             "released": old is not None,
             "state": old.model_dump() if old is not None else None,
+        }
+
+    async def mcp_list(self, session_id: Optional[str] = None) -> Dict[str, Any]:
+        from agent_core.mcp.session_overlay import get_mcp_session_overlay
+
+        sid = session_id or self._active_session_id
+        agent = await self._kernel_scheduler.core_pool.acquire(
+            sid,
+            source=self._source,
+            user_id=self._owner_id,
+            create_if_missing=True,
+            profile=None,
+        )
+        rows = get_mcp_session_overlay().list_declared(agent)
+        return {
+            "servers": [
+                {
+                    "name": r.name,
+                    "location": r.location,
+                    "attach_on": r.attach_on,
+                    "attached": r.attached,
+                    "tool_count": len(r.tool_names),
+                    "tool_names": list(r.tool_names),
+                    "error": r.error,
+                }
+                for r in rows
+            ]
+        }
+
+    async def mcp_attach(
+        self, *, server_name: str, session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        from agent_core.mcp.session_overlay import get_mcp_session_overlay
+
+        sid = session_id or self._active_session_id
+        name = (server_name or "").strip()
+        if not name:
+            raise ValueError("server_name 不能为空")
+        agent = await self._kernel_scheduler.core_pool.acquire(
+            sid,
+            source=self._source,
+            user_id=self._owner_id,
+            create_if_missing=True,
+            profile=None,
+        )
+        row = await get_mcp_session_overlay().attach(
+            agent, name, session_id=sid
+        )
+        return {
+            "ok": bool(row.attached) and not row.error,
+            "server_name": row.name,
+            "attached_tools": list(row.tool_names),
+            "error": row.error,
+        }
+
+    async def mcp_detach(
+        self, *, server_name: str, session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        from agent_core.mcp.session_overlay import get_mcp_session_overlay
+
+        sid = session_id or self._active_session_id
+        name = (server_name or "").strip()
+        if not name:
+            raise ValueError("server_name 不能为空")
+        agent = await self._kernel_scheduler.core_pool.acquire(
+            sid,
+            source=self._source,
+            user_id=self._owner_id,
+            create_if_missing=True,
+            profile=None,
+        )
+        row = await get_mcp_session_overlay().detach(
+            agent, name, session_id=sid
+        )
+        return {
+            "ok": not row.error,
+            "server_name": row.name,
+            "detached_tools": list(row.tool_names),
+            "error": row.error,
+        }
+
+    async def mcp_reload(
+        self, *, server_name: str, session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        from agent_core.mcp.session_overlay import get_mcp_session_overlay
+
+        sid = session_id or self._active_session_id
+        name = (server_name or "").strip()
+        if not name:
+            raise ValueError("server_name 不能为空")
+        agent = await self._kernel_scheduler.core_pool.acquire(
+            sid,
+            source=self._source,
+            user_id=self._owner_id,
+            create_if_missing=True,
+            profile=None,
+        )
+        row = await get_mcp_session_overlay().reload(
+            agent, name, session_id=sid
+        )
+        return {
+            "ok": bool(row.attached) and not row.error,
+            "server_name": row.name,
+            "attached_tools": list(row.tool_names),
+            "error": row.error,
         }
 
     async def delete_session(self, session_id: str) -> bool:

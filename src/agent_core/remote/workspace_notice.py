@@ -14,12 +14,17 @@ def _remote_workspace_body(
     state: RemoteWorkspaceState,
     *,
     skill_count: Optional[int] = None,
+    mcp_line: Optional[str] = None,
 ) -> str:
     """Shared remote workspace detail block (login / path / notes)."""
     device = state.device_label or state.login
     skill_line = ""
     if skill_count is not None:
         skill_line = f"\n已扫描技能数: {int(skill_count)}"
+
+    mcp_extra = ""
+    if mcp_line:
+        mcp_extra = f"\n{mcp_line.strip()}"
 
     ttl_line = ""
     if state.expires_at is not None:
@@ -33,12 +38,12 @@ def _remote_workspace_body(
 远程机器: {device}
 权限档位: {state.profile}
 逻辑挂载: {state.workspace_mount}
-授权目录: {state.display_remote_path}{ttl_line}{skill_line}
+授权目录: {state.display_remote_path}{ttl_line}{skill_line}{mcp_extra}
 
 说明:
 - bash / 文件工具 / load_skill 现在作用在上述远程工作区，不是云服务器本机目录。
 - 相对路径、~、{state.workspace_mount} 都指向该远程授权目录。
-- 工作文件写 `.macchiato/`（journal / rules / skills / scratch / jobs）。
+- 工作文件写 `.macchiato/`（journal / rules / skills / scratch / jobs / mcp.yaml）。
 - 技能查找: `.macchiato/skills` → `.agents/skills`（同名前者优先）。
 - 长期记忆 MEMORY.md 仍在 daemon 侧；不要把设备路径写成跨设备全局偏好。
 - 访问工作区外路径需用户授权（/remote-grant、/remote-elevate）。""".strip()
@@ -49,6 +54,7 @@ def format_remote_workspace_switch_notice(
     *,
     reason: str = "activated",
     skill_count: Optional[int] = None,
+    mcp_line: Optional[str] = None,
 ) -> str:
     """Human/agent-facing notice written into conversation history (not system).
 
@@ -56,7 +62,9 @@ def format_remote_workspace_switch_notice(
     - reinjected (e.g. after compress) → ``[工作区]``，只陈述当前位置，不提压缩
     """
     reason_s = (reason or "activated").strip() or "activated"
-    body = _remote_workspace_body(state, skill_count=skill_count)
+    body = _remote_workspace_body(
+        state, skill_count=skill_count, mcp_line=mcp_line
+    )
 
     if reason_s == "reinjected":
         return f"""{WORKSPACE_STATUS_PREFIX}

@@ -376,6 +376,28 @@ async def _run_subagent_task(
                 login=parent_remote.login,
                 enabled=list(getattr(config.skills, "enabled", None) or []),
             )
+            mcp_line = None
+            try:
+                from agent_core.remote.mcp_lifecycle import (
+                    after_remote_workspace_activated,
+                    format_remote_mcp_notice_line,
+                )
+
+                sub_agent = await core_pool.acquire(
+                    sub_session_id,
+                    source=parent_source or "subagent",
+                    user_id=parent_user_id or "default",
+                    create_if_missing=True,
+                    profile=profile,
+                )
+                mcp_rows = await after_remote_workspace_activated(
+                    sub_agent, session_id=sub_session_id
+                )
+                mcp_line = format_remote_mcp_notice_line(mcp_rows) or None
+            except Exception as mcp_exc:
+                logger.debug(
+                    "subagent remote mcp attach skipped: %s", mcp_exc
+                )
             remote_bound = True
             logger.info(
                 "subagent remote workspace inherited subagent_id=%s parent_session_id=%s login=%s",
@@ -409,6 +431,7 @@ async def _run_subagent_task(
                         rw,
                         reason="inherited",
                         skill_count=skill_count,
+                        mcp_line=mcp_line,
                     )
                     task_text = f"{notice}\n\n{task_text}"
                     request = KernelRequest.create(
@@ -494,6 +517,24 @@ async def _run_subagent_task(
         core_pool.on_sub_fail(sub_session_id, str(exc))
     finally:
         if remote_bound:
+            try:
+                from agent_core.remote.mcp_lifecycle import (
+                    before_remote_workspace_released,
+                )
+
+                sub_agent = None
+                entry = core_pool.get_entry(sub_session_id)
+                if entry is not None:
+                    sub_agent = entry.agent
+                await before_remote_workspace_released(
+                    sub_agent, session_id=sub_session_id
+                )
+            except Exception:
+                logger.debug(
+                    "subagent remote mcp detach skipped session=%s",
+                    sub_session_id,
+                    exc_info=True,
+                )
             released = release_remote_workspace(sub_session_id)
             if released is not None:
                 try:

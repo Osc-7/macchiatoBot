@@ -36,6 +36,7 @@ class RemoteWorkerConnection:
     login: str
     send_json: SendJson
     pending: Dict[str, asyncio.Future[Dict[str, Any]]] = field(default_factory=dict)
+    hello_meta: Dict[str, Any] = field(default_factory=dict)
 
     async def request(
         self,
@@ -427,6 +428,119 @@ class RemoteWorkerRegistry:
             timeout_seconds=10.0,
         )
         return RemoteJobStopResult.model_validate(payload)
+
+    async def mcp_ensure(
+        self,
+        *,
+        login: str,
+        session_id: str,
+        servers: list[str],
+        timeout_seconds: float = 60.0,
+    ):
+        from macchiato_remote.protocol import (
+            RemoteMcpEnsureRequest,
+            RemoteMcpEnsureResult,
+            RemoteMcpServerRef,
+        )
+
+        conn = await self.require(login)
+        req = RemoteMcpEnsureRequest(
+            request_id=uuid.uuid4().hex,
+            session_id=session_id,
+            servers=[RemoteMcpServerRef(name=n) for n in servers],
+        )
+        payload = await conn.request(
+            "mcp_ensure",
+            req.model_dump(),
+            timeout_seconds=timeout_seconds,
+        )
+        return RemoteMcpEnsureResult.model_validate(payload)
+
+    async def mcp_list_tools(
+        self,
+        *,
+        login: str,
+        session_id: str,
+        server_name: str,
+        refresh: bool = False,
+        timeout_seconds: float = 60.0,
+    ):
+        from macchiato_remote.protocol import (
+            RemoteMcpListToolsRequest,
+            RemoteMcpListToolsResult,
+        )
+
+        conn = await self.require(login)
+        req = RemoteMcpListToolsRequest(
+            request_id=uuid.uuid4().hex,
+            session_id=session_id,
+            server_name=server_name,
+            refresh=refresh,
+        )
+        payload = await conn.request(
+            "mcp_list_tools",
+            req.model_dump(),
+            timeout_seconds=timeout_seconds,
+        )
+        return RemoteMcpListToolsResult.model_validate(payload)
+
+    async def mcp_call_tool(
+        self,
+        *,
+        login: str,
+        session_id: str,
+        server_name: str,
+        tool_name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        timeout_seconds: Optional[float] = None,
+    ):
+        from macchiato_remote.protocol import (
+            RemoteMcpCallToolRequest,
+            RemoteMcpCallToolResult,
+        )
+
+        conn = await self.require(login)
+        timeout = float(timeout_seconds) if timeout_seconds is not None else 120.0
+        req = RemoteMcpCallToolRequest(
+            request_id=uuid.uuid4().hex,
+            session_id=session_id,
+            server_name=server_name,
+            tool_name=tool_name,
+            arguments=dict(arguments or {}),
+            timeout_seconds=timeout_seconds,
+        )
+        payload = await conn.request(
+            "mcp_call_tool",
+            req.model_dump(),
+            timeout_seconds=timeout + 5.0,
+        )
+        return RemoteMcpCallToolResult.model_validate(payload)
+
+    async def mcp_shutdown(
+        self,
+        *,
+        login: str,
+        session_id: str,
+        server_name: Optional[str] = None,
+        timeout_seconds: float = 30.0,
+    ):
+        from macchiato_remote.protocol import (
+            RemoteMcpShutdownRequest,
+            RemoteMcpShutdownResult,
+        )
+
+        conn = await self.require(login)
+        req = RemoteMcpShutdownRequest(
+            request_id=uuid.uuid4().hex,
+            session_id=session_id,
+            server_name=server_name,
+        )
+        payload = await conn.request(
+            "mcp_shutdown",
+            req.model_dump(),
+            timeout_seconds=timeout_seconds,
+        )
+        return RemoteMcpShutdownResult.model_validate(payload)
 
 
 _REGISTRY = RemoteWorkerRegistry()

@@ -102,3 +102,24 @@ def test_resolve_memory_doc_path_soul(minimal_config):
     assert err is None
     assert path is not None
     assert path.name == "soul.md"
+
+
+@pytest.mark.asyncio
+async def test_memory_search_finds_legacy_content_dir():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        owner = Path(tmpdir) / "cli" / "root"
+        legacy_content = owner / "content" / "notes"
+        legacy_content.mkdir(parents=True)
+        (legacy_content / "api-notes.md").write_text(
+            "JWT 认证与 API 网关配置说明", encoding="utf-8"
+        )
+        corpus = MemoryCorpus(owner / "corpus")
+        search = MemorySearchTool(corpus, top_n=5)
+
+        result = await search.execute(query="JWT 认证")
+        assert result.success
+        assert result.data["results"]
+        assert any(
+            hit.get("source") == "legacy" and "JWT" in hit.get("snippet", "")
+            for hit in result.data["results"]
+        )

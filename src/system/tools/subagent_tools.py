@@ -82,14 +82,9 @@ def _resolve_parent_identity(
         uid = str(getattr(entry.agent, "_user_id", "") or "").strip()
         if src:
             return src, uid or "root"
-    sid = (parent_session_id or "").strip()
-    if sid.startswith("feishu:"):
-        return "feishu", sid[7:]
-    if ":" in sid:
-        prefix, rest = sid.split(":", 1)
-        p, r = prefix.strip(), rest.strip()
-        return p or "cli", r or "root"
-    return "cli", "root"
+    from system.kernel.scheduler import _infer_memory_owner_from_session_id
+
+    return _infer_memory_owner_from_session_id(parent_session_id)
 
 
 def _inherit_tool_policy_from_parent(
@@ -288,6 +283,7 @@ async def _run_subagent_task(
             tools_config=getattr(config, "tools", None),
         )
         if parent_prof is not None:
+            profile.deny_tools = list(parent_prof.deny_tools or [])
             profile.approval_bypass_enabled = bool(
                 parent_prof.approval_bypass_enabled
             )

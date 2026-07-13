@@ -933,6 +933,61 @@ class TestSubagentInheritParentPermissions:
         assert perm_mode == "full"
         assert memory_owner == "feishu:ou_test"
 
+    def test_resolve_parent_identity_canonical_feishu_session(self):
+        from system.kernel.core_pool import CoreEntry
+        from system.tools.subagent_tools import _resolve_parent_identity
+
+        pool, _ = _make_pool()
+        sid = "feishu:user:ou_canonical:1779373360"
+        pool._pool[sid] = CoreEntry(agent=None, profile=None)
+
+        source, user_id = _resolve_parent_identity(pool, sid)
+        assert source == "feishu"
+        assert user_id == "ou_canonical"
+
+    @pytest.mark.asyncio
+    async def test_explicit_allowed_tools_inherits_parent_deny_tools(self):
+        from agent_core.kernel_interface import CoreProfile
+        from system.kernel.core_pool import CoreEntry
+        from system.tools.subagent_tools import CreateSubagentTool
+
+        pool, scheduler = _make_pool()
+        parent_prof = CoreProfile.default_full(
+            frontend_id="feishu",
+            dialog_window_id="ou_test",
+        )
+        parent_prof.deny_tools = ["bash", "write_file"]
+        pool._pool["feishu:user:ou_test:1"] = CoreEntry(
+            agent=None, profile=parent_prof
+        )
+
+        captured_profiles: list = []
+
+        async def _capture_submit(request):
+            captured_profiles.append(request.profile)
+            return "req-1"
+
+        scheduler.submit = AsyncMock(side_effect=_capture_submit)
+        scheduler.wait_result = AsyncMock(
+            return_value=SimpleNamespace(output_text="done")
+        )
+
+        tool = CreateSubagentTool(core_pool=pool, scheduler=scheduler)
+        result = await tool.execute(
+            task="deny test",
+            allowed_tools=["read_file", "bash"],
+            __execution_context__={"session_id": "feishu:user:ou_test:1"},
+        )
+        assert result.success is True
+        await asyncio.sleep(0.05)
+
+        assert captured_profiles
+        sub_prof = captured_profiles[0]
+        assert "bash" in sub_prof.deny_tools
+        assert "write_file" in sub_prof.deny_tools
+        assert sub_prof.is_tool_allowed("bash") is False
+        assert sub_prof.is_tool_allowed("read_file") is True
+
 
 class TestCreateSubagentTool:
     @pytest.mark.asyncio

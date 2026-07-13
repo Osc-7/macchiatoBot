@@ -97,6 +97,74 @@ def register_wake(
     return wid
 
 
+def _remove_pending_wake(wake_id: str, session_id: Optional[str] = None) -> None:
+    """从暂存队列移除已取消的唤醒，避免 flush 时仍投递。"""
+    wid = str(wake_id or "").strip()
+    if not wid:
+        return
+    with _LOCK:
+        sid_filter = str(session_id or "").strip()
+        if sid_filter:
+            pending = _PENDING_BY_SESSION.get(sid_filter)
+            if pending is not None:
+                kept = [p for p in pending if str(p.get("wake_id") or "") != wid]
+                if kept:
+                    _PENDING_BY_SESSION[sid_filter] = kept
+                else:
+                    _PENDING_BY_SESSION.pop(sid_filter, None)
+            return
+        for sid, pending in list(_PENDING_BY_SESSION.items()):
+            kept = [p for p in pending if str(p.get("wake_id") or "") != wid]
+            if kept:
+                _PENDING_BY_SESSION[sid] = kept
+            else:
+                _PENDING_BY_SESSION.pop(sid, None)
+
+
+def _purge_pending_wakes_by_label(session_id: str, label: str) -> None:
+    """按 label 清除暂存队列中的唤醒（与 cancel_pending_wakes 配对）。"""
+    sid = str(session_id or "").strip()
+    lbl = str(label or "").strip()
+    if not sid or not lbl:
+        return
+    with _LOCK:
+        pending = _PENDING_BY_SESSION.get(sid)
+        if not pending:
+            return
+        kept = [
+            p
+            for p in pending
+            if str((p.get("wake") or {}).get("label") or "").strip() != lbl
+        ]
+        if kept:
+            _PENDING_BY_SESSION[sid] = kept
+        else:
+            _PENDING_BY_SESSION.pop(sid, None)
+
+
+def _wake_still_actionable(
+    wake: Dict[str, Any],
+    core_pool: Optional["CorePool"],
+) -> bool:
+    """唤醒是否仍应投递（未取消；goal-check 时目标状态仍需要续跑）。"""
+    wid = str(wake.get("wake_id") or "").strip()
+    if wid and _get_wake(wid) is None:
+        return False
+    label = str(wake.get("label") or "").strip()
+    if label != "goal-check":
+        return True
+    sid = str(wake.get("session_id") or "").strip()
+    if not sid or core_pool is None:
+        return True
+    entry = core_pool.get_entry(sid)
+    if entry is None or entry.agent is None:
+        return False
+    store = getattr(entry.agent, "_goal_store", None)
+    if store is None:
+        return False
+    return bool(store.should_auto_continue())
+
+
 def cancel_wake(wake_id: str) -> bool:
     wid = str(wake_id or "").strip()
     if not wid:
@@ -105,6 +173,7 @@ def cancel_wake(wake_id: str) -> bool:
         rec = _WAKES.pop(wid, None)
     if rec is None:
         return False
+    _remove_pending_wake(wid, rec.session_id)
     logger.info("agent_wake: cancelled wake_id=%s session=%s", wid, rec.session_id)
     _sync_feishu_push_watch_file()
     return True
@@ -163,6 +232,8 @@ def cancel_pending_wakes(
     for wid in to_cancel:
         if cancel_wake(wid):
             count += 1
+    if label is not None:
+        _purge_pending_wakes_by_label(sid, label)
     return count
 
 
@@ -369,9 +440,24 @@ def flush_pending_wakes_for_session(session_id: str) -> None:
         text = str(item.get("text") or "")
         wake = item.get("wake")
         wid = str(item.get("wake_id") or "")
+        wake_dict = (
+            wake
+            if isinstance(wake, dict)
+            else {"wake_id": wid, "session_id": sid}
+        )
+        if not _wake_still_actionable(wake_dict, core_pool):
+            if wid:
+                _mark_fired(wid)
+            logger.info(
+                "agent_wake: skip stale pending wake session=%s wake=%s label=%r",
+                sid,
+                wid or "?",
+                wake_dict.get("label"),
+            )
+            continue
         try:
             deliver_wake_via_inject(
-                wake=wake if isinstance(wake, dict) else {"wake_id": wid, "session_id": sid},
+                wake=wake_dict,
                 text=text,
                 scheduler=scheduler,
                 core_pool=core_pool,
@@ -430,6 +516,17 @@ def deliver_wake_via_inject(
             inflight = int(cnt_fn(sid))
         except (TypeError, ValueError):
             inflight = 0
+
+    if not _wake_still_actionable(wake, core_pool):
+        if wid:
+            _mark_fired(wid)
+        logger.info(
+            "agent_wake: skip stale wake session=%s wake=%s label=%r",
+            sid,
+            wid or "?",
+            wake.get("label"),
+        )
+        return False
 
     if inflight > 0:
         if wid:

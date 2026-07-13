@@ -187,3 +187,70 @@ def test_non_admin_chat_denies_foreign_session() -> None:
         json={"session_id": "web:admin", "text": "hello"},
     )
     assert denied.status_code == 403
+
+
+def test_filter_agent_tasks_for_non_admin() -> None:
+    from frontend.dashboard.server import DashboardBackend
+
+    backend = DashboardBackend()
+    data = {
+        "recent_tasks": [
+            {"session_id": "web:alice", "instruction": "alice task"},
+            {"session_id": "web:bob", "instruction": "bob secret"},
+        ]
+    }
+    filtered = backend._filter_agent_tasks_for_user(data, "alice")
+    assert len(filtered["recent_tasks"]) == 1
+    assert filtered["recent_tasks"][0]["session_id"] == "web:alice"
+
+
+def test_filter_queue_for_non_admin() -> None:
+    from frontend.dashboard.server import DashboardBackend
+
+    backend = DashboardBackend()
+    data = {
+        "inflight_sessions": {"web:alice": 1, "web:bob": 1},
+        "cancelled_sessions": ["web:alice", "web:bob"],
+    }
+    filtered = backend._filter_queue_for_user(data, "alice")
+    assert filtered["inflight_sessions"] == {"web:alice": 1}
+    assert filtered["cancelled_sessions"] == ["web:alice"]
+
+
+def test_non_admin_config_denied() -> None:
+    users = (
+        DashboardUser(username="admin", password="adminpass"),
+        DashboardUser(username="alice", password="alicepass"),
+    )
+    client = _client(users=users)
+    _login(client, "alice", "alicepass")
+
+    denied = client.get("/console/api/config")
+    assert denied.status_code == 403
+
+    put_denied = client.put(
+        "/console/api/config",
+        json={"yaml_text": "llm:\n  active: hacked\n"},
+    )
+    assert put_denied.status_code == 403
+
+
+def test_admin_config_allowed(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from frontend.dashboard.server import DashboardBackend
+
+    users = (
+        DashboardUser(username="admin", password="adminpass"),
+        DashboardUser(username="alice", password="alicepass"),
+    )
+    cfg = tmp_path / "config" / "config.yaml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("llm:\n  active: default\n", encoding="utf-8")
+    auth = DashboardAuth(_auth_config(users=users))
+    app = create_dashboard_app(backend=DashboardBackend(config_path=cfg), auth=auth)
+    client = TestClient(app)
+    _login(client, "admin", "adminpass")
+
+    resp = client.get("/console/api/config")
+    assert resp.status_code == 200

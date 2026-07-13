@@ -607,6 +607,44 @@ class DashboardBackend:
         prefix = self._web_session_prefix(username)
         return [c for c in cores if str(c.get("session_id") or "").startswith(prefix)]
 
+    def _filter_queue_for_user(
+        self, queue: dict[str, Any], username: str
+    ) -> dict[str, Any]:
+        if self._is_admin(username):
+            return dict(queue)
+        prefix = self._web_session_prefix(username)
+        filtered = dict(queue)
+        inflight = filtered.get("inflight_sessions") or {}
+        if isinstance(inflight, dict):
+            filtered["inflight_sessions"] = {
+                k: v
+                for k, v in inflight.items()
+                if str(k).startswith(prefix)
+            }
+        cancelled = filtered.get("cancelled_sessions") or []
+        if isinstance(cancelled, list):
+            filtered["cancelled_sessions"] = [
+                s for s in cancelled if str(s).startswith(prefix)
+            ]
+        return filtered
+
+    def _filter_agent_tasks_for_user(
+        self, data: dict[str, Any], username: str
+    ) -> dict[str, Any]:
+        if self._is_admin(username):
+            return dict(data)
+        prefix = self._web_session_prefix(username)
+        filtered = dict(data)
+        items = filtered.get("recent_tasks") or []
+        if isinstance(items, list):
+            filtered["recent_tasks"] = [
+                t
+                for t in items
+                if isinstance(t, dict)
+                and str(t.get("session_id") or "").startswith(prefix)
+            ]
+        return filtered
+
     def _assert_session_access(self, session_id: str | None, username: str) -> None:
         """Raise 403 if the user is not allowed to touch this session."""
         if not session_id:
@@ -651,6 +689,7 @@ class DashboardBackend:
             if not self._is_admin(username):
                 sessions = self._filter_sessions_for_user(sessions, username)
                 cores = self._filter_cores_for_user(cores, username)
+                queue = self._filter_queue_for_user(queue, username)
                 # If the active session is outside the user's scope, pin it to the
                 # user's default web session so the frontend dropdown stays consistent.
                 if not active_session_id.startswith(self._web_session_prefix(username)):
@@ -1039,6 +1078,8 @@ class DashboardBackend:
                     }
                 if verb == "queue":
                     data = await client.terminal_queue()
+                    if username and not self._is_admin(username):
+                        data = self._filter_queue_for_user(data, username)
                     return {
                         "ok": True,
                         "kind": "text",
@@ -1058,6 +1099,8 @@ class DashboardBackend:
                     if args and args[0].isdigit():
                         limit = max(1, min(200, int(args[0])))
                     data = await client.terminal_agent_tasks(limit=limit)
+                    if username and not self._is_admin(username):
+                        data = self._filter_agent_tasks_for_user(data, username)
                     return {
                         "ok": True,
                         "kind": "text",
@@ -1275,6 +1318,17 @@ class DashboardBackend:
         except Exception as exc:  # noqa: BLE001
             return {"connected": False, "error": str(exc)}
 
+
+def _require_dashboard_admin(request: Request, auth: DashboardAuth) -> None:
+    """Config and other global settings require admin when dashboard auth is enabled."""
+    if not auth.config.enabled:
+        return
+    username = getattr(request.state, "dashboard_user", "")
+    if DashboardBackend._is_admin(username) or username == "token":
+        return
+    raise HTTPException(status_code=403, detail="Admin access required")
+
+
 def create_dashboard_app(
     *,
     backend: DashboardBackend | None = None,
@@ -1351,7 +1405,8 @@ def create_dashboard_app(
         return resp
 
     @console.get("/api/config")
-    async def get_config_api() -> Dict[str, Any]:
+    async def get_config_api(request: Request) -> Dict[str, Any]:
+        _require_dashboard_admin(request, dashboard_auth)
         try:
             content = service.read_config()
             cfg_path = service.resolve_config_path()
@@ -1370,7 +1425,10 @@ def create_dashboard_app(
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @console.put("/api/config")
-    async def put_config_api(payload: ConfigUpdateRequest) -> Dict[str, Any]:
+    async def put_config_api(
+        payload: ConfigUpdateRequest, request: Request
+    ) -> Dict[str, Any]:
+        _require_dashboard_admin(request, dashboard_auth)
         try:
             if payload.yaml_text is not None:
                 parsed = yaml.safe_load(payload.yaml_text) or {}
@@ -1387,7 +1445,8 @@ def create_dashboard_app(
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @console.get("/api/config/backups")
-    async def get_config_backups_api() -> Dict[str, Any]:
+    async def get_config_backups_api(request: Request) -> Dict[str, Any]:
+        _require_dashboard_admin(request, dashboard_auth)
         try:
             return {"items": service.list_backups()}
         except Exception as exc:  # noqa: BLE001
@@ -1396,7 +1455,9 @@ def create_dashboard_app(
     @console.post("/api/config/backups")
     async def post_config_backup_api(
         payload: ConfigBackupCreateRequest,
+        request: Request,
     ) -> Dict[str, Any]:
+        _require_dashboard_admin(request, dashboard_auth)
         try:
             backup = service.create_backup(reason=payload.reason)
             return {"ok": True, "backup": backup}
@@ -1404,7 +1465,10 @@ def create_dashboard_app(
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @console.post("/api/config/restore")
-    async def post_config_restore_api(payload: ConfigRestoreRequest) -> Dict[str, Any]:
+    async def post_config_restore_api(
+        payload: ConfigRestoreRequest, request: Request
+    ) -> Dict[str, Any]:
+        _require_dashboard_admin(request, dashboard_auth)
         try:
             path = service.restore_backup(payload.backup_name)
             return {"ok": True, "path": str(path)}

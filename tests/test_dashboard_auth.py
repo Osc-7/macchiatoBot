@@ -143,3 +143,47 @@ users:
     client = TestClient(app)
     ok = client.post("/console/api/auth/login", json={"username": "ops", "password": "yaml-pass"})
     assert ok.status_code == 200
+
+
+def _login(client, username: str, password: str) -> None:
+    resp = client.post(
+        "/console/api/auth/login",
+        json={"username": username, "password": password},
+    )
+    assert resp.status_code == 200
+
+
+def test_non_admin_kernel_exec_denies_foreign_session() -> None:
+    users = (
+        DashboardUser(username="admin", password="adminpass"),
+        DashboardUser(username="alice", password="alicepass"),
+    )
+    client = _client(users=users)
+    _login(client, "alice", "alicepass")
+
+    denied = client.post(
+        "/console/api/kernel/exec",
+        json={"session_id": "web:admin", "command": "/clear"},
+    )
+    assert denied.status_code == 403
+
+    allowed = client.post(
+        "/console/api/kernel/exec",
+        json={"session_id": "web:alice", "command": "help"},
+    )
+    assert allowed.status_code == 200
+
+
+def test_non_admin_chat_denies_foreign_session() -> None:
+    users = (
+        DashboardUser(username="admin", password="adminpass"),
+        DashboardUser(username="alice", password="alicepass"),
+    )
+    client = _client(users=users)
+    _login(client, "alice", "alicepass")
+
+    denied = client.post(
+        "/console/api/chat",
+        json={"session_id": "web:admin", "text": "hello"},
+    )
+    assert denied.status_code == 403

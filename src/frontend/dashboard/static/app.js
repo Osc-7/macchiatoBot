@@ -2209,6 +2209,8 @@ const SLASH_COMMANDS = [
   { cmd: "/remote-use", desc: "Use a remote workspace" },
   { cmd: "/remote-status", desc: "Show remote workspace state" },
   { cmd: "/remote-release", desc: "Release the remote workspace" },
+  { cmd: "/skill", desc: "List skills in the current workspace" },
+  { cmd: "/skill ", desc: "Force-load a skill by name" },
 ];
 
 const suggestEl = $("slashSuggest");

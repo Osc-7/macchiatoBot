@@ -24,6 +24,7 @@ def test_help_text():
     assert "/session" in h
     assert "/new" in h
     assert "/remote-use" in h
+    assert "/skill" in h
     assert "/dangerously" in h
     assert "/help" in h
 
@@ -344,6 +345,68 @@ async def test_try_handle_slash_command_remote_release():
     handled, reply = await try_handle_slash_command(client, "/remote-release")
     assert handled is True
     assert "已释放" in (reply or "")
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_skill_loads():
+    client = MagicMock()
+    client.load_skill = AsyncMock(
+        return_value={
+            "ok": True,
+            "skill_name": "demo",
+            "injected": True,
+            "backend": "remote",
+            "error": None,
+            "message": "Loaded skill `demo`.",
+        }
+    )
+    handled, reply = await try_handle_slash_command(client, "/skill demo")
+    assert handled is True
+    assert "demo" in (reply or "")
+    assert "远程" in (reply or "")
+    client.load_skill.assert_awaited_once_with(skill_name="demo")
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_skill_bare_lists():
+    client = MagicMock()
+    client.list_skills = AsyncMock(
+        return_value={
+            "ok": True,
+            "backend": "local",
+            "index": "- **Demo** (`demo`): hello",
+        }
+    )
+    client.load_skill = AsyncMock()
+    handled, reply = await try_handle_slash_command(client, "/skill")
+    assert handled is True
+    assert "可用技能" in (reply or "")
+    assert "demo" in (reply or "")
+    client.list_skills.assert_awaited_once()
+    client.load_skill.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_skill_named_list_loads():
+    """`/skill list` must load a skill named list, not open a list subcommand."""
+    client = MagicMock()
+    client.load_skill = AsyncMock(
+        return_value={
+            "ok": True,
+            "skill_name": "list",
+            "injected": True,
+            "backend": "local",
+            "error": None,
+            "message": "Loaded skill `list`.",
+        }
+    )
+    client.list_skills = AsyncMock()
+    handled, reply = await try_handle_slash_command(client, "/skill list")
+    assert handled is True
+    assert "list" in (reply or "")
+    assert "已强制加载" in (reply or "")
+    client.load_skill.assert_awaited_once_with(skill_name="list")
+    client.list_skills.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -115,6 +115,8 @@ def print_help():
 - `/remote-use <login> [path] [--profile dev]` &nbsp;&nbsp;切换到远程工作区模式
 - `/remote-status` &nbsp;&nbsp;查看当前远程工作区状态
 - `/remote-release` &nbsp;&nbsp;释放远程工作区，恢复云端工作区
+- `/skill` &nbsp;&nbsp;列出当前工作区可用技能
+- `/skill <name>` &nbsp;&nbsp;强制加载技能（等同 load_skill；参数一律当技能名）
 - `/dangerously on|off|status` &nbsp;&nbsp;切换危险放行模式（跳过人工审批）
 
 ## 示例对话
@@ -153,6 +155,8 @@ def print_help():
         print("  /remote-use          切换到远程工作区")
         print("  /remote-status       查看远程工作区状态")
         print("  /remote-release      释放远程工作区")
+        print("  /skill               列出可用技能")
+        print("  /skill <name>        强制加载技能（等同 load_skill）")
         print("  /dangerously         切换危险放行模式")
         print()
         print("示例对话:")
@@ -906,6 +910,52 @@ async def run_interactive_loop(agent: Any) -> str:
                     print(hint("  当前 agent 不支持远程工作区指令。"))
                 else:
                     print(hint(_format_remote_state_cli(state if isinstance(state, dict) else {})))
+                print(thin_separator())
+                continue
+
+            if cmd_lower == "skill" or cmd_lower.startswith("skill "):
+                skill_name = (
+                    cmd_text.split(maxsplit=1)[1].strip() if " " in cmd_text.strip() else ""
+                )
+                if not skill_name:
+                    try:
+                        res = await _call_method("list_skills")
+                    except Exception as exc:
+                        print(accent(f"  列出技能失败: {exc}"))
+                        print(thin_separator())
+                        continue
+                    if not isinstance(res, dict) or not res.get("ok"):
+                        print(hint("  当前 agent 不支持 /skill。"))
+                        print(thin_separator())
+                        continue
+                    backend = str(res.get("backend") or "local")
+                    where = "远程工作区" if backend == "remote" else "本地工作区"
+                    index = str(res.get("index") or "").strip()
+                    print(hint(f"  可用技能（{where}）：\n\n{index}"))
+                    print(thin_separator())
+                    continue
+                try:
+                    res = await _call_method("load_skill", skill_name=skill_name)
+                except Exception as exc:
+                    print(accent(f"  加载技能失败: {exc}"))
+                    print(thin_separator())
+                    continue
+                if not isinstance(res, dict):
+                    print(hint("  当前 agent 不支持 /skill。"))
+                    print(thin_separator())
+                    continue
+                if not res.get("ok"):
+                    err = res.get("error") or "unknown"
+                    msg = (res.get("message") or "").strip()
+                    detail = f"{err}" + (f" — {msg}" if msg else "")
+                    print(accent(f"  加载技能 `{skill_name}` 失败: {detail}"))
+                    print(thin_separator())
+                    continue
+                backend = str(res.get("backend") or "local")
+                where = "远程工作区" if backend == "remote" else "本地工作区"
+                injected = bool(res.get("injected"))
+                suffix = "，已写入会话上下文" if injected else ""
+                print(hint(f"  已强制加载技能 `{skill_name}`（{where}）{suffix}。"))
                 print(thin_separator())
                 continue
 

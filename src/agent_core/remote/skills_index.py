@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shlex
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
@@ -21,38 +22,42 @@ _MAX_REMOTE_SKILLS = 64
 _MAX_SKILL_MD_CHARS = 4000
 
 # Runs on the remote worker inside the authorized workspace (HOME = workspace root).
-_REMOTE_SKILLS_SCAN_SCRIPT = r"""
-python3 - <<'PY'
-import json, pathlib
-roots = %s
-seen = set()
-out = []
-for rel in roots:
-    root = pathlib.Path(rel)
-    if not root.is_dir():
-        continue
-    for d in sorted(root.iterdir()):
-        if not d.is_dir() or d.name in seen:
-            continue
-        skill = d / "SKILL.md"
-        if not skill.is_file():
-            continue
-        seen.add(d.name)
-        try:
-            text = skill.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        out.append({"name": d.name, "rel": str(skill.as_posix()), "content": text[:8000]})
-        if len(out) >= %d:
-            break
-    if len(out) >= %d:
-        break
-print(json.dumps(out, ensure_ascii=False))
-PY
-""" % (
-    json.dumps(list(SKILL_ROOT_RELS), ensure_ascii=False),
-    _MAX_REMOTE_SKILLS,
-    _MAX_REMOTE_SKILLS,
+# Prefer python3 -c (no bash heredoc): job runner wraps commands as `(cmd) > log`,
+# and heredocs break if the closing delimiter shares a line with `)`.
+_REMOTE_SKILLS_SCAN_SCRIPT = (
+    "python3 -c "
+    + shlex.quote(
+        "\n".join(
+            [
+                "import json, pathlib",
+                f"roots = {json.dumps(list(SKILL_ROOT_RELS), ensure_ascii=False)}",
+                "seen = set()",
+                "out = []",
+                f"limit = {int(_MAX_REMOTE_SKILLS)}",
+                "for rel in roots:",
+                "    root = pathlib.Path(rel)",
+                "    if not root.is_dir():",
+                "        continue",
+                "    for d in sorted(root.iterdir()):",
+                "        if not d.is_dir() or d.name in seen:",
+                "            continue",
+                "        skill = d / 'SKILL.md'",
+                "        if not skill.is_file():",
+                "            continue",
+                "        seen.add(d.name)",
+                "        try:",
+                "            text = skill.read_text(encoding='utf-8', errors='replace')",
+                "        except OSError:",
+                "            continue",
+                "        out.append({'name': d.name, 'rel': str(skill.as_posix()), 'content': text[:8000]})",
+                "        if len(out) >= limit:",
+                "            break",
+                "    if len(out) >= limit:",
+                "        break",
+                "print(json.dumps(out, ensure_ascii=False))",
+            ]
+        )
+    )
 )
 
 

@@ -433,7 +433,7 @@ class AutomationCoreGateway:
     ) -> None:
         sid = session_id or self._active_session_id
         try:
-            await self._kernel_scheduler.core_pool.evict(sid)
+            await self._kernel_scheduler.core_pool.evict(sid, release_remote=True)
         except Exception as exc:
             logger.warning(
                 "evict session failed (session_id=%s, reason=%s): %s",
@@ -1230,6 +1230,154 @@ class AutomationCoreGateway:
             "error": row.error,
         }
 
+    async def load_skill_for_session(
+        self,
+        skill_name: str,
+        *,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """强制执行一次 ``load_skill``，并把结果写入会话上下文（等同模型调用该工具）。
+
+        本地 / 远程路径由 ``LoadSkillTool`` 按当前 remote workspace 状态决定。
+        """
+        import json
+        import uuid
+
+        from system.kernel.scheduler import _infer_memory_owner_from_session_id
+        from system.tools.load_skill_tool import LoadSkillTool
+
+        name = (skill_name or "").strip()
+        if not name:
+            raise ValueError("skill_name 不能为空")
+        sid = (session_id or self._active_session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id 不能为空")
+
+        mem_source, mem_user_id = _infer_memory_owner_from_session_id(sid)
+        await self.ensure_session(sid, create_if_missing=True)
+        async with self._kernel_scheduler.hold_session_lock(sid):
+            agent = await self._kernel_scheduler.core_pool.acquire(
+                sid,
+                source=mem_source,
+                user_id=mem_user_id,
+                create_if_missing=True,
+                profile=None,
+            )
+            profile = getattr(agent, "_core_profile", None)
+            exec_ctx: Dict[str, Any] = {
+                "session_id": sid,
+                "source": mem_source,
+                "user_id": mem_user_id,
+            }
+            if profile is not None:
+                exec_ctx["bash_workspace_admin"] = bool(
+                    getattr(profile, "bash_workspace_admin", False)
+                )
+
+            tool = LoadSkillTool(agent.config)
+            result = await tool.execute(
+                skill_name=name,
+                __execution_context__=exec_ctx,
+            )
+
+            injected = False
+            ctx = getattr(agent, "_context", None)
+            if ctx is not None and hasattr(ctx, "add_assistant_message"):
+                call_id = f"call_slash_skill_{uuid.uuid4().hex[:16]}"
+                args_json = json.dumps({"skill_name": name}, ensure_ascii=False)
+                ctx.add_assistant_message(
+                    content=None,
+                    tool_calls=[
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": "load_skill",
+                                "arguments": args_json,
+                            },
+                        }
+                    ],
+                )
+                ctx.add_tool_result(call_id, result)
+                injected = True
+
+            meta = result.metadata if isinstance(result.metadata, dict) else {}
+            backend = str(meta.get("workspace_backend") or "local")
+            return {
+                "ok": bool(result.success),
+                "skill_name": name,
+                "injected": injected,
+                "backend": backend,
+                "error": result.error,
+                "message": result.message or "",
+            }
+
+    async def list_skills_for_session(
+        self, *, session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """列出当前会话可见技能（远程工作区激活则列远程，否则列本地）。"""
+        from agent_core.prompts.loader import (
+            _format_skills_index,
+            resolve_skills_roots,
+        )
+        from agent_core.remote.workspace_state import (
+            get_remote_workspace_skills_index,
+            get_remote_workspace_state,
+        )
+        from system.kernel.scheduler import _infer_memory_owner_from_session_id
+
+        sid = (session_id or self._active_session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id 不能为空")
+
+        mem_source, mem_user_id = _infer_memory_owner_from_session_id(sid)
+        await self.ensure_session(sid, create_if_missing=True)
+        async with self._kernel_scheduler.hold_session_lock(sid):
+            agent = await self._kernel_scheduler.core_pool.acquire(
+                sid,
+                source=mem_source,
+                user_id=mem_user_id,
+                create_if_missing=True,
+                profile=None,
+            )
+            remote_state = get_remote_workspace_state(sid)
+            if remote_state is not None:
+                from agent_core.remote.skills_index import refresh_remote_skills_best_effort
+
+                await refresh_remote_skills_best_effort(
+                    session_id=sid,
+                    login=remote_state.login,
+                    enabled=list(getattr(agent.config.skills, "enabled", None) or []),
+                )
+                index = get_remote_workspace_skills_index(sid).strip()
+                return {
+                    "ok": True,
+                    "backend": "remote",
+                    "index": index
+                    or "当前远程工作区未发现技能（`.macchiato/skills` / `.agents/skills`）。",
+                }
+
+            profile = getattr(agent, "_core_profile", None)
+            roots = resolve_skills_roots(
+                agent.config,
+                source=mem_source,
+                user_id=mem_user_id,
+                profile=profile,
+                bash_workspace_admin=(
+                    bool(getattr(profile, "bash_workspace_admin", False))
+                    if profile is not None
+                    else None
+                ),
+            )
+            enabled = list(getattr(agent.config.skills, "enabled", None) or [])
+            index = _format_skills_index(enabled, skill_roots=roots).strip()
+            return {
+                "ok": True,
+                "backend": "local",
+                "index": index
+                or "当前本地工作区未发现技能（`.macchiato/skills` / `.agents/skills`）。",
+            }
+
     async def delete_session(self, session_id: str) -> bool:
         """删除指定会话。
 
@@ -1324,7 +1472,7 @@ class AutomationCoreGateway:
 
         # 若 session 在 CorePool 中，需 evict 移除
         try:
-            await self._kernel_scheduler.core_pool.evict(sid)
+            await self._kernel_scheduler.core_pool.evict(sid, release_remote=True)
         except Exception:
             pass
         # 若是 Gateway 本地持有的会话，从管理结构中移除并关闭

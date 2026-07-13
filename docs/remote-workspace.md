@@ -63,13 +63,13 @@ uv tool install -e packages/macchiato-remote
 A worker-only machine does not need `config/config.yaml`, `.env`, Feishu config,
 LLM keys, or the automation daemon.
 
-## Remote MCP (protocol v3 / macchiato-remote>=0.2.7)
+## Remote MCP (protocol v3 / macchiato-remote>=0.2.8)
 
 After `/remote-use`, the daemon can attach MCP servers declared with
 `location: remote`. Processes run on the worker; the agent calls them like normal
 tools.
 
-1. Install MCP extras on the worker: `uv tool install 'macchiato-remote[mcp]==0.2.7'`
+1. Install MCP extras on the worker: `uv tool install 'macchiato-remote[mcp]==0.2.8'`
 2. Write `{workspace}/.macchiato/mcp.yaml` (an empty template is created on open):
 
 ```yaml

@@ -611,6 +611,19 @@ class AutomationIPCServer:
                 server_name=server_name, session_id=active_session
             )
 
+        if method == "load_skill":
+            skill_name = str(params.get("skill_name") or "").strip()
+            if not skill_name:
+                raise ValueError("skill_name 不能为空")
+            return await self._gateway.load_skill_for_session(
+                skill_name, session_id=active_session
+            )
+
+        if method == "list_skills":
+            return await self._gateway.list_skills_for_session(
+                session_id=active_session
+            )
+
         if method == "session_set_dangerous_mode":
             enabled = bool(params.get("enabled", False))
             return await self._gateway.set_dangerous_mode(
@@ -1094,6 +1107,14 @@ class AutomationIPCClient:
 
     async def mcp_reload(self, *, server_name: str) -> Dict[str, Any]:
         return await self._request("mcp_reload", {"server_name": server_name})
+
+    async def load_skill(self, *, skill_name: str) -> Dict[str, Any]:
+        """Force-load a skill into the active session context (same as load_skill tool)."""
+        return await self._request("load_skill", {"skill_name": skill_name})
+
+    async def list_skills(self) -> Dict[str, Any]:
+        """List skills visible to the active session (local or remote workspace)."""
+        return await self._request("list_skills", {})
 
     async def set_dangerous_mode(self, *, enabled: bool) -> Dict[str, Any]:
         """Enable/disable dangerous approval-bypass mode for active session."""

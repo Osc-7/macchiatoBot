@@ -347,12 +347,34 @@ class CorePool:
             if ttl_offset > 0:
                 entry.last_active_ts = time.monotonic() - ttl_offset
             self._pool[session_id] = entry
+            # Core TTL 回收后远程状态仍可能在：冷启动时把 remote MCP 工具挂回新 Agent。
+            await self._restore_remote_mcp_if_active(agent, session_id=session_id)
             logger.debug(
                 "CorePool: loaded session %s (pool_size=%d)",
                 session_id,
                 len(self._pool),
             )
             return agent
+
+    async def _restore_remote_mcp_if_active(
+        self, agent: Any, *, session_id: str
+    ) -> None:
+        """若 session 仍绑定远程工作区，重新 attach remote_use MCP 到新 AgentCore。"""
+        try:
+            from agent_core.mcp.session_overlay import get_mcp_session_overlay
+            from agent_core.remote.workspace_state import get_remote_workspace_state
+
+            if get_remote_workspace_state(session_id) is None:
+                return
+            await get_mcp_session_overlay().attach_defaults_for_remote_use(
+                agent, session_id=session_id
+            )
+        except Exception:
+            logger.debug(
+                "CorePool: remote mcp restore skipped session=%s",
+                session_id,
+                exc_info=True,
+            )
 
     def touch(self, session_id: str) -> None:
         """刷新指定 session 的 last_active_ts，维持 TTL 倒计时。"""
@@ -391,7 +413,13 @@ class CorePool:
         """
         return [sid for sid, entry in self._pool.items() if entry.is_expired()]
 
-    async def evict(self, session_id: str, *, shutdown: bool = False) -> None:
+    async def evict(
+        self,
+        session_id: str,
+        *,
+        shutdown: bool = False,
+        release_remote: Optional[bool] = None,
+    ) -> None:
         """
         终结并移除指定 session 的 AgentCore。
 
@@ -404,6 +432,11 @@ class CorePool:
         shutdown=True 时表示 kernel 正在关闭（session 只是暂停，不是真正结束）：
         - 跳过 SessionSummarizer（避免把暂停误认为 session 结束写入长期记忆）
         - 不 mark_expired（保留 checkpoint 供下次 kernel 启动恢复）
+
+        release_remote 控制是否同时拆掉远程工作区（worker shell / remote MCP）：
+        - None（默认）：仅在 shutdown=True（daemon/kernel 停机）时释放
+        - False：TTL 空闲回收只丢本地 Core，远程绑定保持到 /remote-release 或 remote TTL
+        - True：显式结束会话（expire / delete / kill）时一并释放远程
 
         若未注入 kernel/summarizer，退化为旧版 finalize_session() + close()。
         """
@@ -517,19 +550,23 @@ class CorePool:
                     "CorePool: summarizer failed (session=%s): %s", session_id, exc
                 )
 
-        # ── Step 2.5: remote workspace / MCP cleanup ───────────────────────
-        # TTL evict、主动 expire 或 daemon 关闭时都必须通知 worker 关闭会话；
-        # 否则远程 shell 与 MCP 子进程会泄漏，且 daemon 侧 remote state 会与已驱逐的 Core 脱节。
-        try:
-            from agent_core.remote.mcp_lifecycle import release_remote_workspace_session
+        # ── Step 2.5: remote workspace / MCP cleanup（可选）────────────────
+        # Core TTL 空闲回收 ≠ 用户结束远程：远程状态独立于 CorePool，应跨 evict 保持，
+        # 下次 acquire 再挂回 remote MCP。仅在 daemon 停机或调用方显式要求时释放。
+        should_release_remote = shutdown if release_remote is None else release_remote
+        if should_release_remote:
+            try:
+                from agent_core.remote.mcp_lifecycle import (
+                    release_remote_workspace_session,
+                )
 
-            await release_remote_workspace_session(agent, session_id=session_id)
-        except Exception as exc:
-            logger.warning(
-                "CorePool: remote workspace release failed (session=%s): %s",
-                session_id,
-                exc,
-            )
+                await release_remote_workspace_session(agent, session_id=session_id)
+            except Exception as exc:
+                logger.warning(
+                    "CorePool: remote workspace release failed (session=%s): %s",
+                    session_id,
+                    exc,
+                )
 
         # ── Step 3: close — 释放资源 ───────────────────────────────────────
         # shutdown=False（TTL 过期 / 主动关闭单个 session）时，标记 checkpoint 为已过期，

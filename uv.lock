@@ -1155,7 +1155,7 @@ dev = [
 
 [[package]]
 name = "macchiato-remote"
-version = "0.2.7"
+version = "0.2.8"
 source = { editable = "packages/macchiato-remote" }
 dependencies = [
     { name = "pydantic" },

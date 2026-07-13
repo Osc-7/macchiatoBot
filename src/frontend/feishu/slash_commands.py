@@ -229,6 +229,8 @@ def _help_text() -> str:
 /mcp attach <name> - 将配置中的 MCP 挂到当前会话
 /mcp detach <name> - 从当前会话卸下 MCP
 /mcp reload <name> - 重新加载 MCP
+/skill - 列出当前工作区可用技能（远程模式下列远程）
+/skill <name> - 强制加载技能（等同 load_skill；参数一律当技能名，包括 list）
 /dangerously on|off|status - 切换危险放行模式（授权用户可跳过人工审批）
 /help - 显示此帮助"""
 
@@ -589,6 +591,36 @@ async def try_handle_slash_command(
             return True, "用法: /mcp list|attach|detach|reload"
         except Exception as exc:
             return True, f"MCP 命令失败: {exc}"
+
+    if cmd_lower == "skill" or cmd_lower.startswith("skill "):
+        name = cmd_text.split(maxsplit=1)[1].strip() if len(parts) > 1 else ""
+        if not name:
+            try:
+                res = await client.list_skills()
+            except Exception as exc:
+                return True, f"列出技能失败: {exc}"
+            if not isinstance(res, dict) or not res.get("ok"):
+                return True, "列出技能失败: 无效响应"
+            backend = str(res.get("backend") or "local")
+            where = "远程工作区" if backend == "remote" else "本地工作区"
+            index = str(res.get("index") or "").strip()
+            return True, f"可用技能（{where}）：\n\n{index}"
+        try:
+            res = await client.load_skill(skill_name=name)
+        except Exception as exc:
+            return True, f"加载技能失败: {exc}"
+        if not isinstance(res, dict):
+            return True, "加载技能失败: 无效响应"
+        if not res.get("ok"):
+            err = res.get("error") or "unknown"
+            msg = (res.get("message") or "").strip()
+            detail = f"{err}" + (f" — {msg}" if msg else "")
+            return True, f"加载技能 `{name}` 失败: {detail}"
+        backend = str(res.get("backend") or "local")
+        injected = bool(res.get("injected"))
+        where = "远程工作区" if backend == "remote" else "本地工作区"
+        suffix = "，已写入会话上下文" if injected else ""
+        return True, f"已强制加载技能 `{name}`（{where}）{suffix}。"
 
     if cmd_lower.startswith("remote-use"):
         parsed, err = _parse_remote_use_args(cmd_text)

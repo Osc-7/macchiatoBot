@@ -94,7 +94,11 @@ class RemoteSessionJobManager:
         )
 
         quoted_log = shlex.quote(str(log_path))
-        redirected_cmd = f"({command}) > {quoted_log} 2>&1"
+        # 多行命令（尤其是 <<'EOF' heredoc）必须以换行结束，否则
+        # `(cmd) > log` 会把结束标记和 `)` 粘成一行，bash 报
+        # "here-document delimited by end-of-file"。
+        body = command if command.endswith("\n") else f"{command}\n"
+        redirected_cmd = f"({body}) > {quoted_log} 2>&1"
         proc = await asyncio.create_subprocess_shell(
             redirected_cmd,
             cwd=str(job_cwd),

@@ -421,7 +421,7 @@ class KernelTerminal:
         通过 CorePool.evict() 执行完整的 kill 流程：
         收集 CoreStats → 写入长期记忆摘要 → close 释放资源。
         """
-        await self._pool.evict(session_id, shutdown=False)
+        await self._pool.evict(session_id, shutdown=False, release_remote=True)
 
     async def cancel(self, session_id: str) -> bool:
         """

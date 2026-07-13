@@ -259,6 +259,8 @@ class KernelScheduler:
         self._session_active_tasks: Dict[str, set[asyncio.Task]] = defaultdict(set)
         # 已取消的 session_id，用于拦截仍在队列中尚未 dispatch 的请求
         self._cancelled_sessions: set[str] = set()
+        # session_id -> 仍在优先级队列中、尚未被 dispatch 取出的请求数
+        self._queued_by_session: Dict[str, int] = defaultdict(int)
         # send_message_to_agent(require_reply=True) 注册的等待：message_id -> Future[回复正文]
         self._p2p_reply_waiters: Dict[str, asyncio.Future[str]] = {}
         # wait_subagent：sub_session_id -> Future[终态信息]
@@ -526,6 +528,7 @@ class KernelScheduler:
         若调用方要同步等待，可调用 wait_result(request_id)。
         """
         self._out_bus.register_waiter(request.request_id)
+        self._track_enqueue(request.session_id)
         await self._queue.put(request)
         logger.debug(
             "KernelScheduler: queued request_id=%s session=%s priority=%d",
@@ -579,6 +582,7 @@ class KernelScheduler:
                 qsize,
                 _IN_QUEUE_WARN_THRESHOLD,
             )
+        self._track_enqueue(request.session_id)
         self._queue.put_nowait(request)
         text_len = len(request.text or "")
         source = (request.metadata or {}).get("source", request.frontend_id or "")
@@ -620,7 +624,7 @@ class KernelScheduler:
                     session_id,
                     len(pending),
                 )
-                self.clear_cancelled(session_id)
+                self._maybe_clear_cancelled(session_id)
         if cancelled_any:
             logger.info(
                 "KernelScheduler: cancelled %d active task(s) for session_id=%s",
@@ -649,6 +653,22 @@ class KernelScheduler:
             except asyncio.CancelledError:
                 break
 
+            self._track_dequeue(request.session_id)
+            if request.session_id in self._cancelled_sessions:
+                logger.info(
+                    "KernelScheduler: skipping cancelled queued request "
+                    "session_id=%s request_id=%s",
+                    request.session_id,
+                    request.request_id[:8],
+                )
+                await self._out_bus.publish_error(
+                    request.request_id,
+                    asyncio.CancelledError("session cancelled while queued"),
+                )
+                self._queue.task_done()
+                self._maybe_clear_cancelled(request.session_id)
+                continue
+
             task = asyncio.create_task(
                 self._run_and_route(request),
                 name=f"kernel-req-{request.request_id[:8]}",
@@ -666,11 +686,8 @@ class KernelScheduler:
                 # 无论 task_set 是否为空，只要该 session 无已派发的 inflight 任务，
                 # 就清除 cancel 标记。否则 skip 型任务的 _cleanup 会让 task_set
                 # 永远非空，cancel 标记无法被清理，会话永久拒收新请求。
-                if (
-                    sid in self._cancelled_sessions
-                    and self.session_inflight_request_count(sid) == 0
-                ):
-                    self.clear_cancelled(sid)
+                if sid in self._cancelled_sessions:
+                    self._maybe_clear_cancelled(sid)
 
             task.add_done_callback(_cleanup)
             # task_done() 使 queue.join() 能正确追踪完成状态
@@ -765,11 +782,9 @@ class KernelScheduler:
                 request.request_id,
                 asyncio.CancelledError("session cancelled before dispatch"),
             )
-            # 兜底：无 inflight 内核路由时清除 stale cancel 标记。
-            # 不用 _session_active_tasks 判断——skip 型 task 自身仍在 set 里且未 done，
-            # 会导致永远不满足条件；inflight 才是「真正占用 session 锁/跑 turn」的计数。
-            if self.session_inflight_request_count(session_id) == 0:
-                self.clear_cancelled(session_id)
+            # 兜底：无 inflight 且无排队时清除 stale cancel 标记。
+            # 不用 _session_active_tasks——skip 型 task 自身仍在 set 里且未 done。
+            self._maybe_clear_cancelled(session_id)
             self._finalize_agent_wake_delivery(request, confirmed=False)
             return
 
@@ -1084,8 +1099,34 @@ class KernelScheduler:
                         session_id,
                         exc,
                     )
-                # 一轮内核路由完全结束后允许该 session 再次入队（与 terminal_cancel 配对）
-                self.clear_cancelled(session_id)
+                # 仅当无在途且无排队时清除 cancel（避免仍在队列中的请求被误放行）
+                self._maybe_clear_cancelled(session_id)
+
+    def _track_enqueue(self, session_id: str) -> None:
+        sid = (session_id or "").strip()
+        if sid:
+            self._queued_by_session[sid] += 1
+
+    def _track_dequeue(self, session_id: str) -> None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        remaining = self._queued_by_session.get(sid, 0) - 1
+        if remaining <= 0:
+            self._queued_by_session.pop(sid, None)
+        else:
+            self._queued_by_session[sid] = remaining
+
+    def _maybe_clear_cancelled(self, session_id: str) -> None:
+        """仅当该 session 无在途 dispatch 且无排队请求时清除 cancel 标记。"""
+        sid = (session_id or "").strip()
+        if not sid or sid not in self._cancelled_sessions:
+            return
+        if self.session_inflight_request_count(sid) > 0:
+            return
+        if self._queued_by_session.get(sid, 0) > 0:
+            return
+        self.clear_cancelled(sid)
 
     def session_inflight_request_count(self, session_id: str) -> int:
         """已为该 session 派发且尚未在 finally 中结案的 _run_and_route 数量（可能含等 session 锁的任务）。"""

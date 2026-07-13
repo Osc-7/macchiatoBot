@@ -617,6 +617,10 @@ class DashboardBackend:
         if not session_id.startswith(prefix):
             raise HTTPException(status_code=403, detail="Access denied to this session")
 
+    @staticmethod
+    def _kernel_exec_admin_denied_result() -> Dict[str, Any]:
+        return {"ok": False, "kind": "error", "output": "Admin access required"}
+
     async def _with_client(
         self, username: str = "", timeout_seconds: float | None = None
     ) -> AutomationIPCClient:
@@ -640,7 +644,10 @@ class DashboardBackend:
             top = await client.terminal_top()
             queue = await client.terminal_queue()
             cores = await client.terminal_ps()
-            users = await client.terminal_list_users(frontend="cli")
+            if self._is_admin(username):
+                users = await client.terminal_list_users(frontend="cli")
+            else:
+                users = {"frontend": "cli", "users": []}
             sessions = await client.list_sessions()
             models = await client.list_models()
             token_usage = await client.get_token_usage()
@@ -988,6 +995,17 @@ class DashboardBackend:
             return {"ok": False, "kind": "error", "output": "(empty command)"}
 
         self._assert_session_access(session_id, username)
+
+        if not raw.startswith("/"):
+            try:
+                parts = shlex.split(raw)
+            except ValueError as exc:
+                return {"ok": False, "kind": "error", "output": f"parse error: {exc}"}
+            if parts:
+                verb = parts[0].lower()
+                if verb in ("jobs", "cron", "automation", "user"):
+                    if username and not self._is_admin(username) and username != "token":
+                        return self._kernel_exec_admin_denied_result()
 
         client = await self._with_client(username=username)
         try:

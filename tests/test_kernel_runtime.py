@@ -60,6 +60,25 @@ def test_memory_owner_agent_msg_uses_session_id_not_frontend_tag() -> None:
     assert memory_owner_for_kernel_acquire(req3) == ("cli", "root")
 
 
+@pytest.mark.asyncio
+async def test_kernel_propagates_return_status_in_metadata() -> None:
+    from agent_core.kernel_interface.action import ReturnAction
+    from system.kernel.kernel import AgentKernel
+
+    async def _fake_run_loop(**_kwargs):
+        yield ReturnAction(message="ok", status="completed")
+
+    registry = VersionedToolRegistry()
+    kernel = AgentKernel(tool_registry=registry)
+    agent = SimpleNamespace(
+        run_loop=_fake_run_loop,
+        _current_visible_tools=set(),
+    )
+
+    result = await kernel.run(agent, turn_id=1)  # type: ignore[arg-type]
+    assert result.metadata.get("status") == "completed"
+
+
 def test_subagent_memory_owner_inherits_parent_namespace() -> None:
     """子 Agent 可通过 metadata.memory_owner 继承父会话的权限/工作区命名空间。"""
     profile = CoreProfile.default_sub(
@@ -963,6 +982,51 @@ async def test_cancel_clears_stale_flag_after_skip_when_no_inflight() -> None:
 
     assert session_id not in scheduler._cancelled_sessions
     assert scheduler.session_inflight_request_count(session_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_skip_aborts_agent_wake_delivery() -> None:
+    """session cancel 跳过 wake inject 时应 abort，保留 wake 供后续 poll 重试。"""
+    from agent_core.tools.agent_wake import (
+        clear_all_wakes_for_tests,
+        list_wakes,
+        poll_due_wakes,
+        register_wake,
+    )
+
+    clear_all_wakes_for_tests()
+    scheduler = _minimal_scheduler_for_cancel_tests()
+    session_id = "cli:root"
+    wid = register_wake(
+        session_id=session_id,
+        fire_at=time.time() - 1,
+        message="wake after cancel",
+        wake_id="wake-cancel-skip",
+    )
+    wake = poll_due_wakes()[0]
+    assert wake["wake_id"] == wid
+
+    from agent_core.tools.agent_wake import deliver_wake_via_inject
+
+    set_notify_dependencies = __import__(
+        "agent_core.tools.bash_job_notify", fromlist=["set_notify_dependencies"]
+    ).set_notify_dependencies
+    set_notify_dependencies(scheduler=scheduler, core_pool=None)
+    deliver_wake_via_inject(wake=wake, scheduler=scheduler)
+    assert len(list_wakes()) == 1
+    assert list_wakes()[0]["staged"] is True
+
+    scheduler._cancelled_sessions.add(session_id)
+    req = KernelRequest.create(
+        text="wake after cancel",
+        session_id=session_id,
+        metadata={"_wake_id": wid},
+    )
+    await scheduler._run_and_route(req)
+
+    assert len(list_wakes()) == 1
+    assert list_wakes()[0]["staged"] is False
+    assert len(poll_due_wakes()) == 1
 
 
 @pytest.mark.asyncio

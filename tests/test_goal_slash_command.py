@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -149,6 +150,12 @@ async def test_create_goal_for_feishu_passes_chat_id_hint(monkeypatch) -> None:
 
     mock_scheduler = MagicMock()
     mock_scheduler.core_pool = mock_pool
+
+    @asynccontextmanager
+    async def _fake_hold_lock(sid: str):
+        yield
+
+    mock_scheduler.hold_session_lock = _fake_hold_lock
     mock_scheduler.inject_turn = MagicMock(
         side_effect=lambda req: captured.update({"request": req})
     )
@@ -224,6 +231,12 @@ async def test_create_goal_for_feishu_session_injects_feishu_metadata(monkeypatc
 
     mock_scheduler = MagicMock()
     mock_scheduler.core_pool = mock_pool
+
+    @asynccontextmanager
+    async def _fake_hold_lock(sid: str):
+        yield
+
+    mock_scheduler.hold_session_lock = _fake_hold_lock
 
     def _capture_inject(request):
         captured["request"] = request

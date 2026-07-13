@@ -312,16 +312,28 @@ def load_feishu_push_watch_targets_from_file() -> List[Dict[str, Any]]:
 
 def _mark_staged(wake_id: str) -> None:
     wid = str(wake_id or "").strip()
-    rec = _WAKES.get(wid)
-    if rec is not None:
-        rec.staged = True
+    with _LOCK:
+        rec = _WAKES.get(wid)
+        if rec is not None:
+            rec.staged = True
 
 
 def _reset_staged(wake_id: str) -> None:
     wid = str(wake_id or "").strip()
-    rec = _WAKES.get(wid)
-    if rec is not None:
-        rec.staged = False
+    with _LOCK:
+        rec = _WAKES.get(wid)
+        if rec is not None:
+            rec.staged = False
+
+
+def confirm_wake_delivered(wake_id: str) -> None:
+    """内核成功跑完 inject 的唤醒 turn 后调用，从注册表移除。"""
+    _mark_fired(wake_id)
+
+
+def abort_wake_delivery(wake_id: str) -> None:
+    """inject 被 skip/取消时尚未真正投递：清除 staged 以便 poll 重试。"""
+    _reset_staged(wake_id)
 
 
 def stage_wake_notification(session_id: str, text: str, *, wake_id: str) -> None:
@@ -472,7 +484,7 @@ def deliver_wake_via_inject(
         return False
 
     if wid:
-        _mark_fired(wid)
+        _mark_staged(wid)
     return True
 
 

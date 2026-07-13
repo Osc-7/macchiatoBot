@@ -264,3 +264,67 @@ class TestGoalCheckpoint:
         loaded = CoreCheckpointManager(str(ckpt_path)).read()
         assert loaded is not None
         assert loaded.active_goals == []
+
+
+class TestGoalAutoContinue:
+    @pytest.mark.asyncio
+    async def test_finalize_turn_schedules_wake_on_completed_status(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import patch
+
+        from agent_core.agent.agent import AgentCore
+        from agent_core.config import get_config
+        from agent_core.interfaces.models import AgentRunResult
+
+        with patch("agent_core.agent.agent.LLMClient"):
+            agent = AgentCore(config=get_config(), tools=[], memory_enabled=False)
+        agent._goal_store.create_goal(title="任务", steps=["一步"])
+        scheduled: list[str] = []
+
+        def _fake_register_wake(**kwargs: object) -> str:
+            scheduled.append(str(kwargs.get("label") or ""))
+            return "wake-test"
+
+        monkeypatch.setattr(
+            "agent_core.tools.agent_wake.register_wake",
+            _fake_register_wake,
+        )
+        monkeypatch.setattr(agent, "_goal_auto_continue_enabled", lambda: True)
+        monkeypatch.setattr(agent, "_goal_auto_continue_suppressed", lambda: False)
+
+        await agent._finalize_turn(
+            AgentRunResult(output_text="done", metadata={"status": "completed"})
+        )
+        assert scheduled == ["goal-check"]
+
+    @pytest.mark.asyncio
+    async def test_finalize_turn_skips_wake_on_overflow_status(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import patch
+
+        from agent_core.agent.agent import AgentCore
+        from agent_core.config import get_config
+        from agent_core.interfaces.models import AgentRunResult
+
+        with patch("agent_core.agent.agent.LLMClient"):
+            agent = AgentCore(config=get_config(), tools=[], memory_enabled=False)
+        agent._goal_store.create_goal(title="任务", steps=["一步"])
+        scheduled: list[str] = []
+
+        def _fake_register_wake(**kwargs: object) -> str:
+            scheduled.append(str(kwargs.get("label") or ""))
+            return "wake-test"
+
+        monkeypatch.setattr(
+            "agent_core.tools.agent_wake.register_wake",
+            _fake_register_wake,
+        )
+        monkeypatch.setattr(agent, "_goal_auto_continue_enabled", lambda: True)
+        monkeypatch.setattr(agent, "_goal_auto_continue_suppressed", lambda: False)
+
+        await agent._finalize_turn(
+            AgentRunResult(output_text="overflow", metadata={"status": "overflow"})
+        )
+        assert scheduled == []

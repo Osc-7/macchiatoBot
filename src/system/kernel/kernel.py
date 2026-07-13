@@ -119,7 +119,7 @@ class AgentKernel:
         while True:
             if isinstance(action, ReturnAction):
                 _maybe_touch()
-                meta: Dict[str, Any] = {}
+                meta: Dict[str, Any] = {"status": action.status}
                 if tool_names_called:
                     meta["_tool_names_called"] = sorted(tool_names_called)
                 return AgentRunResult(

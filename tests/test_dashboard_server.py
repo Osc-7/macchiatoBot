@@ -15,7 +15,7 @@ from frontend.dashboard.server import (
 
 
 class FakeBackend(DashboardBackend):
-    async def kernel_snapshot(self):
+    async def kernel_snapshot(self, username: str = ""):
         return {
             "connected": True,
             "top": {"active_cores": 2},
@@ -135,7 +135,7 @@ class FakeBackend(DashboardBackend):
 
 
 class BrokenKernelBackend(DashboardBackend):
-    async def kernel_snapshot(self):
+    async def kernel_snapshot(self, username: str = ""):
         raise RuntimeError("daemon offline")
 
 

@@ -926,22 +926,22 @@ class DashboardBackend:
     async def get_stream_recoveries(
         self, *, session_id: str | None = None, username: str = ""
     ) -> list[Dict[str, Any]]:
-        """Poll recoveries from IPC server and optionally filter by session."""
+        """Poll recoveries from IPC server and filter to sessions this user may access."""
         client = await self._with_client(username=username)
         try:
             recoveries = await client.poll_stream_recoveries()
             if not isinstance(recoveries, list):
                 return []
-            if session_id:
-                recoveries = [
-                    r for r in recoveries if r.get("session_id") == session_id
-                ]
-            elif username and not self._is_admin(username):
+            if username and not self._is_admin(username):
                 prefix = self._web_session_prefix(username)
                 recoveries = [
                     r
                     for r in recoveries
                     if str(r.get("session_id") or "").startswith(prefix)
+                ]
+            if session_id:
+                recoveries = [
+                    r for r in recoveries if r.get("session_id") == session_id
                 ]
             return recoveries
         finally:

@@ -466,3 +466,75 @@ def test_dashboard_chat_stream() -> None:
     tool_traces = [e["data"] for e in events if e["type"] == "trace"]
     assert any(t["type"] == "tool_call" for t in tool_traces)
     assert any(t["type"] == "tool_result" and t["success"] for t in tool_traces)
+
+
+def test_dashboard_stream_recoveries_filter_by_user_session() -> None:
+    from frontend.dashboard.auth import DashboardAuth, DashboardAuthConfig, DashboardUser
+
+    class RecoveryBackend(DashboardBackend):
+        async def _with_client(self, username: str = "", timeout_seconds: float | None = None):
+            class FakeClient:
+                async def poll_stream_recoveries(self):
+                    return [
+                        {
+                            "session_id": "web:alice",
+                            "output_text": "alice secret",
+                            "metadata": {},
+                            "attachments": [],
+                        },
+                        {
+                            "session_id": "web:bob",
+                            "output_text": "bob secret",
+                            "metadata": {},
+                            "attachments": [],
+                        },
+                    ]
+
+                async def close(self):
+                    return None
+
+            return FakeClient()
+
+    auth = DashboardAuth(
+        DashboardAuthConfig(
+            enabled=True,
+            users=(
+                DashboardUser(username="alice", password="pass"),
+                DashboardUser(username="bob", password="pass"),
+            ),
+            auth_token="",
+            secret="test-dashboard-auth-secret",
+            session_ttl_seconds=3600,
+            secure_cookies=False,
+        )
+    )
+    app = create_dashboard_app(backend=RecoveryBackend(), auth=auth)
+    client = TestClient(app)
+
+    alice_login = client.post(
+        "/console/api/auth/login", json={"username": "alice", "password": "pass"}
+    )
+    assert alice_login.status_code == 200
+    alice_cookie = alice_login.cookies
+
+    bob_login = client.post(
+        "/console/api/auth/login", json={"username": "bob", "password": "pass"}
+    )
+    assert bob_login.status_code == 200
+    bob_cookie = bob_login.cookies
+
+    alice_resp = client.post(
+        "/console/api/chat/recoveries", cookies=alice_cookie
+    )
+    assert alice_resp.status_code == 200
+    alice_data = alice_resp.json()
+    assert len(alice_data["recoveries"]) == 1
+    assert alice_data["recoveries"][0]["session_id"] == "web:alice"
+
+    bob_resp = client.post(
+        "/console/api/chat/recoveries", cookies=bob_cookie
+    )
+    assert bob_resp.status_code == 200
+    bob_data = bob_resp.json()
+    assert len(bob_data["recoveries"]) == 1
+    assert bob_data["recoveries"][0]["session_id"] == "web:bob"

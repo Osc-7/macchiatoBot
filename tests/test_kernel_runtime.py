@@ -1234,3 +1234,114 @@ async def test_cancel_session_tasks_clears_mark_when_lock_waiter_aborted() -> No
     assert result.output_text == "done"
 
     await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_evict_skips_mark_expired_when_session_reacquired(tmp_path) -> None:
+    """慢速 TTL evict 期间若 session 被重新 acquire，不得把新 checkpoint 标为 expired。"""
+    from agent_core.agent.checkpoint import CoreCheckpoint, CoreCheckpointManager
+
+    ckpt_path = tmp_path / "checkpoint.json"
+    mgr = CoreCheckpointManager(str(ckpt_path))
+    mgr.write(
+        CoreCheckpoint(
+            session_id="cli:root",
+            owner_id="root",
+            source="cli",
+            running_summary=None,
+            recent_messages=[],
+            last_active_at=time.time(),
+            remaining_ttl_seconds=1800.0,
+            turn_count=1,
+            last_history_id=0,
+            token_usage={},
+            expired=False,
+        )
+    )
+
+    summarize_started = asyncio.Event()
+    summarize_release = asyncio.Event()
+
+    async def _slow_summarize(*_a: Any, **_k: Any) -> None:
+        summarize_started.set()
+        await summarize_release.wait()
+
+    old_agent = MagicMock()
+    old_agent._checkpoint_manager = mgr
+    old_agent.close = AsyncMock()
+    old_agent._context = None
+    old_agent._build_system_prompt = MagicMock(return_value="")
+    old_agent._long_term_memory = None
+    old_agent._user_id = "root"
+
+    pool = CorePool()
+    profile = CoreProfile.default_full(frontend_id="cli", dialog_window_id="root")
+    pool._pool["cli:root"] = CoreEntry(agent=old_agent, profile=profile)
+    pool._kernel = MagicMock()
+    pool._kernel.kill = AsyncMock(return_value=CoreStatsAction())
+    pool._summarizer = MagicMock()
+    pool._summarizer.summarize_and_persist = AsyncMock(side_effect=_slow_summarize)
+
+    evict_task = asyncio.create_task(pool.evict("cli:root", shutdown=False))
+    await summarize_started.wait()
+
+    new_agent = MagicMock()
+    new_agent._checkpoint_manager = mgr
+    pool._pool["cli:root"] = CoreEntry(agent=new_agent, profile=profile)
+
+    live = mgr.read()
+    assert live is not None
+    live.turn_count = 5
+    live.expired = False
+    mgr.write(live)
+
+    summarize_release.set()
+    await evict_task
+
+    final = mgr.read()
+    assert final is not None
+    assert final.expired is False
+    assert final.turn_count == 5
+
+
+@pytest.mark.asyncio
+async def test_inject_turn_error_aborts_agent_wake_delivery() -> None:
+    """inject_turn 处理失败时应 abort wake，保留注册表供 poll 重试。"""
+    from agent_core.tools.agent_wake import (
+        clear_all_wakes_for_tests,
+        list_wakes,
+        poll_due_wakes,
+        register_wake,
+    )
+
+    clear_all_wakes_for_tests()
+    scheduler = _minimal_scheduler_for_cancel_tests()
+    session_id = "cli:root"
+    scheduler._kernel.run = AsyncMock(side_effect=RuntimeError("LLM 401"))  # type: ignore[attr-defined]
+    scheduler._core_pool.acquire = AsyncMock(  # type: ignore[attr-defined]
+        return_value=SimpleNamespace(
+            prepare_turn=AsyncMock(return_value=1),
+            _finalize_turn=AsyncMock(),
+            _session_logger=None,
+        )
+    )
+
+    wid = register_wake(
+        session_id=session_id,
+        fire_at=time.time() - 1,
+        message="retry after error",
+        wake_id="wake-error-retry",
+    )
+    assert poll_due_wakes()[0]["wake_id"] == wid
+
+    req = KernelRequest.create(
+        text="retry after error",
+        session_id=session_id,
+        metadata={"_wake_id": wid},
+    )
+    await scheduler._run_and_route(req)
+
+    assert len(list_wakes()) == 1
+    assert list_wakes()[0]["staged"] is False
+    assert len(poll_due_wakes()) == 1
+    assert poll_due_wakes()[0]["wake_id"] == wid

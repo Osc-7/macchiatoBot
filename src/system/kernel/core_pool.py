@@ -576,14 +576,22 @@ class CorePool:
             getattr(agent, "_checkpoint_manager", None) if agent is not None else None
         )
         if ckpt_mgr is not None and not shutdown:
-            try:
-                ckpt_mgr.mark_expired()
-            except Exception as exc:
+            # TTL 驱逐可能耗时（summarize 等）。若期间同 session 已被重新 acquire，
+            # 勿把新 Core 写入的 checkpoint 标为 expired（否则重启后会话丢失）。
+            if session_id in self._pool:
                 logger.debug(
-                    "CorePool: checkpoint mark_expired failed (session=%s): %s",
+                    "CorePool: skip checkpoint mark_expired (session re-acquired) session=%s",
                     session_id,
-                    exc,
                 )
+            else:
+                try:
+                    ckpt_mgr.mark_expired()
+                except Exception as exc:
+                    logger.debug(
+                        "CorePool: checkpoint mark_expired failed (session=%s): %s",
+                        session_id,
+                        exc,
+                    )
 
         try:
             close = getattr(agent, "close", None) if agent is not None else None

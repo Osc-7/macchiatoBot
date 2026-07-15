@@ -19,6 +19,15 @@ _DEFAULT_TTL_SECONDS = 2 * 60 * 60
 # Cached progressive-disclosure skills index for remote sessions (daemon-side).
 _SKILLS_INDEX_BY_SESSION: dict[str, dict[str, Any]] = {}
 
+# Sessions whose remote lease just expired: tools must fail closed instead of
+# silently falling back to daemon-local execution.
+_REMOTE_TTL_LAPSED: set[str] = set()
+
+REMOTE_TTL_EXPIRED_MESSAGE = (
+    "远程工作区租约已过期。请使用 /remote-use 重新连接远程工作区；"
+    "在重新连接前，bash / 文件 / load_skill 不会在云侧本机静默执行。"
+)
+
 
 def activate_remote_workspace(
     *,
@@ -60,6 +69,7 @@ def activate_remote_workspace(
         _STATE_BY_SESSION[sid] = state
         # New activation invalidates any previous skills index for this session.
         _SKILLS_INDEX_BY_SESSION.pop(sid, None)
+        _REMOTE_TTL_LAPSED.discard(sid)
     return state
 
 
@@ -72,6 +82,7 @@ def get_remote_workspace_state(session_id: str) -> Optional[RemoteWorkspaceState
         if state is not None and state.is_expired():
             _STATE_BY_SESSION.pop(sid, None)
             _SKILLS_INDEX_BY_SESSION.pop(sid, None)
+            _REMOTE_TTL_LAPSED.add(sid)
             return None
         return state
 
@@ -82,6 +93,7 @@ def release_remote_workspace(session_id: str) -> Optional[RemoteWorkspaceState]:
         return None
     with _LOCK:
         _SKILLS_INDEX_BY_SESSION.pop(sid, None)
+        _REMOTE_TTL_LAPSED.discard(sid)
         return _STATE_BY_SESSION.pop(sid, None)
 
 
@@ -90,6 +102,16 @@ def clear_remote_workspace_state() -> None:
     with _LOCK:
         _STATE_BY_SESSION.clear()
         _SKILLS_INDEX_BY_SESSION.clear()
+        _REMOTE_TTL_LAPSED.clear()
+
+
+def remote_ttl_lapsed(session_id: str) -> bool:
+    """Return True when this session's remote lease expired and local fallback is forbidden."""
+    sid = (session_id or "").strip()
+    if not sid:
+        return False
+    with _LOCK:
+        return sid in _REMOTE_TTL_LAPSED
 
 
 def update_remote_workspace_skills_index(

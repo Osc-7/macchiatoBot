@@ -19,6 +19,7 @@ from agent_core.remote.workspace_state import (
     format_remote_workspace_prompt_suffix,
     get_remote_workspace_state,
     release_remote_workspace,
+    remote_ttl_lapsed,
 )
 from macchiato_remote.protocol import REMOTE_WORKSPACE_MOUNT, RemoteWorkspaceState
 from system.kernel.kernel import AgentKernel
@@ -56,6 +57,37 @@ def test_activate_and_release_remote_workspace_state():
     released = release_remote_workspace("feishu:abc")
     assert released == state
     assert get_remote_workspace_state("feishu:abc") is None
+
+
+@pytest.mark.asyncio
+async def test_remote_ttl_lapsed_blocks_silent_local_fallback():
+    """Expired remote lease must not silently fall back to local tool execution."""
+    import time
+
+    from agent_core.config import get_config
+    from system.tools.load_skill_tool import LoadSkillTool
+
+    activate_remote_workspace(
+        session_id="cli:root",
+        login="personal",
+        requested_path="~/Project",
+        ttl_seconds=1,
+    )
+    time.sleep(1.1)
+    assert get_remote_workspace_state("cli:root") is None
+    assert remote_ttl_lapsed("cli:root") is True
+
+    tool = LoadSkillTool(get_config())
+    result = await tool.execute(
+        skill_name="any-skill",
+        __execution_context__={
+            "session_id": "cli:root",
+            "source": "cli",
+            "user_id": "root",
+        },
+    )
+    assert result.success is False
+    assert result.error == "REMOTE_TTL_EXPIRED"
 
 
 def test_remote_prompt_suffix_is_empty_notice_moved_to_history():

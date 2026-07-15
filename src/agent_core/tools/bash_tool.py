@@ -264,6 +264,20 @@ class BashTool(BaseTool):
     async def execute(self, **kwargs) -> ToolResult:
         exec_ctx = kwargs.pop("__execution_context__", None) or {}
 
+        sid = str(exec_ctx.get("session_id") or "").strip()
+        if sid:
+            from agent_core.remote.workspace_state import (
+                REMOTE_TTL_EXPIRED_MESSAGE,
+                remote_ttl_lapsed,
+            )
+
+            if remote_ttl_lapsed(sid):
+                return ToolResult(
+                    success=False,
+                    error="REMOTE_TTL_EXPIRED",
+                    message=REMOTE_TTL_EXPIRED_MESSAGE,
+                )
+
         param_err = self._validate_params(kwargs)
         if param_err is not None:
             return param_err

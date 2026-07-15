@@ -113,6 +113,20 @@ class LoadSkillTool(BaseTool):
             )
 
         ctx = kwargs.get("__execution_context__") or {}
+        sid = str(ctx.get("session_id") or "").strip()
+        if sid:
+            from agent_core.remote.workspace_state import (
+                REMOTE_TTL_EXPIRED_MESSAGE,
+                remote_ttl_lapsed,
+            )
+
+            if remote_ttl_lapsed(sid):
+                return ToolResult(
+                    success=False,
+                    error="REMOTE_TTL_EXPIRED",
+                    message=REMOTE_TTL_EXPIRED_MESSAGE,
+                )
+
         remote_content, remote_error, remote_metadata = await self._load_remote_skill_content(
             skill_name=skill_name,
             exec_ctx=ctx,

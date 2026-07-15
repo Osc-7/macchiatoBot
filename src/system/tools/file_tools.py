@@ -37,6 +37,22 @@ from agent_core.tools.permission_path_infer import (
 _MEMORY_MD_WORKSPACE_RELATIVE = "data/memory/long_term/MEMORY.md"
 
 
+def _remote_ttl_expired_result(exec_ctx: dict) -> Optional[ToolResult]:
+    from agent_core.remote.workspace_state import (
+        REMOTE_TTL_EXPIRED_MESSAGE,
+        remote_ttl_lapsed,
+    )
+
+    sid = str(exec_ctx.get("session_id") or "").strip()
+    if sid and remote_ttl_lapsed(sid):
+        return ToolResult(
+            success=False,
+            error="REMOTE_TTL_EXPIRED",
+            message=REMOTE_TTL_EXPIRED_MESSAGE,
+        )
+    return None
+
+
 def _remote_workspace_session_if_active(
     exec_ctx: dict,
 ) -> Optional[Tuple[str, Any]]:
@@ -382,6 +398,9 @@ class ReadFileTool(BaseTool):
 
     async def execute(self, **kwargs) -> ToolResult:
         exec_ctx = kwargs.pop("__execution_context__", None) or {}
+        ttl_err = _remote_ttl_expired_result(exec_ctx)
+        if ttl_err is not None:
+            return ttl_err
         path_str = kwargs.get("path")
         if not path_str:
             return ToolResult(
@@ -740,6 +759,9 @@ class WriteFileTool(BaseTool):
 
     async def execute(self, **kwargs) -> ToolResult:
         exec_ctx = kwargs.pop("__execution_context__", None) or {}
+        ttl_err = _remote_ttl_expired_result(exec_ctx)
+        if ttl_err is not None:
+            return ttl_err
         if _sub_mode_forbids_file_mutation(exec_ctx):
             return ToolResult(
                 success=False,
@@ -1124,6 +1146,9 @@ class ModifyFileTool(BaseTool):
 
     async def execute(self, **kwargs) -> ToolResult:
         exec_ctx = kwargs.pop("__execution_context__", None) or {}
+        ttl_err = _remote_ttl_expired_result(exec_ctx)
+        if ttl_err is not None:
+            return ttl_err
         if _sub_mode_forbids_file_mutation(exec_ctx):
             return ToolResult(
                 success=False,

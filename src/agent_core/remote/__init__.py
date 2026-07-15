@@ -7,6 +7,8 @@ from .workspace_state import (
     get_remote_workspace_skills_index,
     get_remote_workspace_state,
     release_remote_workspace,
+    remote_ttl_lapsed,
+    REMOTE_TTL_EXPIRED_MESSAGE,
     update_remote_workspace_skills_index,
 )
 from .workspace_notice import (
@@ -31,5 +33,7 @@ __all__ = [
     "get_remote_workspace_state",
     "reinject_remote_workspace_notice_if_active",
     "release_remote_workspace",
+    "remote_ttl_lapsed",
+    "REMOTE_TTL_EXPIRED_MESSAGE",
     "update_remote_workspace_skills_index",
 ]

@@ -24,6 +24,7 @@ from agent_core.remote.worker_registry import (RemoteWorkerConnection,
 from frontend.feishu.client import FeishuClient
 from frontend.feishu.remote_login_card import (APPROVE, REJECT,
                                                build_remote_login_request_card)
+from macchiato_remote.protocol import REMOTE_WS_MAX_SIZE
 from macchiato_remote.tokens import (expected_token_matches,
                                      load_registered_remote_worker_tokens,
                                      register_remote_worker_token,
@@ -63,6 +64,11 @@ class RemoteLoginApproveRequest(BaseModel):
 def remote_server_enabled() -> bool:
     raw = os.environ.get("MACCHIATO_REMOTE_SERVER_ENABLED", "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
+
+
+def remote_worker_ws_max_size() -> int:
+    """Uvicorn WS 接收上限须覆盖 worker 返回的 base64 blob（默认 16MiB 不够）。"""
+    return REMOTE_WS_MAX_SIZE
 
 
 def remote_login_approver_secret() -> str:
@@ -722,6 +728,7 @@ async def run_remote_worker_server_until_stopped(
         port=bind_port,
         log_level="info",
         access_log=False,
+        ws_max_size=remote_worker_ws_max_size(),
     )
     server = uvicorn.Server(config)
     task = asyncio.create_task(server.serve(), name="remote-worker-websocket-server")

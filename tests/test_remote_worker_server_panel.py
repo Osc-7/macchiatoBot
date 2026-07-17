@@ -34,6 +34,15 @@ def test_remote_healthz_available() -> None:
     assert resp.json() == {"status": "ok"}
 
 
+def test_remote_worker_ws_max_size_covers_blob_responses() -> None:
+    from macchiato_remote.protocol import REMOTE_BLOB_MAX_BYTES, REMOTE_WS_MAX_SIZE
+    from uvicorn.config import Config
+
+    assert rws.remote_worker_ws_max_size() == REMOTE_WS_MAX_SIZE
+    assert REMOTE_WS_MAX_SIZE > Config("x:app").ws_max_size
+    assert REMOTE_WS_MAX_SIZE > REMOTE_BLOB_MAX_BYTES * 4 // 3
+
+
 def test_remote_device_login_flow_requires_approver_secret(
     monkeypatch,
     tmp_path,

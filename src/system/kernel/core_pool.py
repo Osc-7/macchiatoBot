@@ -88,6 +88,46 @@ def _resolve_core_owner(
     return src, uid
 
 
+def _checkpoint_owner_candidates(
+    session_id: str, source: str, user_id: str
+) -> list[tuple[str, str]]:
+    """Owner 命名空间探测顺序：解析后的 owner 优先，其次保留调用方原始 owner。"""
+    resolved = _resolve_core_owner(session_id, source, user_id)
+    raw = ((source or "").strip() or "cli", (user_id or "").strip() or "root")
+    if raw == resolved:
+        return [resolved]
+    return [resolved, raw]
+
+
+def _read_session_checkpoint(
+    *,
+    session_id: str,
+    source: str,
+    user_id: str,
+    mem_cfg: Any,
+    config: Any,
+) -> tuple[Optional[Any], Optional[Any], bool]:
+    """按 owner 候选路径查找与 ``session_id`` 匹配的 checkpoint。
+
+    Returns ``(checkpoint, manager, loaded_from_legacy_owner)``.
+    """
+    from agent_core.agent.checkpoint import CoreCheckpointManager
+    from agent_core.agent.memory_paths import resolve_memory_owner_paths
+
+    sid = (session_id or "").strip()
+    if not sid:
+        return None, None, False
+
+    candidates = _checkpoint_owner_candidates(session_id, source, user_id)
+    for idx, (src, uid) in enumerate(candidates):
+        paths = resolve_memory_owner_paths(mem_cfg, uid, config=config, source=src)
+        mgr = CoreCheckpointManager(paths["checkpoint_path"])
+        ckpt = mgr.read()
+        if ckpt is not None and ckpt.session_id == sid:
+            return ckpt, mgr, idx > 0
+    return None, None, False
+
+
 @dataclass
 class CoreEntry:
     """进程控制块（PCB）— 一个 AgentCore 实例的完整元数据。"""
@@ -1162,6 +1202,7 @@ class CorePool:
 
         from .core_logger import CoreLifecycleLogger
 
+        raw_source, raw_user_id = source, user_id
         source, user_id = _resolve_core_owner(session_id, source, user_id)
 
         profile_synthesized_here = False
@@ -1199,14 +1240,16 @@ class CorePool:
         # 仅在本函数内按 source 推断了 profile时：尝试用 checkpoint 内存档的 CoreProfile 覆盖（新版 JSON）
         if profile_synthesized_here and not (session_id or "").startswith("cron:"):
             try:
-                mem_paths = resolve_memory_owner_paths(
-                    self._config.memory, user_id, config=self._config, source=source
+                disk_ckpt, _, _ = _read_session_checkpoint(
+                    session_id=session_id,
+                    source=raw_source,
+                    user_id=raw_user_id,
+                    mem_cfg=self._config.memory,
+                    config=self._config,
                 )
-                disk_ckpt = CoreCheckpointManager(mem_paths["checkpoint_path"]).read()
                 if (
                     disk_ckpt is not None
                     and not disk_ckpt.expired
-                    and disk_ckpt.session_id == session_id
                     and disk_ckpt.core_profile
                 ):
                     recovered = core_profile_from_checkpoint_dict(
@@ -1323,14 +1366,17 @@ class CorePool:
                 try:
                     from agent_core.agent.memory_paths import (
                         get_kernel_shutdown_at_path,
+                        resolve_memory_owner_paths,
                     )
 
                     mem_cfg = self._config.memory
-                    mem_paths = resolve_memory_owner_paths(
-                        mem_cfg, user_id, config=self._config, source=source
+                    checkpoint, ckpt_mgr, loaded_from_legacy = _read_session_checkpoint(
+                        session_id=session_id,
+                        source=raw_source,
+                        user_id=raw_user_id,
+                        mem_cfg=mem_cfg,
+                        config=self._config,
                     )
-                    ckpt_mgr = CoreCheckpointManager(mem_paths["checkpoint_path"])
-                    checkpoint = ckpt_mgr.read()
 
                     # expired=True：该 session 已被正常 evict，清理文件并走冷启动
                     if checkpoint is not None and checkpoint.expired:
@@ -1341,7 +1387,7 @@ class CorePool:
                             session_id,
                         )
 
-                    if checkpoint is not None and checkpoint.session_id == session_id:
+                    if checkpoint is not None:
                         shutdown_path = get_kernel_shutdown_at_path(mem_cfg)
                         shutdown_at: Optional[float] = None
                         if Path(shutdown_path).exists():
@@ -1378,6 +1424,42 @@ class CorePool:
                                     restore_fn(checkpoint)
                                     restored_from_checkpoint = True
                                     initial_ttl_offset = elapsed
+                                    if loaded_from_legacy and ckpt_mgr is not None:
+                                        try:
+                                            from dataclasses import replace
+
+                                            primary_paths = resolve_memory_owner_paths(
+                                                mem_cfg,
+                                                user_id,
+                                                config=self._config,
+                                                source=source,
+                                            )
+                                            primary_mgr = CoreCheckpointManager(
+                                                primary_paths["checkpoint_path"]
+                                            )
+                                            migrated = replace(
+                                                checkpoint,
+                                                source=source,
+                                                owner_id=user_id,
+                                            )
+                                            primary_mgr.write(migrated)
+                                            ckpt_mgr.mark_expired()
+                                            logger.info(
+                                                "CorePool._load: migrated legacy checkpoint "
+                                                "session=%s from %s:%s to %s:%s",
+                                                session_id,
+                                                raw_source,
+                                                raw_user_id,
+                                                source,
+                                                user_id,
+                                            )
+                                        except Exception as exc:
+                                            logger.warning(
+                                                "CorePool._load: legacy checkpoint migrate "
+                                                "failed (session=%s): %s",
+                                                session_id,
+                                                exc,
+                                            )
                                     logger.info(
                                         "CorePool._load: restored checkpoint for session=%s "
                                         "(elapsed=%.0fs, remaining=%.0fs)",

@@ -48,3 +48,22 @@ def test_read_workspace_blob_supports_absolute_path(tmp_path):
     assert truncated is False
     assert b64 == "iVBORw0KGgo="
 
+
+def test_write_workspace_blob_relative_inbox(tmp_path):
+    import base64
+
+    from macchiato_remote.runtime.files import write_workspace_blob
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    payload = b"hello-blob"
+    written, err = write_workspace_blob(
+        workspace,
+        ".macchiato/inbox/hello.bin",
+        base64.b64encode(payload).decode("ascii"),
+    )
+    assert err is None
+    assert written == len(payload)
+    assert (
+        workspace / ".macchiato" / "inbox" / "hello.bin"
+    ).read_bytes() == payload

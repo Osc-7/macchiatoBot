@@ -243,6 +243,34 @@ def test_injects_thinking_block_for_tool_calls_when_thinking_enabled():
     assert any(isinstance(x, dict) and x.get("type") == "tool_use" for x in parts)
 
 
+def test_injects_thinking_block_for_final_assistant_when_thinking_enabled():
+    p = AnthropicCompatProvider(
+        name="anthropic-compat",
+        base_url="https://example.com/v1",
+        api_key="sk-x",
+        model="k3",
+        capabilities=Capabilities(reasoning_content=True),
+        temperature=0.7,
+        max_tokens=4096,
+        request_timeout_seconds=30.0,
+        stream=False,
+        vendor_params={"thinking": {"type": "enabled", "effort": "max"}},
+    )
+    _, msgs = p._convert_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "最终答复",
+                "reasoning_content": "先想清楚再答",
+            }
+        ]
+    )
+    parts = msgs[0]["content"]
+    assert isinstance(parts, list)
+    assert parts[0] == {"type": "thinking", "thinking": "先想清楚再答"}
+    assert parts[1] == {"type": "text", "text": "最终答复"}
+
+
 def test_convert_user_pdf_file_block_to_anthropic_document():
     p = _provider(caps=Capabilities(file_input_mime_types=("application/pdf",)))
     _, msgs = p._convert_messages(

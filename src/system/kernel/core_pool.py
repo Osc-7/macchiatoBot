@@ -37,6 +37,57 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _infer_owner_from_session_id(session_id: str) -> tuple[str, str]:
+    """从 session_id 推断 (source, user_id)，供日志文件名与记忆路径对齐。
+
+    与 ``scheduler._infer_memory_owner_from_session_id`` 语义一致；放在此处避免
+    core_pool ↔ scheduler 循环导入。
+    """
+    sid = (session_id or "").strip()
+    if sid.startswith("sub:"):
+        return "subagent", sid[4:]
+    if sid.startswith("feishu:"):
+        rest = sid[7:]
+        parts = rest.split(":")
+        if len(parts) >= 2 and parts[0] in ("user", "chat"):
+            key = (parts[1] or "").strip()
+            if key:
+                return "feishu", key
+        safe = rest.replace(":", "_").strip()
+        return "feishu", safe or "unknown"
+    if sid.startswith("shuiyuan:"):
+        rest = sid[9:].strip()
+        return "shuiyuan", rest or "unknown"
+    if sid.startswith("cron:"):
+        rest = sid[5:].strip()
+        return "cron", rest or "unknown"
+    if ":" in sid:
+        prefix, rest = sid.split(":", 1)
+        return prefix.strip(), (rest.strip() or "root")
+    return "cli", "root"
+
+
+def _resolve_core_owner(
+    session_id: str, source: str, user_id: str
+) -> tuple[str, str]:
+    """纠正「非 cli session_id + CLI 默认 source/user」导致的错误 owner。
+
+    典型场景：CLI ``/session switch`` 到飞书 session_id，但 acquire 仍带
+    ``source=cli user_id=root`` → 日志落到 ``session-cli:root-*.jsonl``，记忆也进错目录。
+    """
+    sid = (session_id or "").strip()
+    src = (source or "").strip() or "cli"
+    uid = (user_id or "").strip() or "root"
+    if not sid.startswith(("feishu:", "sub:", "cron:", "shuiyuan:")):
+        return src, uid
+    inferred_s, inferred_u = _infer_owner_from_session_id(sid)
+    if src == "cli":
+        return inferred_s, inferred_u
+    if src == inferred_s and uid == "root" and inferred_u not in ("", "root", "unknown"):
+        return src, inferred_u
+    return src, uid
+
+
 @dataclass
 class CoreEntry:
     """进程控制块（PCB）— 一个 AgentCore 实例的完整元数据。"""
@@ -247,6 +298,7 @@ class CorePool:
         内部使用 per-session Lock 保证只创建一次。
         返回 AgentCore 实例（不含 CoreEntry，调用方不需要感知 PCB 细节）。
         """
+        source, user_id = _resolve_core_owner(session_id, source, user_id)
         existing = self._pool.get(session_id)
         if existing is not None and existing.agent is not None and profile is None:
             cur_source = str(getattr(existing.agent, "_source", "") or "").strip()
@@ -1109,6 +1161,8 @@ class CorePool:
         )
 
         from .core_logger import CoreLifecycleLogger
+
+        source, user_id = _resolve_core_owner(session_id, source, user_id)
 
         profile_synthesized_here = False
         if profile is None:

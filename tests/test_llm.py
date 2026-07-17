@@ -681,6 +681,60 @@ class TestDeepSeekThinkingToolRoundsUseNonstream:
         )
         assert p._thinking_mode_tool_rounds_need_nonstream() is True
 
+    @pytest.mark.asyncio
+    async def test_chat_with_tools_forces_nonstream_when_thinking_enabled(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        p = OpenAICompatProvider(
+            name="kimi_k3",
+            base_url="https://api.kimi.com/coding/v1",
+            api_key="k",
+            model="k3",
+            capabilities=Capabilities(
+                reasoning_content=True,
+                function_calling=True,
+                parallel_tool_calls=True,
+            ),
+            stream=True,
+            vendor_params={"thinking": {"type": "enabled", "effort": "max"}},
+        )
+        mock_message = MagicMock()
+        mock_message.content = "ok"
+        mock_message.tool_calls = None
+        mock_message.reasoning_content = "think"
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_choice.finish_reason = "stop"
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+        mock_resp.usage = MagicMock(
+            prompt_tokens=1, completion_tokens=1, total_tokens=2
+        )
+
+        create = AsyncMock(return_value=mock_resp)
+        p._client = MagicMock()
+        p._client.chat.completions.create = create
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "run",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        with patch.object(p, "_chat_with_tools_stream", new_callable=AsyncMock) as stream_fn:
+            await p.chat_with_tools(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=tools,
+            )
+            stream_fn.assert_not_awaited()
+        kwargs = create.await_args.kwargs
+        assert kwargs.get("stream") is not True
+        assert "stream" not in kwargs or kwargs["stream"] is False
+
     def test_reasoning_fragment_from_delta_extra(self):
         from openai.types.chat.chat_completion_chunk import ChoiceDelta
 

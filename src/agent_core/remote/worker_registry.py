@@ -8,11 +8,14 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from macchiato_remote.protocol import (
+    REMOTE_BLOB_MAX_BYTES,
     REMOTE_WORKSPACE_MOUNT,
     RemoteCommandRequest,
     RemoteCommandResult,
     RemoteFileBlobReadRequest,
     RemoteFileBlobReadResult,
+    RemoteFileBlobWriteRequest,
+    RemoteFileBlobWriteResult,
     RemoteFileReadRequest,
     RemoteFileReadResult,
     RemoteFileWriteRequest,
@@ -257,7 +260,7 @@ class RemoteWorkerRegistry:
         login: str,
         session_id: str,
         path: str,
-        max_bytes: int = 20 * 1024 * 1024,
+        max_bytes: int = REMOTE_BLOB_MAX_BYTES,
         timeout_seconds: float = 120.0,
     ) -> RemoteFileBlobReadResult:
         conn = await self.require(login)
@@ -273,6 +276,48 @@ class RemoteWorkerRegistry:
             timeout_seconds=timeout_seconds,
         )
         return RemoteFileBlobReadResult.model_validate(payload)
+
+    def worker_supports_file_blob_write(self, login: str) -> bool:
+        """True when the connected worker advertised ``file_blob_write``."""
+        key = (login or "").strip()
+        conn = self._connections.get(key)
+        if conn is None:
+            return False
+        caps = set(conn.hello_meta.get("capabilities") or [])
+        return "file_blob_write" in caps
+
+    async def file_blob_write(
+        self,
+        *,
+        login: str,
+        session_id: str,
+        path: str,
+        content_base64: str,
+        mode: str = "overwrite",
+        max_bytes: int = REMOTE_BLOB_MAX_BYTES,
+        timeout_seconds: float = 120.0,
+    ) -> RemoteFileBlobWriteResult:
+        conn = await self.require(login)
+        if not self.worker_supports_file_blob_write(login):
+            return RemoteFileBlobWriteResult(
+                request_id=uuid.uuid4().hex,
+                path=path,
+                error="CAPABILITY_MISSING:file_blob_write",
+            )
+        req = RemoteFileBlobWriteRequest(
+            request_id=uuid.uuid4().hex,
+            session_id=session_id,
+            path=path,
+            content_base64=content_base64,
+            mode=mode if mode in {"overwrite", "append"} else "overwrite",  # type: ignore[arg-type]
+            max_bytes=max(1, int(max_bytes)),
+        )
+        payload = await conn.request(
+            "file_blob_write",
+            req.model_dump(),
+            timeout_seconds=timeout_seconds,
+        )
+        return RemoteFileBlobWriteResult.model_validate(payload)
 
     async def reset_remote_shell(
         self,

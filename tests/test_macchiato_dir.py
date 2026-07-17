@@ -27,6 +27,7 @@ def test_ensure_macchiato_layout_creates_tree_and_device_md(tmp_path: Path) -> N
     assert (root / ".macchiato" / "rules").is_dir()
     assert (root / ".macchiato" / "skills").is_dir()
     assert (root / ".macchiato" / "scratch").is_dir()
+    assert (root / ".macchiato" / "inbox").is_dir()
     device = root / ".macchiato" / "DEVICE.md"
     assert device.is_file()
     assert "studio" in device.read_text(encoding="utf-8")

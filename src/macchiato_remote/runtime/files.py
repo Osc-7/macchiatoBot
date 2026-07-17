@@ -126,3 +126,35 @@ def read_workspace_blob(
         truncated,
         None,
     )
+
+
+def write_workspace_blob(
+    root: Path,
+    relative: str,
+    content_base64: str,
+    *,
+    mode: str = "overwrite",
+    max_bytes: int = 20 * 1024 * 1024,
+) -> Tuple[int, Optional[str]]:
+    """Decode base64 and write bytes under workspace. Returns (bytes_written, error)."""
+    try:
+        path = resolve_under_workspace(root, relative)
+    except ValueError as exc:
+        return 0, str(exc)
+    try:
+        raw = base64.b64decode(content_base64 or "", validate=False)
+    except Exception as exc:  # noqa: BLE001
+        return 0, f"INVALID_BASE64: {exc}"
+    limit = max(1, int(max_bytes))
+    if len(raw) > limit:
+        return 0, f"BLOB_TOO_LARGE: {len(raw)} > {limit}"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if mode == "append":
+            with open(path, "ab") as handle:
+                handle.write(raw)
+            return len(raw), None
+        path.write_bytes(raw)
+        return len(raw), None
+    except OSError as exc:
+        return 0, str(exc)

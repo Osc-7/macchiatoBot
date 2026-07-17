@@ -15,12 +15,14 @@ from pydantic import BaseModel, Field, field_validator
 REMOTE_WORKSPACE_MOUNT = "/workspace"
 
 # 与 daemon 协商能力；worker 包主版本 bump 时递增
-REMOTE_PROTOCOL_VERSION = 3
+REMOTE_PROTOCOL_VERSION = 4
+REMOTE_BLOB_MAX_BYTES = 20 * 1024 * 1024
 REMOTE_WORKER_CAPABILITIES = (
     "exec",
     "file_read",
     "file_write",
     "file_blob_read",
+    "file_blob_write",
     "reset_shell",
     "shell_capture",
     "job_start",
@@ -187,7 +189,7 @@ class RemoteFileBlobReadRequest(BaseModel):
     request_id: str
     session_id: str
     path: str
-    max_bytes: int = 20 * 1024 * 1024
+    max_bytes: int = REMOTE_BLOB_MAX_BYTES
 
 
 class RemoteFileBlobReadResult(BaseModel):
@@ -198,6 +200,22 @@ class RemoteFileBlobReadResult(BaseModel):
     mime_type: str = "application/octet-stream"
     bytes_read: int = 0
     truncated: bool = False
+    error: Optional[str] = None
+
+
+class RemoteFileBlobWriteRequest(BaseModel):
+    request_id: str
+    session_id: str
+    path: str
+    content_base64: str
+    mode: Literal["overwrite", "append"] = "overwrite"
+    max_bytes: int = REMOTE_BLOB_MAX_BYTES
+
+
+class RemoteFileBlobWriteResult(BaseModel):
+    request_id: str
+    path: str
+    bytes_written: int = 0
     error: Optional[str] = None
 
 

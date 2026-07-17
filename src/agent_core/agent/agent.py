@@ -698,6 +698,26 @@ class AgentCore:
         return str(th.get("type", "")).strip().lower() == "enabled"
 
     @staticmethod
+    def _provider_openai_kimi_coding_thinking_enabled(provider: Any) -> bool:
+        """Kimi Coding OpenAI 兼容端点（如 model=k3）开启 thinking 时的画像。
+
+        直连探针确认：历史里 ``reasoning_content=\"\"`` 可被 api.kimi.com 接受。
+        该路径偶发返回 tool_calls 却无 reasoning；合成空字段可避免整轮 abort。
+        """
+        if provider is None or type(provider).__name__ != "OpenAICompatProvider":
+            return False
+        base = str(getattr(provider, "_base_url", "") or "").lower()
+        if "api.kimi.com" not in base:
+            return False
+        vendor_params = getattr(provider, "_vendor_params", None)
+        if not isinstance(vendor_params, dict):
+            return False
+        th = vendor_params.get("thinking")
+        if not isinstance(th, dict):
+            return False
+        return str(th.get("type", "")).strip().lower() == "enabled"
+
+    @staticmethod
     def _looks_like_vendor_excluded_from_ds_empty_reasoning(provider: Any) -> bool:
         """对明确非 DeepSeek 的厂商不重试写入空 reasoning（例如 GPT）。"""
         model = str(getattr(provider, "model", "") or "").lower()
@@ -746,6 +766,9 @@ class AgentCore:
         # Kimi Code 等 Anthropic 兼容端点：tool_use 常无 thinking 块；回放时
         # anthropic_compat 会注入占位 thinking，故可安全合成空 reasoning_content。
         if self._provider_anthropic_compat_thinking_enabled(provider):
+            return True
+        # Kimi Coding OpenAI（k3 等）：同上，空字段可回传，避免缺 reasoning 时 abort。
+        if self._provider_openai_kimi_coding_thinking_enabled(provider):
             return True
         if self._looks_like_vendor_excluded_from_ds_empty_reasoning(provider):
             return False

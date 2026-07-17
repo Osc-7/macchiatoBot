@@ -544,6 +544,20 @@ class OpenAICompatProvider(BaseProvider):
             # endregion
 
         use_stream = self._stream
+        # thinking + tools：流式偶发丢 reasoning_content，下一轮无法原样回传。
+        # 已有判定方法此前未接入请求路径；有 tools 时强制非流式以一次取全字段。
+        if (
+            use_stream
+            and tools
+            and self._capabilities.function_calling
+            and self._thinking_mode_tool_rounds_need_nonstream()
+        ):
+            logger.debug(
+                "OpenAICompatProvider[%s] thinking+tools: force stream=False "
+                "to preserve reasoning_content",
+                self._name,
+            )
+            use_stream = False
         if use_stream:
             return await self._chat_with_tools_stream(
                 request_params,

@@ -1,4 +1,4 @@
-"""Protocol models and capabilities for remote MCP (v3)."""
+"""Protocol models and capabilities for remote MCP (v3+) and blob write (v4)."""
 
 from macchiato_remote.protocol import (
     REMOTE_PROTOCOL_VERSION,
@@ -15,8 +15,8 @@ from macchiato_remote.protocol import (
 )
 
 
-def test_protocol_version_is_3():
-    assert REMOTE_PROTOCOL_VERSION == 3
+def test_protocol_version_at_least_4():
+    assert REMOTE_PROTOCOL_VERSION >= 4
 
 
 def test_capabilities_include_mcp():
@@ -27,6 +27,7 @@ def test_capabilities_include_mcp():
         "mcp_call_tool",
         "mcp_shutdown",
     }.issubset(caps)
+    assert "file_blob_write" in caps
 
 
 def test_mcp_models_roundtrip():

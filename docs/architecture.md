@@ -97,7 +97,7 @@ Runtime state is intentionally outside source control:
 |---|---|
 | `data/` | persistent app data, sessions, automation repositories |
 | `logs/` | daemon and gateway logs |
-| `.macchiato/` | workspace-local state: jobs, journal, rules/skills, scratch |
+| `.macchiato/` | workspace-local state: jobs, journal, rules/skills, scratch, inbox |
 | `dist/`, `build/`, `*.egg-info/` | package build outputs |
 | `.venv/`, `.pytest_cache/`, `__pycache__/` | local development artifacts |
 

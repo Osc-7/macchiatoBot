@@ -612,7 +612,26 @@ class AnthropicCompatProvider(BaseProvider):
                     if blocks:
                         anthropic_messages.append({"role": "user", "content": blocks})
                 else:
-                    anthropic_messages.append({"role": "assistant", "content": content or ""})
+                    # 无 tool_calls 的最终回复也需回传 thinking，否则 Preserved Thinking
+                    # / K3 多轮会丢掉上一轮推理（仅 content 字符串不够）。
+                    if thinking_enabled:
+                        reasoning_text = str(msg.get("reasoning_content") or "").strip()
+                        content_parts = [
+                            {
+                                "type": "thinking",
+                                "thinking": reasoning_text
+                                or "[compat] missing prior reasoning context",
+                            }
+                        ]
+                        if content:
+                            content_parts.append({"type": "text", "text": content})
+                        anthropic_messages.append(
+                            {"role": "assistant", "content": content_parts}
+                        )
+                    else:
+                        anthropic_messages.append(
+                            {"role": "assistant", "content": content or ""}
+                        )
                 i += 1
                 continue
 

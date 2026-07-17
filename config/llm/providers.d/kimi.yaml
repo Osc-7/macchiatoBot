@@ -22,15 +22,21 @@ kimi_code:
     context_window: 262144
     vendor_files_api: kimi
 
-kimi_k2.6:
-  label: "Kimi K2.6"
-  base_url: "https://api.moonshot.cn/v1"
-  api_key: "${MOONSHOT_API_KEY}"
-  model: "kimi-k2.6"
+kimi_code_fast:
+  label: "Kimi Code Fast"
+  base_url: "https://api.kimi.com/coding/v1"
+  api_key: "${KIMI_CODE_API_KEY}"
+  model: "kimi-for-coding-highspeed"
   temperature: 1.0
+  protocol: "anthropic"
+  # Anthropic 扩展思考要求 budget_tokens；见
+  # https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking
   vendor_params:
     thinking:
       type: "enabled"
+      budget_tokens: 65536
+  # headers:
+  #   User-Agent: "claude-code/0.1.0"
   capabilities:
     vision: true
     function_calling: true
@@ -38,4 +44,25 @@ kimi_k2.6:
     reasoning_content: true
     thinking_tag_inline: false
     context_window: 262144
+    vendor_files_api: kimi
+
+kimi_k3:
+  label: "Kimi K3"
+  base_url: "https://api.kimi.com/coding/v1"
+  api_key: "${KIMI_CODE_API_KEY}"
+  model: "k3"
+  temperature: 1.0
+  protocol: "anthropic"
+  # Coding 端点走 Anthropic Messages；k3 用 thinking.effort=max（非 K2 的 budget_tokens）
+  vendor_params:
+    thinking:
+      type: "enabled"
+      effort: "max"
+  capabilities:
+    vision: true
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: true
+    thinking_tag_inline: false
+    context_window: 1048576
     vendor_files_api: kimi

@@ -19,6 +19,8 @@ from macchiato_remote.protocol import (
     RemoteCommandResult,
     RemoteFileBlobReadRequest,
     RemoteFileBlobReadResult,
+    RemoteFileBlobWriteRequest,
+    RemoteFileBlobWriteResult,
     RemoteFileReadRequest,
     RemoteFileReadResult,
     RemoteFileWriteRequest,
@@ -53,6 +55,7 @@ from macchiato_remote.protocol import (
 from macchiato_remote.runtime.files import (
     read_workspace_blob,
     read_workspace_text,
+    write_workspace_blob,
     write_workspace_text,
 )
 from macchiato_remote.runtime.jobs import RemoteJobRegistry
@@ -359,6 +362,10 @@ class RemoteWorkerClient:
             req = RemoteFileBlobReadRequest.model_validate(payload)
             result = await self._file_blob_read(req)
             return {"type": "file_blob_read_result", "result": result.model_dump()}
+        if msg_type == "file_blob_write":
+            req = RemoteFileBlobWriteRequest.model_validate(payload)
+            result = await self._file_blob_write(req)
+            return {"type": "file_blob_write_result", "result": result.model_dump()}
         if msg_type == "reset_shell":
             req = RemoteShellResetRequest.model_validate(payload)
             result = await self._reset_shell(req)
@@ -715,6 +722,35 @@ class RemoteWorkerClient:
             mime_type=mime,
             bytes_read=read_n,
             truncated=truncated,
+        )
+
+    async def _file_blob_write(
+        self, req: RemoteFileBlobWriteRequest
+    ) -> RemoteFileBlobWriteResult:
+        session = self._sessions.get(req.session_id)
+        if session is None:
+            return RemoteFileBlobWriteResult(
+                request_id=req.request_id,
+                path=req.path,
+                error="remote session is not open",
+            )
+        written, err = write_workspace_blob(
+            session.root,
+            req.path,
+            req.content_base64,
+            mode=req.mode,
+            max_bytes=req.max_bytes,
+        )
+        if err:
+            return RemoteFileBlobWriteResult(
+                request_id=req.request_id,
+                path=req.path,
+                error=err,
+            )
+        return RemoteFileBlobWriteResult(
+            request_id=req.request_id,
+            path=req.path,
+            bytes_written=written,
         )
 
     async def _reset_shell(

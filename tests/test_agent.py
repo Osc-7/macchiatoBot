@@ -1640,3 +1640,26 @@ class TestMissingToolReasoningCompat:
         )
 
         assert agent._should_synthesize_empty_tool_reasoning(response) is False
+
+    def test_openai_kimi_coding_k3_synthesizes_empty_tool_reasoning(self):
+        """api.kimi.com OpenAI 协议（k3）缺 reasoning 时应合成空字段，避免 abort。"""
+        from agent_core.llm.capabilities import Capabilities
+        from agent_core.llm.providers import OpenAICompatProvider
+
+        provider = OpenAICompatProvider(
+            name="kimi_k3",
+            base_url="https://api.kimi.com/coding/v1",
+            api_key="sk-test",
+            model="k3",
+            capabilities=Capabilities(reasoning_content=True),
+            vendor_params={"thinking": {"type": "enabled", "effort": "max"}},
+            stream=False,
+        )
+        agent = self._agent_with_provider(provider)
+        response = LLMResponse(
+            content=None,
+            tool_calls=[ToolCall(id="t1", name="bash", arguments={"command": "ls"})],
+            finish_reason="tool_calls",
+        )
+        assert agent._should_retry_missing_tool_reasoning(response) is True
+        assert agent._should_synthesize_empty_tool_reasoning(response) is True

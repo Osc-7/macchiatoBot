@@ -220,7 +220,13 @@ class FeishuContentResolver(ContentResolver):
                 content_lines.append(preview)
             else:
                 content_lines.append("该文件类型暂不做内联解析，请按路径读取文件后再处理。")
-            return {"type": "text", "text": "\n".join(content_lines)}
+            return {
+                "type": "text",
+                "text": "\n".join(content_lines),
+                "path": str(local_path),
+                "name": local_path.name,
+                "mime_type": normalized_mime,
+            }
 
         if normalized_mime.startswith("video/"):
             return {
@@ -238,6 +244,9 @@ class FeishuContentResolver(ContentResolver):
                     f"[用户上传音频已保存到工作区] {local_path}\n"
                     "当前默认不做音频内联解析，请根据该路径选择后续处理。"
                 ),
+                "path": str(local_path),
+                "name": local_path.name,
+                "mime_type": normalized_mime,
             }
         # image 及未知类型统一按图片处理
         return {

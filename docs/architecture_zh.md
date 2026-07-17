@@ -92,7 +92,7 @@ Kernel 是以下事项的权威：
 |---|---|
 | `data/` | 应用数据、会话、自动化仓库 |
 | `logs/` | daemon / gateway 日志 |
-| `.macchiato/` | 工作区本地状态：job 日志、日记、本机 rules/skills、scratch |
+| `.macchiato/` | 工作区本地状态：job 日志、日记、本机 rules/skills、scratch、inbox |
 | `dist/`、`build/`、`*.egg-info/` | 打包构建产物 |
 | `.venv/`、`.pytest_cache/`、`__pycache__/` | 本地开发产物 |
 

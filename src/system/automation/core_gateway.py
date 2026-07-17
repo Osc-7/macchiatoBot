@@ -348,6 +348,31 @@ class AutomationCoreGateway:
             except Exception as exc:
                 logger.warning("content_refs resolve failed before scheduler: %s", exc)
 
+        # 远程工作区激活时：把 daemon 本地附件镜像到 .macchiato/inbox，并改写文本路径
+        turn_text = agent_input.text
+        items_for_sync = metadata.get("content_items")
+        if isinstance(items_for_sync, list) and items_for_sync:
+            try:
+                from agent_core.remote.attachment_sync import (
+                    format_attachment_sync_notices,
+                    sync_content_items_to_remote_inbox,
+                )
+
+                synced_items, turn_text, notices = await sync_content_items_to_remote_inbox(
+                    session_id=session_id,
+                    content_items=items_for_sync,
+                    user_text=turn_text,
+                )
+                metadata["content_items"] = synced_items
+                notice_block = format_attachment_sync_notices(notices)
+                if notice_block:
+                    # 升级提示等错误类 notice 写入文本；纯成功提示也保留一句。
+                    turn_text = (
+                        f"{turn_text}\n\n{notice_block}" if turn_text else notice_block
+                    )
+            except Exception as exc:
+                logger.warning("remote attachment sync failed before scheduler: %s", exc)
+
         profile = metadata.pop("_core_profile", None)
         frontend_id = self._source
         if profile is None and (session_id or "").startswith("shuiyuan:"):
@@ -362,7 +387,7 @@ class AutomationCoreGateway:
             frontend_id = "shuiyuan"
             metadata.setdefault("user_id", username)
         request = KernelRequest.create(
-            text=agent_input.text,
+            text=turn_text,
             session_id=session_id,
             frontend_id=frontend_id,
             metadata=metadata,

@@ -21,6 +21,7 @@ MACCHIATO_SUBDIRS: tuple[str, ...] = (
     "rules",
     "skills",
     "scratch",
+    "inbox",
 )
 
 JOBS_REL = f"{MACCHIATO_DIR_NAME}/jobs"
@@ -28,6 +29,7 @@ JOURNAL_REL = f"{MACCHIATO_DIR_NAME}/journal"
 RULES_REL = f"{MACCHIATO_DIR_NAME}/rules"
 SKILLS_REL = f"{MACCHIATO_DIR_NAME}/skills"
 SCRATCH_REL = f"{MACCHIATO_DIR_NAME}/scratch"
+INBOX_REL = f"{MACCHIATO_DIR_NAME}/inbox"
 DEVICE_MD_REL = f"{MACCHIATO_DIR_NAME}/DEVICE.md"
 MCP_YAML_REL = f"{MACCHIATO_DIR_NAME}/mcp.yaml"
 
@@ -41,6 +43,7 @@ _DEVICE_MD_TEMPLATE = """# 本机 / 本工作区设备笔记
 - 本机 / 本工作区技能：`.macchiato/skills/`
 - 临时稿：`.macchiato/scratch/`
 - 后台 job 日志：`.macchiato/jobs/`
+- 附件收件箱：`.macchiato/inbox/`（daemon 镜像的上传文件）
 - 本工作区 MCP：`.macchiato/mcp.yaml`（供 remote worker 启动；与 daemon ``location: remote`` 同名）
 
 跨设备稳定的偏好与约束请写 **MEMORY.md**（由记忆系统映射到 canonical 路径），
@@ -65,6 +68,7 @@ def resolve_macchiato_paths(workspace_root: Path | str) -> Dict[str, str]:
         "rules_dir": str(base / "rules"),
         "skills_dir": str(base / "skills"),
         "scratch_dir": str(base / "scratch"),
+        "inbox_dir": str(base / "inbox"),
         "device_md": str(base / "DEVICE.md"),
         "mcp_yaml": str(base / "mcp.yaml"),
     }

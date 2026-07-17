@@ -164,23 +164,30 @@ def adapt_content_items_for_provider(
         if not isinstance(raw, dict):
             continue
         if raw.get("type") != "user_file":
+            remote_path = str(raw.get("remote_path") or "").strip()
+            if remote_path and raw.get("type") in {"media_ref", "image_url", "video_url"}:
+                text_lines.append(f"[用户附件已同步到远程工作区] {remote_path}")
             adapted.append(raw)
             continue
 
         mime = str(raw.get("mime_type") or "application/octet-stream").strip().lower()
         path = str(raw.get("path") or "").strip()
+        remote_path = str(raw.get("remote_path") or "").strip()
+        display_path = remote_path or path
         name = str(raw.get("name") or "").strip() or "attachment.bin"
         preview_text = str(raw.get("preview_text") or "").strip()
 
-        if path:
-            text_lines.append(f"[用户上传文件已保存到工作区] {path}")
+        if display_path:
+            text_lines.append(f"[用户上传文件已保存到工作区] {display_path}")
+            if remote_path:
+                text_lines.append("（已同步到远程工作区）")
         if mime:
             text_lines.append(f"mime={mime}")
 
         if preview_text:
             text_lines.append("以下是文件内容预览：")
             text_lines.append(preview_text)
-        elif path:
+        elif display_path:
             text_lines.append("该文件已保存到工作区，请按路径读取或使用支持的文件接口处理。")
 
         # PDF/文档不在 messages 里挂载；路径提示已写入 preface 文本。
@@ -217,6 +224,7 @@ def normalize_media_items_for_context(
                     "type": "media_ref",
                     "media_type": str(raw.get("media_type") or "file"),
                     "path": str(raw.get("path") or "").strip(),
+                    "remote_path": str(raw.get("remote_path") or "").strip(),
                     "url": str(raw.get("url") or "").strip(),
                     "name": str(raw.get("name") or "").strip(),
                     "mime_type": str(raw.get("mime_type") or "").strip(),
@@ -228,6 +236,7 @@ def normalize_media_items_for_context(
             continue
         if t == "image_url":
             path = str(raw.get("path") or "").strip()
+            remote_path = str(raw.get("remote_path") or "").strip()
             url = ""
             inner = raw.get("image_url")
             if isinstance(inner, dict):
@@ -238,6 +247,7 @@ def normalize_media_items_for_context(
                         "type": "media_ref",
                         "media_type": "image",
                         "path": path,
+                        "remote_path": remote_path,
                         "url": url if not _is_data_url(url) else "",
                         "name": str(raw.get("name") or "").strip(),
                         "mime_type": _guess_mime(path, "image/png"),
@@ -246,6 +256,7 @@ def normalize_media_items_for_context(
             continue
         if t == "video_url":
             path = str(raw.get("path") or "").strip()
+            remote_path = str(raw.get("remote_path") or "").strip()
             url = ""
             inner = raw.get("video_url")
             if isinstance(inner, dict):
@@ -256,6 +267,7 @@ def normalize_media_items_for_context(
                         "type": "media_ref",
                         "media_type": "video",
                         "path": path,
+                        "remote_path": remote_path,
                         "url": url if not _is_data_url(url) else "",
                         "name": str(raw.get("name") or "").strip(),
                         "mime_type": _guess_mime(path, "video/mp4"),
@@ -264,6 +276,7 @@ def normalize_media_items_for_context(
             continue
         if t == "file":
             path = str(raw.get("path") or "").strip()
+            remote_path = str(raw.get("remote_path") or "").strip()
             name = str(raw.get("name") or "").strip()
             file_obj = raw.get("file") if isinstance(raw.get("file"), dict) else {}
             if not name and isinstance(file_obj, dict):
@@ -275,6 +288,7 @@ def normalize_media_items_for_context(
                         "type": "media_ref",
                         "media_type": "file",
                         "path": path,
+                        "remote_path": remote_path,
                         "name": name,
                         "mime_type": mime,
                     }
@@ -626,18 +640,21 @@ def _downgrade_media_items_to_text(
                 url = str(raw.get("url") or "").strip()
             name = str(raw.get("name") or "").strip() or f"{name_prefix}_{seq_image}"
             path = str(raw.get("path") or "").strip()
+            remote_path = str(raw.get("remote_path") or "").strip()
+            display_path = remote_path or path
             if unseen_media is not None:
                 unseen_media.append(
                     {
                         "name": name,
                         "path": path,
+                        "remote_path": remote_path,
                         "url": url,
                         "media_type": "image",
                     }
                 )
             segs = [f"name={name}"]
-            if path:
-                segs.append(f"path={path}")
+            if display_path:
+                segs.append(f"path={display_path}")
             lines.append(
                 f"[用户附上图片 {' '.join(segs)}]，如需理解调用 recognize_image 工具"
             )
@@ -652,18 +669,21 @@ def _downgrade_media_items_to_text(
                 url = str(raw.get("url") or "").strip()
             name = str(raw.get("name") or "").strip() or f"video_{seq_video}"
             path = str(raw.get("path") or "").strip()
+            remote_path = str(raw.get("remote_path") or "").strip()
+            display_path = remote_path or path
             if unseen_media is not None:
                 unseen_media.append(
                     {
                         "name": name,
                         "path": path,
+                        "remote_path": remote_path,
                         "url": url,
                         "media_type": "video",
                     }
                 )
             segs = [f"name={name}"]
-            if path:
-                segs.append(f"path={path}")
+            if display_path:
+                segs.append(f"path={display_path}")
             lines.append(
                 f"[用户附上视频 {' '.join(segs)}]，当前模型不具备视频能力，请据此文字提示进行说明"
             )

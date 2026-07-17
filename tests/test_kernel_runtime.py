@@ -1186,6 +1186,72 @@ async def test_cancel_skip_aborts_agent_wake_delivery() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_does_not_skip_bash_job_system_inject() -> None:
+    """session cancel 后 bash_job 系统通知仍应投递（不应像用户 turn 一样被 skip）。"""
+    from agent_core.tools.bash_job_notify import (
+        clear_all_tracking_for_tests,
+        poll_terminal_jobs,
+        register_local_job,
+        set_notify_dependencies,
+        deliver_via_inject,
+        format_notification,
+    )
+
+    clear_all_tracking_for_tests()
+    scheduler = _minimal_scheduler_for_cancel_tests()
+    session_id = "cli:root"
+    scheduler._core_pool.acquire = AsyncMock(  # type: ignore[attr-defined]
+        return_value=SimpleNamespace(
+            prepare_turn=AsyncMock(return_value=1),
+            _finalize_turn=AsyncMock(),
+            _session_logger=None,
+        )
+    )
+
+    register_local_job(
+        session_id=session_id,
+        job_id="job-cancel-exempt",
+        command="echo done",
+        cwd="/tmp",
+        log_path="/tmp/job.log",
+        workspace_root="/tmp",
+    )
+    notes = await poll_terminal_jobs(max_items=5)
+    assert len(notes) == 1
+
+    set_notify_dependencies(scheduler=scheduler, core_pool=None)
+    deliver_via_inject(
+        session_id=session_id,
+        text=format_notification(notes[0]),
+        note=notes[0],
+    )
+
+    scheduler._cancelled_sessions.add(session_id)
+    req = KernelRequest.create(
+        text=format_notification(notes[0]),
+        session_id=session_id,
+        frontend_id="bash_job",
+        metadata={
+            "_bash_job_notify": {"job_id": "job-cancel-exempt", "remote": False},
+        },
+    )
+    await scheduler._run_and_route(req)
+
+    scheduler._kernel.run.assert_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_cancel_still_skips_user_turn_after_cancel() -> None:
+    """cancel 豁免仅限系统 inject；普通用户 turn 仍应 skip。"""
+    scheduler = _minimal_scheduler_for_cancel_tests()
+    session_id = "cli:root"
+    scheduler._cancelled_sessions.add(session_id)
+    req = KernelRequest.create(text="user message", session_id=session_id)
+    await scheduler._run_and_route(req)
+    scheduler._kernel.run.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
 async def test_cancel_session_tasks_clears_mark_when_lock_waiter_aborted() -> None:
     """stop 时若第二个请求在等锁，cancel 后 session 应恢复可投递。"""
     scheduler = _minimal_scheduler_for_cancel_tests()

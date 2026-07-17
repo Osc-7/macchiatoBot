@@ -445,6 +445,13 @@ def deliver_via_inject(
         "source": note.get("source") if note else "cli",
         "user_id": note.get("user_id") if note else "root",
     }
+    if note is not None:
+        jid = str(note.get("job_id") or "").strip()
+        if jid:
+            inject_md["_bash_job_notify"] = {
+                "job_id": jid,
+                "remote": bool(note.get("remote", False)),
+            }
     chat_hint = None
     if note and isinstance(note.get("metadata"), dict):
         chat_hint = str(note["metadata"].get("feishu_chat_id") or "").strip() or None
@@ -473,13 +480,15 @@ def deliver_via_inject(
         logger.warning("bash_job_notify: inject_turn failed session=%s: %s", sid, exc)
         return False
 
-    # 标记该 job 已通知并从注册表移除
     if note is not None:
-        _mark_notified(
-            sid,
-            str(note.get("job_id") or ""),
-            remote=bool(note.get("remote", False)),
-        )
+        jid = str(note.get("job_id") or "").strip()
+        if jid:
+            with _LOCK:
+                jobs = _TRACKED_BY_SESSION.get(sid, {})
+                key = _job_key(jid, remote=bool(note.get("remote", False)))
+                rec = jobs.get(key)
+                if rec is not None:
+                    rec.staged = True
     return True
 
 
@@ -494,6 +503,16 @@ def _mark_notified(session_id: str, job_id: str, *, remote: bool) -> None:
         jobs.pop(key, None)
         if not jobs:
             _TRACKED_BY_SESSION.pop(session_id, None)
+
+
+def confirm_bash_job_delivered(session_id: str, job_id: str, *, remote: bool) -> None:
+    """内核成功跑完 bash_job inject turn 后调用。"""
+    _mark_notified(session_id, job_id, remote=remote)
+
+
+def abort_bash_job_delivery(session_id: str, job_id: str, *, remote: bool) -> None:
+    """inject 被 skip/取消/失败时尚未真正投递：清除 staged 以便 poll 重试。"""
+    _reset_staged(session_id, job_id, remote=remote)
 
 
 def _reset_staged(session_id: str, job_id: str, *, remote: bool) -> None:

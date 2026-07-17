@@ -75,6 +75,12 @@ def _kernel_task_exception_detail(exc: BaseException) -> str:
 # 子任务完成/失败通知：CorePool._inject_to_parent 使用此前端标签（与 P2P 的 agent_msg 区分）
 _SUBAGENT_LIFECYCLE_FRONTEND_ID = "subagent"
 
+# 会话 cancel 仍应投递的系统 inject（子任务/bash 完成、goal 自启等）。
+# agent_wake 不在此列：skip 时应 abort 以便 poll 重试（见 test_cancel_skip_aborts_agent_wake_delivery）。
+_CANCEL_EXEMPT_SYSTEM_INJECT_FRONTENDS = frozenset(
+    {"subagent", "bash_job", "goal_start"}
+)
+
 # 与 CorePool._inject_to_parent 生成的通知首行一致（信封缺失时仍可从正文解析子 id）
 _SUBAGENT_LIFECYCLE_LINE_RE = re.compile(
     r"^\[子任务 (?P<sub_id>[0-9a-fA-F\-]+) (完成|失败)\]",
@@ -119,6 +125,12 @@ def _child_sub_session_from_subagent_lifecycle_request(
     if m:
         return f"sub:{m.group('sub_id').strip()}"
     return None
+
+
+def _is_cancel_exempt_system_inject(request: KernelRequest) -> bool:
+    """系统级 inject 不受 session cancel 拦截（用户 turn 仍会被 skip）。"""
+    fi = (request.frontend_id or "").strip()
+    return fi in _CANCEL_EXEMPT_SYSTEM_INJECT_FRONTENDS
 
 
 def _should_suppress_reaped_subagent_parent_notify(
@@ -517,6 +529,39 @@ class KernelScheduler:
                 exc,
             )
 
+    @staticmethod
+    def _finalize_bash_job_delivery(
+        request: KernelRequest, *, confirmed: bool
+    ) -> None:
+        md = request.metadata if isinstance(request.metadata, dict) else {}
+        raw = md.get("_bash_job_notify")
+        if not isinstance(raw, dict):
+            return
+        job_id = str(raw.get("job_id") or "").strip()
+        if not job_id:
+            return
+        remote = bool(raw.get("remote", False))
+        sid = (request.session_id or "").strip()
+        if not sid:
+            return
+        try:
+            from agent_core.tools.bash_job_notify import (
+                abort_bash_job_delivery,
+                confirm_bash_job_delivered,
+            )
+
+            if confirmed:
+                confirm_bash_job_delivered(sid, job_id, remote=remote)
+            else:
+                abort_bash_job_delivery(sid, job_id, remote=remote)
+        except Exception as exc:
+            logger.debug(
+                "KernelScheduler: finalize bash_job delivery failed session=%s job=%s: %s",
+                sid,
+                job_id,
+                exc,
+            )
+
     async def submit(
         self,
         request: KernelRequest,
@@ -654,7 +699,10 @@ class KernelScheduler:
                 break
 
             self._track_dequeue(request.session_id)
-            if request.session_id in self._cancelled_sessions:
+            if (
+                request.session_id in self._cancelled_sessions
+                and not _is_cancel_exempt_system_inject(request)
+            ):
                 logger.info(
                     "KernelScheduler: skipping cancelled queued request "
                     "session_id=%s request_id=%s",
@@ -667,6 +715,7 @@ class KernelScheduler:
                 )
                 self._queue.task_done()
                 self._maybe_clear_cancelled(request.session_id)
+                self._finalize_bash_job_delivery(request, confirmed=False)
                 continue
 
             task = asyncio.create_task(
@@ -772,7 +821,10 @@ class KernelScheduler:
         6. 通过 OutputBus.publish() 广播结果（唯一出口）
         """
         session_id = request.session_id
-        if session_id in self._cancelled_sessions:
+        if (
+            session_id in self._cancelled_sessions
+            and not _is_cancel_exempt_system_inject(request)
+        ):
             logger.info(
                 "KernelScheduler: skipping cancelled session request session_id=%s request_id=%s",
                 session_id,
@@ -786,6 +838,7 @@ class KernelScheduler:
             # 不用 _session_active_tasks——skip 型 task 自身仍在 set 里且未 done。
             self._maybe_clear_cancelled(session_id)
             self._finalize_agent_wake_delivery(request, confirmed=False)
+            self._finalize_bash_job_delivery(request, confirmed=False)
             return
 
         if _should_suppress_reaped_subagent_parent_notify(request, self._core_pool):
@@ -805,6 +858,7 @@ class KernelScheduler:
                 },
             )
             self._finalize_agent_wake_delivery(request, confirmed=False)
+            self._finalize_bash_job_delivery(request, confirmed=False)
             return
 
         self._maybe_wake_agent_inbox_waiter(request)
@@ -975,6 +1029,7 @@ class KernelScheduler:
                     # - 所有 subscriber 通过 listener 回调获取结果
                     await self._out_bus.publish(session_id, request.request_id, run_result)
                     self._finalize_agent_wake_delivery(request, confirmed=True)
+                    self._finalize_bash_job_delivery(request, confirmed=True)
 
                 except asyncio.CancelledError:
                     # 取消时也写 checkpoint，保证 daemon 重启后可恢复
@@ -1006,6 +1061,7 @@ class KernelScheduler:
                         asyncio.CancelledError("kernel task cancelled"),
                     )
                     self._finalize_agent_wake_delivery(request, confirmed=False)
+                    self._finalize_bash_job_delivery(request, confirmed=False)
                     raise
                 except Exception as exc:
                     err_detail = _kernel_task_exception_detail(exc)
@@ -1045,6 +1101,7 @@ class KernelScheduler:
                     if self._out_bus.has_waiter(request.request_id):
                         await self._out_bus.publish_error(request.request_id, exc)
                         self._finalize_agent_wake_delivery(request, confirmed=False)
+                        self._finalize_bash_job_delivery(request, confirmed=False)
                     else:
                         err_result = AgentRunResult(
                             output_text=f"[后台任务处理出错] {err_detail}",
@@ -1054,6 +1111,7 @@ class KernelScheduler:
                             session_id, request.request_id, err_result
                         )
                         self._finalize_agent_wake_delivery(request, confirmed=True)
+                        self._finalize_bash_job_delivery(request, confirmed=False)
         finally:
             remaining = self._inflight_sessions.get(session_id, 0) - 1
             if remaining > 0:

@@ -1301,6 +1301,11 @@ class AutomationCoreGateway:
                 ctx.add_tool_result(call_id, result)
                 injected = True
 
+            if injected:
+                finalize = getattr(agent, "_finalize_turn", None)
+                if callable(finalize):
+                    await finalize(None)
+
             meta = result.metadata if isinstance(result.metadata, dict) else {}
             backend = str(meta.get("workspace_backend") or "local")
             return {

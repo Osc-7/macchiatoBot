@@ -206,7 +206,7 @@ async def test_sync_skips_when_worker_missing_cap(tmp_path: Path):
 
     mock_registry.file_blob_write.assert_not_called()
     assert "remote_path" not in out_items[0]
-    assert any("0.2.9" in n for n in notices)
+    assert any("0.2.10" in n for n in notices)
     assert "升级" in format_attachment_sync_notices(notices)
     clear_remote_workspace_state()
 
@@ -247,4 +247,9 @@ async def test_sync_skips_oversize_file(tmp_path: Path):
     assert any("过大" in n for n in notices)
     # sanity: default cap still large
     assert REMOTE_BLOB_MAX_BYTES >= 20 * 1024 * 1024
+    from macchiato_remote.protocol import REMOTE_WS_MAX_SIZE
+
+    # websockets 默认 1MiB；WS 上限需覆盖 base64(~4/3) + JSON 开销。
+    assert REMOTE_WS_MAX_SIZE > REMOTE_BLOB_MAX_BYTES * 4 // 3
+    assert REMOTE_WS_MAX_SIZE > 2**20
     clear_remote_workspace_state()

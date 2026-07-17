@@ -60,7 +60,7 @@ uv tool install -e packages/macchiato-remote
 
 远程工作区激活后，daemon 可以把声明为 `location: remote` 的 MCP 挂到当前会话；**进程在 worker 机器上启动**，agent 仍像普通工具一样调用。
 
-1. Worker 安装 MCP 能力：`uv tool install 'macchiato-remote[mcp]==0.2.9'`
+1. Worker 安装 MCP 能力：`uv tool install 'macchiato-remote[mcp]==0.2.10'`
 2. 在授权工作区写 `{workspace}/.macchiato/mcp.yaml`（`open_workspace` 会生成空模板）：
 
 ```yaml
@@ -87,7 +87,7 @@ mcp:
 4. `/remote-use <login> <path>` 后自动挂载；也可用 `/mcp list|attach|detach|reload` 手动管理。
 5. `/remote-use` 登录仍只用现有 worker token；`env` 仅当该 MCP 自己需要第三方 API key 时才填写。
 
-## 附件同步（协议 v4 / macchiato-remote>=0.2.9）
+## 附件同步（协议 v4 / macchiato-remote>=0.2.10）
 
 飞书等经 gateway 上传的附件仍落在 **daemon** 本地磁盘，供 vision hydrate 读取。远程工作区激活时，daemon 还会通过 `file_blob_write` 把附件（单文件 ≤20MB）镜像到 worker：
 
@@ -95,7 +95,7 @@ mcp:
 - 面向模型/工具的文本使用远程相对路径
 - `media_ref.path` 仍保留 daemon 本地路径（vision / Kimi Files 不变）
 
-请将 worker 升级到 `macchiato-remote>=0.2.9`。旧 worker 会跳过镜像并提示升级，不阻断会话。
+请将 worker 升级到 `macchiato-remote>=0.2.10`（0.2.9 起有能力；0.2.10 起 WS 可接收 >1MiB 的 base64 blob）。旧 worker 会跳过镜像并提示升级，不阻断会话。
 
 ## 配置登录别名
 

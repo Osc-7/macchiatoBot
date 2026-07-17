@@ -10,6 +10,8 @@ from agent_core.tools.bash_job_notify import (
     poll_completed_notifications,
     register_local_job,
     register_remote_job,
+    stage_notification,
+    suppress_job_notification,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -93,4 +95,42 @@ async def test_remote_background_notification_emits_on_terminal(monkeypatch):
     assert second[0]["status"] == "finished"
     assert second[0]["remote"] is True
     assert second[0]["remote_login"] == "sii"
+
+
+async def test_suppress_job_notification_skips_agent_stopped_job(monkeypatch):
+    """Agent 主动 job_stop 后不应再发出终态通知（含已 staged 的 pending）。"""
+    clear_all_tracking_for_tests()
+    fake = _FakeRemoteRegistry()
+    import agent_core.remote.worker_registry as wr
+
+    monkeypatch.setattr(wr, "get_remote_worker_registry", lambda: fake)
+    session_id = "sid-suppress-stop"
+    job_id = "job_stop_me"
+    register_remote_job(
+        session_id=session_id,
+        remote_login="sii",
+        job_id=job_id,
+        command="sleep 99",
+        cwd="/workspace",
+        log_path="/tmp/stop-me.log",
+    )
+    stage_notification(
+        session_id,
+        f"[后台任务完成] 远程任务 {job_id} 已结束：cancelled",
+        note={
+            "job_id": job_id,
+            "status": "cancelled",
+            "remote": True,
+            "remote_login": "sii",
+        },
+    )
+
+    assert suppress_job_notification(session_id, job_id, remote=True) is True
+
+    notes = await poll_completed_notifications(session_id=session_id)
+    assert notes == []
+
+    from agent_core.tools import bash_job_notify as bjn
+
+    assert bjn._PENDING_BY_SESSION.get(session_id, []) == []
 

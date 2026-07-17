@@ -13,7 +13,7 @@ from macchiato_remote.runtime.macchiato_dir import INBOX_REL
 logger = logging.getLogger(__name__)
 
 _UPGRADE_HINT = (
-    "附件未同步到远程工作区：请升级 macchiato-remote≥0.2.9（需 file_blob_write）"
+    "附件未同步到远程工作区：请升级 macchiato-remote≥0.2.10（需 file_blob_write）"
 )
 _SYNC_HINT = "已同步到远程工作区"
 

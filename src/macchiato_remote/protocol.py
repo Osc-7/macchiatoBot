@@ -17,6 +17,9 @@ REMOTE_WORKSPACE_MOUNT = "/workspace"
 # 与 daemon 协商能力；worker 包主版本 bump 时递增
 REMOTE_PROTOCOL_VERSION = 4
 REMOTE_BLOB_MAX_BYTES = 20 * 1024 * 1024
+# websockets 默认 max_size=1MiB；blob 经 base64(~4/3) + JSON 后会远超原文件。
+# 接收侧必须能容纳最大 blob 请求/响应，否则会直接断连。
+REMOTE_WS_MAX_SIZE = REMOTE_BLOB_MAX_BYTES * 2 + 1024 * 1024
 REMOTE_WORKER_CAPABILITIES = (
     "exec",
     "file_read",

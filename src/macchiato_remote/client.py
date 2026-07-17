@@ -15,6 +15,7 @@ from macchiato_remote.protocol import (
     REMOTE_PROTOCOL_VERSION,
     REMOTE_WORKER_CAPABILITIES,
     REMOTE_WORKSPACE_MOUNT,
+    REMOTE_WS_MAX_SIZE,
     RemoteCommandRequest,
     RemoteCommandResult,
     RemoteFileBlobReadRequest,
@@ -249,6 +250,7 @@ class RemoteWorkerClient:
                     open_timeout=30.0,
                     ping_interval=60.0,
                     ping_timeout=120.0,
+                    max_size=REMOTE_WS_MAX_SIZE,
                 ) as ws:
                     await ws.send(
                         json.dumps(worker_hello_payload(), ensure_ascii=False)

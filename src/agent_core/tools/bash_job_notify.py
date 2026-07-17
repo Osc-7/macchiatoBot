@@ -483,6 +483,53 @@ def deliver_via_inject(
     return True
 
 
+def suppress_job_notification(
+    session_id: str, job_id: str, *, remote: bool = False
+) -> bool:
+    """Agent 主动 job_stop 后抑制终态通知（含已 staged 的 pending）。
+
+    返回是否从跟踪表或 pending 队列中清掉了该 job。
+    """
+    sid = str(session_id or "").strip()
+    jid = str(job_id or "").strip()
+    if not sid or not jid:
+        return False
+    removed = False
+    with _LOCK:
+        jobs = _TRACKED_BY_SESSION.get(sid, {})
+        key = _job_key(jid, remote=remote)
+        rec = jobs.pop(key, None)
+        if rec is not None:
+            removed = True
+            if not jobs:
+                _TRACKED_BY_SESSION.pop(sid, None)
+        pending = _PENDING_BY_SESSION.get(sid)
+        if pending:
+            kept: List[Dict[str, Any]] = []
+            for item in pending:
+                note = item.get("note") if isinstance(item, dict) else None
+                if (
+                    isinstance(note, dict)
+                    and str(note.get("job_id") or "").strip() == jid
+                    and bool(note.get("remote", False)) == bool(remote)
+                ):
+                    removed = True
+                    continue
+                kept.append(item)
+            if kept:
+                _PENDING_BY_SESSION[sid] = kept
+            else:
+                _PENDING_BY_SESSION.pop(sid, None)
+    if removed:
+        logger.info(
+            "bash_job_notify: suppressed agent-stopped job session=%s job=%s remote=%s",
+            sid,
+            jid,
+            remote,
+        )
+    return removed
+
+
 def _mark_notified(session_id: str, job_id: str, *, remote: bool) -> None:
     with _LOCK:
         jobs = _TRACKED_BY_SESSION.get(session_id, {})

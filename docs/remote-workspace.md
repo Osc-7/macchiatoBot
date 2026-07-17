@@ -69,7 +69,7 @@ After `/remote-use`, the daemon can attach MCP servers declared with
 `location: remote`. Processes run on the worker; the agent calls them like normal
 tools.
 
-1. Install MCP extras on the worker: `uv tool install 'macchiato-remote[mcp]==0.2.9'`
+1. Install MCP extras on the worker: `uv tool install 'macchiato-remote[mcp]==0.2.10'`
 2. Write `{workspace}/.macchiato/mcp.yaml` (an empty template is created on open):
 
 ```yaml
@@ -98,7 +98,7 @@ mcp:
 5. Remote login is still the existing worker token. `env` is optional and only
    needed when that MCP process itself requires an API key.
 
-## Attachment sync (protocol v4 / macchiato-remote>=0.2.9)
+## Attachment sync (protocol v4 / macchiato-remote>=0.2.10)
 
 Feishu (and other gateway) uploads still land on the **daemon** disk so vision
 hydrate can read them locally. When a remote workspace is active, the daemon also
@@ -108,8 +108,9 @@ mirrors each attachment (≤20MB) to the worker via `file_blob_write`:
 - User/tool-facing text uses the remote relative path
 - `media_ref.path` stays on the daemon for vision / Kimi Files
 
-Upgrade the worker to `macchiato-remote>=0.2.9`. Older workers skip the mirror and
-surface an upgrade hint without blocking the turn.
+Upgrade the worker to `macchiato-remote>=0.2.10` (capability since 0.2.9; 0.2.10
+raises the WS receive limit so base64 blobs larger than 1MiB do not disconnect).
+Older workers skip the mirror and surface an upgrade hint without blocking the turn.
 
 ## Configure A Login
 

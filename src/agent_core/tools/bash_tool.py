@@ -29,6 +29,7 @@ from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolR
 from agent_core.tools.bash_job_notify import (
     register_local_job,
     register_remote_job,
+    suppress_job_notification,
 )
 from macchiato_remote.protocol import REMOTE_WORKSPACE_MOUNT
 
@@ -1250,6 +1251,12 @@ class BashTool(BaseTool):
                     error="STOP_FAILED",
                     message=f"终止任务失败（任务可能不存在或已结束）: {job_stop_id}",
                 )
+            # Agent 主动停止：已知终态，无需再 inject「后台任务完成」通知。
+            suppress_job_notification(
+                str(exec_ctx.get("session_id") or "").strip(),
+                job_stop_id,
+                remote=False,
+            )
             return ToolResult(success=True, message=f"后台任务已终止: {job_stop_id}")
 
         return ToolResult(success=False, error="NO_ACTION", message="未指定 job 操作")
@@ -1574,6 +1581,8 @@ class BashTool(BaseTool):
                     error="STOP_FAILED",
                     message=f"终止远程任务失败: {job_stop_id}",
                 )
+            # Agent 主动停止：已知终态，无需再 inject「后台任务完成」通知。
+            suppress_job_notification(session_id, job_stop_id, remote=True)
             return ToolResult(
                 success=True, message=f"远程后台任务已终止: {job_stop_id}"
             )

@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 
 _IN_QUEUE_WARN_THRESHOLD = 500
 
+# 取消期间仍须投递的系统 inject（见 cancel_session_tasks / _should_skip_due_to_cancel）
+_CANCEL_EXEMPT_FRONTENDS = frozenset({"bash_job", "subagent", "goal_start"})
+
 # 调度器兜底捕获：部分异常（如某些 ReadTimeout）str(exc) 为空，需拼装可读说明
 _KERNEL_TASK_ERR_HINTS: dict[str, str] = {
     "ReadTimeout": "多为等待远端 HTTP 响应超时（如 LLM/API 较慢），可重试或调大 read timeout。",
@@ -136,6 +139,34 @@ def _should_suppress_reaped_subagent_parent_notify(
     if wait_ok:
         return True
     return reaped_ok
+
+
+def _should_skip_due_to_cancel(
+    request: KernelRequest,
+    *,
+    cancelled_sessions: set[str],
+    session_cancel_epoch: Mapping[str, int],
+) -> bool:
+    """判断是否因 session 取消而跳过该请求。
+
+    用户新消息在 cancel 之后入队（enqueue_cancel_epoch == 当前代次）仍应执行；
+    取消前排队、agent_wake 与 system inject 沿用旧语义。
+    """
+    sid = (request.session_id or "").strip()
+    if not sid:
+        return False
+    frontend = (request.frontend_id or "").strip()
+    if frontend in _CANCEL_EXEMPT_FRONTENDS:
+        return False
+    cancel_epoch = int(session_cancel_epoch.get(sid, 0))
+    if request.enqueue_cancel_epoch < cancel_epoch:
+        return True
+    if frontend == "agent_wake" or (request.metadata or {}).get("_wake_id"):
+        return sid in cancelled_sessions
+    if frontend == "system":
+        return sid in cancelled_sessions
+    # 用户面向的前端：代次匹配即放行（即使 _cancelled_sessions 尚未清除）
+    return False
 
 
 def _infer_memory_owner_from_session_id(session_id: str) -> tuple[str, str]:
@@ -259,6 +290,8 @@ class KernelScheduler:
         self._session_active_tasks: Dict[str, set[asyncio.Task]] = defaultdict(set)
         # 已取消的 session_id，用于拦截仍在队列中尚未 dispatch 的请求
         self._cancelled_sessions: set[str] = set()
+        # session 取消代次：每次 cancel_session_tasks 递增，入队时快照到 KernelRequest
+        self._session_cancel_epoch: Dict[str, int] = defaultdict(int)
         # session_id -> 仍在优先级队列中、尚未被 dispatch 取出的请求数
         self._queued_by_session: Dict[str, int] = defaultdict(int)
         # send_message_to_agent(require_reply=True) 注册的等待：message_id -> Future[回复正文]
@@ -517,6 +550,11 @@ class KernelScheduler:
                 exc,
             )
 
+    def _stamp_cancel_epoch(self, request: KernelRequest) -> None:
+        sid = (request.session_id or "").strip()
+        if sid:
+            request.enqueue_cancel_epoch = int(self._session_cancel_epoch.get(sid, 0))
+
     async def submit(
         self,
         request: KernelRequest,
@@ -528,6 +566,7 @@ class KernelScheduler:
         若调用方要同步等待，可调用 wait_result(request_id)。
         """
         self._out_bus.register_waiter(request.request_id)
+        self._stamp_cancel_epoch(request)
         self._track_enqueue(request.session_id)
         await self._queue.put(request)
         logger.debug(
@@ -582,6 +621,7 @@ class KernelScheduler:
                 qsize,
                 _IN_QUEUE_WARN_THRESHOLD,
             )
+        self._stamp_cancel_epoch(request)
         self._track_enqueue(request.session_id)
         self._queue.put_nowait(request)
         text_len = len(request.text or "")
@@ -608,6 +648,7 @@ class KernelScheduler:
         避免新入队请求在取消窗口内被误判为 cancelled 而 skip。
         """
         self._cancelled_sessions.add(session_id)
+        self._session_cancel_epoch[session_id] += 1
         tasks = self._session_active_tasks.get(session_id, set())
         active_tasks = [t for t in list(tasks) if not t.done()]
         cancelled_any = bool(active_tasks)
@@ -654,7 +695,11 @@ class KernelScheduler:
                 break
 
             self._track_dequeue(request.session_id)
-            if request.session_id in self._cancelled_sessions:
+            if _should_skip_due_to_cancel(
+                request,
+                cancelled_sessions=self._cancelled_sessions,
+                session_cancel_epoch=self._session_cancel_epoch,
+            ):
                 logger.info(
                     "KernelScheduler: skipping cancelled queued request "
                     "session_id=%s request_id=%s",
@@ -772,7 +817,11 @@ class KernelScheduler:
         6. 通过 OutputBus.publish() 广播结果（唯一出口）
         """
         session_id = request.session_id
-        if session_id in self._cancelled_sessions:
+        if _should_skip_due_to_cancel(
+            request,
+            cancelled_sessions=self._cancelled_sessions,
+            session_cancel_epoch=self._session_cancel_epoch,
+        ):
             logger.info(
                 "KernelScheduler: skipping cancelled session request session_id=%s request_id=%s",
                 session_id,

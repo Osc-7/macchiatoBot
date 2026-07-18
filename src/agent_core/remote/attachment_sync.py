@@ -75,6 +75,53 @@ def worker_supports_file_blob_write(
     return "file_blob_write" in caps
 
 
+def _is_session_not_open_error(error: str) -> bool:
+    err = (error or "").strip().upper()
+    return err == "SESSION_NOT_OPEN" or "SESSION IS NOT OPEN" in err
+
+
+async def _file_blob_write_with_reopen(
+    *,
+    registry: Any,
+    state: Any,
+    session_id: str,
+    remote_rel: str,
+    content_base64: str,
+    max_bytes: int,
+) -> Any:
+    """Write blob to remote inbox; reopen worker session on SESSION_NOT_OPEN."""
+    result = await registry.file_blob_write(
+        login=state.login,
+        session_id=session_id,
+        path=remote_rel,
+        content_base64=content_base64,
+        mode="overwrite",
+        max_bytes=max_bytes,
+    )
+    if not result.error or not _is_session_not_open_error(result.error):
+        return result
+    try:
+        await registry.open_workspace(
+            login=state.login,
+            session_id=session_id,
+            requested_path=(
+                state.requested_path or state.resolved_path or "~"
+            ),
+            profile=state.profile,
+        )
+    except Exception as exc:
+        result.error = f"{result.error}; reopen failed: {exc}"
+        return result
+    return await registry.file_blob_write(
+        login=state.login,
+        session_id=session_id,
+        path=remote_rel,
+        content_base64=content_base64,
+        mode="overwrite",
+        max_bytes=max_bytes,
+    )
+
+
 async def sync_content_items_to_remote_inbox(
     *,
     session_id: str,
@@ -164,12 +211,12 @@ async def sync_content_items_to_remote_inbox(
         remote_rel = _unique_inbox_rel(preferred, used_names)
         b64 = base64.b64encode(raw).decode("ascii")
         try:
-            result = await registry.file_blob_write(
-                login=state.login,
+            result = await _file_blob_write_with_reopen(
+                registry=registry,
+                state=state,
                 session_id=sid,
-                path=remote_rel,
+                remote_rel=remote_rel,
                 content_base64=b64,
-                mode="overwrite",
                 max_bytes=max_bytes,
             )
         except Exception as exc:  # noqa: BLE001

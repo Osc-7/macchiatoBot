@@ -601,8 +601,10 @@ async def test_cancel_session_tasks_skips_still_queued_requests() -> None:
         assert routed == ["first"]
 
         scheduler._cancelled_sessions.add(sid)
+        scheduler._session_cancel_epoch[sid] += 1
         scheduler._track_enqueue(sid)
         queued = KernelRequest.create(text="queued-after-cancel", session_id=sid)
+        queued.enqueue_cancel_epoch = 0
         await scheduler._queue.put(queued)
 
         await asyncio.sleep(0.05)
@@ -1132,12 +1134,67 @@ async def test_cancel_clears_stale_flag_after_skip_when_no_inflight() -> None:
     scheduler = _minimal_scheduler_for_cancel_tests()
     session_id = "feishu:user:test2"
     scheduler._cancelled_sessions.add(session_id)
+    scheduler._session_cancel_epoch[session_id] += 1
 
     skipped = KernelRequest.create(text="skip-me", session_id=session_id)
+    skipped.enqueue_cancel_epoch = 0
     await scheduler._run_and_route(skipped)
 
     assert session_id not in scheduler._cancelled_sessions
     assert scheduler.session_inflight_request_count(session_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_then_new_user_message_not_skipped() -> None:
+    """用户取消后立刻发新消息时，新请求不应因 cancel 标记仍挂着而被拒。"""
+    scheduler = _minimal_scheduler_for_cancel_tests()
+    session_id = "feishu:user:post-cancel"
+    hold = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_run(*_a: Any, **_k: Any) -> Any:
+        from agent_core.interfaces import AgentRunResult
+
+        hold.set()
+        await release.wait()
+        return AgentRunResult(output_text="slow-done")
+
+    scheduler._kernel.run = AsyncMock(side_effect=_slow_run)  # type: ignore[attr-defined]
+    scheduler._core_pool.acquire = AsyncMock(  # type: ignore[attr-defined]
+        return_value=SimpleNamespace(
+            prepare_turn=AsyncMock(return_value=1),
+            _finalize_turn=AsyncMock(),
+            _session_logger=None,
+        )
+    )
+
+    await scheduler.start()
+    try:
+        req1 = KernelRequest.create(text="slow", session_id=session_id)
+        await scheduler.submit(req1)
+        for _ in range(100):
+            if hold.is_set():
+                break
+            await asyncio.sleep(0.01)
+
+        cancel_task = asyncio.create_task(
+            scheduler.cancel_session_tasks(session_id)
+        )
+        for _ in range(100):
+            if scheduler._session_cancel_epoch.get(session_id, 0) > 0:
+                break
+            await asyncio.sleep(0.01)
+        h2 = await scheduler.submit(
+            KernelRequest.create(text="after-cancel", session_id=session_id)
+        )
+        release.set()
+        await cancel_task
+
+        result = await asyncio.wait_for(scheduler.wait_result(h2), timeout=5.0)
+        assert result.output_text == "slow-done"
+        assert session_id not in scheduler._cancelled_sessions
+    finally:
+        await scheduler.stop()
 
 
 @pytest.mark.asyncio

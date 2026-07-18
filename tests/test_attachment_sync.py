@@ -175,6 +175,80 @@ async def test_sync_mirrors_to_inbox_and_rewrites_text(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_sync_reopens_worker_session_on_not_open(tmp_path: Path):
+    clear_remote_workspace_state()
+    sid = "sess-sync-reopen"
+    activate_remote_workspace(
+        session_id=sid,
+        login="personal",
+        requested_path=str(tmp_path / "remote"),
+    )
+    local = tmp_path / "uploads" / "clip.png"
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b"\x89PNG mock")
+
+    calls = {"blob": 0, "open": 0}
+
+    async def _blob_write(**kwargs):
+        calls["blob"] += 1
+        if calls["blob"] == 1:
+            return RemoteFileBlobWriteResult(
+                request_id="r1",
+                path=kwargs["path"],
+                error="SESSION_NOT_OPEN",
+            )
+        return RemoteFileBlobWriteResult(
+            request_id="r2",
+            path=kwargs["path"],
+            bytes_written=len(base64.b64decode(kwargs["content_base64"])),
+        )
+
+    async def _open_workspace(**kwargs):
+        calls["open"] += 1
+        from macchiato_remote.protocol import RemoteWorkspaceOpenResult
+
+        return RemoteWorkspaceOpenResult(
+            request_id="open1",
+            session_id=kwargs["session_id"],
+            success=True,
+            resolved_path=str(tmp_path / "remote"),
+        )
+
+    mock_conn = MagicMock()
+    mock_conn.hello_meta = {
+        "protocol_version": 4,
+        "capabilities": ["file_blob_write"],
+    }
+    mock_registry = MagicMock()
+    mock_registry.get = AsyncMock(return_value=mock_conn)
+    mock_registry.file_blob_write = AsyncMock(side_effect=_blob_write)
+    mock_registry.open_workspace = AsyncMock(side_effect=_open_workspace)
+
+    items = [
+        {
+            "type": "media_ref",
+            "media_type": "image",
+            "path": str(local),
+            "name": "clip.png",
+        }
+    ]
+    with patch(
+        "agent_core.remote.worker_registry.get_remote_worker_registry",
+        return_value=mock_registry,
+    ):
+        out_items, _out_text, notices = await sync_content_items_to_remote_inbox(
+            session_id=sid,
+            content_items=items,
+        )
+
+    assert calls["open"] == 1
+    assert calls["blob"] == 2
+    assert out_items[0]["remote_path"] == f"{INBOX_REL}/clip.png"
+    assert any("已同步" in n for n in notices)
+    clear_remote_workspace_state()
+
+
+@pytest.mark.asyncio
 async def test_sync_skips_when_worker_missing_cap(tmp_path: Path):
     clear_remote_workspace_state()
     sid = "sess-sync-old"

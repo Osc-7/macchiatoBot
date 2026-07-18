@@ -200,6 +200,8 @@ class KernelRequest:
     text: str = field(default="", compare=False)
     metadata: Dict[str, Any] = field(default_factory=dict, compare=False)
     profile: Optional["CoreProfile"] = field(default=None, compare=False)  # noqa: F821
+    # cancel_session_tasks 递增 session 代次；入队时快照，用于区分取消前排队与取消后新投递。
+    enqueue_cancel_epoch: int = field(default=0, compare=False)
 
     @classmethod
     def create(

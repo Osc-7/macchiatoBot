@@ -1186,6 +1186,112 @@ async def test_cancel_skip_aborts_agent_wake_delivery() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_dispatch_skip_aborts_agent_wake_delivery() -> None:
+    """dispatch 在队列层跳过已 cancel 的 wake inject 时应 abort，供 poll 重试。"""
+    from agent_core.tools.agent_wake import (
+        clear_all_wakes_for_tests,
+        deliver_wake_via_inject,
+        list_wakes,
+        poll_due_wakes,
+        register_wake,
+    )
+    from agent_core.tools.bash_job_notify import set_notify_dependencies
+
+    clear_all_wakes_for_tests()
+    scheduler = _minimal_scheduler_for_cancel_tests()
+    await scheduler.start()
+    session_id = "cli:root"
+    wid = register_wake(
+        session_id=session_id,
+        fire_at=time.time() - 1,
+        message="wake queued then cancel",
+        wake_id="wake-dispatch-cancel",
+    )
+    wake = poll_due_wakes()[0]
+    set_notify_dependencies(scheduler=scheduler, core_pool=None)
+    deliver_wake_via_inject(wake=wake, scheduler=scheduler)
+    assert list_wakes()[0]["staged"] is True
+    assert scheduler._queue.qsize() >= 1
+
+    await scheduler.cancel_session_tasks(session_id)
+    for _ in range(50):
+        if list_wakes()[0]["staged"] is False:
+            break
+        await asyncio.sleep(0.02)
+
+    assert list_wakes()[0]["staged"] is False
+    assert len(poll_due_wakes()) == 1
+    await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_terminal_cancel_does_not_flush_staged_goal_check() -> None:
+    """终端 cancel 不应在 finally flush 已暂存的 goal-check 唤醒。"""
+    from agent_core.tools.agent_wake import (
+        clear_all_wakes_for_tests,
+        deliver_wake_via_inject,
+        list_wakes,
+        poll_due_wakes,
+        register_wake,
+    )
+    from agent_core.tools.bash_job_notify import set_notify_dependencies
+
+    clear_all_wakes_for_tests()
+    scheduler = _minimal_scheduler_for_cancel_tests()
+    session_id = "cli:root"
+    hold = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_run(*_a: Any, **_k: Any) -> Any:
+        from agent_core.interfaces import AgentRunResult
+
+        hold.set()
+        await release.wait()
+        return AgentRunResult(output_text="done")
+
+    scheduler._kernel.run = AsyncMock(side_effect=_slow_run)  # type: ignore[attr-defined]
+    scheduler._core_pool.acquire = AsyncMock(  # type: ignore[attr-defined]
+        return_value=SimpleNamespace(
+            prepare_turn=AsyncMock(return_value=1),
+            _finalize_turn=AsyncMock(),
+            _session_logger=None,
+        )
+    )
+    set_notify_dependencies(scheduler=scheduler, core_pool=None)
+    await scheduler.start()
+
+    user_req = KernelRequest.create(text="block", session_id=session_id)
+    user_task = asyncio.create_task(scheduler.submit(user_req))
+    for _ in range(50):
+        if hold.is_set():
+            break
+        await asyncio.sleep(0.02)
+    assert scheduler.session_inflight_request_count(session_id) == 1
+
+    register_wake(
+        session_id=session_id,
+        fire_at=time.time() - 1,
+        message="goal nudge",
+        label="goal-check",
+        wake_id="wake-goal-cancel",
+    )
+    wake = poll_due_wakes()[0]
+    assert deliver_wake_via_inject(wake=wake, scheduler=scheduler) is True
+    assert scheduler._queue.qsize() == 0
+
+    await scheduler.cancel_session_tasks(session_id)
+    for _ in range(50):
+        if scheduler.session_inflight_request_count(session_id) == 0:
+            break
+        await asyncio.sleep(0.02)
+    release.set()
+
+    assert list_wakes() == []
+    assert scheduler._queue.qsize() == 0
+    await scheduler.stop()
+
+
+@pytest.mark.asyncio
 async def test_cancel_session_tasks_clears_mark_when_lock_waiter_aborted() -> None:
     """stop 时若第二个请求在等锁，cancel 后 session 应恢复可投递。"""
     scheduler = _minimal_scheduler_for_cancel_tests()

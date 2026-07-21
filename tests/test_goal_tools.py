@@ -328,3 +328,39 @@ class TestGoalAutoContinue:
             AgentRunResult(output_text="overflow", metadata={"status": "overflow"})
         )
         assert scheduled == []
+
+    @pytest.mark.asyncio
+    async def test_max_iteration_completed_registers_single_goal_wake(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """最后一轮 completed 时 run_loop + finalize 不得重复登记 goal-check。"""
+        from unittest.mock import AsyncMock, patch
+
+        from agent_core.agent.agent import AgentCore
+        from agent_core.config import get_config
+        from agent_core.llm import LLMResponse
+        from agent_core.tools.agent_wake import clear_all_wakes_for_tests, list_wakes
+
+        clear_all_wakes_for_tests()
+        cfg = get_config()
+        cfg.agent.goal_auto_continue = True
+        cfg.agent.goal_auto_continue_max_nudges = 5
+        with patch("agent_core.agent.agent.LLMClient"):
+            agent = AgentCore(
+                config=cfg, tools=[], max_iterations=1, memory_enabled=False
+            )
+        agent._goal_store.create_goal(title="任务", steps=["一步"])
+
+        with patch.object(
+            agent._llm_client,
+            "chat_with_tools",
+            new_callable=AsyncMock,
+            return_value=LLMResponse(content="最后一轮回复", tool_calls=[]),
+        ):
+            result = await agent.process_input("继续")
+
+        assert result == "最后一轮回复"
+        goal_wakes = [
+            w for w in list_wakes(session_id=agent._session_id) if w.get("label") == "goal-check"
+        ]
+        assert len(goal_wakes) == 1

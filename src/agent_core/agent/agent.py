@@ -1765,14 +1765,8 @@ class AgentCore:
                     ):
                         continue
 
-                    # 本轮迭代已用尽但仍有活跃目标：保留助手原文，跨轮唤醒续跑。
-                    if (
-                        iteration >= self._max_iterations
-                        and self._goal_store.has_active_goals()
-                        and self._goal_auto_continue_enabled()
-                        and not self._goal_auto_continue_suppressed()
-                    ):
-                        self._maybe_schedule_goal_continuation_wake()
+                    # 跨轮 goal-check 唤醒由 _finalize_turn(status=completed) 统一登记；
+                    # 勿在此重复调用，否则与 finalize 双路径各登记一次。
 
                     yield ReturnAction(
                         message=response.content,

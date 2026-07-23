@@ -108,12 +108,13 @@ def resolve_media_to_content_item(
     Returns:
         (content_item, error)
     """
-    if config is not None and _remote_workspace_active(exec_ctx):
-        return (
-            None,
-            "远程工作区下暂不支持直接挂载远程媒体路径；请提供 http(s)/data URL，或先把媒体同步到 daemon 可读路径。",
-        )
     path = _resolve_media_path(media_path, config=config, exec_ctx=exec_ctx)
+    if config is not None and _remote_workspace_active(exec_ctx):
+        if not (path.exists() and path.is_file()):
+            return (
+                None,
+                "远程工作区下暂不支持直接挂载远程媒体路径；请提供 http(s)/data URL，或先把媒体同步到 daemon 可读路径。",
+            )
     mime, _ = mimetypes.guess_type(str(path))
     if not mime:
         mime = "application/octet-stream"
@@ -134,3 +135,27 @@ def resolve_media_to_content_item(
         "name": path.name,
         "mime_type": mime,
     }, None
+
+
+def resolve_media_path_to_data_url(
+    media_path: str,
+    *,
+    config: Optional["Config"] = None,
+    exec_ctx: Optional[dict] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve a local media path to a data URL for vision fallback tools."""
+    content_item, err = resolve_media_to_content_item(
+        media_path, config=config, exec_ctx=exec_ctx
+    )
+    if err or not content_item:
+        return None, err or f"无法解析媒体路径: {media_path}"
+    media_type = str(content_item.get("media_type") or "").strip().lower()
+    if media_type and media_type != "image":
+        return None, f"路径指向的不是图像（media_type={media_type}）"
+    path_str = str(content_item.get("path") or "").strip()
+    if not path_str:
+        return None, f"无法解析媒体路径: {media_path}"
+    data_url, _mime, data_err = _file_to_data_url(Path(path_str))
+    if data_err or not data_url:
+        return None, data_err or f"无法读取媒体文件: {media_path}"
+    return data_url, None

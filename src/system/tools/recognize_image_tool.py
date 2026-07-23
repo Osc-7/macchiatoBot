@@ -14,12 +14,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from agent_core.config import Config, get_config
 from agent_core.llm.client import LLMClient
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
-from agent_core.utils.media import resolve_media_to_content_item
+from agent_core.utils.media import resolve_media_path_to_data_url
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ class RecognizeImageTool(BaseTool):
         )
 
     def _lookup_unseen_media(self, key: str) -> Optional[Dict[str, Any]]:
-        """在 AgentCore._last_unseen_media 中按 name / path 反查一条媒体记录。"""
+        """在 AgentCore._last_unseen_media 中按 name / path / remote_path 反查一条媒体记录。"""
         key = (key or "").strip()
         if not key:
             return None
@@ -131,7 +131,63 @@ class RecognizeImageTool(BaseTool):
                 return item
             if str(item.get("path") or "").strip() == key:
                 return item
+            if str(item.get("remote_path") or "").strip() == key:
+                return item
         return None
+
+    async def _resolve_image_data_url(
+        self,
+        *,
+        original_key: str,
+        lookup: Optional[Dict[str, Any]],
+        exec_ctx: dict,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        if lookup:
+            registered_url = str(lookup.get("url") or "").strip()
+            if registered_url:
+                return registered_url, None
+
+        local_path = ""
+        remote_path = ""
+        if lookup:
+            local_path = str(lookup.get("path") or "").strip()
+            remote_path = str(lookup.get("remote_path") or "").strip()
+        else:
+            local_path = str(original_key or "").strip()
+
+        if local_path:
+            data_url, err = resolve_media_path_to_data_url(
+                local_path,
+                config=self._config,
+                exec_ctx=exec_ctx,
+            )
+            if data_url:
+                return data_url, None
+            if not remote_path and not lookup:
+                return None, err or f"无法解析图片路径: {original_key}"
+
+        remote_candidate = remote_path or (
+            original_key if not lookup else ""
+        )
+        if remote_candidate:
+            try:
+                from system.tools.media_tools import _read_remote_attachment_blob
+            except ImportError:
+                return None, "远程附件读取模块不可用"
+            blob, berr = await _read_remote_attachment_blob(
+                path_str=remote_candidate,
+                exec_ctx=exec_ctx,
+                max_bytes=10 * 1024 * 1024,
+            )
+            if berr or blob is None:
+                return None, berr or f"无法读取远程图片: {remote_candidate}"
+            mime = str(blob.get("mime_type") or "image/png").strip() or "image/png"
+            b64 = str(blob.get("content_base64") or "").strip()
+            if not b64:
+                return None, "远程附件为空"
+            return f"data:{mime};base64,{b64}", None
+
+        return None, f"无法解析图片路径: {original_key}"
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         image_path = kwargs.get("image_path")
@@ -164,52 +220,19 @@ class RecognizeImageTool(BaseTool):
                 )
             resolved_url = url
         else:
-            # image_path 可能是 name；先从 unseen_media 反查
             original_key = str(image_path).strip()
             lookup = self._lookup_unseen_media(original_key)
-            if lookup:
-                # 有登记条目时，优先使用已登记的 url（可能是 data URL），
-                # 其次再尝试重新按 path 解析为 data URL。
-                registered_url = str(lookup.get("url") or "").strip()
-                if registered_url:
-                    resolved_url = registered_url
-                elif lookup.get("path"):
-                    content_item, err = resolve_media_to_content_item(
-                        str(lookup.get("path") or "").strip(),
-                        config=self._config,
-                        exec_ctx=ctx,
-                    )
-                    if err or not content_item:
-                        return ToolResult(
-                            success=False,
-                            error="RESOLVE_FAILED",
-                            message=err or f"无法解析登记的图片: {original_key}",
-                        )
-                    if content_item.get("type") != "image_url":
-                        return ToolResult(
-                            success=False,
-                            error="NOT_AN_IMAGE",
-                            message=f"登记条目不是图像（type={content_item.get('type')}）。",
-                        )
-                    resolved_url = (content_item.get("image_url") or {}).get("url")
-            else:
-                content_item, err = resolve_media_to_content_item(
-                    original_key, config=self._config, exec_ctx=ctx
+            resolved_url, err = await self._resolve_image_data_url(
+                original_key=original_key,
+                lookup=lookup,
+                exec_ctx=ctx,
+            )
+            if err or not resolved_url:
+                return ToolResult(
+                    success=False,
+                    error="RESOLVE_FAILED",
+                    message=err or f"无法解析图片路径: {image_path}",
                 )
-                if err or not content_item:
-                    return ToolResult(
-                        success=False,
-                        error="RESOLVE_FAILED",
-                        message=err or f"无法解析图片路径: {image_path}",
-                    )
-                media_type = content_item.get("type")
-                if media_type != "image_url":
-                    return ToolResult(
-                        success=False,
-                        error="NOT_AN_IMAGE",
-                        message=f"路径指向的不是图像（type={media_type}）；recognize_image 仅支持图像。",
-                    )
-                resolved_url = (content_item.get("image_url") or {}).get("url")
 
         if not resolved_url:
             return ToolResult(

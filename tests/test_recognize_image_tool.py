@@ -115,3 +115,101 @@ async def test_empty_description_returns_error():
     result = await tool.execute(image_url="https://a.example/x.png")
     assert result.success is False
     assert result.error == "EMPTY_DESCRIPTION"
+
+
+@pytest.mark.asyncio
+async def test_image_path_from_unseen_media_local_file_in_remote_workspace(
+    tmp_path, monkeypatch
+):
+    from agent_core.config import Config, FileToolsConfig, LLMConfig
+    from agent_core.remote.workspace_state import (
+        activate_remote_workspace,
+        clear_remote_workspace_state,
+    )
+
+    img = tmp_path / "shot.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n")
+    cfg = Config(
+        llm=LLMConfig(api_key="k", model="m"),
+        file_tools=FileToolsConfig(base_dir=str(tmp_path)),
+    )
+    client = _make_llm_client(vision_provider="vl")
+    unseen = [
+        {
+            "name": "image_1",
+            "path": str(img),
+            "remote_path": ".macchiato/inbox/shot.png",
+            "url": "",
+            "media_type": "image",
+        }
+    ]
+    clear_remote_workspace_state()
+    try:
+        activate_remote_workspace(
+            session_id="feishu:user:abc",
+            login="lab",
+            requested_path="~/proj",
+        )
+        tool = RecognizeImageTool(llm_client=client, config=cfg, unseen_media=unseen)
+        result = await tool.execute(
+            image_path="image_1",
+            __execution_context__={"session_id": "feishu:user:abc"},
+        )
+        assert result.success is True
+        call_kwargs = client.chat_with_image.await_args.kwargs
+        assert call_kwargs["image_url"].startswith("data:image/png;base64,")
+    finally:
+        clear_remote_workspace_state()
+
+
+@pytest.mark.asyncio
+async def test_image_path_remote_relative_reads_blob(monkeypatch):
+    from agent_core.remote.workspace_state import (
+        activate_remote_workspace,
+        clear_remote_workspace_state,
+    )
+
+    client = _make_llm_client(vision_provider="vl")
+    unseen = [
+        {
+            "name": "image_1",
+            "path": "",
+            "remote_path": ".macchiato/inbox/shot.png",
+            "url": "",
+            "media_type": "image",
+        }
+    ]
+
+    async def _fake_blob(*, path_str, exec_ctx, max_bytes):
+        assert path_str == ".macchiato/inbox/shot.png"
+        return (
+            {
+                "content_base64": "aGVsbG8=",
+                "mime_type": "image/png",
+                "file_name": "shot.png",
+            },
+            None,
+        )
+
+    monkeypatch.setattr(
+        "system.tools.media_tools._read_remote_attachment_blob",
+        _fake_blob,
+    )
+
+    clear_remote_workspace_state()
+    try:
+        activate_remote_workspace(
+            session_id="feishu:user:abc",
+            login="lab",
+            requested_path="~/proj",
+        )
+        tool = RecognizeImageTool(llm_client=client, unseen_media=unseen)
+        result = await tool.execute(
+            image_path=".macchiato/inbox/shot.png",
+            __execution_context__={"session_id": "feishu:user:abc"},
+        )
+        assert result.success is True
+        call_kwargs = client.chat_with_image.await_args.kwargs
+        assert call_kwargs["image_url"] == "data:image/png;base64,aGVsbG8="
+    finally:
+        clear_remote_workspace_state()

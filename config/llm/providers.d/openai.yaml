@@ -1,8 +1,8 @@
-gpt_5.3_codex:
-  label: "GPT-5.3 codex"
+gpt_5.6_sol:
+  label: "GPT-5.6 Sol"
   base_url: "https://api.openai.com/v1"
   api_key: "${OPENAI_API_KEY}"
-  model: "gpt-5.3-codex"
+  model: "gpt-5.6-sol"
   vendor_params: {}
   capabilities:
     vision: true
@@ -10,4 +10,4 @@ gpt_5.3_codex:
     parallel_tool_calls: true
     reasoning_content: false
     thinking_tag_inline: false
-    context_window: null
+    context_window: 1050000

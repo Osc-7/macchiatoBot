@@ -38,3 +38,18 @@ sjtu_qwen3vl:
     reasoning_content: false
     thinking_tag_inline: false
     context_window: 262144
+
+denglab_qwen3.8_27B:
+  label: "Qwen3.8-27B Denglab"
+  base_url: "https://tokenlab.drewjin.sh/url/api/anthropic/v1"
+  api_key: "${DENGLAB_API_KEY}"
+  model: "ckpts/Qwen/Qwen3.8-27B"
+  protocol: "anthropic"
+  vendor_params: {}
+  capabilities:
+    vision: true
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: true
+    thinking_tag_inline: false
+    context_window: 262144

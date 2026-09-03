@@ -4,12 +4,13 @@ deepseek_V4_flash:
   api_key: "${DEEPSEEK_API_KEY}"
   model: "deepseek-v4-flash"
   pricing:
-    # 价格单位均为“每 1M token”；DeepSeek 价格/促销变化时改这里。
+    # 官方峰谷价（北京时间工作日 9:00-12:00、14:00-18:00 为高峰，高峰=闲时×2）。
+    # 此处按闲时填写；DeepSeek 价格/促销变化时改这里。
     currency: "CNY"
     cny_per_currency_unit: 1.0
-    input_cache_hit_per_million: 0.02
-    input_cache_miss_per_million: 1
-    output_per_million: 2
+    input_cache_hit_per_million: 0.05
+    input_cache_miss_per_million: 1.5
+    output_per_million: 4.5
   vendor_params:
     thinking:
       type: enabled
@@ -26,18 +27,18 @@ deepseek_V4_pro:
   api_key: "${DEEPSEEK_API_KEY}"
   model: "deepseek-v4-pro"
   pricing:
-    # 当前按本地预算口径填写；DeepSeek 价格/促销变化时改这里。
+    # 闲时口径；高峰为 0.30 / 9 / 27。
     currency: "CNY"
     cny_per_currency_unit: 1.0
-    input_cache_hit_per_million: 0.025
-    input_cache_miss_per_million: 3
-    output_per_million: 6
+    input_cache_hit_per_million: 0.15
+    input_cache_miss_per_million: 4.5
+    output_per_million: 13.5
   vendor_params:
     thinking:
       type: enabled
   capabilities:
     vision: false
     function_calling: true
-    parallel_tool_calls: true 
+    parallel_tool_calls: true
     reasoning_content: true
     context_window: 1048576

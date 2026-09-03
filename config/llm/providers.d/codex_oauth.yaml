@@ -1,17 +1,16 @@
 # OpenAI Codex OAuth — ChatGPT Plus/Team/Pro 订阅
 # 通过 codex_oauth 协议，使用 Codex Responses API
 
-# GPT-5.5 默认（medium 推理）
-gpt-5.5:
-  label: "GPT 5.5"
+# GPT-5.6 Sol 默认（medium 推理）
+gpt-5.6-sol:
+  label: "GPT 5.6 Sol"
   protocol: "codex_oauth"
   base_url: "https://chatgpt.com/backend-api/codex/responses"
-  model: "gpt-5.5"
+  model: "gpt-5.6-sol"
   auth_file: "./data/oauth/chatgpt-plus.json"
   reasoning_effort: "medium"
   capabilities:
     vision: true
     function_calling: true
     parallel_tool_calls: true
-    context_window: 1000000
-    
+    context_window: 1050000

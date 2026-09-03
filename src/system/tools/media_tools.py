@@ -405,7 +405,7 @@ class AttachImageToReplyTool(BaseTool):
             ],
             usage_notes=[
                 "image_path 与 image_url 必须且只能提供一个。",
-                "本地路径会经解析后传给前端；前端（如飞书）会上传该文件并发送图片消息。",
+                "本地路径会经解析后传给前端；飞书会话会在工具返回时立即尝试上传并发送，仅发送成功才返回 success。",
             ],
             tags=["多模态", "回复", "图片", "飞书"],
         )
@@ -548,6 +548,7 @@ class AttachFileToReplyTool(BaseTool):
             usage_notes=[
                 "file_path 与 file_url 必须且只能提供一个。",
                 "建议优先使用 file_path，避免远程下载失败导致发送失败。",
+                "飞书会话会在工具返回时立即尝试上传并发送，仅发送成功才返回 success。",
             ],
             tags=["附件", "回复", "文件", "飞书"],
         )

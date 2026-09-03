@@ -204,7 +204,7 @@ class FeishuClient:
         """
         发送引用卡片实体的消息（content 为 type=card + card_id，与内嵌整卡 JSON 二选一）。
 
-        返回 message_id（流式场景通常后续改卡走 card_id，不依赖 message_id）。
+        返回 message_id（关流失败时可用 IM PATCH 兜底改 header）。
         """
         if not chat_id or not card_id:
             raise ValueError("chat_id/card_id 不能为空")
@@ -298,8 +298,9 @@ class FeishuClient:
         全量更新卡片实体（含 header 标签、body 等）。
 
         PUT /open-apis/cardkit/v1/cards/:card_id
-        流式场景在结束后应用此接口，才能把标题区 text_tag 从 Streaming 改为 Complete/Segment
-        （仅 PATCH settings 不会更新 header）。
+        关流必须先 PATCH settings 把 streaming_mode 设为 false，再用本接口改 header
+        标签（Streaming → Complete/Segment）。只 replace、不 PATCH settings 时，
+        客户端会话标题会一直停在 (Streaming) / [生成中...]。
         """
         cid = (card_id or "").strip()
         if not cid:
@@ -367,6 +368,111 @@ class FeishuClient:
         if int(data.get("code", 0)) != 0:
             raise RuntimeError(f"发送飞书图片消息失败: {data}")
 
+    async def send_reply_attachment(
+        self,
+        *,
+        chat_id: str,
+        att: Dict[str, Any],
+    ) -> tuple[bool, str]:
+        """发送单个回复附件；返回 (是否成功, 失败原因)。"""
+        if not chat_id:
+            return False, "缺少 chat_id"
+        att_type = str(att.get("type") or "").strip().lower()
+        if att_type == "image":
+            image_bytes: Optional[bytes] = None
+            content_type = "image/png"
+            if "content_base64" in att:
+                try:
+                    image_bytes = base64.b64decode(
+                        str(att.get("content_base64") or ""),
+                        validate=True,
+                    )
+                except Exception:
+                    image_bytes = None
+                ct = str(att.get("content_type") or "").strip().lower()
+                if ct.startswith("image/"):
+                    content_type = ct
+            elif "path" in att:
+                path = Path(att["path"]).expanduser().resolve()
+                if not path.exists() or not path.is_file():
+                    return False, f"图片文件不存在: {path}"
+                image_bytes = path.read_bytes()
+                suffix = path.suffix.lower()
+                if suffix in (".jpg", ".jpeg"):
+                    content_type = "image/jpeg"
+                elif suffix == ".gif":
+                    content_type = "image/gif"
+                elif suffix == ".webp":
+                    content_type = "image/webp"
+            elif "url" in att:
+                url_str = str(att["url"]).strip()
+                if url_str.startswith(("http://", "https://")):
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        resp = await client.get(url_str)
+                        resp.raise_for_status()
+                        image_bytes = resp.content
+                        ct = resp.headers.get("content-type", "")
+                        if "image/" in ct:
+                            content_type = ct.split(";")[0].strip()
+            if not image_bytes:
+                return False, "无法读取图片内容"
+            if len(image_bytes) > 10 * 1024 * 1024:
+                return False, "图片超过 10MB 上限"
+            try:
+                image_key = await self.upload_image(
+                    image_bytes=image_bytes, content_type=content_type
+                )
+                await self.send_image_message(chat_id=chat_id, image_key=image_key)
+            except Exception as exc:
+                return False, str(exc)
+            return True, ""
+
+        if att_type == "file":
+            file_bytes: Optional[bytes] = None
+            file_name = str(att.get("file_name") or "").strip()
+            if "content_base64" in att:
+                try:
+                    file_bytes = base64.b64decode(
+                        str(att.get("content_base64") or ""),
+                        validate=True,
+                    )
+                except Exception:
+                    file_bytes = None
+                if not file_name:
+                    file_name = "attachment.bin"
+            elif "path" in att:
+                path = Path(att["path"]).expanduser().resolve()
+                if not path.exists() or not path.is_file():
+                    return False, f"文件不存在: {path}"
+                file_bytes = path.read_bytes()
+                if not file_name:
+                    file_name = path.name
+            elif "url" in att:
+                url_str = str(att["url"]).strip()
+                if url_str.startswith(("http://", "https://")):
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        resp = await client.get(url_str)
+                        resp.raise_for_status()
+                        file_bytes = resp.content
+                        if not file_name:
+                            file_name = self._infer_filename_from_response(
+                                resp.headers.get("content-disposition"), url_str
+                            )
+            if not file_bytes:
+                return False, "无法读取文件内容"
+            file_name = file_name or "attachment.bin"
+            try:
+                file_key = await self.upload_file(
+                    file_bytes=file_bytes,
+                    file_name=file_name,
+                )
+                await self.send_file_message(chat_id=chat_id, file_key=file_key)
+            except Exception as exc:
+                return False, str(exc)
+            return True, ""
+
+        return False, f"不支持的附件类型: {att_type or 'unknown'}"
+
     async def send_reply_attachments(
         self,
         *,
@@ -385,97 +491,11 @@ class FeishuClient:
         if not chat_id or not attachments:
             return
         for att in attachments:
-            att_type = str(att.get("type") or "").strip().lower()
-            if att_type == "image":
-                image_bytes: Optional[bytes] = None
-                content_type = "image/png"
-                if "content_base64" in att:
-                    try:
-                        image_bytes = base64.b64decode(
-                            str(att.get("content_base64") or ""),
-                            validate=True,
-                        )
-                    except Exception:
-                        image_bytes = None
-                    ct = str(att.get("content_type") or "").strip().lower()
-                    if ct.startswith("image/"):
-                        content_type = ct
-                elif "path" in att:
-                    path = Path(att["path"]).expanduser().resolve()
-                    if not path.exists() or not path.is_file():
-                        continue
-                    image_bytes = path.read_bytes()
-                    suffix = path.suffix.lower()
-                    if suffix in (".jpg", ".jpeg"):
-                        content_type = "image/jpeg"
-                    elif suffix == ".gif":
-                        content_type = "image/gif"
-                    elif suffix == ".webp":
-                        content_type = "image/webp"
-                elif "url" in att:
-                    url_str = str(att["url"]).strip()
-                    if url_str.startswith(("http://", "https://")):
-                        async with httpx.AsyncClient(timeout=30.0) as client:
-                            resp = await client.get(url_str)
-                            resp.raise_for_status()
-                            image_bytes = resp.content
-                            ct = resp.headers.get("content-type", "")
-                            if "image/" in ct:
-                                content_type = ct.split(";")[0].strip()
-                if not image_bytes or len(image_bytes) > 10 * 1024 * 1024:
-                    continue
-                try:
-                    image_key = await self.upload_image(
-                        image_bytes=image_bytes, content_type=content_type
-                    )
-                    await self.send_image_message(chat_id=chat_id, image_key=image_key)
-                except Exception as exc:
-                    logging.getLogger(__name__).warning("飞书发送回复附图失败: %s", exc)
-                continue
-
-            if att_type == "file":
-                file_bytes: Optional[bytes] = None
-                file_name = str(att.get("file_name") or "").strip()
-                if "content_base64" in att:
-                    try:
-                        file_bytes = base64.b64decode(
-                            str(att.get("content_base64") or ""),
-                            validate=True,
-                        )
-                    except Exception:
-                        file_bytes = None
-                    if not file_name:
-                        file_name = "attachment.bin"
-                elif "path" in att:
-                    path = Path(att["path"]).expanduser().resolve()
-                    if not path.exists() or not path.is_file():
-                        continue
-                    file_bytes = path.read_bytes()
-                    if not file_name:
-                        file_name = path.name
-                elif "url" in att:
-                    url_str = str(att["url"]).strip()
-                    if url_str.startswith(("http://", "https://")):
-                        async with httpx.AsyncClient(timeout=60.0) as client:
-                            resp = await client.get(url_str)
-                            resp.raise_for_status()
-                            file_bytes = resp.content
-                            if not file_name:
-                                file_name = self._infer_filename_from_response(
-                                    resp.headers.get("content-disposition"), url_str
-                                )
-                if not file_bytes:
-                    continue
-                file_name = file_name or "attachment.bin"
-                try:
-                    file_key = await self.upload_file(
-                        file_bytes=file_bytes,
-                        file_name=file_name,
-                    )
-                    await self.send_file_message(chat_id=chat_id, file_key=file_key)
-                except Exception as exc:
-                    logging.getLogger(__name__).warning("飞书发送回复附件失败: %s", exc)
-                continue
+            ok, err = await self.send_reply_attachment(chat_id=chat_id, att=att)
+            if not ok:
+                logging.getLogger(__name__).warning(
+                    "飞书发送回复附件失败: %s", err or "unknown"
+                )
 
     async def download_message_resource(
         self,

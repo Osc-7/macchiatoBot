@@ -66,6 +66,31 @@ def queue_media_for_next_call(
             pending_multimodal_items.append(content_item)
 
 
+_ATTACHMENT_DELIVERED_KEY = "_attachment_delivered"
+
+
+def is_attachment_delivered(att: Dict[str, Any]) -> bool:
+    return bool(att.get(_ATTACHMENT_DELIVERED_KEY) or att.get("_feishu_delivered"))
+
+
+def mark_attachment_delivered(att: Dict[str, Any]) -> None:
+    att[_ATTACHMENT_DELIVERED_KEY] = True
+
+
+def filter_undelivered_attachments(
+    attachments: Optional[List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """过滤已在工具执行阶段即时送达的附件，避免终态重复发送。"""
+    out: List[Dict[str, Any]] = []
+    for raw in attachments or []:
+        if not isinstance(raw, dict):
+            continue
+        if is_attachment_delivered(raw):
+            continue
+        out.append(raw)
+    return out
+
+
 def collect_outgoing_attachment(
     result: ToolResult,
     outgoing_attachments: List[Dict[str, Any]],
@@ -77,6 +102,8 @@ def collect_outgoing_attachment(
     if not att or not isinstance(att, dict):
         return
     if att.get("type") not in {"image", "file"}:
+        return
+    if is_attachment_delivered(att):
         return
     if "path" in att or "url" in att or "content_base64" in att:
         outgoing_attachments.append(dict(att))

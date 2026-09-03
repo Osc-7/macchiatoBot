@@ -323,13 +323,17 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
     # 将 Agent 回复通过飞书再发回用户（流式 PATCH 已完成时跳过重复卡片）
     feishu_client = _build_feishu_client()
     try:
+        from agent_core.agent.media_helpers import filter_undelivered_attachments
+
         if not (result.metadata or {}).get("feishu_skip_final_reply"):
             await send_feishu_agent_final_reply(
                 client=feishu_client,
                 chat_id=msg.chat_id,
                 output_text=result.output_text,
             )
-        attachments = getattr(result, "attachments", None)
+        attachments = filter_undelivered_attachments(
+            getattr(result, "attachments", None)
+        )
         if attachments:
             await feishu_client.send_reply_attachments(
                 chat_id=msg.chat_id, attachments=attachments

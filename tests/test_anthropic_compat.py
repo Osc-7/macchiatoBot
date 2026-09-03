@@ -402,3 +402,90 @@ async def test_chat_with_tools_stream_emits_delta_and_tool_calls():
     assert out.tool_calls[0].name == "search_tools"
     assert out.tool_calls[0].arguments == {"query": "calendar"}
     await p.close()
+
+
+def test_content_delta_has_visible_text_skips_sglang_blank_separator():
+    from agent_core.llm.providers.anthropic_compat import (
+        _content_delta_has_visible_text,
+    )
+
+    assert _content_delta_has_visible_text([], "\n\n") is False
+    assert _content_delta_has_visible_text(["\n\n"], "  ") is False
+    assert _content_delta_has_visible_text(["\n\n"], "收到") is True
+    assert _content_delta_has_visible_text(["收到"], "\n\n") is True
+
+
+@pytest.mark.asyncio
+async def test_chat_with_tools_stream_ignores_blank_text_before_tool_use():
+    """SGLang: thinking → text_delta('\\n\\n') → tool_use 不应触发 assistant_delta。"""
+    p = AnthropicCompatProvider(
+        name="t",
+        base_url="https://example.com/v1",
+        api_key="sk-x",
+        model="qwen",
+        capabilities=Capabilities(reasoning_content=True, function_calling=True),
+        temperature=0.7,
+        max_tokens=4096,
+        request_timeout_seconds=30.0,
+        stream=True,
+        vendor_params={},
+    )
+    blocks = [
+        'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":3}}}\n\n',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"call date"}}\n\n',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"\\n\\n"}}\n\n',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"call_1","name":"bash","input":{}}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\\"command\\": \\"date\\"}"}}\n\n',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":2}\n\n',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":4}}\n\n',
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]
+
+    class _FakeStreamResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_bytes(self):
+            for b in blocks:
+                yield b.encode("utf-8")
+
+    class _FakeStreamContext:
+        async def __aenter__(self):
+            return _FakeStreamResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    p._http_client.stream = lambda *a, **k: _FakeStreamContext()  # type: ignore[method-assign]
+
+    deltas: list[str] = []
+    reasoning: list[str] = []
+    out = await p.chat_with_tools(
+        messages=[{"role": "user", "content": "date"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "run",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+        on_content_delta=lambda s: deltas.append(s),
+        on_reasoning_delta=lambda s: reasoning.append(s),
+    )
+    assert deltas == []
+    assert "".join(reasoning) == "call date"
+    assert out.content is None
+    assert out.tool_calls and out.tool_calls[0].name == "bash"
+    await p.close()

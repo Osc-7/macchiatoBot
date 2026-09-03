@@ -28,6 +28,17 @@ logger = logging.getLogger(__name__)
 _SSE_LINE_RE = re.compile(r"^(event|data):\s?(.*)")
 
 
+def _content_delta_has_visible_text(existing_parts: List[str], delta: str) -> bool:
+    """SGLang 会在 thinking 与 tool_use 之间插一段 ``\\n\\n`` text 块。
+
+    累计正文仍全是空白时，不要把这段分隔符当成 assistant_delta，
+    否则飞书会先弹出空的 Streaming 回复框。已有可见正文后的换行仍照常下发。
+    """
+    if not isinstance(delta, str) or not delta:
+        return False
+    return bool(("".join(existing_parts) + delta).strip())
+
+
 def _convert_openai_user_content_part_to_anthropic(part: Any) -> Any:
     """将 OpenAI 风格 user content part 转成 Anthropic content block。"""
     if not isinstance(part, dict):
@@ -377,8 +388,10 @@ class AnthropicCompatProvider(BaseProvider):
                 elif btype == "text":
                     t = block_obj.get("text")
                     if isinstance(t, str) and t:
+                        emit = _content_delta_has_visible_text(text_parts, t)
                         text_parts.append(t)
-                        await _emit_delta(on_content_delta, t)
+                        if emit:
+                            await _emit_delta(on_content_delta, t)
                 elif btype == "tool_use":
                     entry = _tool_entry(idx)
                     entry["id"] = str(block_obj.get("id") or entry.get("id") or "")
@@ -396,8 +409,10 @@ class AnthropicCompatProvider(BaseProvider):
                 if dtype == "text_delta":
                     txt = delta.get("text")
                     if isinstance(txt, str) and txt:
+                        emit = _content_delta_has_visible_text(text_parts, txt)
                         text_parts.append(txt)
-                        await _emit_delta(on_content_delta, txt)
+                        if emit:
+                            await _emit_delta(on_content_delta, txt)
                 elif dtype == "thinking_delta":
                     thinking = delta.get("thinking")
                     if isinstance(thinking, str) and thinking:

@@ -117,6 +117,7 @@ class FeishuTurnHooksController:
             on_trace_event=self._on_trace_event,
             on_feishu_ask_user_notify=self._on_feishu_ask_user_notify,
             on_feishu_permission_notify=self._on_feishu_permission_notify,
+            on_outgoing_attachment=self._on_outgoing_attachment,
         )
 
     @property
@@ -126,6 +127,10 @@ class FeishuTurnHooksController:
     def _ck_next_seq(self) -> int:
         self._ck_seq += 1
         return self._ck_seq
+
+    def _visible_assistant_text(self) -> str:
+        """流式框只应在有可见正文时出现；纯空白/换行不算。"""
+        return (self._assistant_buffer or "").strip()
 
     async def _cancel_assistant_debounce(self) -> None:
         t = self._assistant_debounce_task
@@ -145,9 +150,9 @@ class FeishuTurnHooksController:
         fc = self._feishu_client
         if not fc or not self._chat_id:
             return
-        body = self._assistant_buffer
-        if not body:
+        if not self._visible_assistant_text():
             return
+        body = self._assistant_buffer
         card = build_agent_reply_markdown_card(
             body,
             header_title=self._markdown_header_title,
@@ -172,9 +177,9 @@ class FeishuTurnHooksController:
     async def _ck_put_buffer(self) -> None:
         if not self._ck_card_id or not self._feishu_client:
             return
-        text = self._assistant_buffer
-        if not text:
+        if not self._visible_assistant_text():
             return
+        text = self._assistant_buffer
         if len(text) > 100_000:
             text = text[:100_000]
         await self._feishu_client.cardkit_put_streaming_text_content(
@@ -184,6 +189,24 @@ class FeishuTurnHooksController:
             sequence=self._ck_next_seq(),
         )
         self._assistant_stream_patched_len = len(self._assistant_buffer)
+
+    async def _ck_stop_streaming_mode(self) -> None:
+        """官方关流：PATCH settings 把 streaming_mode 设为 false。
+
+        只 replace 卡片 JSON 不会清掉客户端会话标题上的 (Streaming) / [生成中...]。
+        """
+        if not self._ck_card_id or not self._feishu_client:
+            return
+        await self._feishu_client.cardkit_patch_card_settings(
+            card_id=self._ck_card_id,
+            settings={"config": {"streaming_mode": False}},
+            sequence=self._ck_next_seq(),
+        )
+
+    def _ck_release_local_handle(self) -> None:
+        self._ck_card_id = ""
+        self._ck_seq = 0
+        self._assistant_stream_patched_len = 0
 
     async def _ck_close_streaming_card(
         self,
@@ -207,14 +230,27 @@ class FeishuTurnHooksController:
         cfg = card.setdefault("config", {})
         cfg["streaming_mode"] = False
         cfg.pop("streaming_config", None)
-        await self._feishu_client.cardkit_replace_card_entity(
-            card_id=self._ck_card_id,
-            card=card,
-            sequence=self._ck_next_seq(),
-        )
-        self._ck_card_id = ""
-        self._ck_seq = 0
-        self._assistant_stream_patched_len = 0
+        # 先关流式模式，再全量替换 header 标签（Streaming → Complete/Segment）。
+        await self._ck_stop_streaming_mode()
+        try:
+            await self._feishu_client.cardkit_replace_card_entity(
+                card_id=self._ck_card_id,
+                card=card,
+                sequence=self._ck_next_seq(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            mid = self._assistant_stream_mid
+            if not mid:
+                raise
+            logger.warning(
+                "feishu CardKit replace after stream stop failed, "
+                "fallback to message PATCH: %s",
+                exc,
+            )
+            await self._feishu_client.patch_interactive_card_message(
+                message_id=mid, card=card
+            )
+        self._ck_release_local_handle()
 
     async def _ck_bootstrap(self) -> None:
         fc = self._feishu_client
@@ -223,9 +259,11 @@ class FeishuTurnHooksController:
         try:
             shell = build_agent_reply_card_streaming_shell(reply_phase="streaming")
             cid = await fc.create_cardkit_card_entity(card=shell)
-            await fc.send_message_with_card_id(chat_id=self._chat_id, card_id=cid)
+            mid = await fc.send_message_with_card_id(chat_id=self._chat_id, card_id=cid)
             self._ck_card_id = cid
             self._ck_seq = 0
+            if mid:
+                self._assistant_stream_mid = mid
             await self._ck_put_buffer()
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -264,12 +302,21 @@ class FeishuTurnHooksController:
 
     async def _end_assistant_segment_before_tools(self) -> None:
         await self._cancel_assistant_debounce()
-        if not self._assistant_buffer.strip():
+        if not self._visible_assistant_text():
+            # 思考模型常先打出空白/换行 delta，会留下空的 Streaming 壳。
+            # 进工具前丢掉这张空卡的本地句柄，避免后续终态 PATCH 回填到工具卡片上方。
+            # 句柄丢掉之前仍要关 streaming_mode，否则会话标题会一直停在 (Streaming)。
+            if self._use_cardkit_stream and not self._ck_fallback and self._ck_card_id:
+                try:
+                    await self._ck_stop_streaming_mode()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "feishu CardKit stop streaming on empty shell failed: %s",
+                        exc,
+                    )
             self._assistant_buffer = ""
             self._assistant_stream_mid = ""
-            self._assistant_stream_patched_len = 0
-            self._ck_card_id = ""
-            self._ck_seq = 0
+            self._ck_release_local_handle()
             return
         if self._stream_reply:
             if self._use_cardkit_stream and not self._ck_fallback and self._ck_card_id:
@@ -293,6 +340,8 @@ class FeishuTurnHooksController:
         if not delta:
             return
         self._assistant_buffer += delta
+        if not self._visible_assistant_text():
+            return
         if (
             not self._stream_reply
             or not self._feishu_client
@@ -307,7 +356,10 @@ class FeishuTurnHooksController:
             pending_chars = len(self._assistant_buffer) - self._assistant_stream_patched_len
             if pending_chars >= _FEISHU_STREAM_PATCH_MIN_CHARS:
                 await self._cancel_assistant_debounce()
-                await self._ck_put_buffer()
+                try:
+                    await self._ck_put_buffer()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("feishu CardKit stream put failed: %s", exc)
                 return
 
             async def _debounced_ck() -> None:
@@ -316,6 +368,8 @@ class FeishuTurnHooksController:
                     await self._ck_put_buffer()
                 except asyncio.CancelledError:
                     pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("feishu CardKit stream put failed: %s", exc)
 
             await self._cancel_assistant_debounce()
             self._assistant_debounce_task = asyncio.create_task(_debounced_ck())
@@ -356,6 +410,26 @@ class FeishuTurnHooksController:
 
         await send_permission_feishu_card(permission_id, payload)
 
+    async def _on_outgoing_attachment(self, att: Dict[str, Any]) -> bool:
+        """工具调用后立即把附件发到飞书；成功后才算送达。"""
+        from agent_core.agent.media_helpers import is_attachment_delivered, mark_attachment_delivered
+
+        if not self._feishu_client or not self._chat_id:
+            return False
+        if is_attachment_delivered(att):
+            return True
+        ok, err = await self._feishu_client.send_reply_attachment(
+            chat_id=self._chat_id,
+            att=att,
+        )
+        if not ok:
+            logger.warning(
+                "feishu immediate attachment send failed: %s", err or "unknown"
+            )
+            return False
+        mark_attachment_delivered(att)
+        return True
+
     async def _on_trace_event(self, evt: Dict[str, Any]) -> None:
         if not self._feishu_client or not self._chat_id:
             return
@@ -364,6 +438,7 @@ class FeishuTurnHooksController:
         chat_id = self._chat_id
 
         if evt_type == "tool_call" and self._tool_trace_cards_enabled:
+            await self._end_assistant_segment_before_tools()
             tcid = str(evt.get("tool_call_id") or "").strip()
             if tcid:
                 self._pending_tool_args[tcid] = {
@@ -442,8 +517,7 @@ class FeishuTurnHooksController:
             return
 
         if evt_type == "llm_request":
-            if self._assistant_buffer.strip():
-                await self._end_assistant_segment_before_tools()
+            await self._end_assistant_segment_before_tools()
             return
 
         if evt_type == "chat_history_summarized":

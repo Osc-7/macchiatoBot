@@ -47,3 +47,5 @@ class AgentHooks:
     on_feishu_ask_user_notify: Optional[Callable[[str, Dict[str, Any]], Any]] = None
     # 同上，request_permission 权限卡
     on_feishu_permission_notify: Optional[Callable[[str, Dict[str, Any]], Any]] = None
+    # attach_*_to_reply：工具返回后立即尝试把附件发到前端（如飞书）
+    on_outgoing_attachment: Optional[Callable[[Dict[str, Any]], Any]] = None

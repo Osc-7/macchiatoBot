@@ -432,19 +432,25 @@ class FeishuPushForwarder:
         chat_id: str,
         payload: Dict[str, Any],
     ) -> bool:
+        from agent_core.agent.media_helpers import filter_undelivered_attachments
+
         meta = payload.get("metadata")
-        if isinstance(meta, dict) and meta.get("feishu_skip_final_reply"):
-            return True
+        skip_final_reply = isinstance(meta, dict) and bool(
+            meta.get("feishu_skip_final_reply")
+        )
         text = (payload.get("output_text") or "").strip()
         attachments = payload.get("attachments")
         if not isinstance(attachments, list):
             attachments = []
+        attachments = filter_undelivered_attachments(attachments)
+        if skip_final_reply and not attachments:
+            return True
         if not text and not attachments:
             return False
         try:
             # 与 send_message 主路径一致：按 reply_format 发 Markdown 卡片或纯文本，
             # 避免 poll_push 走 send_text_message 的 Markdown→纯文本过滤。
-            if text:
+            if text and not skip_final_reply:
                 await send_feishu_agent_final_reply(
                     client=feishu_client,
                     chat_id=chat_id,

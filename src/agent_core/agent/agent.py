@@ -1725,6 +1725,9 @@ class AgentCore:
 
                         # 媒体与待发送附件用「原始 result」，避免截断丢失 data 中的
                         # 资源指针（图片/视频路径等）。
+                        result = await self._maybe_deliver_outgoing_attachment(
+                            result, hooks
+                        )
                         self._queue_media_for_next_call(result)
                         self._collect_outgoing_attachment(result)
 
@@ -1848,7 +1851,7 @@ class AgentCore:
                 fallback = "抱歉，我无法处理您的请求。请重试或换一种方式表达。"
                 if self._session_logger:
                     self._session_logger.on_assistant_message(turn_id, fallback)
-                yield ReturnAction(message=fallback, status="fallback")
+                yield ReturnAction(message=fallback, status="fallback", attachments=list(self._outgoing_attachments))
                 return
 
             except asyncio.CancelledError:
@@ -1882,7 +1885,11 @@ class AgentCore:
             )
         if self._session_logger:
             self._session_logger.on_assistant_message(turn_id, overflow_msg)
-        yield ReturnAction(message=overflow_msg, status="overflow")
+        yield ReturnAction(
+            message=overflow_msg,
+            status="overflow",
+            attachments=list(self._outgoing_attachments),
+        )
 
     @staticmethod
     async def _emit_trace(
@@ -2188,6 +2195,42 @@ class AgentCore:
     def _collect_outgoing_attachment(self, result: ToolResult) -> None:
         """将工具结果中声明的「随回复发给用户的附件」加入本轮待发送列表。"""
         collect_outgoing_attachment(result, self._outgoing_attachments)
+
+    async def _maybe_deliver_outgoing_attachment(
+        self,
+        result: ToolResult,
+        hooks: Optional["AgentHooks"],
+    ) -> ToolResult:
+        """若前端注册了即时送达钩子，则在工具返回后立刻发送附件。"""
+        if not result.success or not isinstance(result.metadata, dict):
+            return result
+        att = result.metadata.get("outgoing_attachment")
+        if not att or not isinstance(att, dict):
+            return result
+        if hooks is None or hooks.on_outgoing_attachment is None:
+            return result
+
+        delivered = hooks.on_outgoing_attachment(att)
+        if inspect.isawaitable(delivered):
+            delivered = await delivered
+        if delivered:
+            return result
+
+        meta = dict(result.metadata)
+        meta.pop("outgoing_attachment", None)
+        err_detail = ""
+        if att.get("type") == "file":
+            err_detail = str(att.get("file_name") or att.get("path") or "").strip()
+        elif att.get("type") == "image":
+            err_detail = str(att.get("path") or att.get("url") or "").strip()
+        suffix = f" ({err_detail})" if err_detail else ""
+        return ToolResult(
+            success=False,
+            data=result.data,
+            message=f"附件发送失败，用户未收到该文件/图片{suffix}。请检查路径或稍后重试。",
+            error="ATTACHMENT_DELIVERY_FAILED",
+            metadata=meta,
+        )
 
     def _maybe_scrub_oversized_tool_results(self) -> int:
         """

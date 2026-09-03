@@ -1294,6 +1294,86 @@ async def test_cancel_session_tasks_clears_mark_when_lock_waiter_aborted() -> No
     await scheduler.stop()
 
 
+def _write_cli_root_checkpoint(
+    mem_dir, *, session_id: str, last_active_at: float, goals: list | None = None
+):
+    from agent_core.agent.checkpoint import CoreCheckpoint, CoreCheckpointManager
+
+    owner = mem_dir / "cli" / "root"
+    owner.mkdir(parents=True, exist_ok=True)
+    mgr = CoreCheckpointManager(str(owner / "checkpoint.json"))
+    mgr.write(
+        CoreCheckpoint(
+            session_id=session_id,
+            owner_id="root",
+            source="cli",
+            running_summary=None,
+            recent_messages=[],
+            last_active_at=last_active_at,
+            remaining_ttl_seconds=1800.0,
+            turn_count=0,
+            last_history_id=0,
+            token_usage={},
+            active_goals=list(goals or []),
+        )
+    )
+    return mgr
+
+
+@pytest.mark.asyncio
+async def test_restore_from_checkpoints_skips_ttl_expired_even_with_goals(
+    tmp_path,
+) -> None:
+    """残留 goal 不得把过期 Core 拉回进程池（否则每次 restart 都写空 cli:root 日志）。"""
+    mem = tmp_path / "memory"
+    shutdown_at = 2_000_000.0
+    (mem).mkdir()
+    (mem / ".kernel_last_shutdown_at").write_text(str(shutdown_at), encoding="utf-8")
+    mgr = _write_cli_root_checkpoint(
+        mem,
+        session_id="sess-stale-goal",
+        last_active_at=1.0,
+        goals=[{"id": "g1", "title": "残留", "status": "active", "steps": []}],
+    )
+    cfg = SimpleNamespace(
+        memory=SimpleNamespace(memory_base_dir=str(mem)),
+        agent=SimpleNamespace(session_expired_seconds=1800),
+    )
+    pool = CorePool(config=cfg)  # type: ignore[arg-type]
+    pool.acquire = AsyncMock()
+
+    restored = await pool.restore_from_checkpoints()
+    assert restored == 0
+    pool.acquire.assert_not_called()
+    loaded = mgr.read()
+    assert loaded is not None
+    assert loaded.expired is True
+    assert loaded.active_goals
+
+
+@pytest.mark.asyncio
+async def test_restore_from_checkpoints_restores_unexpired_session(tmp_path) -> None:
+    mem = tmp_path / "memory"
+    shutdown_at = 10_000.0
+    mem.mkdir()
+    (mem / ".kernel_last_shutdown_at").write_text(str(shutdown_at), encoding="utf-8")
+    _write_cli_root_checkpoint(
+        mem, session_id="sess-fresh", last_active_at=shutdown_at - 10.0
+    )
+    cfg = SimpleNamespace(
+        memory=SimpleNamespace(memory_base_dir=str(mem)),
+        agent=SimpleNamespace(session_expired_seconds=1800),
+    )
+    pool = CorePool(config=cfg)  # type: ignore[arg-type]
+    pool.acquire = AsyncMock()
+
+    restored = await pool.restore_from_checkpoints()
+    assert restored == 1
+    pool.acquire.assert_awaited_once()
+    assert pool.acquire.await_args.kwargs["user_id"] == "root"
+    assert pool.acquire.await_args.args[0] == "sess-fresh"
+
+
 @pytest.mark.asyncio
 async def test_compress_context_writes_chapter_entry_to_recent_topic(tmp_path) -> None:
     """压缩成功后：上下文放累计摘要，recent_topic 写入「本段新增」章节。"""

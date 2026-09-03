@@ -1051,8 +1051,9 @@ class CorePool:
 
         1. expired=True  → 无活跃 goal 时物理删除；有 active_goals 则保留供下次 _load 救出
         2. elapsed = kernel_last_shutdown_at - last_active_at
-           elapsed >= session_ttl 且无 active_goals → 超时，标记 expired=True 并跳过
-           否则（未超时，或有活跃 goal）→ 恢复为活跃 Core：
+           elapsed >= session_ttl → 超时，标记 expired=True 并跳过（有 goal 也只保留文件，
+           不把过期 Core 拉回进程池；否则每次 restart 都会写出空的 session-cli:root 日志）
+           elapsed < session_ttl → 恢复为活跃 Core：
                - 通过 acquire() → _load() 重建 AgentCore 并调用 restore_from_checkpoint
                - CoreEntry.last_active_ts = monotonic() - elapsed（TTL 从剩余时间继续计时）
 
@@ -1134,28 +1135,31 @@ class CorePool:
             session_ttl = ckpt.remaining_ttl_seconds or float(
                 getattr(self._config.agent, "session_expired_seconds", 1800)
             )
-            if elapsed >= session_ttl and not ckpt.active_goals:
-                # 超时且无活跃 goal：标记 expired=True，供下次启动清理
+            if elapsed >= session_ttl:
+                # 超时：不拉回进程池。残留 goal 随 expired 文件留给下次真实 _load 救出。
+                n_goals = len(ckpt.active_goals or [])
                 mgr.mark_expired()
-                logger.debug(
-                    "CorePool.restore_from_checkpoints: checkpoint expired session=%s "
-                    "(elapsed=%.0fs >= ttl=%.0fs)",
-                    session_id,
-                    elapsed,
-                    session_ttl,
-                )
+                if n_goals:
+                    logger.info(
+                        "CorePool.restore_from_checkpoints: keep TTL-expired checkpoint "
+                        "with %d goal(s) for salvage session=%s "
+                        "(elapsed=%.0fs >= ttl=%.0fs); not restoring into pool",
+                        n_goals,
+                        session_id,
+                        elapsed,
+                        session_ttl,
+                    )
+                else:
+                    logger.debug(
+                        "CorePool.restore_from_checkpoints: checkpoint expired session=%s "
+                        "(elapsed=%.0fs >= ttl=%.0fs)",
+                        session_id,
+                        elapsed,
+                        session_ttl,
+                    )
                 continue
-            if elapsed >= session_ttl and ckpt.active_goals:
-                logger.info(
-                    "CorePool.restore_from_checkpoints: restoring expired-by-TTL "
-                    "session=%s with %d active goal(s) (elapsed=%.0fs >= ttl=%.0fs)",
-                    session_id,
-                    len(ckpt.active_goals),
-                    elapsed,
-                    session_ttl,
-                )
 
-            # ③ 未过期（或有活跃 goal）：通过 acquire() 重建 Core
+            # ③ 未过期：通过 acquire() 重建 Core
             try:
                 from agent_core.kernel_interface.profile import (
                     core_profile_from_checkpoint_dict,
@@ -1434,42 +1438,40 @@ class CorePool:
                             # max(0.0, ...) 防御 NTP 时钟回拨（elapsed 为负时视为 0，保留 session）
                             elapsed = max(0.0, shutdown_at - checkpoint.last_active_at)
                             ttl_elapsed = elapsed >= session_ttl
-                            pin_for_goals = bool(checkpoint.active_goals)
-                            if ttl_elapsed and not pin_for_goals:
-                                # 超时且无活跃 goal：标记过期，冷启动
+                            if ttl_elapsed:
+                                # 超时：冷启动。有 goal 则救出，避免「目标不存在」，但不复活过期 Core。
+                                if checkpoint.active_goals:
+                                    salvaged_goals = [
+                                        dict(item) for item in checkpoint.active_goals
+                                    ]
                                 ckpt_mgr.mark_expired()
                                 logger.debug(
                                     "CorePool._load: checkpoint expired (session=%s "
-                                    "elapsed=%.0fs >= ttl=%.0fs)",
+                                    "elapsed=%.0fs >= ttl=%.0fs%s)",
                                     session_id,
                                     elapsed,
                                     session_ttl,
+                                    (
+                                        f", salvaging {len(salvaged_goals)} goal(s)"
+                                        if salvaged_goals
+                                        else ""
+                                    ),
                                 )
-                            elif not ttl_elapsed or pin_for_goals:
+                            else:
                                 restore_fn = getattr(
                                     agent, "restore_from_checkpoint", None
                                 )
                                 if callable(restore_fn):
                                     restore_fn(checkpoint)
                                     restored_from_checkpoint = True
-                                    # 有 goal 时即使 elapsed>=ttl 也恢复；TTL 偏移封顶以免负 remaining
-                                    initial_ttl_offset = (
-                                        min(elapsed, session_ttl)
-                                        if pin_for_goals and ttl_elapsed
-                                        else elapsed
-                                    )
+                                    initial_ttl_offset = elapsed
                                     salvaged_goals = None
                                     logger.info(
                                         "CorePool._load: restored checkpoint for session=%s "
-                                        "(elapsed=%.0fs, remaining=%.0fs%s)",
+                                        "(elapsed=%.0fs, remaining=%.0fs)",
                                         session_id,
                                         elapsed,
                                         max(0.0, session_ttl - initial_ttl_offset),
-                                        (
-                                            ", pinned by active goals"
-                                            if pin_for_goals and ttl_elapsed
-                                            else ""
-                                        ),
                                     )
                 except Exception as exc:
                     logger.warning(

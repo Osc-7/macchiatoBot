@@ -772,6 +772,8 @@ async def run_remote_worker_server_until_stopped(
     )
     try:
         await stop_event.wait()
+    except asyncio.CancelledError:
+        logger.info("remote worker server cancelled; shutting down uvicorn")
     finally:
         server.should_exit = True
-        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.shield(asyncio.gather(task, return_exceptions=True))

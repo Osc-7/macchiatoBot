@@ -857,7 +857,7 @@ async def _main() -> None:
             consumer_task.cancel()
             await asyncio.gather(consumer_task, return_exceptions=True)
             if remote_server_task is not None:
-                remote_server_task.cancel()
+                # stop_event 已 set；等 uvicorn should_exit，不要 cancel，否则 lifespan 打 CancelledError
                 await asyncio.gather(remote_server_task, return_exceptions=True)
             if notify_task is not None:
                 notify_task.cancel()

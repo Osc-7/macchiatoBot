@@ -87,6 +87,8 @@ def _config_job_to_definition(cfg: Config, job_config: Any) -> JobDefinition:
         payload["times"] = [t.strip() for t in job_config.times if t and str(t).strip()]
     if job_config.start_time:
         payload["start_time"] = job_config.start_time
+    if getattr(job_config, "write_recent_topic", False):
+        payload["write_recent_topic"] = True
 
     stable_owner = memory_owner or user_id
     job_name = _stable_job_name(name, stable_owner)

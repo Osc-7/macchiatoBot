@@ -94,14 +94,17 @@ class MemoryCorpus:
         self._embed()
         return md_path
 
-    def store_entry_markdown(self, entry_id: str, markdown: str, category: str) -> Path:
-        """写入单条 entry 镜像（如 recent_topic）。"""
+    def store_entry_markdown(
+        self, entry_id: str, markdown: str, category: str, *, embed: bool = True
+    ) -> Path:
+        """写入单条 entry 镜像（如 recent_topic）。embed=False 时跳过 QMD 同步（调用方自行触发）。"""
         cat = category if category in self.VALID_CATEGORIES else "other"
         cat_dir = self._dir / cat
         cat_dir.mkdir(parents=True, exist_ok=True)
         md_path = cat_dir / f"{entry_id}.md"
         md_path.write_text(markdown, encoding="utf-8")
-        self._embed()
+        if embed:
+            self._embed()
         return md_path
 
     def _legacy_search_roots(self) -> List[Path]:

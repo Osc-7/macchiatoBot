@@ -935,6 +935,26 @@ class MemoryConfig(BaseModel):
         description="是否强制在每轮对话前执行记忆检索；默认关闭，由 runtime_memory 决策框架引导按需检索",
     )
 
+    # Recent topic 章节化写入
+    recent_topic_max_chapters_per_base: int = Field(
+        default=8,
+        ge=1,
+        description="同一 base session（如 feishu:user:{uid}）在 recent_topic 中最多保留的章节条目数，超出触发合并",
+    )
+    recent_topic_merge_batch: int = Field(
+        default=4,
+        ge=1,
+        description="recent_topic 单 base session 章节超限时，每次合并的最老条目数",
+    )
+    cron_write_recent_topic: bool = Field(
+        default=False,
+        description="cron: 会话在 evict 时是否写入 recent_topic；默认关闭以避免刷屏",
+    )
+    recent_topic_write_on_compress: bool = Field(
+        default=True,
+        description="是否在上下文压缩时向 recent_topic 写入章节条目；可关闭以回滚到老模式",
+    )
+
     # QMD 集成
     qmd_enabled: bool = Field(
         default=False,
@@ -1271,6 +1291,14 @@ class AutomationJobConfig(BaseModel):
         description=(
             "远程绑定失败时是否直接让任务失败。默认 true（避免悄悄回落到本机执行）；"
             "设为 false 时会记录告警并回落本地执行。"
+        ),
+    )
+    write_recent_topic: bool = Field(
+        default=False,
+        description=(
+            "可选：任务 evict 时是否把会话摘要写入 recent_topic。"
+            "默认 false（定时任务的产出是推送给用户的消息，写入会刷屏最近话题窗口）；"
+            "moltbook 类需要留存执行记录的 full 任务可显式开启。"
         ),
     )
     enabled: bool = Field(

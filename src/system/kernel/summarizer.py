@@ -74,13 +74,17 @@ class SessionSummarizer:
             )
             if summary_text and long_term_memory is not None:
                 add_recent = getattr(long_term_memory, "add_recent_topic", None)
+                embed_async = getattr(long_term_memory, "embed_async", None)
                 if callable(add_recent):
                     add_recent(
                         summary=summary_text,
                         session_id=stats.session_id,
                         tags=self._extract_tags(stats),
                         owner_id=owner_id,
+                        defer_qmd=True,
                     )
+                    if callable(embed_async):
+                        embed_async()
                     logger.info(
                         "SessionSummarizer: persisted summary for session=%s (%d turns, %d tokens)",
                         stats.session_id,
@@ -106,11 +110,17 @@ class SessionSummarizer:
             return ""
 
         if not messages or self._llm_client is None:
-            return self._fallback_summary(stats)
+            # 无 LLM / 无消息时不写「[自动摘要] turns=… tokens=…」垃圾条目：
+            # 这类条目无信息价值，注入后会稀释最近话题窗口（复读事故来源之一）。
+            logger.info(
+                "SessionSummarizer: skip persist (no messages or no LLM) for session=%s",
+                stats.session_id,
+            )
+            return ""
 
         chat_messages = [dict(m) for m in messages]
         if not chat_messages:
-            return self._fallback_summary(stats)
+            return ""
         chat_messages.append(
             {
                 "role": "user",
@@ -123,24 +133,15 @@ class SessionSummarizer:
                 system_message=(system_message or "").strip(),
                 messages=chat_messages,
             )
-            return (
-                response.content.strip()
-                if response.content
-                else self._fallback_summary(stats)
-            )
+            return (response.content or "").strip()
         except Exception as exc:
             logger.warning("SessionSummarizer: LLM call failed: %s", exc)
-            return self._fallback_summary(stats)
+            return ""
 
     @staticmethod
     def _fallback_summary(stats: "CoreStatsAction") -> str:
-        """无 LLM 时的退化摘要，仅记录统计信息。"""
-        tokens = stats.token_usage.get("total_tokens", 0)
-        return (
-            f"[自动摘要] session={stats.session_id}, "
-            f"turns={stats.turn_count}, tokens={tokens}, "
-            f"start={stats.session_start_time}"
-        )
+        """保留旧签名但不再写入，用于兼容可能的外部调用。"""
+        return ""
 
     @staticmethod
     def _extract_tags(stats: "CoreStatsAction") -> List[str]:

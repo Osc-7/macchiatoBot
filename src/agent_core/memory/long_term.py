@@ -203,15 +203,34 @@ class LongTermMemory:
 
         return new_entries
 
-    def _write_entries_as_markdown(self, entries: List[MemoryEntry]) -> None:
-        """将记忆条目写为 Markdown 文件并可选地同步到 QMD / 统一语料库。"""
+    def _write_entries_as_markdown(
+        self, entries: List[MemoryEntry], *, defer_qmd: bool = False
+    ) -> None:
+        """将记忆条目写为 Markdown 文件并可选地同步到 QMD / 统一语料库。
+
+        defer_qmd=True 时跳过同步 QMD embed（subprocess，最坏 120s+），
+        由调用方随后通过 embed_async() 后台触发——压缩钩子等 turn 内路径必须这么做。
+        """
         for entry in entries:
             md_path = self._md_dir / f"{entry.id}.md"
             md_path.write_text(entry.to_markdown(), encoding="utf-8")
-            self._sync_entry_to_corpus(entry)
+            self._sync_entry_to_corpus(entry, embed=not defer_qmd)
 
-        if self._qmd_enabled:
+        if self._qmd_enabled and not defer_qmd:
             _write_to_qmd_collection(self._md_dir, self._qmd_command)
+
+    def embed_async(self) -> None:
+        """后台线程触发 QMD embed（best-effort），不阻塞调用方。"""
+        if not self._qmd_enabled:
+            return
+        import threading
+
+        def _run() -> None:
+            _write_to_qmd_collection(self._md_dir, self._qmd_command)
+            if self._corpus_dir is not None:
+                _write_to_qmd_collection(self._corpus_dir, self._qmd_command)
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _ensure_memory_md(self) -> None:
         """确保 MEMORY.md 存在，若不存在则创建初始模板。"""
@@ -344,6 +363,8 @@ class LongTermMemory:
         session_id: str,
         tags: Optional[List[str]] = None,
         owner_id: Optional[str] = None,
+        *,
+        defer_qmd: bool = False,
     ) -> MemoryEntry:
         """
         添加一条「最近话题」条目（category=recent_topic）到 entries.jsonl。
@@ -356,6 +377,8 @@ class LongTermMemory:
             session_id: 来源会话 ID
             tags: 可选标签列表
             owner_id: 可选，多用户共享时按 owner 区分（如水源 username）
+            defer_qmd: 为 True 时跳过同步 QMD embed（subprocess，turn 内调用必须开启），
+                由调用方随后用 embed_async() 后台触发
 
         Returns:
             新创建的 MemoryEntry
@@ -377,11 +400,97 @@ class LongTermMemory:
         # 同步写入 markdown 文件，并在启用时触发 QMD collection 更新。
         # 这样 recent_topic 与 distill() 生成的长期记忆在物理存储上保持一致，
         # 便于统一检索与人工查看。
-        self._write_entries_as_markdown([entry])
+        self._write_entries_as_markdown([entry], defer_qmd=defer_qmd)
 
         return entry
 
-    def _sync_entry_to_corpus(self, entry: MemoryEntry) -> None:
+    @staticmethod
+    def base_session_id(session_id: str) -> str:
+        """提取会话 lineage 标识：去掉 feishu/cli 会话 ID 末尾的 ``:{数字时间戳}`` 段。
+
+        feishu 会话在 idle 超时/日切后会轮换 session_id（``feishu:user:{uid}:{ts}``），
+        章节限格必须按轮换前的 base 统计，否则同一段对话会被计成多个会话。
+        其他形式（``cli:root``、``cron:{job}:{date}``）原样返回。
+        """
+        head, sep, tail = (session_id or "").rpartition(":")
+        if sep and tail.isdigit():
+            return head
+        return session_id
+
+    def merge_oldest_chapters(
+        self,
+        base_session_id: str,
+        *,
+        max_chapters: int,
+        merge_batch: int,
+    ) -> Optional[MemoryEntry]:
+        """当某 base session 的章节条目超过上限时，把最老 merge_batch 条合并为一条。
+
+        合并是确定性的（日期前缀 + 截断拼接），不调用 LLM；
+        被合并条目的 markdown 镜像（long_term/markdown/ 与 corpus/recent_topic/）同步删除。
+
+        Returns:
+            新生成的合并条目；未触发合并时返回 None。
+        """
+        self._refresh_entries_if_needed()
+        chapters = [
+            e
+            for e in self._entries
+            if e.category == "recent_topic"
+            and "chapter" in (e.tags or [])
+            and e.source_session_ids
+            and self.base_session_id(e.source_session_ids[0]) == base_session_id
+        ]
+        if len(chapters) <= max_chapters:
+            return None
+
+        to_merge = chapters[:merge_batch]
+        lines: List[str] = ["（早期章节合并）"]
+        for e in to_merge:
+            date = (e.created_at or "")[:10]
+            snippet = " ".join((e.content or "").split())
+            if len(snippet) > 300:
+                snippet = snippet[:300] + "…"
+            lines.append(f"- [{date}] {snippet}")
+
+        merged = MemoryEntry(
+            id=f"topic-{uuid.uuid4().hex[:8]}",
+            created_at=to_merge[-1].created_at,
+            source_session_ids=[to_merge[-1].source_session_ids[0]],
+            content="\n".join(lines),
+            category="recent_topic",
+            tags=["chapter", "merged"],
+            confidence=1.0,
+            owner_id=to_merge[-1].owner_id,
+        )
+
+        merged_ids = {e.id for e in to_merge}
+        new_entries: List[MemoryEntry] = []
+        inserted = False
+        for e in self._entries:
+            if e.id in merged_ids:
+                if not inserted:
+                    new_entries.append(merged)
+                    inserted = True
+                continue
+            new_entries.append(e)
+        self._entries = new_entries
+        self._save()
+
+        # 清理被合并条目的镜像文件，再写合并条目的镜像
+        for e in to_merge:
+            md_file = self._md_dir / f"{e.id}.md"
+            if md_file.exists():
+                md_file.unlink()
+            if self._corpus_dir is not None:
+                corpus_file = self._corpus_dir / "recent_topic" / f"{e.id}.md"
+                if corpus_file.exists():
+                    corpus_file.unlink()
+        self._write_entries_as_markdown([merged], defer_qmd=True)
+
+        return merged
+
+    def _sync_entry_to_corpus(self, entry: MemoryEntry, *, embed: bool = True) -> None:
         """将会话摘要等条目同步到统一语料库，供 memory_search 检索。"""
         if self._corpus_dir is None:
             return
@@ -392,7 +501,9 @@ class LongTermMemory:
             qmd_enabled=self._qmd_enabled,
             qmd_command=self._qmd_command,
         )
-        corpus.store_entry_markdown(entry.id, entry.to_markdown(), entry.category)
+        corpus.store_entry_markdown(
+            entry.id, entry.to_markdown(), entry.category, embed=embed
+        )
 
     def get_recent_topics(
         self,

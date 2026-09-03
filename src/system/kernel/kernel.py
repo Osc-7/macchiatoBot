@@ -35,8 +35,10 @@ from agent_core.kernel_interface import (
     ToolCallAction,
     ToolResultEvent,
 )
-from system.kernel.summary_prompt import SUMMARY_USER_APPEND
-
+from system.kernel.summary_prompt import (
+    COMPRESS_SUMMARY_USER_APPEND,
+    SUMMARY_USER_APPEND,
+)
 if TYPE_CHECKING:
     from agent_core.agent.agent import AgentCore
 
@@ -388,14 +390,17 @@ class AgentKernel:
         summary_text = await cls._summarize_messages(agent, old_messages)
 
         if summary_text.strip():
+            # 压缩摘要为两节格式：[累计摘要] 留在上下文，[本段新增] 写入 recent_topic 章节
+            cumulative, delta = cls._split_compress_summary(summary_text)
             summary_msg = {
                 "role": "user",
-                "content": (f"{cls._SUMMARY_USER_PREFIX}\n{summary_text.strip()}"),
+                "content": (f"{cls._SUMMARY_USER_PREFIX}\n{cumulative}"),
             }
             ctx.messages = [summary_msg] + list(new_messages)
             if wm is not None:
-                wm.running_summary = summary_text.strip()
+                wm.running_summary = cumulative
                 wm.compression_round = fold_before + 1
+            cls._write_chapter_entry(agent, delta, round_no=fold_before + 1)
         else:
             ctx.messages = list(new_messages)
 
@@ -439,7 +444,58 @@ class AgentKernel:
         )
         return summary_text, kept
 
+    @staticmethod
+    def _split_compress_summary(text: str) -> tuple[str, str]:
+        """拆分压缩摘要的 [累计摘要] / [本段新增] 两节；解析失败时两节均退回整段。"""
+        import re
+
+        m = re.search(r"\[累计摘要\]\s*(.*?)\[本段新增\]\s*(.*)", text, re.S)
+        if not m:
+            return text.strip(), text.strip()
+        cumulative = m.group(1).strip()
+        delta = m.group(2).strip()
+        full = text.strip()
+        return (cumulative or full), (delta or cumulative or full)
+
+    @classmethod
+    def _write_chapter_entry(cls, agent: "AgentCore", delta: str, *, round_no: int) -> None:
+        """压缩成功后把「本段新增」写入 recent_topic 章节，并触发限格合并。
+
+        仅 full 模式、非 cron 会话写入；QMD embed 走后台线程，不阻塞 turn。
+        任何异常都只记日志，不影响压缩主流程。
+        """
+        try:
+            if not getattr(agent, "_memory_enabled", False):
+                return
+            profile = getattr(agent, "_core_profile", None)
+            if (getattr(profile, "mode", None) or "full") != "full":
+                return
+            session_id = getattr(agent, "_session_id", "") or ""
+            if session_id.startswith("cron:"):
+                return
+            mem_cfg = getattr(getattr(agent, "_config", None), "memory", None)
+            if not getattr(mem_cfg, "recent_topic_write_on_compress", True):
+                return
+            ltm = getattr(agent, "_long_term_memory", None)
+            if ltm is None or not delta.strip():
+                return
+            ltm.add_recent_topic(
+                summary=delta.strip(),
+                session_id=session_id,
+                tags=["chapter", f"round:{round_no}"],
+                defer_qmd=True,
+            )
+            ltm.merge_oldest_chapters(
+                ltm.base_session_id(session_id),
+                max_chapters=int(getattr(mem_cfg, "recent_topic_max_chapters_per_base", 8) or 8),
+                merge_batch=int(getattr(mem_cfg, "recent_topic_merge_batch", 4) or 4),
+            )
+            ltm.embed_async()
+        except Exception as exc:
+            logger.warning("AgentKernel._write_chapter_entry failed: %s", exc)
+
     _SUMMARIZE_USER_APPEND = SUMMARY_USER_APPEND
+    _COMPRESS_SUMMARIZE_USER_APPEND = COMPRESS_SUMMARY_USER_APPEND
 
     @staticmethod
     def _system_message_for_compression(agent: "AgentCore") -> str:
@@ -458,6 +514,8 @@ class AgentKernel:
     async def _summarize_messages(
         agent: "AgentCore",
         messages: list,
+        *,
+        user_append: Optional[str] = None,
     ) -> str:
         """待折叠段浅拷贝进 API messages（避免客户端就地改 dict 影响尚未替换的上下文），末尾追加「请总结」。"""
         llm = getattr(agent, "_summary_llm_client", None)
@@ -467,7 +525,10 @@ class AgentKernel:
         # 浅拷贝即可：总结完成后原段会从 context 丢弃；此处仅防 LLM 客户端改写 message dict
         chat_messages: List[Dict[str, Any]] = [dict(m) for m in messages]
         chat_messages.append(
-            {"role": "user", "content": AgentKernel._SUMMARIZE_USER_APPEND}
+            {
+                "role": "user",
+                "content": user_append or AgentKernel._COMPRESS_SUMMARIZE_USER_APPEND,
+            }
         )
 
         system_message = AgentKernel._system_message_for_compression(agent)

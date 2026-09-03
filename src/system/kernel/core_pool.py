@@ -589,17 +589,24 @@ class CorePool:
         # background 模式不跑会话摘要：多为高频定时任务，避免长期记忆被刷屏。
         # sub 模式（子 Agent）为一次性任务：可交付结果在 sub_result / zombie，由父 get / reap
         # 拉取即可；不必再跑 LLM 会话摘要写入 data/memory/subagent/<id>/long_term（重复、费 token、拉长 evict）。
-        # full（含带 memory_owner 的 cron 任务）使用与主会话一致的 LongTermMemory 时应正常摘要；
-        # 此前误用 session_id.startswith("cron:") 一刀切，导致如 moltbook full 任务 evict 时从不写入 long_term。
+        # full 主会话使用与主会话一致的 LongTermMemory 时应正常摘要；
+        # cron full 任务默认也不写（见下方 _skip_cron_summary），避免定时任务刷屏最近话题窗口。
         # shutdown=True 时跳过：session 只是暂停，checkpoint 会保留完整上下文供恢复，
         # 此时写摘要属于把暂停误认为 session 结束。
         _prof_mode = getattr(getattr(entry, "profile", None), "mode", None)
+        # cron 会话默认不写 recent_topic（一次性推送任务的产出是发给用户的消息，
+        # 不是"聊过的话题"；其每天 3 条的 evict 摘要曾把 15 格最近话题窗口刷满）。
+        # job payload 可设 write_recent_topic: true 显式 opt-in（如 moltbook 类 full 任务）。
+        _skip_cron_summary = (session_id or "").startswith("cron:") and not bool(
+            getattr(agent, "_job_write_recent_topic", False)
+        )
         if (
             agent is not None
             and not shutdown
             and core_stats is not None
             and self._summarizer is not None
             and _prof_mode != "sub"
+            and not _skip_cron_summary
         ):
             try:
                 long_term_memory = None

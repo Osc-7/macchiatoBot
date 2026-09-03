@@ -14,6 +14,29 @@ from agent_core.remote.workspace_state import (
 )
 
 
+def _format_topic_ts(created_at: str, tz_name: str) -> str:
+    """把 entries 的 UTC ISO 时间格式化为本地 ``MM-DD HH:mm``（跨年带年份）。
+
+    created_at 为空或解析失败时原样返回前 10 位，保证注入不因脏数据中断。
+    """
+    if not created_at:
+        return ""
+    try:
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+
+        dt = datetime.fromisoformat(created_at)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone(ZoneInfo(tz_name))
+        now = datetime.now(ZoneInfo(tz_name))
+        if local.year != now.year:
+            return local.strftime("%Y-%m-%d %H:%M")
+        return local.strftime("%m-%d %H:%M")
+    except Exception:
+        return created_at[:10]
+
+
 def _visible_scopes(agent: Any) -> set:
     """返回当前 Core 可见的记忆 scope 集合；无 profile 时视为全部可见（向后兼容）。"""
     profile = getattr(agent, "_core_profile", None)
@@ -92,11 +115,18 @@ def build_agent_system_prompt(agent: Any) -> str:
                 owner_id=owner_id,
             )
             if recent_topics:
+                tz_name = (
+                    getattr(getattr(agent._config, "time", None), "timezone", None)
+                    or "Asia/Shanghai"
+                )
                 parts.append("## 最近话题")
+                parts.append(
+                    "（按时间从旧到新排列，越靠后越新；同一事项的状态以最新条目为准，"
+                    "旧条目中未被新条目延续的待办/未决视为已失效）"
+                )
                 for topic in recent_topics:
-                    ts = topic.created_at[:10] if topic.created_at else ""
-                    ts_prefix = f"[{ts}] " if ts else ""
-                    parts.append(f"- {ts_prefix}{topic.content}")
+                    ts_prefix = _format_topic_ts(topic.created_at, tz_name)
+                    parts.append(f"- [{ts_prefix}] {topic.content}")
             md_content = agent._long_term_memory.read_memory_md()
             if md_content and len(md_content) > 50:
                 excerpt = (

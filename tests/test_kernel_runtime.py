@@ -1292,3 +1292,122 @@ async def test_cancel_session_tasks_clears_mark_when_lock_waiter_aborted() -> No
     assert result.output_text == "done"
 
     await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_compress_context_writes_chapter_entry_to_recent_topic(tmp_path) -> None:
+    """压缩成功后：上下文放累计摘要，recent_topic 写入「本段新增」章节。"""
+    from agent_core.memory.long_term import LongTermMemory
+
+    registry = VersionedToolRegistry()
+    kernel = AgentKernel(tool_registry=registry)
+
+    ctx = ConversationContext()
+    ctx.messages = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+    wm = SimpleNamespace(running_summary=None, compression_round=0)
+    llm = AsyncMock()
+    llm.chat = AsyncMock(
+        return_value=SimpleNamespace(
+            content="[累计摘要]\n目前在做记忆改造\n\n[本段新增]\n完成了代码通读"
+        )
+    )
+    ltm = LongTermMemory(
+        str(tmp_path / "lt"), str(tmp_path / "MEMORY.md"), qmd_enabled=False
+    )
+    mem_cfg = SimpleNamespace(
+        recent_topic_write_on_compress=True,
+        recent_topic_max_chapters_per_base=8,
+        recent_topic_merge_batch=4,
+    )
+    agent = SimpleNamespace(
+        _context=ctx,
+        _summary_llm_client=llm,
+        _working_memory=wm,
+        _build_system_prompt=MagicMock(return_value="主系统提示"),
+        _memory_enabled=True,
+        _core_profile=SimpleNamespace(mode="full"),
+        _session_id="cli:root",
+        _config=SimpleNamespace(memory=mem_cfg),
+        _long_term_memory=ltm,
+    )
+
+    summary, kept = await kernel.compress_context(agent, keep_recent_turns=1)
+
+    # 上下文与 running_summary 用累计摘要
+    assert "目前在做记忆改造" in ctx.messages[0]["content"]
+    assert "完成了代码通读" not in ctx.messages[0]["content"]
+    assert wm.running_summary == "目前在做记忆改造"
+
+    # recent_topic 写入本段新增，带 chapter 标签
+    chapters = [e for e in ltm.entries if "chapter" in e.tags]
+    assert len(chapters) == 1
+    assert chapters[0].content == "完成了代码通读"
+    assert chapters[0].source_session_ids == ["cli:root"]
+
+
+@pytest.mark.asyncio
+async def test_compress_context_skips_chapter_write_for_cron(tmp_path) -> None:
+    """cron 会话压缩不写章节（防止定时任务刷屏 recent_topic）。"""
+    from agent_core.memory.long_term import LongTermMemory
+
+    registry = VersionedToolRegistry()
+    kernel = AgentKernel(tool_registry=registry)
+
+    ctx = ConversationContext()
+    ctx.messages = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+    wm = SimpleNamespace(running_summary=None, compression_round=0)
+    llm = AsyncMock()
+    llm.chat = AsyncMock(
+        return_value=SimpleNamespace(
+            content="[累计摘要]\ncron 摘要\n\n[本段新增]\ncron 新增"
+        )
+    )
+    ltm = LongTermMemory(
+        str(tmp_path / "lt"), str(tmp_path / "MEMORY.md"), qmd_enabled=False
+    )
+    mem_cfg = SimpleNamespace(
+        recent_topic_write_on_compress=True,
+        recent_topic_max_chapters_per_base=8,
+        recent_topic_merge_batch=4,
+    )
+    agent = SimpleNamespace(
+        _context=ctx,
+        _summary_llm_client=llm,
+        _working_memory=wm,
+        _build_system_prompt=MagicMock(return_value="主系统提示"),
+        _memory_enabled=True,
+        _core_profile=SimpleNamespace(mode="full"),
+        _session_id="cron:morning_update:2026-08-21",
+        _config=SimpleNamespace(memory=mem_cfg),
+        _long_term_memory=ltm,
+    )
+
+    await kernel.compress_context(agent, keep_recent_turns=1)
+
+    assert [e for e in ltm.entries if "chapter" in e.tags] == []
+
+
+def test_split_compress_summary_fallback() -> None:
+    """两节解析：无标记 / 空节时安全退回整段。"""
+    cum, delta = AgentKernel._split_compress_summary("整段无标记")
+    assert cum == delta == "整段无标记"
+
+    cum, delta = AgentKernel._split_compress_summary(
+        "[累计摘要]\nA\n\n[本段新增]\nB"
+    )
+    assert cum == "A" and delta == "B"
+
+    cum, delta = AgentKernel._split_compress_summary(
+        "[累计摘要]\n\n[本段新增]\nB"
+    )
+    assert cum and delta == "B"

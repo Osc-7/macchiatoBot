@@ -846,6 +846,12 @@ class KernelScheduler:
                     )
                     # 供工具层解析 MEMORY.md / 与任务 owner 对齐（即使 agent._source 曾为 cron:job）
                     setattr(agent, "_job_memory_owner", mo_raw or None)
+                    # cron evict 摘要 opt-in 标志（core_pool.evict 读取；默认 cron 不写 recent_topic）
+                    setattr(
+                        agent,
+                        "_job_write_recent_topic",
+                        bool(md.get("write_recent_topic", False)),
+                    )
 
                     # Core 级生命周期日志接入（在 prepare_turn 之前注入，确保用户消息被记录）
                     entry = self._core_pool.get_live_entry(session_id)

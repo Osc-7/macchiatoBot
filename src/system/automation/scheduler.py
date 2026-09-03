@@ -427,6 +427,7 @@ class AutomationScheduler:
             core_mode=core_mode,
             tool_template=tool_template,
             feishu_chat_id=feishu_chat_id,
+            write_recent_topic=bool(payload.get("write_recent_topic", False)),
             remote_login=remote_login,
             remote_path=remote_path,
             remote_profile=remote_profile,

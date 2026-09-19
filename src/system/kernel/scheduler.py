@@ -1053,7 +1053,7 @@ class KernelScheduler:
                         await self._out_bus.publish(
                             session_id, request.request_id, err_result
                         )
-                        self._finalize_agent_wake_delivery(request, confirmed=True)
+                        self._finalize_agent_wake_delivery(request, confirmed=False)
         finally:
             remaining = self._inflight_sessions.get(session_id, 0) - 1
             if remaining > 0:

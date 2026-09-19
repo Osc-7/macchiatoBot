@@ -283,6 +283,39 @@ async def test_evict_release_remote_closes_worker_workspace(
 
 
 @pytest.mark.asyncio
+async def test_evict_release_remote_without_live_core(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TTL 已回收 Core 后，显式 evict(release_remote=True) 仍应拆掉远程绑定。"""
+    from agent_core.remote.workspace_state import (
+        activate_remote_workspace,
+        clear_remote_workspace_state,
+        get_remote_workspace_state,
+    )
+
+    clear_remote_workspace_state()
+    activate_remote_workspace(
+        session_id="cli:root",
+        login="laptop",
+        requested_path="~/Project",
+        ttl_seconds=None,
+    )
+
+    close_workspace = AsyncMock()
+    monkeypatch.setattr(
+        "agent_core.remote.worker_registry.get_remote_worker_registry",
+        lambda: SimpleNamespace(close_workspace=close_workspace),
+    )
+
+    pool = CorePool()
+    # 无 live entry — 模拟 Core TTL 已 evict 后的状态
+    await pool.evict("cli:root", shutdown=False, release_remote=True)
+
+    close_workspace.assert_awaited_once_with(login="laptop", session_id="cli:root")
+    assert get_remote_workspace_state("cli:root") is None
+
+
+@pytest.mark.asyncio
 async def test_evict_shutdown_releases_remote_workspace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

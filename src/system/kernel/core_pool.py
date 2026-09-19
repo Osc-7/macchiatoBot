@@ -526,8 +526,26 @@ class CorePool:
 
         若未注入 kernel/summarizer，退化为旧版 finalize_session() + close()。
         """
+        should_release_remote = shutdown if release_remote is None else release_remote
+
         entry = self._pool.pop(session_id, None)
         if entry is None:
+            # Core 可能已被 TTL 回收，但远程绑定仍留在 workspace_state（e295106 设计）。
+            # delete_session / terminal_kill 等显式结束路径仍须拆掉远程工作区。
+            if should_release_remote:
+                try:
+                    from agent_core.remote.mcp_lifecycle import (
+                        release_remote_workspace_session,
+                    )
+
+                    await release_remote_workspace_session(None, session_id=session_id)
+                except Exception as exc:
+                    logger.warning(
+                        "CorePool: remote workspace release failed "
+                        "(no live core, session=%s): %s",
+                        session_id,
+                        exc,
+                    )
             return
         # 不在此丢弃 _pending_subagent_lifecycle：子任务线程里 on_sub_complete 可能已将通知
         # 暂存（父会话仍有 inflight），随后本方法在 finally 中 evict 子会话。若此处 pop 暂存，
@@ -639,7 +657,6 @@ class CorePool:
         # ── Step 2.5: remote workspace / MCP cleanup（可选）────────────────
         # Core TTL 空闲回收 ≠ 用户结束远程：远程状态独立于 CorePool，应跨 evict 保持，
         # 下次 acquire 再挂回 remote MCP。仅在 daemon 停机或调用方显式要求时释放。
-        should_release_remote = shutdown if release_remote is None else release_remote
         if should_release_remote:
             try:
                 from agent_core.remote.mcp_lifecycle import (

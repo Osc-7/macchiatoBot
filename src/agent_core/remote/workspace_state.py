@@ -134,3 +134,33 @@ def format_remote_workspace_prompt_suffix(
     """
     _ = state
     return ""
+
+
+def remote_workspace_to_checkpoint_dict(
+    state: Optional[RemoteWorkspaceState],
+) -> Optional[Dict[str, Any]]:
+    """Serialize active remote workspace state for checkpoint persistence."""
+    if state is None:
+        return None
+    return state.model_dump(mode="json")
+
+
+def restore_remote_workspace_from_checkpoint(
+    data: Optional[Dict[str, Any]],
+) -> Optional[RemoteWorkspaceState]:
+    """Rehydrate in-memory remote workspace binding after kernel restart."""
+    if not isinstance(data, dict) or not data:
+        return None
+    try:
+        state = RemoteWorkspaceState.model_validate(data)
+    except Exception:
+        return None
+    if state.is_expired():
+        return None
+    sid = (state.session_id or "").strip()
+    if not sid:
+        return None
+    with _LOCK:
+        _STATE_BY_SESSION[sid] = state
+        _SKILLS_INDEX_BY_SESSION.pop(sid, None)
+    return state

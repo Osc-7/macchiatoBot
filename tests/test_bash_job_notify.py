@@ -7,6 +7,7 @@ import pytest
 from agent_core.job_manager import get_job_manager
 from agent_core.tools.bash_job_notify import (
     clear_all_tracking_for_tests,
+    clear_session_job_tracking,
     poll_completed_notifications,
     register_local_job,
     register_remote_job,
@@ -133,4 +134,25 @@ async def test_suppress_job_notification_skips_agent_stopped_job(monkeypatch):
     from agent_core.tools import bash_job_notify as bjn
 
     assert bjn._PENDING_BY_SESSION.get(session_id, []) == []
+
+
+def test_clear_session_job_tracking_drops_tracked_and_pending():
+    clear_all_tracking_for_tests()
+    session_id = "sid-clear-jobs"
+    register_local_job(
+        session_id=session_id,
+        job_id="job-1",
+        command="sleep 1",
+        cwd="/tmp",
+        log_path="/tmp/job.log",
+        workspace_root="/tmp",
+    )
+    stage_notification(session_id, "pending note", note={"job_id": "job-1", "remote": False})
+
+    clear_session_job_tracking(session_id)
+
+    from agent_core.tools import bash_job_notify as bjn
+
+    assert session_id not in bjn._TRACKED_BY_SESSION
+    assert session_id not in bjn._PENDING_BY_SESSION
 

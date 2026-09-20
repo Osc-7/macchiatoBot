@@ -234,7 +234,15 @@ def cancel_pending_wakes(
             count += 1
     if label is not None:
         _purge_pending_wakes_by_label(sid, label)
+    else:
+        with _LOCK:
+            _PENDING_BY_SESSION.pop(sid, None)
     return count
+
+
+def clear_session_agent_wakes(session_id: str) -> int:
+    """Cancel all scheduled/staged wakes when a session is deleted or expired."""
+    return cancel_pending_wakes(session_id)
 
 
 def _wake_to_dict(w: _ScheduledWake) -> Dict[str, Any]:

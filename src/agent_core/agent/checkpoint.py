@@ -53,6 +53,8 @@ class CoreCheckpoint:
     core_profile: Optional[Dict[str, Any]] = None
     # Agent 工作目标（goal_create 等工具维护的会话内计划）
     active_goals: List[Dict[str, Any]] = field(default_factory=list)
+    # 远程工作区绑定（daemon 重启后恢复，避免静默回落到本机执行）
+    remote_workspace: Optional[Dict[str, Any]] = None
 
 
 class CoreCheckpointManager:
@@ -103,6 +105,10 @@ class CoreCheckpointManager:
                 active_goals = [
                     dict(item) for item in raw_goals if isinstance(item, dict)
                 ]
+            raw_remote = data.get("remote_workspace")
+            remote_workspace: Optional[Dict[str, Any]] = None
+            if isinstance(raw_remote, dict):
+                remote_workspace = dict(raw_remote)
             return CoreCheckpoint(
                 session_id=str(data.get("session_id", "")),
                 owner_id=str(data.get("owner_id", "")),
@@ -119,6 +125,7 @@ class CoreCheckpointManager:
                 expired=bool(data.get("expired", False)),
                 core_profile=core_profile,
                 active_goals=active_goals,
+                remote_workspace=remote_workspace,
             )
         except Exception as exc:
             logger.warning("CoreCheckpointManager: read failed (%s): %s", self._path, exc)

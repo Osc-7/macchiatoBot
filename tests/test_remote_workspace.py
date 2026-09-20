@@ -19,6 +19,8 @@ from agent_core.remote.workspace_state import (
     format_remote_workspace_prompt_suffix,
     get_remote_workspace_state,
     release_remote_workspace,
+    remote_workspace_to_checkpoint_dict,
+    restore_remote_workspace_from_checkpoint,
 )
 from macchiato_remote.protocol import REMOTE_WORKSPACE_MOUNT, RemoteWorkspaceState
 from system.kernel.kernel import AgentKernel
@@ -182,3 +184,22 @@ async def test_kernel_compress_reinjects_remote_notice(monkeypatch):
     assert "压缩" not in body
     assert "远程登录: personal" in body
     assert "授权目录:" in body
+
+
+def test_remote_workspace_checkpoint_roundtrip():
+    state = activate_remote_workspace(
+        session_id="feishu:restore",
+        login="personal",
+        requested_path="~/Project",
+        resolved_path="/Users/me/Project",
+        device_label="mbp",
+        ttl_seconds=3600,
+    )
+    payload = remote_workspace_to_checkpoint_dict(state)
+    clear_remote_workspace_state()
+    assert get_remote_workspace_state("feishu:restore") is None
+
+    restored = restore_remote_workspace_from_checkpoint(payload)
+    assert restored is not None
+    assert restored.login == "personal"
+    assert get_remote_workspace_state("feishu:restore") == restored

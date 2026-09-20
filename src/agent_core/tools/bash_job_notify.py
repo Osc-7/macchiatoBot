@@ -584,13 +584,18 @@ async def poll_completed_notifications(
     return result
 
 
-def clear_session_tracking_for_tests(session_id: str) -> None:
+def clear_session_job_tracking(session_id: str) -> None:
+    """Drop bash-job tracking and staged notifications for a session."""
     sid = str(session_id or "").strip()
     if not sid:
         return
     with _LOCK:
         _TRACKED_BY_SESSION.pop(sid, None)
         _PENDING_BY_SESSION.pop(sid, None)
+
+
+def clear_session_tracking_for_tests(session_id: str) -> None:
+    clear_session_job_tracking(session_id)
 
 
 def clear_all_tracking_for_tests() -> None:

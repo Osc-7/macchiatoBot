@@ -453,10 +453,28 @@ class AutomationCoreGateway:
             return True
         return False
 
+    @staticmethod
+    def _dispose_session_scheduled_work(session_id: str) -> None:
+        """Drop background bash jobs and agent wakes tied to a session being torn down."""
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        try:
+            from agent_core.tools.agent_wake import clear_session_agent_wakes
+            from agent_core.tools.bash_job_notify import clear_session_job_tracking
+
+            clear_session_job_tracking(sid)
+            clear_session_agent_wakes(sid)
+        except Exception as exc:
+            logger.warning(
+                "dispose session scheduled work failed (session_id=%s): %s", sid, exc
+            )
+
     async def expire_session(
         self, reason: str = "session_expire", *, session_id: Optional[str] = None
     ) -> None:
         sid = session_id or self._active_session_id
+        self._dispose_session_scheduled_work(sid)
         try:
             await self._kernel_scheduler.core_pool.evict(sid, release_remote=True)
         except Exception as exc:
@@ -1494,6 +1512,8 @@ class AutomationCoreGateway:
             if created_temp:
                 await _close_session_if_needed(session, temp=True)
             return False
+
+        self._dispose_session_scheduled_work(sid)
 
         # 若 session 在 CorePool 中，需 evict 移除
         try:

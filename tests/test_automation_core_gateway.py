@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -140,7 +141,7 @@ async def test_gateway_expire_flow_calls_evict(tmp_path):
     changed = await gateway.expire_session_if_needed(reason="idle_timeout")
 
     assert changed is True
-    scheduler.core_pool.evict.assert_awaited_once_with("cli:root")
+    scheduler.core_pool.evict.assert_awaited_once_with("cli:root", release_remote=True)
     assert registry.is_expired("root", "cli", "cli:root") is True
 
 
@@ -153,7 +154,7 @@ async def test_gateway_expire_session_calls_evict(tmp_path):
     gateway = _make_gateway(tmp_path, core, kernel_scheduler=scheduler)
     await gateway.expire_session(reason="manual")
 
-    scheduler.core_pool.evict.assert_awaited_once_with("cli:root")
+    scheduler.core_pool.evict.assert_awaited_once_with("cli:root", release_remote=True)
 
 
 @pytest.mark.asyncio
@@ -458,6 +459,62 @@ async def test_gateway_delete_session_returns_false_without_core_session_for_col
     ok = await gateway.delete_session("cli:cold")
     assert ok is False
     assert registry.session_exists("root", "cli", "cli:cold") is True
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_delete_session_clears_background_tracking(tmp_path):
+    from agent_core.tools import agent_wake as aw
+    from agent_core.tools import bash_job_notify as bjn
+    from agent_core.tools.agent_wake import register_wake
+    from agent_core.tools.bash_job_notify import register_local_job
+
+    registry = SessionRegistry(str(tmp_path / "sessions.db"))
+    registry.upsert_session("root", "cli", "cli:work")
+    registry.upsert_session("root", "cli", "cli:other")
+
+    scheduler = _make_mock_scheduler(pool_sessions=["cli:work", "cli:other"])
+    work_core = AsyncMock()
+    work_core.get_session_state = MagicMock(return_value=MagicMock(turn_count=0))
+    work_core.delete_session_history = MagicMock(return_value=3)
+    work_core.close = AsyncMock()
+
+    other_core = AsyncMock()
+    other_core.delete_session_history = MagicMock(return_value=1)
+    other_core.close = AsyncMock()
+
+    gateway = _make_gateway(
+        tmp_path,
+        work_core,
+        kernel_scheduler=scheduler,
+        session_id="cli:work",
+        session_registry=registry,
+        owner_id="root",
+        source="cli",
+    )
+    gateway._sessions["cli:other"] = other_core
+    gateway._owned_sessions.add("cli:other")
+
+    register_local_job(
+        session_id="cli:other",
+        job_id="bg-1",
+        command="sleep 9",
+        cwd="/tmp",
+        log_path="/tmp/bg.log",
+        workspace_root="/tmp",
+    )
+    register_wake(
+        session_id="cli:other",
+        fire_at=time.time() + 300,
+        message="wake me",
+        label="reminder",
+    )
+
+    ok = await gateway.delete_session("cli:other")
+    assert ok is True
+    assert "cli:other" not in bjn._TRACKED_BY_SESSION
+    assert aw.list_wakes(session_id="cli:other") == []
+    scheduler.core_pool.evict.assert_awaited_with("cli:other", release_remote=True)
     await gateway.close()
 
 

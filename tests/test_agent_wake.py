@@ -10,6 +10,7 @@ from agent_core.tools.agent_wake import (
     cancel_pending_wakes,
     cancel_wake,
     clear_all_wakes_for_tests,
+    clear_session_agent_wakes,
     deliver_wake_via_inject,
     flush_pending_wakes_for_session,
     format_wake_notification,
@@ -422,3 +423,20 @@ async def test_stale_goal_check_wake_skipped_when_deferred() -> None:
     assert ok is False
     assert len(scheduler.injected) == 0
     assert list_wakes() == []
+
+
+def test_clear_session_agent_wakes_removes_scheduled_and_pending():
+    clear_all_wakes_for_tests()
+    wid = register_wake(
+        session_id="cli:gone",
+        fire_at=time.time() + 120,
+        message="later",
+        label="reminder",
+    )
+    from agent_core.tools import agent_wake as aw
+
+    aw.stage_wake_notification("cli:gone", "staged wake", wake_id=wid)
+
+    assert clear_session_agent_wakes("cli:gone") == 1
+    assert list_wakes(session_id="cli:gone") == []
+    assert "cli:gone" not in aw._PENDING_BY_SESSION

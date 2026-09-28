@@ -261,6 +261,14 @@ class LLMConfig(BaseModel):
             "（按文件名排序），同名 provider 以后加载的文件为准。"
         ),
     )
+    catalog_watch_seconds: float = Field(
+        default=30.0,
+        ge=0,
+        description=(
+            "daemon 轮询模型目录文件（config.yaml / providers_dir / provider_include / _runtime.yaml）"
+            "mtime 的间隔（秒）；变化时自动重载 llm.providers 并同步到存活 Core。0 关闭。"
+        ),
+    )
 
     @model_validator(mode="after")
     def _migrate_legacy_to_providers(self) -> "LLMConfig":
@@ -430,6 +438,14 @@ class ShuiyuanConfig(BaseModel):
     allowed_topic_ids: List[int] = Field(
         default_factory=list,
         description="仅在这些话题中响应 @。非空时使用 topic 监控模式（解析正文 @owner+trigger），不依赖 user_actions/notifications；为空时使用 user_actions+notifications 模式",
+    )
+    automation_ipc_timeout_seconds: float = Field(
+        default=1800.0,
+        gt=0,
+        description=(
+            "水源 connector 与 automation_daemon 之间 Unix socket 流式 IPC 的单次读超时（秒）。"
+            "每次等待下一行 JSON（含长工具执行期间无输出）不得超过此时长；与 llm.request_timeout_seconds（LLM HTTP）无关。"
+        ),
     )
 
 
@@ -783,7 +799,9 @@ class MCPServerConfig(BaseModel):
                 f"MCP server {self.name!r}: location=remote 不能使用 attach_on=boot"
             )
         if loc == "local" and not (self.command or "").strip():
-            raise ValueError(f"MCP server {self.name!r}: location=local 时 command 必填")
+            raise ValueError(
+                f"MCP server {self.name!r}: location=local 时 command 必填"
+            )
         return self
 
 
@@ -1990,3 +2008,99 @@ def reset_config() -> None:
     """重置全局配置实例（用于测试）"""
     global _config
     _config = None
+
+
+# ---------------------------------------------------------------------------
+# 运行时 provider 注册（/model add）持久化 + 目录快照
+# ---------------------------------------------------------------------------
+
+RUNTIME_PROVIDERS_FILENAME = "_runtime.yaml"
+
+
+def resolve_runtime_providers_path(config_path: Optional[Path] = None) -> Path:
+    """返回运行时注册 provider 的持久化文件 ``<providers_dir>/_runtime.yaml``。
+
+    ``providers_dir`` 取自主配置 ``llm.providers_dir``（解析规则同 ``_merge_llm_provider_files``）；
+    未配置或目录不存在时回落到 ``<主配置目录>/llm/providers.d/_runtime.yaml``。
+    """
+    cfg_path = Path(config_path) if config_path is not None else find_config_file()
+    cfg_path = cfg_path.resolve()
+
+    providers_dir_raw: Optional[str] = None
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        llm_raw = raw.get("llm") if isinstance(raw, dict) else None
+        if isinstance(llm_raw, dict):
+            pd = llm_raw.get("providers_dir")
+            if pd:
+                providers_dir_raw = str(pd).strip() or None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("resolve_runtime_providers_path: read %s failed: %s", cfg_path, exc)
+
+    if providers_dir_raw:
+        resolved = _resolve_llm_providers_dir(providers_dir_raw, cfg_path)
+        if resolved is None:
+            # 目录尚不存在：按第一候选路径创建
+            cands = _llm_rel_path_candidates(providers_dir_raw, cfg_path)
+            resolved = cands[0].resolve() if cands else None
+        if resolved is not None:
+            return resolved / RUNTIME_PROVIDERS_FILENAME
+
+    return (cfg_path.parent / "llm" / "providers.d" / RUNTIME_PROVIDERS_FILENAME).resolve()
+
+
+def persist_runtime_provider(
+    name: str,
+    entry: Dict[str, Any],
+    *,
+    config_path: Optional[Path] = None,
+) -> Path:
+    """把一条 provider 条目 upsert 进 ``_runtime.yaml``（原子写回）。
+
+    条目原样写入：``${ENV}`` 文本不展开，由 ``load_config`` 在加载时统一展开。
+    """
+    key = str(name or "").strip()
+    if not key:
+        raise ValueError("provider 名不能为空")
+    if not isinstance(entry, dict):
+        raise ValueError("provider 条目必须是 dict")
+
+    path = resolve_runtime_providers_path(config_path)
+    existing: Dict[str, Any] = {}
+    if path.is_file():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                loaded = yaml.safe_load(f) or {}
+            if isinstance(loaded, dict):
+                if "providers" in loaded and isinstance(loaded["providers"], dict):
+                    existing = dict(loaded["providers"])
+                else:
+                    existing = {
+                        str(k): v for k, v in loaded.items() if isinstance(v, dict)
+                    }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("persist_runtime_provider: read %s failed: %s", path, exc)
+
+    existing[key] = dict(entry)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        "# 由 /model add 运行时注册生成；可手工编辑，daemon 会在目录刷新时重新加载。\n"
+        + yaml.safe_dump(
+            existing, allow_unicode=True, sort_keys=False, default_flow_style=False
+        ),
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+    return path
+
+
+def load_llm_catalog_snapshot(config_path: Optional[Path] = None) -> LLMConfig:
+    """重新解析磁盘配置，只返回 ``llm`` 段（providers 已合并 providers_dir / include / _runtime.yaml）。
+
+    不触碰全局 ``get_config()`` 单例；供 ModelCatalog.reload_from_disk 做增量 diff。
+    """
+    cfg = load_config(config_path)
+    return cfg.llm

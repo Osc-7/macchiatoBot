@@ -216,6 +216,8 @@ def _help_text() -> str:
 /usage 或 /stats - 本会话 token 用量
 /model 或 /model list - 列出可用 LLM（★ 为当前主对话）
 /model <备注名或配置名> - 切换主对话模型（与配置里 label 一致即可，可含空格）
+/model add <name> --base-url … --model … [--switch] - 运行时注册新 provider（/model add help 看选项）
+/model reload - 让 daemon 重新读取磁盘上的模型目录
 /session - 显示当前会话
 /session list - 列出已加载会话
 /session switch <id> - 切换到指定会话
@@ -352,11 +354,21 @@ def _format_remote_state(state: Dict[str, Any]) -> str:
     mount = state.get("workspace_mount") or "/workspace"
     login = state.get("login") or "—"
     profile = state.get("profile") or "—"
+    online = state.get("worker_online")
+    worker_line = ""
+    if online is False:
+        worker_line = (
+            "worker: 离线（绑定已保留；请在远端启动 macchiato-remote，"
+            "或 /remote-release 回到云端）\n"
+        )
+    elif online is True:
+        worker_line = "worker: 在线\n"
     return (
         "远程工作区已启用\n"
         f"登录: {login}\n"
         f"权限档位: {profile}\n"
         f"工作区: {mount} -> {path}\n"
+        f"{worker_line}"
         "提示: 已写入对话历史的 [工作区切换] 通知；Available Skills 索引来自远程工作区。"
     )
 
@@ -641,6 +653,37 @@ async def try_handle_slash_command(
         if sub_tokens and sub_tokens[0].lower() == "switch":
             sub = " ".join(sub_tokens[1:]).strip()
         sub_l = sub.lower()
+        # /model add ... → daemon 解析并注册（目录权威在 daemon）
+        if sub_tokens and sub_tokens[0].lower() == "add":
+            try:
+                res = await client.add_model(sub)
+            except Exception as exc:
+                return True, f"注册模型失败: {exc}"
+            if isinstance(res, dict) and res.get("help"):
+                return True, str(res["help"])
+            lines = []
+            for row in (res or {}).get("registered", []) or []:
+                lines.append(
+                    f"已注册 provider: {row.get('name')}  |  API 模型 ID: {row.get('api_model')}"
+                    f"  |  {'已持久化' if row.get('persisted') else '仅内存'}"
+                )
+            sw = (res or {}).get("switched")
+            if isinstance(sw, dict) and sw.get("name"):
+                lines.append(f"已切换主对话 provider: {sw.get('name')}")
+            return True, "\n".join(lines) or "未注册任何 provider。"
+        # /model reload → daemon 重新读取磁盘目录
+        if sub_l in ("reload", "refresh"):
+            try:
+                res = await client.reload_models()
+            except Exception as exc:
+                return True, f"重载模型目录失败: {exc}"
+            res = res if isinstance(res, dict) else {}
+            return True, (
+                f"模型目录已重载 (generation={res.get('generation')}, total={res.get('total')})\n"
+                f"新增: {res.get('added') or []}\n"
+                f"移除: {res.get('removed') or []}\n"
+                f"变更: {res.get('changed') or []}"
+            )
         if not sub or sub_l in ("list", "ls"):
             try:
                 models = await client.list_models()

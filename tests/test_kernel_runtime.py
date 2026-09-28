@@ -328,6 +328,238 @@ async def test_evict_shutdown_releases_remote_workspace(
 
 
 @pytest.mark.asyncio
+async def test_evict_shutdown_flushes_checkpoint_before_releasing_remote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """shutdown 路径：checkpoint flush 必须发生在远程绑定被清掉之前，快照才带 remote_workspace。"""
+    from agent_core.remote.workspace_state import (
+        activate_remote_workspace,
+        clear_remote_workspace_state,
+        snapshot_remote_workspace,
+    )
+
+    clear_remote_workspace_state()
+    activate_remote_workspace(
+        session_id="cli:root",
+        login="laptop",
+        requested_path="~/Project",
+        ttl_seconds=None,
+    )
+    monkeypatch.setattr(
+        "agent_core.remote.worker_registry.get_remote_worker_registry",
+        lambda: SimpleNamespace(close_workspace=AsyncMock()),
+    )
+    monkeypatch.setattr(
+        "agent_core.mcp.session_overlay.get_mcp_session_overlay",
+        lambda: SimpleNamespace(detach_all_remote=AsyncMock()),
+    )
+
+    seen: dict[str, Any] = {}
+
+    def _flush() -> None:
+        seen["snapshot"] = snapshot_remote_workspace("cli:root")
+
+    agent = MagicMock()
+    agent.close = AsyncMock()
+    agent.flush_checkpoint_for_shutdown = _flush
+    pool = CorePool()
+    profile = CoreProfile.default_full(frontend_id="cli", dialog_window_id="root")
+    pool._pool["cli:root"] = CoreEntry(agent=agent, profile=profile)
+    pool._kernel = MagicMock()
+    pool._kernel.kill = AsyncMock(return_value=None)
+    pool._summarizer = None
+
+    await pool.evict("cli:root", shutdown=True)
+
+    assert seen["snapshot"] is not None
+    assert seen["snapshot"]["login"] == "laptop"
+
+
+def _remote_checkpoint_snapshot(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "session_id": "cli:root",
+        "login": "laptop",
+        "requested_path": "~/Project",
+        "resolved_path": "/home/u/Project",
+        "profile": "dev",
+        "status": "active",
+        "workspace_mount": "/workspace",
+        "device_label": "mbp",
+        "expires_at": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def _agent_with_context() -> MagicMock:
+    agent = MagicMock()
+    agent._context = ConversationContext()
+    agent._memory_enabled = False
+    agent._session_id = "cli:root"
+    return agent
+
+
+@pytest.mark.asyncio
+async def test_restore_remote_workspace_from_checkpoint_worker_online(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """worker 在线：回填绑定并重新 open_workspace，回写 resolved_path，写 [工作区] 通知。"""
+    from agent_core.remote.workspace_state import (
+        clear_remote_workspace_state,
+        get_remote_workspace_state,
+    )
+
+    clear_remote_workspace_state()
+    open_workspace = AsyncMock(
+        return_value=SimpleNamespace(
+            resolved_path="/home/u/Project-new", device_label="mbp-2"
+        )
+    )
+    registry = SimpleNamespace(
+        get=AsyncMock(return_value=object()), open_workspace=open_workspace
+    )
+    monkeypatch.setattr(
+        "agent_core.remote.worker_registry.get_remote_worker_registry",
+        lambda: registry,
+    )
+    monkeypatch.setattr(
+        "agent_core.remote.skills_index.refresh_remote_skills_best_effort",
+        AsyncMock(),
+    )
+
+    agent = _agent_with_context()
+    pool = CorePool(config=SimpleNamespace(skills=SimpleNamespace(enabled=[])))  # type: ignore[arg-type]
+    await pool._restore_remote_workspace_from_checkpoint(
+        agent, session_id="cli:root", raw=_remote_checkpoint_snapshot()
+    )
+
+    open_workspace.assert_awaited_once_with(
+        login="laptop",
+        session_id="cli:root",
+        requested_path="~/Project",
+        profile="dev",
+    )
+    state = get_remote_workspace_state("cli:root")
+    assert state is not None
+    assert state.login == "laptop"
+    assert state.resolved_path == "/home/u/Project-new"
+    assert state.device_label == "mbp-2"
+    msgs = agent._context.get_messages()
+    assert len(msgs) == 1
+    assert "已恢复远程工作区绑定" in msgs[0]["content"]
+    assert "离线" not in msgs[0]["content"]
+    clear_remote_workspace_state()
+
+
+@pytest.mark.asyncio
+async def test_restore_remote_workspace_from_checkpoint_worker_offline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """worker 离线：保留绑定、不调用 open_workspace，通知里提示离线。"""
+    from agent_core.remote.workspace_state import (
+        clear_remote_workspace_state,
+        get_remote_workspace_state,
+    )
+
+    clear_remote_workspace_state()
+    open_workspace = AsyncMock()
+    registry = SimpleNamespace(
+        get=AsyncMock(return_value=None), open_workspace=open_workspace
+    )
+    monkeypatch.setattr(
+        "agent_core.remote.worker_registry.get_remote_worker_registry",
+        lambda: registry,
+    )
+
+    agent = _agent_with_context()
+    pool = CorePool()
+    await pool._restore_remote_workspace_from_checkpoint(
+        agent, session_id="cli:root", raw=_remote_checkpoint_snapshot()
+    )
+
+    open_workspace.assert_not_awaited()
+    state = get_remote_workspace_state("cli:root")
+    assert state is not None
+    assert state.resolved_path == "/home/u/Project"
+    msgs = agent._context.get_messages()
+    assert len(msgs) == 1
+    assert "离线" in msgs[0]["content"]
+
+    # worker 离线时不应尝试 attach remote MCP
+    attach = AsyncMock()
+    monkeypatch.setattr(
+        "agent_core.mcp.session_overlay.get_mcp_session_overlay",
+        lambda: SimpleNamespace(attach_defaults_for_remote_use=attach),
+    )
+    await pool._restore_remote_mcp_if_active(agent, session_id="cli:root")
+    attach.assert_not_awaited()
+    clear_remote_workspace_state()
+
+
+@pytest.mark.asyncio
+async def test_restore_remote_workspace_from_checkpoint_expired_stays_cloud(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """快照已过期：不回填、不联系 worker、不写通知。"""
+    from agent_core.remote.workspace_state import (
+        clear_remote_workspace_state,
+        get_remote_workspace_state,
+    )
+
+    clear_remote_workspace_state()
+    registry = SimpleNamespace(get=AsyncMock(), open_workspace=AsyncMock())
+    monkeypatch.setattr(
+        "agent_core.remote.worker_registry.get_remote_worker_registry",
+        lambda: registry,
+    )
+
+    agent = _agent_with_context()
+    pool = CorePool()
+    await pool._restore_remote_workspace_from_checkpoint(
+        agent,
+        session_id="cli:root",
+        raw=_remote_checkpoint_snapshot(expires_at=time.time() - 5),
+    )
+
+    registry.get.assert_not_awaited()
+    assert get_remote_workspace_state("cli:root") is None
+    assert agent._context.get_messages() == []
+
+
+@pytest.mark.asyncio
+async def test_restore_remote_workspace_from_checkpoint_reopen_failure_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """worker 在线但 open_workspace 失败：释放绑定，写回到云端的 [工作区切换] 通知。"""
+    from agent_core.remote.workspace_state import (
+        clear_remote_workspace_state,
+        get_remote_workspace_state,
+    )
+
+    clear_remote_workspace_state()
+    registry = SimpleNamespace(
+        get=AsyncMock(return_value=object()),
+        open_workspace=AsyncMock(side_effect=RuntimeError("path denied")),
+    )
+    monkeypatch.setattr(
+        "agent_core.remote.worker_registry.get_remote_worker_registry",
+        lambda: registry,
+    )
+
+    agent = _agent_with_context()
+    pool = CorePool()
+    await pool._restore_remote_workspace_from_checkpoint(
+        agent, session_id="cli:root", raw=_remote_checkpoint_snapshot()
+    )
+
+    assert get_remote_workspace_state("cli:root") is None
+    msgs = agent._context.get_messages()
+    assert len(msgs) == 1
+    assert "已回到本地 / 云端工作区" in msgs[0]["content"]
+    assert "path denied" in msgs[0]["content"]
+
+
+@pytest.mark.asyncio
 async def test_evict_passes_normal_system_prompt_to_session_summarizer() -> None:
     agent = MagicMock()
     agent._context.get_messages.return_value = [{"role": "user", "content": "hi"}]
@@ -1349,6 +1581,51 @@ async def test_restore_from_checkpoints_skips_ttl_expired_even_with_goals(
     assert loaded is not None
     assert loaded.expired is True
     assert loaded.active_goals
+
+
+def test_checkpoint_preferred_llm_provider_roundtrip_and_legacy(tmp_path) -> None:
+    """checkpoint 记录会话 /model 选择；旧版文件缺字段时读为 None。"""
+    import json
+
+    from agent_core.agent.checkpoint import CoreCheckpoint, CoreCheckpointManager
+
+    mgr = CoreCheckpointManager(str(tmp_path / "checkpoint.json"))
+    mgr.write(
+        CoreCheckpoint(
+            session_id="s1",
+            owner_id="root",
+            source="cli",
+            running_summary=None,
+            recent_messages=[],
+            last_active_at=1.0,
+            remaining_ttl_seconds=1800.0,
+            turn_count=0,
+            last_history_id=0,
+            token_usage={},
+            preferred_llm_provider="kimi_k25",
+            remote_workspace={
+                "session_id": "s1",
+                "login": "laptop",
+                "requested_path": "~/Project",
+                "profile": "dev",
+                "expires_at": None,
+            },
+        )
+    )
+    loaded = mgr.read()
+    assert loaded is not None
+    assert loaded.preferred_llm_provider == "kimi_k25"
+    assert loaded.remote_workspace is not None
+    assert loaded.remote_workspace["login"] == "laptop"
+
+    raw = json.loads((tmp_path / "checkpoint.json").read_text(encoding="utf-8"))
+    raw.pop("preferred_llm_provider")
+    raw.pop("remote_workspace")
+    (tmp_path / "checkpoint.json").write_text(json.dumps(raw), encoding="utf-8")
+    legacy = mgr.read()
+    assert legacy is not None
+    assert legacy.preferred_llm_provider is None
+    assert legacy.remote_workspace is None
 
 
 @pytest.mark.asyncio

@@ -112,6 +112,8 @@ def print_help():
 - `/model` / `/model list` &nbsp;列出各模型的 **备注 label（切换用）** 与能力；当前主对话标 `*`，vision 回落标 `V`
 - `/model <model name>` &nbsp;切换：与列表中的展示名一致（一般为 label；无 label 时为配置名）
 - `/model switch <model name>` &nbsp;与上一行相同（多写 `switch` 亦可）
+- `/model add <name> --base-url … --model … [--switch]` &nbsp;运行时注册新 provider（无需重启 daemon；`/model add help` 看全部选项）
+- `/model reload` &nbsp;让 daemon 重新读取 config.yaml / providers.d / _runtime.yaml 里的模型目录
 - `/remote-use <login> [path] [--profile dev]` &nbsp;&nbsp;切换到远程工作区模式
 - `/remote-status` &nbsp;&nbsp;查看当前远程工作区状态
 - `/remote-release` &nbsp;&nbsp;释放远程工作区，恢复云端工作区
@@ -372,11 +374,21 @@ def _format_remote_state_cli(state: dict[str, Any]) -> str:
     mount = state.get("workspace_mount") or "/workspace"
     login = state.get("login") or "—"
     profile = state.get("profile") or "—"
+    online = state.get("worker_online")
+    worker_line = ""
+    if online is False:
+        worker_line = (
+            "\nworker: 离线（绑定已保留；请在远端启动 macchiato-remote，"
+            "或 /remote-release 回到云端）"
+        )
+    elif online is True:
+        worker_line = "\nworker: 在线"
     return (
         "远程工作区已启用\n"
         f"登录: {login}\n"
         f"权限档位: {profile}\n"
         f"工作区: {mount} -> {path}"
+        f"{worker_line}"
     )
 
 
@@ -1030,6 +1042,58 @@ async def run_interactive_loop(agent: Any) -> str:
                 switch_fn = getattr(agent, "switch_model", None)
                 if not callable(list_fn) or not callable(switch_fn):
                     print(hint("  当前 agent 不支持 /model 指令。"))
+                    print(thin_separator())
+                    continue
+                # /model add ... → daemon 解析并注册（目录权威在 daemon）
+                if sub_tokens and sub_tokens[0].lower() == "add":
+                    add_fn = getattr(agent, "add_model", None)
+                    if not callable(add_fn):
+                        print(hint("  当前 agent 不支持 /model add。"))
+                        print(thin_separator())
+                        continue
+                    try:
+                        res = await _maybe_await(add_fn(sub))
+                    except Exception as exc:
+                        print(accent("  注册模型失败: ") + str(exc))
+                        print(thin_separator())
+                        continue
+                    if isinstance(res, dict) and res.get("help"):
+                        print(hint(str(res["help"])))
+                    else:
+                        for row in (res or {}).get("registered", []) or []:
+                            print(
+                                hint(
+                                    f"  已注册 provider: {row.get('name')}  |  API 模型 ID: "
+                                    f"{row.get('api_model')}  |  "
+                                    f"{'已持久化' if row.get('persisted') else '仅内存'}"
+                                )
+                            )
+                        sw = (res or {}).get("switched")
+                        if isinstance(sw, dict) and sw.get("name"):
+                            print(hint(f"  已切换主对话 provider: {sw.get('name')}"))
+                    print(thin_separator())
+                    continue
+                # /model reload → daemon 重新读取 config.yaml / providers.d / _runtime.yaml
+                if sub_lower in ("reload", "refresh"):
+                    reload_fn = getattr(agent, "reload_models", None)
+                    if not callable(reload_fn):
+                        print(hint("  当前 agent 不支持 /model reload。"))
+                        print(thin_separator())
+                        continue
+                    try:
+                        res = await _maybe_await(reload_fn())
+                    except Exception as exc:
+                        print(accent("  重载模型目录失败: ") + str(exc))
+                        print(thin_separator())
+                        continue
+                    res = res if isinstance(res, dict) else {}
+                    print(
+                        hint(
+                            f"  模型目录已重载 (generation={res.get('generation')}, "
+                            f"total={res.get('total')})  新增={res.get('added') or []}  "
+                            f"移除={res.get('removed') or []}  变更={res.get('changed') or []}"
+                        )
+                    )
                     print(thin_separator())
                     continue
                 if not sub or sub_lower in ("list", "ls"):

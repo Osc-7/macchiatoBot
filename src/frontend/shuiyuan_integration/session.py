@@ -20,13 +20,13 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agent_core.config import Config, get_config
-from agent_core.kernel_interface import CoreProfile
-from frontend.shuiyuan_integration.reply import AUTO_REPLY_MARK
-
 from agent_core import AgentCore
+from agent_core.config import Config, get_config
 from agent_core.content import ContentReference
 from agent_core.interfaces import AgentRunInput, AgentRunResult
+from agent_core.kernel_interface import CoreProfile
+from frontend.shuiyuan_integration.reply import AUTO_REPLY_MARK
+from system.automation import AutomationIPCClient, default_socket_path
 from system.tools.media_tools import AttachImageToReplyTool
 from system.tools.shuiyuan_tools import (
     ShuiyuanBrowseTopicTool,
@@ -38,8 +38,6 @@ from system.tools.shuiyuan_tools import (
     ShuiyuanRetortTool,
     ShuiyuanSearchTool,
 )
-
-from system.automation import AutomationIPCClient, default_socket_path
 
 logger = logging.getLogger("shuiyuan_session")
 
@@ -82,9 +80,7 @@ def _should_poll_inject_followup(result: AgentRunResult) -> bool:
         names = {str(x) for x in raw}
         return bool(_SUBAGENT_CREATOR_TOOLS & names)
     tl = (result.output_text or "").lower()
-    return (
-        "create_subagent" in tl or "create_parallel_subagents" in tl
-    )
+    return "create_subagent" in tl or "create_parallel_subagents" in tl
 
 
 async def _poll_shuiyuan_inject_edits(
@@ -132,9 +128,7 @@ async def _poll_shuiyuan_inject_edits(
                 return merged
             inject_chunks_n += 1
             merged = merged + _SHUIYUAN_INJECT_CHUNK_SEP + t
-            ok_u, umsg = update_post_reply(
-                post_id=post_id, raw=merged, client=client
-            )
+            ok_u, umsg = update_post_reply(post_id=post_id, raw=merged, client=client)
             edit_calls += 1
             if not ok_u:
                 logger.warning("inject 段更新帖子失败 post_id=%s: %s", post_id, umsg)
@@ -148,6 +142,7 @@ async def _poll_shuiyuan_inject_edits(
             return merged
         await asyncio.sleep(_SHUIYUAN_INJECT_POLL_INTERVAL_SEC)
     return merged
+
 
 _MIME_BY_EXT: Dict[str, str] = {
     ".png": "image/png",
@@ -195,7 +190,10 @@ async def _upload_and_embed_attachments(
                     Path(filename).suffix.lower(), "image/png"
                 )
                 upload_result = await asyncio.to_thread(
-                    client.upload_file, file_bytes, filename, mime_type=mime,
+                    client.upload_file,
+                    file_bytes,
+                    filename,
+                    mime_type=mime,
                 )
                 if upload_result and upload_result.get("short_url"):
                     short_url = upload_result["short_url"]
@@ -204,7 +202,9 @@ async def _upload_and_embed_attachments(
                     size = f"|{w}x{h}" if w and h else ""
                     md_parts.append(f"![image{size}]({short_url})")
                 else:
-                    logger.warning("upload_file returned no short_url for inline attachment")
+                    logger.warning(
+                        "upload_file returned no short_url for inline attachment"
+                    )
             elif img_path:
                 p = Path(img_path)
                 if not p.exists():
@@ -214,7 +214,10 @@ async def _upload_and_embed_attachments(
                 filename = p.name
                 mime = _MIME_BY_EXT.get(p.suffix.lower(), "image/png")
                 upload_result = await asyncio.to_thread(
-                    client.upload_file, file_bytes, filename, mime_type=mime,
+                    client.upload_file,
+                    file_bytes,
+                    filename,
+                    mime_type=mime,
                 )
                 if upload_result and upload_result.get("short_url"):
                     short_url = upload_result["short_url"]
@@ -223,7 +226,10 @@ async def _upload_and_embed_attachments(
                     size = f"|{w}x{h}" if w and h else ""
                     md_parts.append(f"![image{size}]({short_url})")
                 else:
-                    logger.warning("upload_file returned no short_url for local attachment: %s", img_path)
+                    logger.warning(
+                        "upload_file returned no short_url for local attachment: %s",
+                        img_path,
+                    )
             elif img_url:
                 md_parts.append(f"![image]({img_url})")
             else:
@@ -323,11 +329,19 @@ async def _run_via_daemon(
     client: Any,
     *,
     content_refs: Optional[List[ContentReference]] = None,
+    config: Optional[Config] = None,
 ) -> Optional[str]:
     """通过 daemon IPC 运行，使用 per-user 受限 Core。成功返回 str（可为空），daemon 不可用时返回 None。"""
+    cfg = config or get_config()
     try:
+        ipc_timeout = float(
+            getattr(cfg.shuiyuan, "automation_ipc_timeout_seconds", 1800.0) or 1800.0
+        )
         ipc = AutomationIPCClient(
-            owner_id=username, source="shuiyuan", socket_path=default_socket_path()
+            owner_id=username,
+            source="shuiyuan",
+            socket_path=default_socket_path(),
+            timeout_seconds=ipc_timeout,
         )
         if not await ipc.ping():
             return None
@@ -449,8 +463,8 @@ async def run_shuiyuan_reply(
             record_user_message,
         )
         from frontend.shuiyuan_integration.reply import (
-            post_reply,
             get_shuiyuan_db_for_user,
+            post_reply,
         )
     except ImportError as e:
         return f"无法加载水源集成: {e}"
@@ -563,6 +577,7 @@ async def run_shuiyuan_reply(
         db=db,
         client=client,
         content_refs=content_refs or None,
+        config=cfg,
     )
     if via_daemon is not None:
         return via_daemon

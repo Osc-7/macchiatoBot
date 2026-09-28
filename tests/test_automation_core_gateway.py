@@ -622,3 +622,107 @@ def test_register_model_updates_global_config_and_list(tmp_path, monkeypatch):
     assert "glm52" in minimal.llm.providers
     models = gateway.list_models(session_id="cli:root")
     assert any(m["name"] == "glm52" for m in models)
+
+
+def _minimal_llm_config():
+    from agent_core.config import CapabilitiesModel, Config, LLMConfig, ProviderEntry
+
+    return Config(
+        llm=LLMConfig(
+            providers={
+                "p_a": ProviderEntry(
+                    base_url="https://a/v1",
+                    api_key="k",
+                    model="ma",
+                    capabilities=CapabilitiesModel(vision=False),
+                ),
+            },
+            active="p_a",
+        ),
+    )
+
+
+def test_model_add_help_and_inline_register_with_switch(tmp_path, monkeypatch):
+    """/model add 全文由 gateway 解析：help 返回帮助；--switch 注册后切换当前会话。"""
+    from agent_core.llm.catalog import reset_model_catalog
+
+    reset_model_catalog()
+    minimal = _minimal_llm_config()
+    monkeypatch.setattr("agent_core.config.get_config", lambda: minimal)
+    monkeypatch.setattr(
+        "agent_core.config.persist_runtime_provider",
+        lambda *a, **k: tmp_path / "_runtime.yaml",
+    )
+    scheduler = _make_mock_scheduler(pool_entries={})
+    gateway = _make_gateway(tmp_path, kernel_scheduler=scheduler)
+
+    helped = gateway.model_add("add help", session_id="cli:root")
+    assert "/model add" in helped["help"]
+    assert helped["registered"] == []
+
+    out = gateway.model_add(
+        'add glm52 -u https://glm/v1 -k k -m glm-5.2 --label "GLM 5.2" --switch --no-persist',
+        session_id="cli:root",
+    )
+    assert out["persisted"] is False
+    assert [r["name"] for r in out["registered"]] == ["glm52"]
+    assert out["registered"][0]["persisted"] is False
+    assert out["switched"]["name"] == "glm52"
+    assert "glm52" in minimal.llm.providers
+    # 会话预选已写入 CorePool
+    assert scheduler._preferred_llm_by_session["cli:root"] == "glm52"
+
+    with pytest.raises(ValueError):
+        gateway.model_add("add glm52 -u https://glm/v1 -m glm-5.2 --no-persist")
+
+
+def test_reload_models_delegates_to_catalog(tmp_path, monkeypatch):
+    from agent_core.llm import catalog as catalog_mod
+
+    minimal = _minimal_llm_config()
+    monkeypatch.setattr("agent_core.config.get_config", lambda: minimal)
+    calls = {}
+
+    class FakeCatalog:
+        def reload_from_disk(self, *, config=None, config_path=None):
+            calls["config"] = config
+            return {"generation": 7, "added": ["x"], "removed": [], "changed": []}
+
+    monkeypatch.setattr(catalog_mod, "get_model_catalog", lambda: FakeCatalog())
+    gateway = _make_gateway(tmp_path, kernel_scheduler=_make_mock_scheduler())
+    result = gateway.reload_models()
+    assert result["generation"] == 7
+    assert calls["config"] is minimal
+
+
+def test_remote_workspace_status_reports_worker_online(tmp_path, monkeypatch):
+    """/remote-status 附带 worker_online：绑定可跨重启持久化，在线态以 WS 连接为准。"""
+    from agent_core.remote.workspace_state import (
+        activate_remote_workspace,
+        clear_remote_workspace_state,
+    )
+
+    clear_remote_workspace_state()
+    gateway = _make_gateway(tmp_path, kernel_scheduler=_make_mock_scheduler())
+
+    out = gateway.remote_workspace_status()
+    assert out == {"active": False, "worker_online": None, "state": None}
+
+    activate_remote_workspace(
+        session_id="cli:root", login="laptop", requested_path="~/P", ttl_seconds=None
+    )
+    online = {"laptop"}
+    monkeypatch.setattr(
+        "agent_core.remote.worker_registry.get_remote_worker_registry",
+        lambda: MagicMock(is_connected=lambda login: login in online),
+    )
+    out = gateway.remote_workspace_status()
+    assert out["active"] is True
+    assert out["worker_online"] is True
+    assert out["state"]["worker_online"] is True
+
+    online.clear()
+    out = gateway.remote_workspace_status()
+    assert out["worker_online"] is False
+    assert out["state"]["login"] == "laptop"
+    clear_remote_workspace_state()

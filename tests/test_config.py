@@ -8,26 +8,27 @@ import pytest
 import yaml
 
 from agent_core.config import (
+    AgentConfig,
+    CanvasIntegrationConfig,
+    CommandToolsConfig,
     Config,
     FeishuConfig,
-    LLMConfig,
-    TimeConfig,
-    StorageConfig,
-    AgentConfig,
-    MultimodalConfig,
-    CanvasIntegrationConfig,
-    PlanningConfig,
-    PlanningWeightsConfig,
     FileToolsConfig,
-    CommandToolsConfig,
+    LLMConfig,
     MCPConfig,
     MCPServerConfig,
+    MultimodalConfig,
+    PlanningConfig,
+    PlanningWeightsConfig,
+    ShuiyuanConfig,
+    StorageConfig,
+    TimeConfig,
     ToolsConfig,
     UIConfig,
-    load_config,
-    get_config,
-    reset_config,
     find_config_file,
+    get_config,
+    load_config,
+    reset_config,
 )
 from agent_core.kernel_interface.profile import CoreProfile
 
@@ -69,6 +70,11 @@ class TestConfigModels:
         """飞书 automation IPC 读超时与 LLM HTTP 超时解耦，默认应足够长。"""
         fei = FeishuConfig()
         assert fei.automation_ipc_timeout_seconds == 1800.0
+
+    def test_shuiyuan_automation_ipc_timeout_default(self):
+        """水源 connector 与飞书一样使用长 IPC 读超时，避免长工具静默时断开。"""
+        sy = ShuiyuanConfig()
+        assert sy.automation_ipc_timeout_seconds == 1800.0
 
     def test_multimodal_config_defaults(self):
         """测试多模态配置默认值"""

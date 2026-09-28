@@ -28,6 +28,9 @@ from .core_gateway import AutomationCoreGateway
 # base64 图片可能数 MB，默认 64KB readline limit 远远不够
 _STREAM_LIMIT = 32 * 1024 * 1024  # 32 MB
 _STREAM_RECOVERY_MAXLEN = 100
+# 长工具/权限等待期间可能没有任何 delta；定期写一行以免客户端 readline 空闲超时。
+# 测试可 monkeypatch 为更短间隔；<=0 关闭 keepalive。
+_STREAM_KEEPALIVE_INTERVAL_SECONDS = 15.0
 logger = logging.getLogger(__name__)
 
 
@@ -289,6 +292,18 @@ class AutomationIPCServer:
                 {"permission_id": permission_id, "payload": payload},
             )
 
+        async def _keepalive_loop() -> None:
+            interval = float(_STREAM_KEEPALIVE_INTERVAL_SECONDS)
+            if interval <= 0:
+                return
+            while True:
+                await asyncio.sleep(interval)
+                if stream_closed:
+                    return
+                if not await _send_event("keepalive", {}):
+                    return
+
+        keepalive_task = asyncio.create_task(_keepalive_loop())
         try:
             meta_dict: Dict[str, Any] = metadata if isinstance(metadata, dict) else {}
             _ci = meta_dict.get("content_items")
@@ -370,6 +385,12 @@ class AutomationIPCServer:
                     client_id,
                     exc,
                 )
+        finally:
+            keepalive_task.cancel()
+            try:
+                await keepalive_task
+            except asyncio.CancelledError:
+                pass
 
     def _buffer_stream_recovery(
         self,
@@ -554,6 +575,15 @@ class AutomationIPCServer:
                 raise ValueError("name 不能为空")
             info = self._gateway.switch_model(name, session_id=active_session)
             return {"ok": True, "info": info}
+
+        if method == "model_add":
+            args = str(params.get("args") or "").strip()
+            result = self._gateway.model_add(args, session_id=active_session)
+            return {"ok": True, "result": result}
+
+        if method == "model_reload":
+            result = self._gateway.reload_models()
+            return {"ok": True, "result": result}
 
         if method == "remote_workspace_use":
             login = str(params.get("login") or "").strip()
@@ -827,10 +857,9 @@ class AutomationIPCServer:
                 to_day = params.get("to_day")
                 provider_key = params.get("provider_key")
                 return t.usage_stats(
-                    range=(str(range_s).strip() if range_s is not None else "7d") or "7d",
-                    from_day=(
-                        str(from_day).strip() if from_day is not None else None
-                    )
+                    range=(str(range_s).strip() if range_s is not None else "7d")
+                    or "7d",
+                    from_day=(str(from_day).strip() if from_day is not None else None)
                     or None,
                     to_day=(str(to_day).strip() if to_day is not None else None)
                     or None,
@@ -1087,6 +1116,21 @@ class AutomationIPCClient:
         info = data.get("info")
         return dict(info) if isinstance(info, dict) else {}
 
+    async def add_model(self, args: str) -> Dict[str, Any]:
+        """转发 ``/model add ...`` 全文给 daemon 解析并注册（daemon 是模型目录权威）。
+
+        返回 ``{"help": str}`` 或 ``{"registered": [...], "persisted": bool, "switched": {...}}``。
+        """
+        data = await self._request("model_add", {"args": str(args or "")})
+        result = data.get("result")
+        return dict(result) if isinstance(result, dict) else {}
+
+    async def reload_models(self) -> Dict[str, Any]:
+        """让 daemon 重新读取磁盘上的模型目录（config.yaml + providers.d + _runtime.yaml）。"""
+        data = await self._request("model_reload", {})
+        result = data.get("result")
+        return dict(result) if isinstance(result, dict) else {}
+
     async def remote_workspace_use(
         self,
         *,
@@ -1305,6 +1349,8 @@ class AutomationIPCClient:
                 if not payload.get("stream"):
                     continue
                 event_type = str(payload.get("event") or "")
+                if event_type == "keepalive":
+                    continue
                 if event_type == "assistant_delta":
                     delta = str(payload.get("delta") or "")
                     if hooks and hooks.on_assistant_delta:

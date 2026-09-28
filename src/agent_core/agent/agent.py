@@ -607,6 +607,8 @@ class AgentCore:
             dict: 包含 ``name`` / ``model`` / 切换后主模型 ``vision`` 能力等信息。
         """
         self._llm_client.switch_model(name)
+        # 记录显式选择，供 checkpoint 持久化并在 Core 重建后恢复
+        self._user_selected_llm_provider = self._llm_client.active_provider_name
         self._refresh_recognize_image_visibility()
         caps = self._llm_client.capabilities
         api_model = self._llm_client.model
@@ -1949,6 +1951,8 @@ class AgentCore:
                         compression_round=self._working_memory.compression_round,
                         core_profile=core_profile_to_checkpoint_dict(profile),
                         active_goals=self._goal_store.to_checkpoint_data(),
+                        preferred_llm_provider=self._checkpoint_preferred_llm_provider(),
+                        remote_workspace=self._checkpoint_remote_workspace(),
                     )
                 )
             except Exception as exc:
@@ -1957,6 +1961,24 @@ class AgentCore:
                 _logging.getLogger(__name__).warning(
                     "AgentCore: checkpoint write failed: %s", exc
                 )
+
+    def _checkpoint_remote_workspace(self) -> Optional[Dict[str, Any]]:
+        """写入 checkpoint 的 /remote-use 绑定快照；无绑定或已过期为 None。"""
+        try:
+            from agent_core.remote.workspace_state import snapshot_remote_workspace
+
+            return snapshot_remote_workspace(self._session_id)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _checkpoint_preferred_llm_provider(self) -> Optional[str]:
+        """写入 checkpoint 的会话级 /model 选择；从未显式切换过则为 None。
+
+        只记录显式选择（``switch_model`` 成功后写入），不记录配置默认值：
+        这样 config.llm.active 改动后，未手动切换的会话仍跟随新默认。
+        """
+        name = getattr(self, "_user_selected_llm_provider", None)
+        return str(name).strip() if isinstance(name, str) and name.strip() else None
 
     def flush_checkpoint_for_shutdown(self) -> None:
         """Daemon / Kernel 正常关闭前刷新检查点，将 ``last_active_at`` 更新为当前时刻。
@@ -1992,6 +2014,8 @@ class AgentCore:
                     compression_round=self._working_memory.compression_round,
                     core_profile=core_profile_to_checkpoint_dict(profile),
                     active_goals=self._goal_store.to_checkpoint_data(),
+                    preferred_llm_provider=self._checkpoint_preferred_llm_provider(),
+                    remote_workspace=self._checkpoint_remote_workspace(),
                 )
             )
         except Exception as exc:

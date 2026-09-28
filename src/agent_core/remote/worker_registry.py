@@ -309,6 +309,11 @@ class RemoteWorkerRegistry:
         async with self._lock:
             return self._connections.get(key)
 
+    def is_connected(self, login: str) -> bool:
+        """同步查询 login 是否有在线 WS 连接（供 status 之类的同步路径使用）。"""
+        key = (login or "").strip()
+        return bool(key) and key in self._connections
+
     async def require(self, login: str) -> RemoteWorkerConnection:
         conn = await self.get(login)
         if conn is None:

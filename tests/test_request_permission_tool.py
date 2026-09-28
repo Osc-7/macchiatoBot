@@ -7,23 +7,23 @@ import json
 
 import pytest
 
-from agent_core.config import CommandToolsConfig, Config, LLMConfig
-from agent_core.permissions.wait_registry import (
-    PermissionDecision,
-    resolve_permission,
-    set_permission_notify_hook,
-)
 from agent_core.agent.readable_ephemeral_grants import (
     clear_ephemeral_readable_grants_for_tests,
 )
 from agent_core.agent.readable_roots_store import load_user_readable_prefixes
-from agent_core.agent.writable_roots_store import load_user_writable_prefixes
 from agent_core.agent.writable_ephemeral_grants import (
     clear_ephemeral_writable_grants_for_tests,
 )
+from agent_core.agent.writable_roots_store import load_user_writable_prefixes
+from agent_core.config import CommandToolsConfig, Config, LLMConfig
 from agent_core.permissions.bash_danger_approvals import (
     clear_bash_danger_grant_for_tests,
     consume_bash_danger_grant,
+)
+from agent_core.permissions.wait_registry import (
+    PermissionDecision,
+    resolve_permission,
+    set_permission_notify_hook,
 )
 from agent_core.tools.request_permission_tool import RequestPermissionTool
 
@@ -161,6 +161,23 @@ async def test_request_permission_timeout(monkeypatch, tmp_path):
     )
     assert not r.success
     assert r.error == "PERMISSION_TIMEOUT"
+
+
+async def test_request_permission_shuiyuan_unattended_auto_deny(patched_get_config):
+    """水源没有审批 UI，应立即拒绝而不是空等 timeout。"""
+    notified: list[str] = []
+    set_permission_notify_hook(lambda pid, _payload: notified.append(pid))
+    tool = RequestPermissionTool()
+    r = await tool.execute(
+        summary="need write",
+        kind="bash_write",
+        timeout_seconds=5.0,
+        __execution_context__={"source": "shuiyuan", "user_id": "alice"},
+    )
+    assert not r.success
+    assert r.error == "PERMISSION_DENIED"
+    assert "无人值守" in (r.message or "")
+    assert notified == []
 
 
 async def test_request_permission_clarify(patched_get_config):
@@ -471,6 +488,7 @@ async def test_request_permission_sub_mode_can_reach_human(patched_get_config):
 
     set_permission_notify_hook(_notify)
     try:
+
         async def _run():
             return await tool.execute(
                 summary="subagent needs file write",

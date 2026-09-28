@@ -184,10 +184,13 @@ class LLMClient:
                 "providers['default']。"
             )
 
+        # provider 名 -> 构造该实例时的目录条目指纹（sync_from_catalog 判断是否需重建）
+        self._entry_fingerprints: Dict[str, Any] = {}
         for name, entry in providers_map.items():
             self._providers[str(name)] = _build_provider_from_entry(
                 str(name), entry, llm_config=llm_cfg
             )
+            self._entry_fingerprints[str(name)] = self._entry_fingerprint(entry)
 
         active_name = getattr(llm_cfg, "active", None)
         if active_name and active_name in self._providers:
@@ -213,6 +216,135 @@ class LLMClient:
         self._vision_provider_name: Optional[str] = self._resolve_vision_provider(
             getattr(llm_cfg, "vision_provider", None)
         )
+
+        # 登记到进程级目录：/model add、磁盘重载后由 catalog 调用 sync_from_catalog()
+        try:
+            from agent_core.llm.catalog import get_model_catalog
+
+            get_model_catalog().attach(self)
+        except Exception:  # noqa: BLE001
+            logger.debug("LLMClient: attach to ModelCatalog failed", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # 目录同步 / 运行时注册
+    # ------------------------------------------------------------------
+    def register_provider(
+        self,
+        name: str,
+        entry: Dict[str, Any],
+        *,
+        persist: bool = True,
+        overwrite: bool = False,
+    ) -> Any:
+        """运行时注册一条 provider（写入本客户端持有的 ``config.llm.providers`` 并建实例）。
+
+        委托 ``ModelCatalog.register``；catalog 会回调 ``sync_from_catalog()``，
+        因此返回时 ``self.providers`` 已含新条目，随后可直接 ``switch_model(name)``。
+
+        Raises:
+            ValueError: 同名且未 ``overwrite``，或条目校验失败
+        """
+        from agent_core.llm.catalog import get_model_catalog
+
+        catalog = get_model_catalog()
+        catalog.attach(self)
+        pe = catalog.register(
+            name,
+            entry,
+            persist=persist,
+            overwrite=overwrite,
+            config=self._config,
+        )
+        # catalog 通知走 weakref 集合；这里再显式同步一次，保证同步语义不依赖 GC 状态
+        self.sync_from_catalog()
+        return pe
+
+    def sync_from_catalog(self) -> Dict[str, List[str]]:
+        """把 ``self._config.llm.providers`` 的增删改同步到 ``self._providers``。
+
+        - 新增：构造 provider 实例
+        - 变更（base_url / model / capabilities 等）：重建实例；若为 active 也重建（下一次请求生效）
+        - 移除：非 active 的直接删除；active 保留旧实例并 warning，避免正在进行的会话失去模型
+        """
+        llm_cfg = self._config.llm
+        target: Dict[str, Any] = dict(getattr(llm_cfg, "providers", None) or {})
+        added: List[str] = []
+        changed: List[str] = []
+        removed: List[str] = []
+
+        for name, entry in target.items():
+            key = str(name)
+            existing = self._providers.get(key)
+            if existing is None:
+                try:
+                    self._providers[key] = _build_provider_from_entry(
+                        key, entry, llm_config=llm_cfg
+                    )
+                    self._entry_fingerprints[key] = self._entry_fingerprint(entry)
+                    added.append(key)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "LLMClient.sync_from_catalog: build provider %s failed: %s",
+                        key,
+                        exc,
+                    )
+                continue
+            if self._provider_differs(key, entry):
+                try:
+                    self._providers[key] = _build_provider_from_entry(
+                        key, entry, llm_config=llm_cfg
+                    )
+                    self._entry_fingerprints[key] = self._entry_fingerprint(entry)
+                    changed.append(key)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "LLMClient.sync_from_catalog: rebuild provider %s failed: %s",
+                        key,
+                        exc,
+                    )
+
+        for key in list(self._providers.keys()):
+            if key in target:
+                continue
+            if key == self._active:
+                logger.warning(
+                    "LLMClient.sync_from_catalog: active provider %s 已从目录移除，"
+                    "本会话保留旧实例直至切换",
+                    key,
+                )
+                continue
+            self._providers.pop(key, None)
+            self._entry_fingerprints.pop(key, None)
+            removed.append(key)
+
+        self._vision_provider_name = self._resolve_vision_provider(
+            getattr(llm_cfg, "vision_provider", None)
+        )
+        if added or changed or removed:
+            logger.info(
+                "LLMClient.sync_from_catalog: added=%s changed=%s removed=%s",
+                added,
+                changed,
+                removed,
+            )
+        return {"added": added, "changed": changed, "removed": removed}
+
+    @staticmethod
+    def _entry_fingerprint(entry: Any) -> Any:
+        dump = getattr(entry, "model_dump", None)
+        if callable(dump):
+            try:
+                return dump()
+            except Exception:  # noqa: BLE001
+                pass
+        return repr(entry)
+
+    def _provider_differs(self, key: str, entry: Any) -> bool:
+        """已建实例对应的目录条目是否变化（按构造时记录的条目指纹比较）。"""
+        prev = self._entry_fingerprints.get(key)
+        if prev is None:
+            return False
+        return prev != self._entry_fingerprint(entry)
 
     def _resolve_vision_provider(self, configured: Optional[str]) -> Optional[str]:
         """返回用作 chat_with_image 的 provider 名；未显式配置时自动挑首个 vision=True。"""

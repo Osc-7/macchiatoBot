@@ -795,40 +795,12 @@ class AutomationCoreGateway:
         尚无 live Core 时从配置构造列表（与 AgentCore.list_models 字段对齐）。
         ``CorePool`` 中若已有该 session 的预选主模型，则 ``is_active`` 以预选为准。
         """
-        from agent_core.config import CapabilitiesModel, get_config
+        from agent_core.config import get_config
+        from agent_core.llm.catalog import get_model_catalog
 
-        cfg = get_config()
-        llm = cfg.llm
-        prov_map = getattr(llm, "providers", None) or {}
-        if not prov_map:
+        out = get_model_catalog().snapshot(config=get_config())
+        if not out:
             return []
-        vision_name = self._resolve_vision_provider_name_static(llm, prov_map)
-
-        out: List[Dict[str, Any]] = []
-        for name, ent in prov_map.items():
-            caps_m = getattr(ent, "capabilities", None)
-            # 缺 capabilities 时仍要列出该行；否则当前 active 若恰被 skip，列表里会没有任何 *。
-            if caps_m is None:
-                caps_m = CapabilitiesModel()
-            api_model = str(getattr(ent, "model", "") or "")
-            out.append(
-                {
-                    "name": name,
-                    "model": api_model,
-                    "api_model": api_model,
-                    "label": getattr(ent, "label", None),
-                    "base_url": getattr(ent, "base_url", None),
-                    "vision": bool(getattr(caps_m, "vision", False)),
-                    "function_calling": bool(getattr(caps_m, "function_calling", True)),
-                    "reasoning_content": bool(
-                        getattr(caps_m, "reasoning_content", False)
-                    ),
-                    "context_window": getattr(caps_m, "context_window", None),
-                    "is_active": False,
-                    "is_vision_provider": vision_name is not None
-                    and name == vision_name,
-                }
-            )
         sid = (session_id or self._active_session_id or "").strip()
         self._apply_model_list_active_flags(out, sid)
         return out
@@ -900,6 +872,96 @@ class AutomationCoreGateway:
                 return {"name": str(name)}
             return result
         return self._switch_result_from_config_provider(name)
+
+    # ------------------------------------------------------------------
+    # 模型目录：运行时注册 / 磁盘重载（daemon 是目录的唯一权威）
+    # ------------------------------------------------------------------
+    def register_model(
+        self,
+        name: str,
+        entry: Dict[str, Any],
+        *,
+        persist: bool = True,
+        overwrite: bool = False,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """向全局目录注册一条 provider；已存活 Core 的 LLMClient 由 catalog 增量同步。
+
+        Returns:
+            dict: ``name / model / api_model / label / vision / vision_provider / generation / persisted``
+        """
+        from agent_core.config import get_config
+        from agent_core.llm.catalog import (
+            get_model_catalog,
+            resolve_vision_provider_name,
+        )
+
+        key = str(name or "").strip()
+        if not key:
+            raise ValueError("name 不能为空")
+        if not isinstance(entry, dict) or not entry:
+            raise ValueError("provider 条目不能为空")
+
+        cfg = get_config()
+        catalog = get_model_catalog()
+        pe = catalog.register(
+            key, entry, persist=persist, overwrite=overwrite, config=cfg
+        )
+        caps = getattr(pe, "capabilities", None)
+        return {
+            "name": key,
+            "model": pe.model,
+            "api_model": pe.model,
+            "label": getattr(pe, "label", None),
+            "base_url": pe.base_url,
+            "vision": bool(getattr(caps, "vision", False)) if caps else False,
+            "vision_provider": resolve_vision_provider_name(cfg.llm),
+            "generation": catalog.generation,
+            "persisted": bool(persist),
+        }
+
+    def model_add(
+        self, arg_text: str, *, session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """处理 ``/model add ...`` 全文：解析 → 逐条注册 → 可选切换当前会话。
+
+        ``add help`` / 空参数返回帮助文本（``help`` 字段）。
+        """
+        from agent_core.llm.provider_runtime import (
+            MODEL_ADD_HELP,
+            parse_model_add_cli,
+        )
+
+        text = str(arg_text or "").strip()
+        if not text.lower().startswith("add"):
+            text = f"add {text}".strip()
+        tail = text[3:].strip().lower()
+        if not tail or tail in ("help", "-h", "--help"):
+            return {"help": MODEL_ADD_HELP, "registered": []}
+
+        req = parse_model_add_cli(text)
+        registered: List[Dict[str, Any]] = []
+        for item in req.entries:
+            info = self.register_model(
+                item.name,
+                item.provider,
+                persist=req.persist,
+                overwrite=req.overwrite,
+                session_id=session_id,
+            )
+            registered.append(info)
+
+        result: Dict[str, Any] = {"registered": registered, "persisted": req.persist}
+        if req.switch_to:
+            result["switched"] = self.switch_model(req.switch_to, session_id=session_id)
+        return result
+
+    def reload_models(self) -> Dict[str, Any]:
+        """重新解析磁盘上的 llm 段（config.yaml + providers.d + _runtime.yaml）并同步到所有存活 Core。"""
+        from agent_core.config import get_config
+        from agent_core.llm.catalog import get_model_catalog
+
+        return get_model_catalog().reload_from_disk(config=get_config())
 
     def get_turn_count(self, session_id: Optional[str] = None) -> int:
         sid = session_id or self._active_session_id
@@ -1080,11 +1142,21 @@ class AutomationCoreGateway:
     ) -> Dict[str, Any]:
         from agent_core.remote.workspace_state import get_remote_workspace_state
 
+        from agent_core.remote.worker_registry import get_remote_worker_registry
+
         sid = session_id or self._active_session_id
         state = get_remote_workspace_state(sid)
+        worker_online: Optional[bool] = None
+        state_payload: Optional[Dict[str, Any]] = None
+        if state is not None:
+            worker_online = bool(get_remote_worker_registry().is_connected(state.login))
+            state_payload = state.model_dump()
+            state_payload["worker_online"] = worker_online
         return {
             "active": state is not None,
-            "state": state.model_dump() if state is not None else None,
+            # 绑定可跨 daemon 重启持久化；worker 在线与否以当前 WS 连接为准
+            "worker_online": worker_online,
+            "state": state_payload,
         }
 
     async def remote_workspace_release(

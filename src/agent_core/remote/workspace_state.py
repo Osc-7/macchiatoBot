@@ -76,6 +76,69 @@ def get_remote_workspace_state(session_id: str) -> Optional[RemoteWorkspaceState
         return state
 
 
+def snapshot_remote_workspace(session_id: str) -> Optional[dict[str, Any]]:
+    """当前有效的远程绑定快照（``model_dump``），供 checkpoint 持久化；无绑定/已过期返回 None。"""
+    state = get_remote_workspace_state(session_id)
+    if state is None:
+        return None
+    return state.model_dump()
+
+
+def restore_remote_workspace(
+    session_id: str, raw: Optional[dict[str, Any]]
+) -> Optional[RemoteWorkspaceState]:
+    """从 checkpoint 快照回填远程绑定（仅登记内存态，不联系 worker）。
+
+    - 快照非法 / 已过期 → 返回 None，不写入
+    - session_id 以当前会话为准（快照里的值被覆盖）
+    - 已存在有效绑定时不覆盖（进程内状态更新）
+    """
+    sid = (session_id or "").strip()
+    if not sid or not isinstance(raw, dict) or not raw:
+        return None
+    with _LOCK:
+        existing = _STATE_BY_SESSION.get(sid)
+        if existing is not None and not existing.is_expired():
+            return existing
+    try:
+        data = dict(raw)
+        data["session_id"] = sid
+        data.setdefault("status", "active")
+        state = RemoteWorkspaceState.model_validate(data)
+    except Exception:  # noqa: BLE001
+        return None
+    if state.is_expired():
+        return None
+    with _LOCK:
+        _STATE_BY_SESSION[sid] = state
+        _SKILLS_INDEX_BY_SESSION.pop(sid, None)
+    return state
+
+
+def update_remote_workspace_resolution(
+    session_id: str,
+    *,
+    resolved_path: Optional[str] = None,
+    device_label: Optional[str] = None,
+) -> Optional[RemoteWorkspaceState]:
+    """worker 重新 open_workspace 后回填 resolved_path / device_label。"""
+    sid = (session_id or "").strip()
+    with _LOCK:
+        state = _STATE_BY_SESSION.get(sid)
+        if state is None:
+            return None
+        updates: dict[str, Any] = {}
+        if (resolved_path or "").strip():
+            updates["resolved_path"] = resolved_path.strip()  # type: ignore[union-attr]
+        if (device_label or "").strip():
+            updates["device_label"] = device_label.strip()  # type: ignore[union-attr]
+        if not updates:
+            return state
+        new_state = state.model_copy(update=updates)
+        _STATE_BY_SESSION[sid] = new_state
+        return new_state
+
+
 def release_remote_workspace(session_id: str) -> Optional[RemoteWorkspaceState]:
     sid = (session_id or "").strip()
     if not sid:

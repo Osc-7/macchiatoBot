@@ -14,6 +14,9 @@ llm:
   stream: true
   providers_dir: llm/providers.d
   # provider_include: []
+  # Daemon polls config.yaml / providers_dir / provider_include mtimes and hot-reloads llm.providers.
+  # /model add persists to providers_dir/_runtime.yaml. 0 disables the watcher; /model reload still works.
+  catalog_watch_seconds: 30
 
   # Keep at least one inline provider if providers_dir is empty; directory entries override same keys here.
   providers:
@@ -70,6 +73,8 @@ shuiyuan:
     tool_max_posts: 50  # max posts returned by Shuiyuan search tools
   rate_limit:
     replies_per_minute: 5
+  # Connector ↔ daemon 流式 IPC 单次读超时。长工具/权限等待期间若无 JSON 行会断开。
+  automation_ipc_timeout_seconds: 1800
 
 # Declarative jobs; automation_daemon maps them to JobDefinition entries.
 automation:
@@ -252,13 +257,18 @@ mcp:
       tool_name_prefix: "tavily"
       init_timeout_seconds: 20
       call_timeout_seconds: 45
-    # Remote example: declare name only; worker starts process from
+    # Remote: declare name only; worker starts the process from
     # {workspace}/.macchiato/mcp.yaml with the same name after /remote-use.
     # - name: "local_chrome"
     #   location: remote
     #   attach_on: remote_use
     #   enabled: true
     #   tool_name_prefix: "chrome"
+    - name: "kimi-cu"
+      location: remote
+      attach_on: remote_use
+      enabled: true
+      tool_name_prefix: "kimi-cu"
 
 skills:
   enabled: []  # empty lists all skills under cli_dir; non-empty filters the index

@@ -724,6 +724,14 @@ class DashboardBackend:
         finally:
             await client.close()
 
+    async def reload_models(self, *, username: str = "") -> Dict[str, Any]:
+        """让 daemon 重新读取磁盘上的模型目录（config.yaml / providers.d / _runtime.yaml）。"""
+        client = await self._with_client(username=username)
+        try:
+            return await client.reload_models()
+        finally:
+            await client.close()
+
     async def chat(self, text: str, *, session_id: str | None = None, username: str = "") -> Dict[str, Any]:
         client = await self._with_client(username=username)
         try:
@@ -1422,9 +1430,27 @@ def create_dashboard_app(
                 path = service.write_config(payload.content)
             else:
                 raise ValueError("payload 不能为空")
-            return {"ok": True, "path": str(path)}
         except Exception as exc:  # noqa: BLE001
             logger.warning("dashboard write config failed: %s", exc)
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        out: Dict[str, Any] = {"ok": True, "path": str(path)}
+        # 写盘后 best-effort 通知 daemon 重载模型目录；其它 bootstrap 段仍需重启才生效。
+        reload_fn = getattr(service, "reload_models", None)
+        if callable(reload_fn):
+            try:
+                out["reload"] = await reload_fn()
+            except Exception as exc:  # noqa: BLE001
+                logger.info("dashboard config saved but model reload failed: %s", exc)
+                out["reload_error"] = str(exc)
+        return out
+
+    @console.post("/api/kernel/model/reload")
+    async def post_kernel_model_reload(request: Request) -> Dict[str, Any]:
+        try:
+            username = getattr(request.state, "dashboard_user", "")
+            return {"ok": True, "result": await service.reload_models(username=username)}
+        except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @console.get("/api/config/backups")

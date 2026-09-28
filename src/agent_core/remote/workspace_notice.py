@@ -59,6 +59,7 @@ def format_remote_workspace_switch_notice(
     """Human/agent-facing notice written into conversation history (not system).
 
     - activate / bound / inherited → ``[工作区切换]``
+    - restored / restored_offline（daemon 重启后从 checkpoint 恢复绑定）→ ``[工作区]``
     - reinjected (e.g. after compress) → ``[工作区]``，只陈述当前位置，不提压缩
     """
     reason_s = (reason or "activated").strip() or "activated"
@@ -69,6 +70,20 @@ def format_remote_workspace_switch_notice(
     if reason_s == "reinjected":
         return f"""{WORKSPACE_STATUS_PREFIX}
 {body}
+""".strip()
+
+    if reason_s == "restored":
+        return f"""{WORKSPACE_STATUS_PREFIX}
+daemon 重启后已恢复远程工作区绑定
+{body}
+""".strip()
+
+    if reason_s == "restored_offline":
+        return f"""{WORKSPACE_STATUS_PREFIX}
+daemon 重启后已恢复远程工作区绑定，但远程 worker 当前离线
+{body}
+
+- worker 尚未重连：bash / 文件工具会报「远程 worker 未连接」，请在远端机器启动 macchiato-remote，或用 /remote-release 回到云端工作区。
 """.strip()
 
     if reason_s == "inherited":

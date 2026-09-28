@@ -149,6 +149,56 @@ async def test_try_handle_slash_command_model_list():
 
 
 @pytest.mark.asyncio
+async def test_try_handle_slash_command_model_add_help_and_register():
+    client = MagicMock()
+    client.add_model = AsyncMock(return_value={"help": "/model add — 用法", "registered": []})
+    handled, reply = await try_handle_slash_command(client, "/model add help")
+    assert handled is True
+    assert "/model add" in (reply or "")
+    client.add_model.assert_awaited_once_with("add help")
+
+    client.add_model = AsyncMock(
+        return_value={
+            "registered": [{"name": "glm52", "api_model": "glm-5.2", "persisted": True}],
+            "persisted": True,
+            "switched": {"name": "glm52"},
+        }
+    )
+    handled, reply = await try_handle_slash_command(
+        client, "/model add glm52 -u https://g/v1 -m glm-5.2 --switch"
+    )
+    assert handled is True
+    assert "glm52" in (reply or "")
+    assert "已持久化" in (reply or "")
+    assert "已切换" in (reply or "")
+    client.add_model.assert_awaited_once_with(
+        "add glm52 -u https://g/v1 -m glm-5.2 --switch"
+    )
+    client.switch_model.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_try_handle_slash_command_model_reload():
+    client = MagicMock()
+    client.reload_models = AsyncMock(
+        return_value={
+            "generation": 3,
+            "total": 4,
+            "added": ["glm52"],
+            "removed": [],
+            "changed": ["kimi_k25"],
+        }
+    )
+    handled, reply = await try_handle_slash_command(client, "/model reload")
+    assert handled is True
+    assert "generation=3" in (reply or "")
+    assert "glm52" in (reply or "")
+    assert "kimi_k25" in (reply or "")
+    client.reload_models.assert_awaited_once()
+    client.switch_model.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_try_handle_slash_command_compress_default():
     client = MagicMock()
     client.compress_context = AsyncMock(

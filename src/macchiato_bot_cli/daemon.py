@@ -683,6 +683,58 @@ async def _bash_job_notify_loop(
         raise
 
 
+async def _model_catalog_watch_loop(
+    stop_event: asyncio.Event,
+    poll_interval: float,
+) -> None:
+    """daemon 后台 watcher：轮询模型目录文件 mtime，变化时重载 llm.providers 并同步到存活 Core。
+
+    只覆盖模型层（config.yaml 的 llm 段 + providers_dir + provider_include + _runtime.yaml）；
+    其它 bootstrap 配置仍需重启。重载失败保留上一代目录。
+    """
+    from agent_core.llm.catalog import catalog_files_fingerprint, get_model_catalog
+
+    logger.info("model_catalog: watcher started poll_interval=%.1fs", poll_interval)
+    try:
+        last_fp = catalog_files_fingerprint()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("model_catalog: initial fingerprint failed: %s", exc)
+        last_fp = None
+    try:
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(), timeout=max(1.0, poll_interval)
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+            try:
+                fp = catalog_files_fingerprint()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("model_catalog: fingerprint failed: %s", exc)
+                continue
+            if fp == last_fp:
+                continue
+            last_fp = fp
+            try:
+                result = get_model_catalog().reload_from_disk()
+                logger.info(
+                    "model_catalog: reloaded generation=%s added=%s removed=%s changed=%s",
+                    result.get("generation"),
+                    result.get("added"),
+                    result.get("removed"),
+                    result.get("changed"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "model_catalog: reload failed, keeping previous catalog: %s", exc
+                )
+    except asyncio.CancelledError:
+        logger.info("model_catalog: watcher cancelled")
+        raise
+
+
 async def _main() -> None:
     cfg = get_config()
     logger.info("automation daemon: reconciling linux admin users (if enabled)")
@@ -826,6 +878,18 @@ async def _main() -> None:
                 name="bash-job-notify-watcher",
             )
 
+        catalog_watch_task: asyncio.Task[Any] | None = None
+        catalog_watch_seconds = float(
+            getattr(cfg.llm, "catalog_watch_seconds", 30.0) or 0.0
+        )
+        if catalog_watch_seconds > 0:
+            catalog_watch_task = asyncio.create_task(
+                _model_catalog_watch_loop(
+                    stop_event=stop_event, poll_interval=catalog_watch_seconds
+                ),
+                name="model-catalog-watcher",
+            )
+
         await scheduler.start()
         await ipc.start()
         logger.info("Automation daemon started. socket=%s", ipc.socket_path)
@@ -862,6 +926,9 @@ async def _main() -> None:
             if notify_task is not None:
                 notify_task.cancel()
                 await asyncio.gather(notify_task, return_exceptions=True)
+            if catalog_watch_task is not None:
+                catalog_watch_task.cancel()
+                await asyncio.gather(catalog_watch_task, return_exceptions=True)
             await ipc.stop()
             await scheduler.stop()
             await scheduler_runtime.stop()

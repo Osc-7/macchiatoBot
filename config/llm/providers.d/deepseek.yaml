@@ -1,8 +1,8 @@
-deepseek_V4_flash:
-  label: "DeepSeek V4 Flash"
+deepseek_flash:
+  label: "DeepSeek V4.1 Flash"
   base_url: "https://api.deepseek.com/v1"
   api_key: "${DEEPSEEK_API_KEY}"
-  model: "deepseek-v4-flash"
+  model: "deepseek-flash"
   pricing:
     # 官方峰谷价（北京时间工作日 9:00-12:00、14:00-18:00 为高峰，高峰=闲时×2）。
     # 此处按闲时填写；DeepSeek 价格/促销变化时改这里。
@@ -15,7 +15,7 @@ deepseek_V4_flash:
     thinking:
       type: enabled
   capabilities:
-    vision: false
+    vision: true
     function_calling: true
     parallel_tool_calls: true
     reasoning_content: true

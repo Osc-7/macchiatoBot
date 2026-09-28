@@ -28,6 +28,9 @@ from agent_core.permissions.wait_registry import (
 
 AccessMode = Literal["read", "write"]
 
+# 这些渠道没有人类审批 UI。空等 timeout 会让前端 IPC 因无 stream 行而断开。
+_UNATTENDED_APPROVAL_SOURCES = frozenset({"shuiyuan"})
+
 
 @dataclass(frozen=True)
 class PathGrant:
@@ -171,6 +174,19 @@ class PermissionBroker:
                 note="auto-approved-by-danger-mode",
             )
 
+        if self._is_unattended_source(request.exec_ctx):
+            src, _uid = _source_user(request.exec_ctx)
+            return PermissionBrokerResult(
+                allowed=False,
+                permission_id=f"unattended-{uuid.uuid4().hex[:12]}",
+                error="PERMISSION_DENIED",
+                message=(
+                    f"{src} 渠道无人值守，无法等待人类批准，已拒绝。"
+                    "请在当前工作区内执行，或只访问已经授权的路径。"
+                ),
+                note="unattended-source-auto-deny",
+            )
+
         timeout = max(0.1, float(request.timeout_seconds or 300.0))
         pid, fut = register_permission_wait()
         payload = self._build_payload(pid, request, timeout)
@@ -240,6 +256,11 @@ class PermissionBroker:
     @staticmethod
     def _is_approval_bypass_enabled(exec_ctx: Dict[str, Any]) -> bool:
         return bool(exec_ctx.get("approval_bypass_enabled", False))
+
+    @staticmethod
+    def _is_unattended_source(exec_ctx: Dict[str, Any]) -> bool:
+        src, _uid = _source_user(exec_ctx)
+        return src in _UNATTENDED_APPROVAL_SOURCES
 
     def _build_payload(
         self,

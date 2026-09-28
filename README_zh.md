@@ -154,6 +154,7 @@ CLI 与飞书通过 daemon IPC 共用同一组斜杠命令：
 
 - `/help`
 - `/model`、`/model list`、`/model <name>`
+- `/model add <name> --base-url … --model … [--switch]`（运行时注册 provider，持久化到 `providers.d/_runtime.yaml`）、`/model reload`（重新读取磁盘模型目录；daemon 也会在文件变化时自动重载）
 - `/session`、`/session whoami`、`/session list`
 - `/session new [id]`、`/session switch <id>`、`/session delete <id>`
 - `/remote-use <login> [path]`

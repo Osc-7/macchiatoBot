@@ -58,6 +58,108 @@ def test_activate_and_release_remote_workspace_state():
     assert get_remote_workspace_state("feishu:abc") is None
 
 
+def test_snapshot_and_restore_remote_workspace_roundtrip():
+    """checkpoint 快照 → 新进程回填：字段一致、session_id 以当前会话为准。"""
+    from agent_core.remote.workspace_state import (
+        restore_remote_workspace,
+        snapshot_remote_workspace,
+    )
+
+    assert snapshot_remote_workspace("cli:root") is None
+    activate_remote_workspace(
+        session_id="cli:root",
+        login="laptop",
+        requested_path="~/Project",
+        profile="strict",
+        ttl_seconds=3600,
+        resolved_path="/home/u/Project",
+        device_label="mbp",
+    )
+    snap = snapshot_remote_workspace("cli:root")
+    assert snap is not None
+    assert snap["login"] == "laptop"
+    assert snap["resolved_path"] == "/home/u/Project"
+    assert snap["expires_at"] is not None
+
+    clear_remote_workspace_state()
+    assert get_remote_workspace_state("cli:root") is None
+
+    snap["session_id"] = "stale-id"
+    restored = restore_remote_workspace("cli:root", snap)
+    assert restored is not None
+    assert restored.session_id == "cli:root"
+    assert restored.login == "laptop"
+    assert restored.profile == "strict"
+    assert restored.device_label == "mbp"
+    assert get_remote_workspace_state("cli:root") is restored
+
+
+def test_restore_remote_workspace_rejects_expired_or_invalid():
+    from agent_core.remote.workspace_state import restore_remote_workspace
+
+    expired = {
+        "session_id": "cli:root",
+        "login": "laptop",
+        "requested_path": "~/Project",
+        "expires_at": 1.0,
+    }
+    assert restore_remote_workspace("cli:root", expired) is None
+    assert get_remote_workspace_state("cli:root") is None
+
+    assert restore_remote_workspace("cli:root", {"login": ""}) is None
+    assert restore_remote_workspace("cli:root", None) is None
+    assert restore_remote_workspace("cli:root", {}) is None
+
+
+def test_restore_remote_workspace_keeps_existing_live_binding():
+    from agent_core.remote.workspace_state import restore_remote_workspace
+
+    live = activate_remote_workspace(
+        session_id="cli:root",
+        login="live",
+        requested_path="~/Live",
+        ttl_seconds=None,
+    )
+    restored = restore_remote_workspace(
+        "cli:root",
+        {"login": "stale", "requested_path": "~/Old", "session_id": "cli:root"},
+    )
+    assert restored is live
+    assert get_remote_workspace_state("cli:root").login == "live"
+
+
+def test_update_remote_workspace_resolution():
+    from agent_core.remote.workspace_state import update_remote_workspace_resolution
+
+    activate_remote_workspace(
+        session_id="cli:root",
+        login="laptop",
+        requested_path="~/Project",
+        ttl_seconds=None,
+    )
+    updated = update_remote_workspace_resolution(
+        "cli:root", resolved_path="/abs/Project", device_label="mbp"
+    )
+    assert updated is not None
+    assert updated.resolved_path == "/abs/Project"
+    assert updated.device_label == "mbp"
+    assert get_remote_workspace_state("cli:root").resolved_path == "/abs/Project"
+    assert update_remote_workspace_resolution("missing", resolved_path="/x") is None
+
+
+def test_restored_notice_variants():
+    state = RemoteWorkspaceState(
+        session_id="cli:root", login="laptop", requested_path="~/Project"
+    )
+    online = format_remote_workspace_switch_notice(state, reason="restored")
+    assert online.startswith(WORKSPACE_STATUS_PREFIX)
+    assert "已恢复远程工作区绑定" in online
+    offline = format_remote_workspace_switch_notice(state, reason="restored_offline")
+    assert offline.startswith(WORKSPACE_STATUS_PREFIX)
+    assert "离线" in offline
+    assert "/remote-release" in offline
+
+
 def test_remote_prompt_suffix_is_empty_notice_moved_to_history():
     state = activate_remote_workspace(
         session_id="feishu:abc",

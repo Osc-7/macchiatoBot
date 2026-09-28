@@ -53,6 +53,12 @@ class CoreCheckpoint:
     core_profile: Optional[Dict[str, Any]] = None
     # Agent 工作目标（goal_create 等工具维护的会话内计划）
     active_goals: List[Dict[str, Any]] = field(default_factory=list)
+    # 会话内 /model 选择的主对话 provider 名（config.llm.providers 的 key）；
+    # Kernel 重启 / Core 重建后由 CorePool 恢复，目录中已不存在时忽略。
+    preferred_llm_provider: Optional[str] = None
+    # /remote-use 绑定快照（RemoteWorkspaceState.model_dump）；daemon 重启后由 CorePool
+    # 回填内存态，worker 在线时重新 open_workspace。None = 云端工作区。
+    remote_workspace: Optional[Dict[str, Any]] = None
 
 
 class CoreCheckpointManager:
@@ -97,6 +103,10 @@ class CoreCheckpointManager:
             core_profile: Optional[Dict[str, Any]] = None
             if isinstance(raw_profile, dict):
                 core_profile = dict(raw_profile)
+            raw_remote = data.get("remote_workspace")
+            remote_workspace: Optional[Dict[str, Any]] = (
+                dict(raw_remote) if isinstance(raw_remote, dict) and raw_remote else None
+            )
             raw_goals = data.get("active_goals")
             active_goals: List[Dict[str, Any]] = []
             if isinstance(raw_goals, list):
@@ -119,6 +129,12 @@ class CoreCheckpointManager:
                 expired=bool(data.get("expired", False)),
                 core_profile=core_profile,
                 active_goals=active_goals,
+                preferred_llm_provider=(
+                    str(data["preferred_llm_provider"]).strip() or None
+                    if data.get("preferred_llm_provider")
+                    else None
+                ),
+                remote_workspace=remote_workspace,
             )
         except Exception as exc:
             logger.warning("CoreCheckpointManager: read failed (%s): %s", self._path, exc)

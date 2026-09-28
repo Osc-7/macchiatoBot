@@ -411,12 +411,26 @@ class CorePool:
     async def _restore_remote_mcp_if_active(
         self, agent: Any, *, session_id: str
     ) -> None:
-        """若 session 仍绑定远程工作区，重新 attach remote_use MCP 到新 AgentCore。"""
+        """若 session 仍绑定远程工作区且 worker 在线，重新 attach remote_use MCP 到新 AgentCore。
+
+        worker 离线（daemon 重启后 checkpoint 回填但 worker 尚未重连）时跳过：
+        remote MCP 需要经 worker 转发，此时 attach 只会产出一堆失败行。
+        """
         try:
             from agent_core.mcp.session_overlay import get_mcp_session_overlay
+            from agent_core.remote.worker_registry import get_remote_worker_registry
             from agent_core.remote.workspace_state import get_remote_workspace_state
 
-            if get_remote_workspace_state(session_id) is None:
+            state = get_remote_workspace_state(session_id)
+            if state is None:
+                return
+            if await get_remote_worker_registry().get(state.login) is None:
+                logger.info(
+                    "CorePool: remote worker %r offline; skip remote MCP attach "
+                    "(session=%s)",
+                    state.login,
+                    session_id,
+                )
                 return
             await get_mcp_session_overlay().attach_defaults_for_remote_use(
                 agent, session_id=session_id
@@ -424,6 +438,149 @@ class CorePool:
         except Exception:
             logger.debug(
                 "CorePool: remote mcp restore skipped session=%s",
+                session_id,
+                exc_info=True,
+            )
+
+    async def _restore_remote_workspace_from_checkpoint(
+        self,
+        agent: Any,
+        *,
+        session_id: str,
+        raw: Optional[Dict[str, Any]],
+    ) -> None:
+        """daemon 重启后从 checkpoint 回填 /remote-use 绑定。
+
+        - 快照过期 / 非法 → 留在云端工作区，不写通知
+        - 内存已有有效绑定（同进程 TTL 回收后再 acquire）→ 以内存态为准
+        - worker 在线 → 重新 open_workspace 校验；成功回填 resolved_path，刷新技能索引
+          失败 → 释放绑定，回落云端并写 [工作区切换] 通知
+        - worker 离线 → 保留绑定（工具调用会报「远程 worker 未连接」），写离线提示；
+          worker 重连后无需再 /remote-use
+        """
+        if not raw:
+            return
+        try:
+            from agent_core.remote.worker_registry import get_remote_worker_registry
+            from agent_core.remote.workspace_notice import (
+                append_workspace_switch_notice,
+                format_local_workspace_switch_notice,
+                format_remote_workspace_switch_notice,
+            )
+            from agent_core.remote.workspace_state import (
+                get_remote_workspace_state,
+                release_remote_workspace,
+                restore_remote_workspace,
+                update_remote_workspace_resolution,
+            )
+
+            if get_remote_workspace_state(session_id) is not None:
+                return
+            state = restore_remote_workspace(session_id, raw)
+            if state is None:
+                logger.info(
+                    "CorePool._load: checkpoint remote workspace expired/invalid; "
+                    "staying on cloud workspace (session=%s)",
+                    session_id,
+                )
+                return
+
+            registry = get_remote_worker_registry()
+            if await registry.get(state.login) is None:
+                logger.info(
+                    "CorePool._load: restored remote binding login=%r but worker "
+                    "offline (session=%s)",
+                    state.login,
+                    session_id,
+                )
+                append_workspace_switch_notice(
+                    agent,
+                    format_remote_workspace_switch_notice(
+                        state, reason="restored_offline"
+                    ),
+                    persist=False,
+                )
+                return
+
+            try:
+                opened = await registry.open_workspace(
+                    login=state.login,
+                    session_id=session_id,
+                    requested_path=state.requested_path,
+                    profile=state.profile,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "CorePool._load: reopen remote workspace failed login=%r "
+                    "(session=%s): %s",
+                    state.login,
+                    session_id,
+                    exc,
+                )
+                release_remote_workspace(session_id)
+                append_workspace_switch_notice(
+                    agent,
+                    format_local_workspace_switch_notice(previous=state)
+                    + f"\n原因: daemon 重启后重新打开远程工作区失败: {exc}",
+                    persist=True,
+                )
+                return
+
+            state = (
+                update_remote_workspace_resolution(
+                    session_id,
+                    resolved_path=opened.resolved_path,
+                    device_label=opened.device_label,
+                )
+                or state
+            )
+
+            skill_count: Optional[int] = None
+            try:
+                from agent_core.remote.skills_index import (
+                    refresh_remote_skills_best_effort,
+                )
+                from agent_core.remote.workspace_state import (
+                    get_remote_workspace_skills_index,
+                )
+
+                enabled = list(
+                    getattr(self._config.skills, "enabled", None) or []
+                ) or None
+                await refresh_remote_skills_best_effort(
+                    session_id=session_id, login=state.login, enabled=enabled
+                )
+                idx = get_remote_workspace_skills_index(session_id)
+                if idx:
+                    skill_count = sum(
+                        1
+                        for line in idx.splitlines()
+                        if line.strip().startswith("- **")
+                    )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "CorePool._load: remote skills refresh skipped (session=%s)",
+                    session_id,
+                    exc_info=True,
+                )
+
+            append_workspace_switch_notice(
+                agent,
+                format_remote_workspace_switch_notice(
+                    state, reason="restored", skill_count=skill_count
+                ),
+                persist=False,
+            )
+            logger.info(
+                "CorePool._load: restored remote workspace login=%r path=%r "
+                "(session=%s)",
+                state.login,
+                state.resolved_path or state.requested_path,
+                session_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "CorePool._load: remote workspace restore failed (session=%s)",
                 session_id,
                 exc_info=True,
             )
@@ -646,6 +803,9 @@ class CorePool:
         # ── Step 2.5: remote workspace / MCP cleanup（可选）────────────────
         # Core TTL 空闲回收 ≠ 用户结束远程：远程状态独立于 CorePool，应跨 evict 保持，
         # 下次 acquire 再挂回 remote MCP。仅在 daemon 停机或调用方显式要求时释放。
+        # shutdown 路径：上方 flush_checkpoint_for_shutdown 已把绑定快照写进 checkpoint
+        # （remote_workspace 字段），这里只是关闭 worker 侧 shell 并清内存态；
+        # 下次 daemon 启动由 CorePool._load 回填并重新 open_workspace。切勿把 flush 挪到本步之后。
         should_release_remote = shutdown if release_remote is None else release_remote
         if should_release_remote:
             try:
@@ -1384,6 +1544,10 @@ class CorePool:
 
             # Core TTL 过期后仍保留 active_goals，冷启动时写回 GoalStore。
             salvaged_goals: Optional[List[Dict[str, Any]]] = None
+            # checkpoint 中记录的会话 /model 选择；恢复后若内存无预选则沿用
+            checkpoint_preferred: Optional[str] = None
+            # checkpoint 中的 /remote-use 绑定快照；daemon 重启后回填内存态
+            checkpoint_remote: Optional[Dict[str, Any]] = None
 
             if use_checkpoint:
                 try:
@@ -1466,6 +1630,12 @@ class CorePool:
                                     restored_from_checkpoint = True
                                     initial_ttl_offset = elapsed
                                     salvaged_goals = None
+                                    checkpoint_preferred = getattr(
+                                        checkpoint, "preferred_llm_provider", None
+                                    )
+                                    checkpoint_remote = getattr(
+                                        checkpoint, "remote_workspace", None
+                                    )
                                     logger.info(
                                         "CorePool._load: restored checkpoint for session=%s "
                                         "(elapsed=%.0fs, remaining=%.0fs)",
@@ -1508,6 +1678,35 @@ class CorePool:
                             )
 
             preferred = self.get_session_preferred_llm_provider(session_id)
+            if not preferred and checkpoint_preferred:
+                # 仅当该 provider 仍在当前目录中才恢复；目录已删则静默回落默认
+                prov_map = getattr(self._config.llm, "providers", None) or {}
+                if str(checkpoint_preferred) in prov_map:
+                    try:
+                        self.set_session_preferred_llm_provider(
+                            session_id, str(checkpoint_preferred)
+                        )
+                        preferred = self.get_session_preferred_llm_provider(session_id)
+                        logger.info(
+                            "CorePool._load: restored preferred LLM provider %r from "
+                            "checkpoint (session=%s)",
+                            checkpoint_preferred,
+                            session_id,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "CorePool._load: restore preferred LLM from checkpoint "
+                            "failed (session=%s): %s",
+                            session_id,
+                            exc,
+                        )
+                else:
+                    logger.info(
+                        "CorePool._load: checkpoint preferred LLM %r no longer in "
+                        "catalog; using default (session=%s)",
+                        checkpoint_preferred,
+                        session_id,
+                    )
             if preferred:
                 sw = getattr(agent, "switch_model", None)
                 if callable(sw):
@@ -1521,6 +1720,11 @@ class CorePool:
                             session_id,
                             exc,
                         )
+
+            if checkpoint_remote:
+                await self._restore_remote_workspace_from_checkpoint(
+                    agent, session_id=session_id, raw=checkpoint_remote
+                )
 
             # 将 TTL 偏移量附到返回值，供 CorePool.acquire() 修正 CoreEntry 时间戳
             agent._checkpoint_ttl_offset = initial_ttl_offset  # type: ignore[attr-defined]

@@ -170,6 +170,7 @@ CLI and Feishu share the same slash-command surface through daemon IPC:
 
 - `/help`
 - `/model`, `/model list`, `/model <name>`
+- `/model add <name> --base-url … --model … [--switch]` (register a provider at runtime, persisted to `providers.d/_runtime.yaml`), `/model reload` (re-read the model catalog from disk; the daemon also auto-reloads on file changes)
 - `/session`, `/session whoami`, `/session list`
 - `/session new [id]`, `/session switch <id>`, `/session delete <id>`
 - `/remote-use <login> [path]`

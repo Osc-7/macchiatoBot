@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -166,9 +167,7 @@ async def test_run_turn_stream_client_disconnect_buffers_recoverable_result(
         DisconnectingWriter(),  # type: ignore[arg-type]
     )
 
-    data = await server._dispatch(
-        "poll_stream_recoveries", {"client_id": "client-a"}
-    )
+    data = await server._dispatch("poll_stream_recoveries", {"client_id": "client-a"})
     assert data["results"] == [
         {
             "request_id": "req-1",
@@ -231,9 +230,7 @@ async def test_stream_recoveries_isolated_per_client_id(tmp_path: Path):
         DisconnectingWriter(),  # type: ignore[arg-type]
     )
 
-    alice = await server._dispatch(
-        "poll_stream_recoveries", {"client_id": "client-a"}
-    )
+    alice = await server._dispatch("poll_stream_recoveries", {"client_id": "client-a"})
     assert alice["results"] == [
         {
             "request_id": "req-a",
@@ -244,9 +241,7 @@ async def test_stream_recoveries_isolated_per_client_id(tmp_path: Path):
         }
     ]
 
-    bob = await server._dispatch(
-        "poll_stream_recoveries", {"client_id": "client-b"}
-    )
+    bob = await server._dispatch("poll_stream_recoveries", {"client_id": "client-b"})
     assert bob["results"] == [
         {
             "request_id": "req-b",
@@ -260,6 +255,50 @@ async def test_stream_recoveries_isolated_per_client_id(tmp_path: Path):
     assert await server._dispatch(
         "poll_stream_recoveries", {"client_id": "client-a"}
     ) == {"results": []}
+
+
+@pytest.mark.asyncio
+async def test_run_turn_stream_keepalive_survives_idle_gap(monkeypatch, tmp_path: Path):
+    """无 delta 的长等待应靠 keepalive 撑过客户端 readline 空闲超时。"""
+    import system.automation.ipc as ipc_mod
+
+    monkeypatch.setattr(ipc_mod, "_STREAM_KEEPALIVE_INTERVAL_SECONDS", 0.05)
+
+    class Gateway:
+        async def inject_message(self, command, hooks=None):  # type: ignore[no-untyped-def]
+            _ = command
+            _ = hooks
+            await asyncio.sleep(0.4)
+            return AgentRunResult(output_text="slow-ok")
+
+        def get_token_usage(self, *, session_id: str) -> dict:
+            _ = session_id
+            return {}
+
+        def get_turn_count(self, *, session_id: str) -> int:
+            _ = session_id
+            return 1
+
+    socket_path = str(tmp_path / "automation.sock")
+    server = AutomationIPCServer(
+        Gateway(),  # type: ignore[arg-type]
+        owner_id="root",
+        source="cli",
+        socket_path=socket_path,
+    )
+    await server.start()
+    client = AutomationIPCClient(
+        owner_id="root",
+        source="cli",
+        socket_path=socket_path,
+        timeout_seconds=0.15,
+    )
+    try:
+        result = await client.run_turn(AgentRunInput(text="hello"))
+        assert result.output_text == "slow-ok"
+    finally:
+        await client.close()
+        await server.stop()
 
 
 @pytest.mark.asyncio
@@ -505,3 +544,35 @@ async def test_ipc_dispatch_resolve_remote_login_feishu(monkeypatch, tmp_path: P
     assert captured["request_id"] == "dc-001"
     assert captured["approve"] is True
     assert captured["approver_open_id"] == "ou_x"
+
+
+@pytest.mark.asyncio
+async def test_ipc_dispatch_model_add_and_reload(tmp_path: Path):
+    """model_add 把 /model add 全文与当前会话转给 gateway；model_reload 直接委托。"""
+    gateway = MagicMock()
+    gateway.model_add = MagicMock(
+        return_value={"registered": [{"name": "glm52"}], "persisted": True}
+    )
+    gateway.reload_models = MagicMock(
+        return_value={"generation": 2, "added": ["glm52"], "removed": [], "changed": []}
+    )
+    server = AutomationIPCServer(
+        gateway,  # type: ignore[arg-type]
+        owner_id="root",
+        source="cli",
+        socket_path=str(tmp_path / "unused.sock"),
+    )
+
+    res = await server._dispatch(
+        "model_add", {"client_id": "c1", "args": "add glm52 -u https://g/v1 -m glm-5.2"}
+    )
+    assert res["ok"] is True
+    assert res["result"]["registered"][0]["name"] == "glm52"
+    gateway.model_add.assert_called_once_with(
+        "add glm52 -u https://g/v1 -m glm-5.2", session_id="cli:root"
+    )
+
+    res2 = await server._dispatch("model_reload", {"client_id": "c1"})
+    assert res2["ok"] is True
+    assert res2["result"]["generation"] == 2
+    gateway.reload_models.assert_called_once_with()

@@ -95,11 +95,15 @@ def package_version() -> str:
 
 
 def worker_hello_payload() -> Dict[str, Any]:
+    """Handshake facts. ``default_workspace`` is the directory where this process started."""
     return {
         "type": "worker_hello",
         "protocol_version": REMOTE_PROTOCOL_VERSION,
         "capabilities": list(REMOTE_WORKER_CAPABILITIES),
         "package_version": package_version(),
+        "device_label": platform.node() or "",
+        "os": platform.system() or "",
+        "default_workspace": str(Path.cwd().resolve()),
     }
 
 

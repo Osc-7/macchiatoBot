@@ -316,9 +316,13 @@ class AutomationIPCServer:
             # Pass IPC stream forward functions through metadata to the scheduler,
             # where ContextVars will be properly restored (scheduler dispatches via
             # create_task which does NOT inherit ContextVars from this scope).
+            async def _forward_workspace_notice(message: str) -> None:
+                await _send_event("workspace_notice", {"message": message})
+
             meta_dict["_ipc_ask_user_forward"] = _forward_ask_user_stream
             meta_dict["_ipc_permission_forward"] = _forward_permission_stream
             meta_dict["_ipc_permission_session_id"] = active_session
+            meta_dict["_ipc_workspace_notice_forward"] = _forward_workspace_notice
 
             result = await self._gateway.inject_message(
                 InjectMessageCommand(
@@ -1395,6 +1399,14 @@ class AutomationIPCClient:
                     )
                     if fn and pid and isinstance(pl, dict):
                         maybe = fn(pid, pl)
+                        if inspect.isawaitable(maybe):
+                            await maybe
+                    continue
+                if event_type == "workspace_notice":
+                    msg = str(payload.get("message") or "").strip()
+                    fn = getattr(hooks, "on_workspace_notice", None) if hooks else None
+                    if fn and msg:
+                        maybe = fn(msg)
                         if inspect.isawaitable(maybe):
                             await maybe
                     continue

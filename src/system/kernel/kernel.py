@@ -107,6 +107,9 @@ class AgentKernel:
 
         on_signal: 每次收到 ReturnAction 或 ToolCallAction 时调用，用于刷新 TTL 等。
         """
+        from agent_core.remote.workspace_switch import bind_kernel_agent
+
+        bind_kernel_agent(agent)
         gen = agent.run_loop(turn_id=turn_id, hooks=hooks)
         action: KernelAction = await gen.__anext__()
         tool_names_called: set[str] = set()
@@ -186,6 +189,22 @@ class AgentKernel:
                         data=None,
                     )
                 else:
+                    if action.tool_name == "switch_workspace":
+                        from agent_core.remote.workspace_switch import (
+                            kernel_admit_workspace_request,
+                        )
+                        from agent_core.tools.base import ToolResult as _ToolResult
+
+                        denied = kernel_admit_workspace_request(parsed_args)
+                        if isinstance(denied, _ToolResult):
+                            result = denied
+                            action = await gen.asend(
+                                ToolResultEvent(
+                                    tool_call_id=action.tool_call_id,
+                                    result=result,
+                                )
+                            )
+                            continue
                     # 注入执行上下文：让 bash / file_tools 等能感知当前 CoreProfile。
                     profile_mode = (
                         profile.effective_permission_mode()

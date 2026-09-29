@@ -314,6 +314,22 @@ class RemoteWorkerRegistry:
         key = (login or "").strip()
         return bool(key) and key in self._connections
 
+    def connected_snapshots(self) -> list[dict[str, str]]:
+        """在线 worker 的 login / 设备 / 启动目录快照。不含 token。"""
+        rows: list[dict[str, str]] = []
+        for login, conn in list(self._connections.items()):
+            meta = dict(getattr(conn, "hello_meta", None) or {})
+            rows.append(
+                {
+                    "login": login,
+                    "device_label": str(meta.get("device_label") or ""),
+                    "default_workspace": str(meta.get("default_workspace") or ""),
+                    "os": str(meta.get("os") or ""),
+                }
+            )
+        rows.sort(key=lambda row: row["login"])
+        return rows
+
     async def require(self, login: str) -> RemoteWorkerConnection:
         conn = await self.get(login)
         if conn is None:

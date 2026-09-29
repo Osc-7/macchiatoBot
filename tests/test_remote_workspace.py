@@ -200,7 +200,9 @@ def test_format_local_workspace_switch_notice():
     )
     notice = format_local_workspace_switch_notice(previous=prev)
     assert notice.startswith(WORKSPACE_SWITCH_PREFIX)
-    assert "后端: local" in notice
+    assert "后端: daemon" in notice
+    assert "daemon 主机:" in notice
+    assert "已回到 daemon 所在机器" in notice
     assert "personal" in notice
 
 

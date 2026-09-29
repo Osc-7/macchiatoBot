@@ -358,6 +358,10 @@ async def test_try_handle_slash_command_remote_use():
             "requested_path": "~/Project",
             "profile": "dev",
             "workspace_mount": "/workspace",
+            "frontend_message": (
+                "macchiatoBot 已将工作区切换至 personal（personal），"
+                "工作目录 ~/Project，权限档位 dev。"
+            ),
         }
     )
     handled, reply = await try_handle_slash_command(
@@ -365,7 +369,8 @@ async def test_try_handle_slash_command_remote_use():
     )
     assert handled is True
     assert reply is not None
-    assert "远程工作区已启用" in reply
+    assert "macchiatoBot 已将工作区切换至 personal" in reply
+    assert "工作目录 ~/Project" in reply
     assert "personal" in reply
     client.remote_workspace_use.assert_awaited_once_with(
         login="personal",
@@ -394,7 +399,7 @@ async def test_try_handle_slash_command_remote_release():
     )
     handled, reply = await try_handle_slash_command(client, "/remote-release")
     assert handled is True
-    assert "已释放" in (reply or "")
+    assert "macchiatoBot 已将工作区切换回 daemon" in (reply or "")
 
 
 @pytest.mark.asyncio

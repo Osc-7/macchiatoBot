@@ -1086,6 +1086,7 @@ class ToolsConfig(BaseModel):
             "memory_update",
             "list_scheduled_jobs",
             "delete_scheduled_job",
+            "switch_workspace",
         ],
         description="默认模板在 exposure=pinned 时额外始终暴露给 LLM 的工具名列表",
     )

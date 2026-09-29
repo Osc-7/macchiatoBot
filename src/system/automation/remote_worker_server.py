@@ -620,6 +620,9 @@ def create_remote_worker_app(*, token: Optional[str] = None) -> FastAPI:
                         "protocol_version": parsed.get("protocol_version"),
                         "package_version": parsed.get("package_version"),
                         "capabilities": list(parsed.get("capabilities") or []),
+                        "device_label": str(parsed.get("device_label") or ""),
+                        "os": str(parsed.get("os") or ""),
+                        "default_workspace": str(parsed.get("default_workspace") or ""),
                     }
                     logger.info(
                         "remote worker hello: login=%s protocol=%s package=%s caps=%s",

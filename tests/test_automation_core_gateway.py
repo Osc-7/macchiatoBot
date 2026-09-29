@@ -695,6 +695,34 @@ def test_reload_models_delegates_to_catalog(tmp_path, monkeypatch):
     assert calls["config"] is minimal
 
 
+@pytest.mark.asyncio
+async def test_remote_workspace_use_rejects_shuiyuan(tmp_path, monkeypatch):
+    opened = {"n": 0}
+
+    async def _open(**kwargs):
+        opened["n"] += 1
+        return MagicMock(resolved_path="/srv/work", device_label="box")
+
+    registry = MagicMock()
+    registry.open_workspace = AsyncMock(side_effect=_open)
+    monkeypatch.setattr(
+        "agent_core.remote.worker_registry.get_remote_worker_registry",
+        lambda: registry,
+    )
+    gateway = _make_gateway(
+        tmp_path,
+        session_id="shuiyuan:alice",
+        source="shuiyuan",
+    )
+    with pytest.raises(ValueError, match="无权切换工作区"):
+        await gateway.remote_workspace_use(
+            session_id="shuiyuan:alice",
+            login="work",
+            requested_path="/srv/work",
+        )
+    assert opened["n"] == 0
+
+
 def test_remote_workspace_status_reports_worker_online(tmp_path, monkeypatch):
     """/remote-status 附带 worker_online：绑定可跨重启持久化，在线态以 WS 连接为准。"""
     from agent_core.remote.workspace_state import (

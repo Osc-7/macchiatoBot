@@ -1647,6 +1647,25 @@ function makeMessage(role) {
   return wrap;
 }
 
+function appendWorkspaceNotice(ctx, message) {
+  const text = (message || "").trim();
+  if (!text) return;
+  const wrap = makeMessage("assistant");
+  wrap.innerHTML = `
+    <div class="bubble system">
+      <span class="role">workspace</span>
+      <div class="body"></div>
+    </div>
+  `;
+  wrap.querySelector(".body").textContent = text;
+  if (ctx && ctx.wrap && ctx.wrap.parentNode) {
+    ctx.wrap.parentNode.insertBefore(wrap, ctx.wrap);
+  } else {
+    chatWindow.appendChild(wrap);
+  }
+  chatWindow.scrollTop = chatWindow.scrollHeight;
+}
+
 function makeUserBubble(text) {
   const wrap = makeMessage("user");
   const bubble = document.createElement("div");
@@ -2057,6 +2076,9 @@ async function streamChat(text, sessionId, ctx) {
             break;
           case "ask_user":
             addAskUserRequest(ctx, event);
+            break;
+          case "workspace_notice":
+            appendWorkspaceNotice(ctx, event.message || "");
             break;
           case "system": {
             ctx.bubble.classList.remove("assistant");

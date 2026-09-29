@@ -363,8 +363,10 @@ def _format_remote_state(state: Dict[str, Any]) -> str:
         )
     elif online is True:
         worker_line = "worker: 在线\n"
+    headline = str(state.get("frontend_message") or "").strip()
+    title = headline or "远程工作区已启用"
     return (
-        "远程工作区已启用\n"
+        f"{title}\n"
         f"登录: {login}\n"
         f"权限档位: {profile}\n"
         f"工作区: {mount} -> {path}\n"
@@ -550,7 +552,10 @@ async def try_handle_slash_command(
             return True, f"释放远程工作区失败: {exc}"
         released = bool(res.get("released")) if isinstance(res, dict) else False
         if released:
-            return True, "已释放远程工作区，当前会话将恢复云端工作区模式。"
+            note = ""
+            if isinstance(res, dict):
+                note = str(res.get("frontend_message") or "").strip()
+            return True, note or "macchiatoBot 已将工作区切换回 daemon。"
         return True, "当前会话未启用远程工作区。"
 
     if cmd_lower == "mcp" or cmd_lower.startswith("mcp "):

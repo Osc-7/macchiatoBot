@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import logging
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from typing import Any, Awaitable, Callable, Optional
 
 from macchiato_remote.protocol import RemoteWorkspaceState
+
+logger = logging.getLogger(__name__)
+
+_workspace_switch_frontend_notify: ContextVar[
+    Optional[Callable[[str], Awaitable[None]]]
+] = ContextVar("workspace_switch_frontend_notify", default=None)
 
 WORKSPACE_SWITCH_PREFIX = "[工作区切换]"
 WORKSPACE_STATUS_PREFIX = "[工作区]"
@@ -99,26 +108,94 @@ daemon 重启后已恢复远程工作区绑定，但远程 worker 当前离线
 """.strip()
 
 
+def format_daemon_host_lines() -> str:
+    """本进程所在机器的运行时描述。每次调用现算，不写死主机名。"""
+    import platform
+
+    hostname = (platform.node() or "").strip() or "unknown"
+    system = (platform.system() or "").strip() or "unknown"
+    release = (platform.release() or "").strip()
+    machine = (platform.machine() or "").strip()
+    system_line = f"{system} {release}".strip()
+    if machine:
+        system_line = f"{system_line} ({machine})"
+    return f"daemon 主机: {hostname}\ndaemon 系统: {system_line}"
+
+
 def format_local_workspace_switch_notice(
     *,
     previous: Optional[RemoteWorkspaceState] = None,
 ) -> str:
-    """Notice when releasing remote mode and returning to the local/cloud workspace."""
+    """Notice when releasing remote mode and returning to the daemon machine."""
     prev_line = ""
     if previous is not None:
         prev_line = (
             f"\n已释放远程: login={previous.login}, "
             f"path={previous.display_remote_path}"
         )
+    host = format_daemon_host_lines()
     return f"""{WORKSPACE_SWITCH_PREFIX}
-已回到本地 / 云端工作区
-后端: local{prev_line}
+已回到 daemon 所在机器
+后端: daemon
+{host}{prev_line}
 
 说明:
-- bash / 文件工具 / load_skill 恢复为当前会话的本地工作区。
-- 技能查找: `.macchiato/skills` → `.agents/skills`。
+- bash / 文件工具 / load_skill 现在作用在上面这台 daemon 上，不是远程 worker。
+- 技能查找: `.macchiato/skills` → `.agents/skills`（daemon 本机）。
 - 长期记忆仍按 memory_owner 映射到 daemon 侧 MEMORY.md。
 """.strip()
+
+
+def format_frontend_remote_switch_message(state: RemoteWorkspaceState) -> str:
+    """给用户看的一行切换说明，不含写进仓库的机器名。"""
+    device = (state.device_label or state.login or "").strip() or state.login
+    path = state.display_remote_path
+    return (
+        f"macchiatoBot 已将工作区切换至 {device}（{state.login}），"
+        f"工作目录 {path}，权限档位 {state.profile}。"
+    )
+
+
+def format_frontend_daemon_switch_message(
+    *,
+    previous: Optional[RemoteWorkspaceState] = None,
+    workspace_dir: str = "",
+) -> str:
+    """切回 daemon 时推给前端的一行说明。"""
+    host_line = format_daemon_host_lines().splitlines()[0]
+    hostname = host_line.split(":", 1)[-1].strip() if ":" in host_line else host_line
+    directory = f"，工作目录 {workspace_dir}" if (workspace_dir or "").strip() else ""
+    left = ""
+    if previous is not None:
+        device = (previous.device_label or previous.login or "").strip()
+        left = f" 已离开 {device or previous.login}。"
+    return f"macchiatoBot 已将工作区切换回 daemon（{hostname}）{directory}。{left}".strip()
+
+
+@asynccontextmanager
+async def workspace_switch_notify_scope(
+    forward: Callable[[str], Awaitable[None]],
+):
+    """run_turn_stream 期间挂上，把切换说明写回当前前端。"""
+    token = _workspace_switch_frontend_notify.set(forward)
+    try:
+        yield
+    finally:
+        _workspace_switch_frontend_notify.reset(token)
+
+
+async def notify_workspace_switch_frontend(message: str) -> None:
+    """若当前轮有前端流，推送一条用户可见的工作区切换说明。没有流则跳过。"""
+    text = (message or "").strip()
+    if not text:
+        return
+    forward = _workspace_switch_frontend_notify.get()
+    if forward is None:
+        return
+    try:
+        await forward(text)
+    except Exception:  # noqa: BLE001
+        logger.warning("workspace switch frontend notify failed", exc_info=True)
 
 
 def append_workspace_switch_notice(

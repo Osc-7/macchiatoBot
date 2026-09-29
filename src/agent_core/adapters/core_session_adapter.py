@@ -255,6 +255,14 @@ class CoreSessionAdapter:
                 if inspect.isawaitable(maybe):
                     await maybe
 
+        notice_fn = hooks.on_workspace_notice
+
+        async def on_workspace_notice(message: str) -> None:
+            if notice_fn:
+                maybe = notice_fn(message)
+                if inspect.isawaitable(maybe):
+                    await maybe
+
         return AgentHooks(
             on_assistant_delta=on_assistant_delta,
             on_reasoning_delta=on_reasoning_delta,
@@ -264,6 +272,8 @@ class CoreSessionAdapter:
             on_feishu_permission_notify=(
                 on_feishu_permission_notify if perm_fn else None
             ),
+            on_outgoing_attachment=hooks.on_outgoing_attachment,
+            on_workspace_notice=on_workspace_notice if notice_fn else None,
         )
 
     async def finalize_session(self):

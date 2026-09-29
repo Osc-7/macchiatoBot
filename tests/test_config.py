@@ -127,6 +127,7 @@ class TestConfigModels:
         assert "read_file" in config.pinned_tools
         assert "list_scheduled_jobs" in config.pinned_tools
         assert "delete_scheduled_job" in config.pinned_tools
+        assert "switch_workspace" in config.pinned_tools
         assert config.templates["default"].exposure == "pinned"
         assert "shuiyuan_browse_topic" in config.templates["shuiyuan"].extra
 
@@ -136,6 +137,8 @@ class TestConfigModels:
         assert profile.mode == "full"
         assert profile.allowed_tools is None
         assert profile.frontend_id == "shuiyuan"
+        assert profile.allow_workspace_switch is False
+        assert profile.is_tool_allowed("switch_workspace") is False
         assert profile.dialog_window_id == "alice"
 
     def test_full_config(self):

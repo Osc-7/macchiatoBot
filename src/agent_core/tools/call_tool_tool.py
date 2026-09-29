@@ -112,6 +112,16 @@ class CallToolTool(BaseTool):
             name, arguments, get_config()
         )
 
+        if name == "switch_workspace":
+            from agent_core.remote.workspace_switch import (
+                kernel_admit_workspace_request,
+            )
+
+            denied = kernel_admit_workspace_request(arguments)
+            if denied is not None:
+                denied.metadata["_delegated_tool_name"] = name
+                return denied
+
         result = await self._registry.execute(name, **arguments)
         result.metadata["_delegated_tool_name"] = name
         return result

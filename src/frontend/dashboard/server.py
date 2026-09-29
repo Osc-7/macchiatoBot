@@ -827,6 +827,11 @@ class DashboardBackend:
                     }
                 )
 
+            async def _on_workspace_notice(message: str) -> None:
+                text = (message or "").strip()
+                if text:
+                    await queue.put({"type": "workspace_notice", "message": text})
+
             async def _on_ask_user_notify(
                 batch_id: str, payload: Dict[str, Any]
             ) -> None:
@@ -849,6 +854,7 @@ class DashboardBackend:
                 on_trace_event=_on_trace_event,
                 on_feishu_permission_notify=_on_permission_notify,
                 on_feishu_ask_user_notify=_on_ask_user_notify,
+                on_workspace_notice=_on_workspace_notice,
             )
 
             holder: Dict[str, Any] = {"result": None, "error": None}

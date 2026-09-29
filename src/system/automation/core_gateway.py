@@ -1029,6 +1029,27 @@ class AutomationCoreGateway:
             enabled = bool(getattr(entry.profile, "approval_bypass_enabled", False))
         return {"session_id": sid, "dangerous_mode_enabled": enabled}
 
+    def _reject_workspace_switch(self, session_id: str) -> None:
+        """水源、定时任务等会话不能改远程绑定。"""
+        from agent_core.kernel_interface.profile import may_switch_workspace
+
+        sid = (session_id or "").strip()
+        entry = None
+        pool = getattr(self._kernel_scheduler, "core_pool", None)
+        if pool is not None and sid:
+            try:
+                entry = pool.get_entry(sid)
+            except Exception:  # noqa: BLE001
+                entry = None
+        profile = getattr(entry, "profile", None) if entry is not None else None
+        agent = getattr(entry, "agent", None) if entry is not None else None
+        source = str(getattr(agent, "_source", "") or self._source or "")
+        if may_switch_workspace(profile, source=source, session_id=sid):
+            return
+        raise ValueError(
+            "当前会话无权切换工作区。水源、定时任务等 Core 不能使用 /remote-use 或 /remote-release。"
+        )
+
     async def remote_workspace_use(
         self,
         *,
@@ -1049,6 +1070,7 @@ class AutomationCoreGateway:
         from agent_core.remote.workspace_state import get_remote_workspace_skills_index
 
         sid = session_id or self._active_session_id
+        self._reject_workspace_switch(sid)
         prof = (
             profile
             if profile in {"strict", "dev", "host-user", "host-admin"}
@@ -1134,8 +1156,18 @@ class AutomationCoreGateway:
                 sid,
                 exc_info=True,
             )
+        from agent_core.remote.workspace_notice import (
+            format_frontend_remote_switch_message,
+            notify_workspace_switch_frontend,
+        )
+
+        await notify_workspace_switch_frontend(
+            format_frontend_remote_switch_message(state)
+        )
         self.mark_activity(sid)
-        return state.model_dump()
+        payload = state.model_dump()
+        payload["frontend_message"] = format_frontend_remote_switch_message(state)
+        return payload
 
     def remote_workspace_status(
         self, session_id: Optional[str] = None
@@ -1170,6 +1202,7 @@ class AutomationCoreGateway:
         )
 
         sid = session_id or self._active_session_id
+        self._reject_workspace_switch(sid)
         agent = None
         try:
             agent = await self._kernel_scheduler.core_pool.acquire(
@@ -1216,10 +1249,29 @@ class AutomationCoreGateway:
                     sid,
                     exc_info=True,
                 )
+        frontend_message = ""
+        if old is not None:
+            from agent_core.remote.workspace_notice import (
+                format_frontend_daemon_switch_message,
+                notify_workspace_switch_frontend,
+            )
+
+            from agent_core.remote.workspace_switch import (
+                _session_daemon_workspace_root,
+            )
+
+            workspace_dir = (
+                _session_daemon_workspace_root(agent) if agent is not None else ""
+            )
+            frontend_message = format_frontend_daemon_switch_message(
+                previous=old, workspace_dir=workspace_dir
+            )
+            await notify_workspace_switch_frontend(frontend_message)
         self.mark_activity(sid)
         return {
             "released": old is not None,
             "state": old.model_dump() if old is not None else None,
+            "frontend_message": frontend_message,
         }
 
     async def mcp_list(self, session_id: Optional[str] = None) -> Dict[str, Any]:

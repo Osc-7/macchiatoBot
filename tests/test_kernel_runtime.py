@@ -555,7 +555,8 @@ async def test_restore_remote_workspace_from_checkpoint_reopen_failure_falls_bac
     assert get_remote_workspace_state("cli:root") is None
     msgs = agent._context.get_messages()
     assert len(msgs) == 1
-    assert "已回到本地 / 云端工作区" in msgs[0]["content"]
+    assert "已回到 daemon 所在机器" in msgs[0]["content"]
+    assert "后端: daemon" in msgs[0]["content"]
     assert "path denied" in msgs[0]["content"]
 
 

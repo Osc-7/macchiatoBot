@@ -292,6 +292,18 @@ async def _run_subagent_task(
             profile.allow_dangerous_commands = bool(
                 parent_prof.allow_dangerous_commands
             ) or allow_run_for_subagent
+    parent_entry_for_switch = core_pool.get_entry(parent_session_id)
+    parent_prof_for_switch = (
+        parent_entry_for_switch.profile
+        if parent_entry_for_switch is not None
+        else None
+    )
+    if parent_prof_for_switch is None:
+        profile.allow_workspace_switch = False
+    else:
+        profile.allow_workspace_switch = bool(
+            getattr(parent_prof_for_switch, "allow_workspace_switch", True)
+        )
     # 24h TTL 保护（任务完成后主动 evict，不依赖 TTL 扫描）
     profile.session_expired_seconds = 86400
 

@@ -27,6 +27,45 @@ if TYPE_CHECKING:
 
 CHECKPOINT_CORE_PROFILE_FORMAT = 1
 
+_WORKSPACE_SWITCH_DENIED_SOURCES = frozenset({"shuiyuan", "cron", "heartbeat"})
+_WORKSPACE_SWITCH_DENIED_FRONTENDS = frozenset({"shuiyuan"})
+_WORKSPACE_SWITCH_DENIED_TEMPLATES = frozenset({"shuiyuan", "cron"})
+
+
+def may_switch_workspace(
+    profile: Optional["CoreProfile"] = None,
+    *,
+    source: str = "",
+    session_id: str = "",
+) -> bool:
+    """当前会话能否执行 /remote-use、/remote-release 或 switch_workspace。
+
+    主人直接使用的 CLI、飞书、Dashboard 可以。水源、定时任务，以及显式关闭
+    ``allow_workspace_switch`` 的 Core 不可以。没有身份信息时不额外拒绝，
+    方便尚未绑定会话的内部调用。
+    """
+    src = (source or "").strip().lower()
+    sid = (session_id or "").strip().lower()
+    frontend = ""
+    template = ""
+    mode = ""
+    allowed = True
+    if profile is not None:
+        frontend = str(getattr(profile, "frontend_id", "") or "").strip().lower()
+        template = str(getattr(profile, "tool_template", "") or "").strip().lower()
+        mode = str(getattr(profile, "mode", "") or "").strip().lower()
+        allowed = bool(getattr(profile, "allow_workspace_switch", True))
+    if (
+        src in _WORKSPACE_SWITCH_DENIED_SOURCES
+        or frontend in _WORKSPACE_SWITCH_DENIED_FRONTENDS
+        or template in _WORKSPACE_SWITCH_DENIED_TEMPLATES
+        or sid.startswith("shuiyuan:")
+        or sid.startswith("cron:")
+        or mode == "background"
+    ):
+        return False
+    return allowed
+
 
 def _resolve_tool_template_config(
     *,
@@ -128,6 +167,9 @@ class CoreProfile:
     dialog_window_id: str = ""
     tool_template: str = "default"
     tool_exposure_mode: Literal["pinned", "empty"] = "pinned"
+    # 能否把本会话的工具执行切到远程 worker。主人直接使用的 CLI / 飞书 / Dashboard 为 True。
+    # 水源、定时任务等对外或无人值守 Core 为 False；旧 checkpoint 缺该字段时按来源再判一次。
+    allow_workspace_switch: bool = True
 
     def effective_permission_mode(self) -> str:
         """用于 bash / 文件工具 / 审批等安全边界的模式（可与 mode 解耦）。"""
@@ -148,6 +190,10 @@ class CoreProfile:
         _CORE_TOOLS = {"search_tools", "call_tool", "bash", "request_permission", "ask_user"}
 
         if tool_name in self.deny_tools:
+            return False
+        if tool_name == "switch_workspace" and not may_switch_workspace(
+            self, source=self.frontend_id
+        ):
             return False
         if tool_name in _CORE_TOOLS:
             return True
@@ -282,6 +328,7 @@ class CoreProfile:
         return cls(
             mode="background",
             allowed_tools=allowed_tools,
+            allow_workspace_switch=False,
             allow_dangerous_commands=False,
             visible_memory_scopes=["long_term"],
             memory_enabled=False,
@@ -312,6 +359,7 @@ class CoreProfile:
             mode="full",
             allowed_tools=None,
             allow_dangerous_commands=True,
+            allow_workspace_switch=False,
             # 为每个水源用户名维护独立记忆与工作区命名空间
             frontend_id="shuiyuan",
             dialog_window_id=dialog_window_id,

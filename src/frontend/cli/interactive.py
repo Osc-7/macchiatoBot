@@ -383,8 +383,10 @@ def _format_remote_state_cli(state: dict[str, Any]) -> str:
         )
     elif online is True:
         worker_line = "\nworker: 在线"
+    headline = str(state.get("frontend_message") or "").strip()
+    title = headline or "远程工作区已启用"
     return (
-        "远程工作区已启用\n"
+        f"{title}\n"
         f"登录: {login}\n"
         f"权限档位: {profile}\n"
         f"工作区: {mount} -> {path}"
@@ -900,7 +902,16 @@ async def run_interactive_loop(agent: Any) -> str:
                 else:
                     released = bool(res.get("released")) if isinstance(res, dict) else False
                     if released:
-                        print(hint("  已释放远程工作区，当前会话将恢复云端工作区模式。"))
+                        note = ""
+                        if isinstance(res, dict):
+                            note = str(res.get("frontend_message") or "").strip()
+                        print(
+                            hint(
+                                f"  {note}"
+                                if note
+                                else "  macchiatoBot 已将工作区切换回 daemon。"
+                            )
+                        )
                     else:
                         print(hint("  当前会话未启用远程工作区。"))
                 print(thin_separator())
@@ -1608,10 +1619,21 @@ async def run_interactive_loop(agent: Any) -> str:
                         print(hint("    无效输入，请重试。"))
 
                 is_processing = True
+                def on_workspace_notice(message: str) -> None:
+                    text = (message or "").strip()
+                    if not text:
+                        return
+                    _flush_reasoning_buffer()
+                    if stream_started:
+                        _persist_live_block()
+                    _resume_spinner()
+                    _print_with_spinner(hint(f"  {text}"))
+
                 hooks = AgentHooks(
                     on_assistant_delta=on_stream_delta,
                     on_reasoning_delta=on_reasoning_delta,
                     on_trace_event=on_trace_event,
+                    on_workspace_notice=on_workspace_notice,
                     on_feishu_ask_user_notify=on_feishu_ask_user_notify,
                     on_feishu_permission_notify=on_feishu_permission_notify,
                 )

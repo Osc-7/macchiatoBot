@@ -497,6 +497,15 @@ def build_tool_registry(
             core_pool=core_pool,
         )
     )
+    from agent_core.kernel_interface.profile import may_switch_workspace
+    from .switch_workspace_tool import SwitchWorkspaceTool
+
+    allow_workspace_switch = may_switch_workspace(
+        profile,
+        source=str(getattr(profile, "frontend_id", "") or "") if profile is not None else "",
+    )
+    if allow_workspace_switch:
+        tools.append(SwitchWorkspaceTool())
 
     if profile is not None and filter_by_profile:
         for tool in tools:
@@ -525,6 +534,12 @@ def build_tool_registry(
             pinned.extend(list(getattr(tools_cfg, "pinned_tools", None) or []))
         if template is not None:
             pinned.extend(list(template.extra or []))
+    if (
+        allow_workspace_switch
+        and registry.has("switch_workspace")
+        and "switch_workspace" not in pinned
+    ):
+        pinned.append("switch_workspace")
     pinned = [name for idx, name in enumerate(pinned) if name and name not in pinned[:idx]]
     working_set_size = int(getattr(agent_cfg, "working_set_size", 6) or 6)
     working_set = ToolWorkingSetManager(

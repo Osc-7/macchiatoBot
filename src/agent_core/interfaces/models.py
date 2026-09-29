@@ -49,3 +49,5 @@ class AgentHooks:
     on_feishu_permission_notify: Optional[Callable[[str, Dict[str, Any]], Any]] = None
     # attach_*_to_reply：工具返回后立即尝试把附件发到前端（如飞书）
     on_outgoing_attachment: Optional[Callable[[Dict[str, Any]], Any]] = None
+    # 工作区切换：daemon 在 run_turn_stream 上推一条用户可见说明
+    on_workspace_notice: Optional[Callable[[str], Any]] = None

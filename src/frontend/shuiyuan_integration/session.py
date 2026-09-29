@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 from agent_core import AgentCore
 from agent_core.config import Config, get_config
 from agent_core.content import ContentReference
-from agent_core.interfaces import AgentRunInput, AgentRunResult
+from agent_core.interfaces import AgentHooks, AgentRunInput, AgentRunResult
 from agent_core.kernel_interface import CoreProfile
 from frontend.shuiyuan_integration.reply import AUTO_REPLY_MARK
 from system.automation import AutomationIPCClient, default_socket_path
@@ -382,7 +382,29 @@ async def _run_via_daemon(
         except Exception as exc:
             logger.warning("resolve content_refs before IPC failed: %s", exc)
 
-    result = await ipc.run_turn(AgentRunInput(text=ctx_user, metadata=metadata))
+    async def _on_workspace_notice(message: str) -> None:
+        text = (message or "").strip()
+        if not text:
+            return
+        from .reply import post_reply
+
+        try:
+            await asyncio.to_thread(
+                post_reply,
+                username,
+                topic_id,
+                text,
+                reply_to_post_number,
+                db=db,
+                client=client,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("shuiyuan workspace switch notify failed: %s", exc)
+
+    result = await ipc.run_turn(
+        AgentRunInput(text=ctx_user, metadata=metadata),
+        hooks=AgentHooks(on_workspace_notice=_on_workspace_notice),
+    )
     reply_text = (result.output_text or "").strip()
 
     # 处理 attach_image_to_reply 登记的附件：上传并拼接 Markdown

@@ -27,5 +27,5 @@ npx skills add <owner/repo@skill> -g -y   # 安装到 ~/.agents/skills
 ## 渐进式披露
 
 System prompt 仅注入 metadata；需完整内容时调用 `load_skill(skill_name)` 按需加载。
-远程工作区在 `/remote-use`（或任务绑定远程）时会扫描远程技能树并缓存索引，供后续 system prompt 注入。
-工作区切换写入对话历史（`[工作区切换]`），不再挂在 system prompt；上下文压缩后若仍在远程，会再注入一条 `[工作区]` 状态说明（含具体路径，不提压缩）。
+远程工作区在 `/remote-use`（或 `switch_workspace`、任务绑定远程）时会扫描远程技能树并缓存索引，供后续 system prompt 注入。
+工作区切换写入对话历史（`[工作区切换]`）。system prompt 末尾的「运行环境」每次现算：daemon 主机、当前工具执行位置，以及在线 worker 的 login / 默认工作区 / 权限档位。上下文压缩后若仍在远程，会再注入一条 `[工作区]` 状态说明（含具体路径，不提压缩）。

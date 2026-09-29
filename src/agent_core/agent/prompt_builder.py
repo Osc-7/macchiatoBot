@@ -151,9 +151,9 @@ def build_agent_system_prompt(agent: Any) -> str:
     weekly_digest = None
     if recipe.include_digest and "long_term" in scopes:
         try:
-            from system.automation.repositories import (
+            from system.automation.repositories import (  # type: ignore[import]
                 DigestRepository,
-            )  # type: ignore[import]
+            )
 
             digest_repo = DigestRepository()
             daily_digest = digest_repo.latest("daily")
@@ -202,7 +202,17 @@ def build_agent_system_prompt(agent: Any) -> str:
             if goals_text:
                 prompt += "\n\n# 当前目标\n\n" + goals_text
 
-    # Remote workspace mode is announced via conversation history notices
-    # (activate / release / post-compress reinject), not a system prompt suffix.
+    # 可变运行环境放在 system prompt 最后：daemon 事实、当前绑定、在线机器。
+    # 主机名与路径在此现算，不写入 prompts/*.md。
+    try:
+        from agent_core.remote.workspace_switch import (
+            format_runtime_environment_section,
+        )
+
+        runtime_section = format_runtime_environment_section(agent)
+    except Exception:
+        runtime_section = ""
+    if runtime_section:
+        prompt += "\n\n" + runtime_section
 
     return prompt

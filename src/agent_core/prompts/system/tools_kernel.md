@@ -21,6 +21,21 @@
 - **attach_file_to_reply**：当需要**把文件随回复发给用户看**时使用。参数二选一：file_path（本地路径）或 file_url；调用后该文件会随你的文字回复一起发送到对话（如飞书会收到文件消息）。
 - **goal_create** / **goal_update** / **goal_complete** / **goal_cancel** / **goal_list**：会话内 Agent 工作目标与步骤进度（复杂多步骤任务）；与用户待办 add_task 不同，见 runtime_goals。用户也可 **`/goal <instruction>`** 直接创建并开始执行。活跃 goal 会 pin 会话：过时或已换题的目标必须 `goal_cancel` / `goal_complete`，不要长期挂着。
 
+## 切换工作区
+
+- **switch_workspace**：把当前会话的 bash / 文件工具 / load_skill 切到另一台已连接的 worker，或切回 daemon。
+  - **用法**：`switch_workspace(target="<login>")` 使用该 worker 的默认工作区；需要别的目录时再传 `path`。`profile` 缺省 `dev`，可选 `strict` / `dev` / `host-user` / `host-admin`。回到 daemon 用 `target=daemon`。
+  - **场景**：任务文件或命令要在工作服务器、个人电脑上执行，而当前工具还在 daemon；或者远程步骤已经做完，接下来要读 daemon 上的会话文件、记忆或仓库。
+  - **规范**：
+    - 只使用系统提示末尾「运行环境」里列出的 login，不要猜机器名，也不要把某台机器的主机名写进长期记忆当成固定地址。
+    - 只有主人直接使用的会话可以切换，例如 CLI、飞书、Dashboard。水源、定时任务等 Core 没有这个权限；调用会被拒绝，并留在原工作区。
+    - 调用时 Kernel 会检查该 login 是否已登录、是否有活跃连接，以及请求的权限档位。未登录、离线或档位非法会直接拒绝，并留在原工作区。
+    - 省略 `path` 时，默认目录是那台机器启动 `macchiato-remote` 时的工作目录，不是 daemon 的目录。
+    - `host-user` / `host-admin` 只在用户明确要求更高权限时使用。
+    - 一次会话只绑定一台机器。切换不搬运文件。长期记忆仍在 daemon。
+    - 本工具单独调用。切换结果返回后，下一轮再使用 bash 和文件工具。
+    - 切回 daemon 之后，以「运行环境」里的「当前工具执行位置: daemon」为准：工具已经在 daemon 这台机器上，不是刚才的远程 worker。
+
 ## 工作流程
 
 1. **需要日程/任务/规划等能力时**：先调用 `search_tools(query, tags?)`，用自然语言描述需求；支持按标签筛选（如 `tags=["日程","查询"]`）。例如：

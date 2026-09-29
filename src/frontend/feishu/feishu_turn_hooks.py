@@ -118,6 +118,7 @@ class FeishuTurnHooksController:
             on_feishu_ask_user_notify=self._on_feishu_ask_user_notify,
             on_feishu_permission_notify=self._on_feishu_permission_notify,
             on_outgoing_attachment=self._on_outgoing_attachment,
+            on_workspace_notice=self._on_workspace_notice,
         )
 
     @property
@@ -402,6 +403,17 @@ class FeishuTurnHooksController:
         from .ask_user_notify import send_ask_user_feishu_cards
 
         await send_ask_user_feishu_cards(batch_id, payload)
+
+    async def _on_workspace_notice(self, message: str) -> None:
+        text = (message or "").strip()
+        fc = self._feishu_client
+        chat_id = self._chat_id
+        if not text or fc is None or not chat_id:
+            return
+        try:
+            await fc.send_text_message(chat_id=chat_id, text=text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("feishu workspace switch notify failed: %s", exc)
 
     async def _on_feishu_permission_notify(
         self, permission_id: str, payload: Dict[str, Any]

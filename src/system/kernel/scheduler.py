@@ -910,6 +910,7 @@ class KernelScheduler:
                     ipc_ask_fwd = md.pop("_ipc_ask_user_forward", None)
                     ipc_perm_fwd = md.pop("_ipc_permission_forward", None)
                     ipc_perm_sid = md.pop("_ipc_permission_session_id", None)
+                    ipc_ws_fwd = md.pop("_ipc_workspace_notice_forward", None)
 
                     _run_result_holder: Dict[str, Any] = {}
 
@@ -926,7 +927,7 @@ class KernelScheduler:
                             r = await feishu_hook_ctx.finalize_after_run(r)
                         _run_result_holder["result"] = r
 
-                    if ipc_ask_fwd or ipc_perm_fwd or ipc_perm_sid:
+                    if ipc_ask_fwd or ipc_perm_fwd or ipc_perm_sid or ipc_ws_fwd:
                         from contextlib import AsyncExitStack
 
                         from agent_core.permissions.ask_user_registry import (
@@ -935,6 +936,9 @@ class KernelScheduler:
                         from agent_core.permissions.wait_registry import (
                             permission_ipc_stream_notify_scope,
                             permission_session_notify_scope,
+                        )
+                        from agent_core.remote.workspace_notice import (
+                            workspace_switch_notify_scope,
                         )
 
                         async with AsyncExitStack() as stack:
@@ -951,6 +955,10 @@ class KernelScheduler:
                             if ipc_perm_fwd:
                                 await stack.enter_async_context(
                                     permission_ipc_stream_notify_scope(ipc_perm_fwd)
+                                )
+                            if ipc_ws_fwd:
+                                await stack.enter_async_context(
+                                    workspace_switch_notify_scope(ipc_ws_fwd)
                                 )
                             await _do_run()
                     else:

@@ -67,6 +67,7 @@ from .shuiyuan_tools import (
     ShuiyuanGetCategoryTopicsTool,
     ShuiyuanBrowseTopicTool,
 )
+from .switch_workspace_tool import SwitchWorkspaceTool
 
 
 def get_default_tools(
@@ -169,6 +170,11 @@ def get_default_tools(
         tools.append(ShuiyuanGetCategoryTopicsTool(config=config))
         tools.append(ShuiyuanBrowseTopicTool(config=config))
 
+    from agent_core.kernel_interface.profile import may_switch_workspace
+
+    switch_source = (source or os.getenv("SCHEDULE_SOURCE", "cli")).strip() or "cli"
+    if may_switch_workspace(source=switch_source):
+        tools.append(SwitchWorkspaceTool())
     tools.append(GetDigestTool())
     tools.append(NotifyOwnerTool(config=config))
     tools.append(ListNotificationsTool())

@@ -77,5 +77,6 @@ run_automation.sh
 MagicMock/
 config/llm/providers.d/custom.yaml
 config/llm/providers.d/right_code.yaml
+config/llm/providers.d/sjtu.yaml
 # Plans & roadmaps (local working docs, not committed)
 plan/

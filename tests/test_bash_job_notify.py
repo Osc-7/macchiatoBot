@@ -97,6 +97,74 @@ async def test_remote_background_notification_emits_on_terminal(monkeypatch):
     assert second[0]["remote_login"] == "sii"
 
 
+class _FakeRemoteRegistryJobNotFound:
+    async def job_status(self, **kwargs):
+        return type(
+            "RemoteStatus",
+            (),
+            {
+                "status": "",
+                "exit_code": None,
+                "timed_out": False,
+                "duration_seconds": 0.0,
+                "log_path": "/tmp/lost-job.log",
+                "error": "JOB_NOT_FOUND",
+            },
+        )()
+
+
+async def test_remote_job_not_found_does_not_emit_false_failure(monkeypatch):
+    """Worker 重启丢失 job 表时不应误报 failed 终态通知。"""
+    clear_all_tracking_for_tests()
+    fake = _FakeRemoteRegistryJobNotFound()
+    import agent_core.remote.worker_registry as wr
+
+    monkeypatch.setattr(wr, "get_remote_worker_registry", lambda: fake)
+    session_id = "sid-remote-lost"
+    job_id = "job_lost_1"
+    register_remote_job(
+        session_id=session_id,
+        remote_login="sii",
+        job_id=job_id,
+        command="long-running-task",
+        cwd="/workspace",
+        log_path="/tmp/lost-job.log",
+    )
+
+    notes = await poll_completed_notifications(session_id=session_id)
+    assert notes == []
+
+    from agent_core.tools import bash_job_notify as bjn
+
+    assert job_id in {
+        rec.job_id for rec in bjn._TRACKED_BY_SESSION.get(session_id, {}).values()
+    }
+
+
+async def test_local_job_missing_from_manager_does_not_emit_false_failure(tmp_path):
+    """daemon 重启后本地 JobManager 无记录时不应误报 failed。"""
+    clear_all_tracking_for_tests()
+    session_id = "sid-local-lost"
+    job_id = "job_local_missing"
+    register_local_job(
+        session_id=session_id,
+        job_id=job_id,
+        command="sleep 99",
+        cwd=str(tmp_path),
+        log_path=str(tmp_path / "job.log"),
+        workspace_root=str(tmp_path),
+    )
+
+    notes = await poll_completed_notifications(session_id=session_id)
+    assert notes == []
+
+    from agent_core.tools import bash_job_notify as bjn
+
+    assert job_id in {
+        rec.job_id for rec in bjn._TRACKED_BY_SESSION.get(session_id, {}).values()
+    }
+
+
 async def test_suppress_job_notification_skips_agent_stopped_job(monkeypatch):
     """Agent 主动 job_stop 后不应再发出终态通知（含已 staged 的 pending）。"""
     clear_all_tracking_for_tests()

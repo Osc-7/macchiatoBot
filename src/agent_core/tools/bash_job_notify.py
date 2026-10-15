@@ -209,13 +209,9 @@ async def _query_job_status(rec: _TrackedJob) -> Optional[Dict[str, Any]]:
                 job_id=rec.job_id,
             )
             if str(getattr(res, "error", "") or "") == "JOB_NOT_FOUND":
-                return {
-                    "status": "failed",
-                    "exit_code": None,
-                    "timed_out": False,
-                    "duration_seconds": 0.0,
-                    "log_path": rec.log_path,
-                }
+                # Worker 重启后内存 job 表会丢失，但 OS 进程可能仍在跑；
+                # 不能当作终态 failed 通知并移除跟踪。
+                return None
             return {
                 "status": str(getattr(res, "status", "") or ""),
                 "exit_code": getattr(res, "exit_code", None),
@@ -229,13 +225,8 @@ async def _query_job_status(rec: _TrackedJob) -> Optional[Dict[str, Any]]:
         mgr = get_job_manager(workspace_root=rec.workspace_root or ".")
         handle = await mgr.job_status(rec.job_id)
         if handle is None:
-            return {
-                "status": "failed",
-                "exit_code": None,
-                "timed_out": False,
-                "duration_seconds": 0.0,
-                "log_path": rec.log_path,
-            }
+            # daemon 重启后本地 JobManager 内存表丢失；勿误报 failed。
+            return None
         return {
             "status": str(getattr(handle, "status", "") or ""),
             "exit_code": getattr(handle, "exit_code", None),

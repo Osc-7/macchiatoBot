@@ -19,6 +19,7 @@ async def test_load_skill_for_session_injects_tool_pair(monkeypatch: pytest.Monk
     agent.config = MagicMock()
     agent._context = ctx
     agent._core_profile = None
+    agent._finalize_turn = AsyncMock()
 
     async def _fake_execute(**kwargs):
         assert kwargs.get("skill_name") == "demo-skill"
@@ -71,3 +72,4 @@ async def test_load_skill_for_session_injects_tool_pair(monkeypatch: pytest.Monk
     assert msgs[0]["role"] == "assistant"
     assert msgs[0]["tool_calls"][0]["function"]["name"] == "load_skill"
     assert msgs[1]["role"] == "tool"
+    agent._finalize_turn.assert_awaited_once_with(None)

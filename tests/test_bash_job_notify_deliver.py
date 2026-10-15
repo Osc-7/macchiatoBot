@@ -82,6 +82,52 @@ async def test_format_notification():
     assert "远程(a100)" in remote_text
 
 
+async def test_bash_job_deferred_mark_until_kernel_confirms(tmp_path):
+    """inject 入队后不应立即 mark_notified，须等 scheduler 确认投递。"""
+    from agent_core.tools.bash_job_notify import (
+        confirm_bash_job_delivered,
+        poll_terminal_jobs,
+    )
+
+    clear_all_tracking_for_tests()
+    scheduler = _FakeScheduler()
+    pool = _FakeCorePool()
+    set_notify_dependencies(scheduler=scheduler, core_pool=pool)
+
+    ws = str(tmp_path)
+    register_local_job(
+        session_id="sid-1",
+        job_id="job-defer",
+        command="echo done",
+        cwd=ws,
+        log_path=f"{ws}/job.log",
+        workspace_root=ws,
+    )
+
+    notes = await poll_terminal_jobs(max_items=10)
+    assert len(notes) == 1
+
+    ok = deliver_via_inject(
+        session_id="sid-1",
+        text=format_notification(notes[0]),
+        note=notes[0],
+    )
+    assert ok is True
+    assert len(scheduler.injected) == 1
+    req = scheduler.injected[0]
+    assert req.metadata.get("_bash_job_notify") == {
+        "job_id": "job-defer",
+        "remote": False,
+    }
+    # 尚未确认投递前仍可 poll（staged 会跳过，但注册表仍在）
+    notes_staged = await poll_terminal_jobs(max_items=10)
+    assert len(notes_staged) == 0
+
+    confirm_bash_job_delivered("sid-1", "job-defer", remote=False)
+    notes_after = await poll_terminal_jobs(max_items=10)
+    assert len(notes_after) == 0
+
+
 async def test_deliver_inject_turn_when_no_inflight(tmp_path):
     clear_all_tracking_for_tests()
     scheduler = _FakeScheduler()

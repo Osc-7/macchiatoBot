@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from frontend.dashboard.auth import (
     DashboardAuth,
     DashboardAuthConfig,
     DashboardUser,
 )
-from frontend.dashboard.server import create_dashboard_app
+from frontend.dashboard.server import create_dashboard_app, DashboardBackend
 from tests.test_dashboard_server import FakeBackend
 
 
@@ -187,3 +189,88 @@ def test_non_admin_chat_denies_foreign_session() -> None:
         json={"session_id": "web:admin", "text": "hello"},
     )
     assert denied.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_non_admin_kernel_exec_denies_jobs() -> None:
+    backend = DashboardBackend()
+    result = await backend.kernel_exec("jobs", username="alice")
+    assert result["ok"] is False
+    assert "Admin access required" in result["output"]
+
+
+@pytest.mark.asyncio
+async def test_non_admin_kernel_exec_denies_user_list() -> None:
+    backend = DashboardBackend()
+    result = await backend.kernel_exec("user list", username="alice")
+    assert result["ok"] is False
+    assert "Admin access required" in result["output"]
+
+
+@pytest.mark.asyncio
+async def test_admin_kernel_exec_allows_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeClient:
+        active_session_id = "web:admin"
+
+        async def terminal_automation_jobs(self):
+            return {
+                "available": True,
+                "scheduler_running": True,
+                "reload_interval_seconds": 60,
+                "tracked_job_count": 0,
+                "jobs": [],
+            }
+
+        async def close(self) -> None:
+            return None
+
+    async def _fake_with_client(self, username: str = "", timeout_seconds=None):
+        return _FakeClient()
+
+    backend = DashboardBackend()
+    monkeypatch.setattr(backend, "_with_client", _fake_with_client.__get__(backend, DashboardBackend))
+    result = await backend.kernel_exec("jobs", username="admin")
+    assert result["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_non_admin_kernel_snapshot_redacts_users(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeClient:
+        active_session_id = "web:alice"
+
+        async def terminal_top(self):
+            return {"active_cores": 0, "max_cores": 10, "queue_depth": 0, "inflight_tasks": 0, "zombie_cores": 0, "uptime_seconds": 0}
+
+        async def terminal_queue(self):
+            return {"queue_size": 0, "active_task_count": 0, "inflight_sessions": {}, "cancelled_sessions": []}
+
+        async def terminal_ps(self):
+            return []
+
+        async def list_sessions(self):
+            return ["web:alice"]
+
+        async def list_models(self):
+            return []
+
+        async def get_token_usage(self):
+            return {}
+
+        async def get_turn_count(self):
+            return 0
+
+        async def get_dangerous_mode(self):
+            return {}
+
+        async def close(self) -> None:
+            return None
+
+    async def _fake_with_client(self, username: str = "", timeout_seconds=None):
+        return _FakeClient()
+
+    backend = DashboardBackend()
+    monkeypatch.setattr(backend, "_with_client", _fake_with_client.__get__(backend, DashboardBackend))
+    snap = await backend.kernel_snapshot(username="alice")
+    assert snap["users"] == {"frontend": "cli", "users": []}

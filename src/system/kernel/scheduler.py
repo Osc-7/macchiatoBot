@@ -608,6 +608,16 @@ class KernelScheduler:
         避免新入队请求在取消窗口内被误判为 cancelled 而 skip。
         """
         self._cancelled_sessions.add(session_id)
+        try:
+            from agent_core.tools.agent_wake import cancel_pending_wakes
+
+            cancel_pending_wakes(session_id, label="goal-check")
+        except Exception as exc:
+            logger.debug(
+                "KernelScheduler: cancel goal-check wakes failed session_id=%s: %s",
+                session_id,
+                exc,
+            )
         tasks = self._session_active_tasks.get(session_id, set())
         active_tasks = [t for t in list(tasks) if not t.done()]
         cancelled_any = bool(active_tasks)
@@ -665,6 +675,7 @@ class KernelScheduler:
                     request.request_id,
                     asyncio.CancelledError("session cancelled while queued"),
                 )
+                self._finalize_agent_wake_delivery(request, confirmed=False)
                 self._queue.task_done()
                 self._maybe_clear_cancelled(request.session_id)
                 continue

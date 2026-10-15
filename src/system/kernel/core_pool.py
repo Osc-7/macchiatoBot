@@ -78,7 +78,7 @@ def _resolve_core_owner(
     sid = (session_id or "").strip()
     src = (source or "").strip() or "cli"
     uid = (user_id or "").strip() or "root"
-    if not sid.startswith(("feishu:", "sub:", "cron:", "shuiyuan:")):
+    if not sid.startswith(("feishu:", "sub:", "cron:", "shuiyuan:", "web:")):
         return src, uid
     inferred_s, inferred_u = _infer_owner_from_session_id(sid)
     if src == "cli":

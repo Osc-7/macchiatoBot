@@ -61,6 +61,17 @@ def test_memory_owner_agent_msg_uses_session_id_not_frontend_tag() -> None:
     assert memory_owner_for_kernel_acquire(req3) == ("cli", "root")
 
 
+def test_dashboard_web_session_memory_owner_matches_history_path() -> None:
+    """Dashboard IPC uses source=web; gateway must not override to dashboard:*."""
+    req = KernelRequest.create(
+        text="hi",
+        session_id="web:alice",
+        frontend_id="web",
+        metadata={"source": "web", "user_id": "alice"},
+    )
+    assert memory_owner_for_kernel_acquire(req) == ("web", "alice")
+
+
 @pytest.mark.asyncio
 async def test_kernel_propagates_return_status_in_metadata() -> None:
     from agent_core.kernel_interface.action import ReturnAction

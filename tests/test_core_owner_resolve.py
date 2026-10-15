@@ -35,3 +35,11 @@ def test_resolve_fills_feishu_user_when_root_placeholder():
 
 def test_resolve_leaves_cli_session_alone():
     assert _resolve_core_owner("cli:root", "cli", "root") == ("cli", "root")
+
+
+def test_resolve_overrides_cli_default_for_web_session():
+    assert _resolve_core_owner("web:alice", "cli", "root") == ("web", "alice")
+
+
+def test_resolve_keeps_explicit_web_owner():
+    assert _resolve_core_owner("web:alice", "web", "alice") == ("web", "alice")

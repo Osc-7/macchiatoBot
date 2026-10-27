@@ -30,6 +30,15 @@ flowchart LR
 
 
 
+### 收到 Agent 间消息：必须用 `reply_to_message` 回复（硬性）
+
+看到 `[来自 [{sender}]] 的消息（message_id=…，需要回复）]` 这类注入，说明**另一个 Agent 正在同步阻塞等你的工具返回值**（不是用户闲聊）。
+
+- **直接输出自然语言，对方收不到**：该请求 `frontend_id=agent_msg`，飞书 / 水源 / CLI 都不投递你的最终文本，它只落在你自己的 session log；对方只会等到 `P2P_REPLY_TIMEOUT`。
+- **对方拿到的回复只有 `reply_to_message` 的 `content`**：必须调用 `reply_to_message(correlation_id="<message_id>", sender_session_id="<sender>", content="…")`。
+- 你同时写给「用户」的内容（论坛回帖、飞书答复）**不会**顺带传回对方，两者是两条独立通道。
+- 答不上来 / 需要更多信息也照样回一条，沉默只会让对方超时拿到空错误；`require_reply=false` 的通知类消息不需要回复。
+
 当任务可以拆分或并行时，可使用以下工具委托子 Agent 处理：
 
 ### 工具速查
@@ -62,59 +71,23 @@ flowchart LR
 
 ### 使用原则
 
-**何时用 create_subagent**：
-
-- 任务可独立执行、不需要实时交互时
-- 任务耗时较长、不希望阻塞当前会话时
-- 例：「帮我整理这份报告的关键数据」「搜索并总结某主题的近期新闻」
-- 牢记：`create_subagent` 只负责“创建子任务”，不是同步拿结果；结果要等系统通知后再决定是否拉取
-
-**何时用 create_parallel_subagents**：
-
-- 同一问题需要从多个角度/维度分析时
-- 需要 A/B 比较不同方案时
-- 收到第一个满意结果就可以继续，其余可取消
-
-**context 参数的重要性**：
-
-- 必须在 context 中说明「完成后父 Agent 的下一步计划」
-- 这确保父 Agent 从 checkpoint 恢复时能正确理解期望
-- 例：`"context": "完成后将结果整合进我正在撰写的技术分析报告第三节"`
+- `create_subagent` / `create_parallel_subagents` 适合**可独立执行、耗时较长、不需要实时交互**的任务（如「整理这份报告的关键数据」「搜索并总结某主题近期新闻」）；同一问题要多角度分析或 A/B 比较时用并行版，拿到满意结果即可 cancel 其余。
+- `create_subagent` 只负责**创建**，不是同步拿结果；结果等系统通知后再决定是否 `get`。
+- `context` 里必须写清「完成后父 Agent 的下一步计划」（例：`"完成后将结果整合进技术分析报告第三节"`），这样父 Agent 从 checkpoint 恢复后能理解期望。
 
 ### 典型工作流（Notify-and-Pull）
 
 ```
-# 1. 创建并行子任务
-result = create_parallel_subagents(tasks=[
-    {task: "从技术角度分析...", context: "汇总到主报告"},
-    {task: "从市场角度分析...", context: "汇总到主报告"},
-])
-# → 立即返回，turn 结束
-
-# 2. 收到第一个完成通知（系统注入消息）：
-# [子任务 id1 完成]
-# 任务：从技术角度分析...
-# 结果预览：...（前200字）
-# 如需只读完整结果，调用 get_subagent_status(subagent_id="id1", include_full_result=True)
-
-# 3. 按需只读拉取完整结果（不收割）
-get_subagent_status(subagent_id="id1", include_full_result=True)
-# → 返回 data.result（完整输出）
-
-# 3b. 必做：本路结果已取用完毕、不再需要子目录 → reap（不依赖自动清理）
+# 1. 创建并行子任务（立即返回，不阻塞）
+create_parallel_subagents(tasks=[{task: "从技术角度分析...", context: "汇总到主报告"}, ...])
+# 2. 收到完成通知：[子任务 id1 完成] + 结果预览（前 200 字符，不是全文）
+# 3. 预览不够 → 只读拉全文（不收割）
+get_subagent_status(subagent_id="id1", include_full_result=True)   # → data.result
+# 4. 必做：结果取用完毕、不再需要子工作区 → reap（含已 cancel 的分支）
 reap_subagent(subagent_id="id1")
-
-# 4. 若并行任务中已有足够结果，取消其余（cancel 不删盘）
-cancel_subagent(subagent_id="id2")
-# 4b. 必做：对每个已结束/已取消且不再需要其工作区的 id 分别 reap_subagent
-reap_subagent(subagent_id="id2")
-
-# 5. 子 Agent 向父发消息（仅用于询问，不用于汇报完成）
-#    例：send_message_to_agent(session_id="cli:root", content="任务中「大厂」具体指哪些公司？")
-#    完成信号由系统自动推送，子 Agent 无需也不应 send_message 汇报完成
-
-# 6. 回复收到的 query 消息（correlation_id 关联）
-reply_to_message(correlation_id="msg-001", sender_session_id="cli:root", content="结果如下...")
+# 5. 若已有足够结果，其余分支 cancel_subagent（不删盘）后仍须 reap
+# 6. 子 Agent 向父询问用 send_message_to_agent；完成信号由系统推送，不要用它汇报
+# 7. 收到 query 用 reply_to_message(correlation_id=…, sender_session_id=…, content=…)
 ```
 
 ### 权限说明

@@ -1089,7 +1089,12 @@ class SendMessageToAgentTool(BaseTool):
         sender_label = f"来自 [{sender_session_id}] 的消息"
         if require_reply:
             inject_text = (
-                f"[{sender_label}（message_id={message_id}，需要回复）]\n\n{content}"
+                f"[{sender_label}（message_id={message_id}，需要回复）]\n\n{content}\n\n"
+                f"—— 这是一条 Agent 间消息，对方正在阻塞等待你的工具返回（不是用户闲聊）。"
+                f"直接输出文字对方收不到，必须调用 "
+                f"reply_to_message(correlation_id=\"{message_id}\", "
+                f"sender_session_id=\"{sender_session_id}\", content=\"<要告诉对方的话>\")。"
+                f"答不上来或需要更多信息也要回一条说明原因，否则对方只会超时。"
             )
         else:
             inject_text = f"[{sender_label}]\n\n{content}"
@@ -1102,7 +1107,7 @@ class SendMessageToAgentTool(BaseTool):
             metadata={METADATA_KEY_AGENT_MESSAGE: agent_msg},
         )
 
-        reply_waiter: Optional[asyncio.Future[str]] = None
+        reply_waiter: Optional["asyncio.Future[Any]"] = None
         if require_reply:
             reply_waiter = self._scheduler.register_p2p_reply_waiter(message_id)
 
@@ -1148,7 +1153,7 @@ class SendMessageToAgentTool(BaseTool):
         )
 
         try:
-            reply_text = await asyncio.wait_for(reply_waiter, timeout=wait_to)
+            reply_payload = await asyncio.wait_for(reply_waiter, timeout=wait_to)
         except asyncio.TimeoutError:
             self._scheduler.cancel_p2p_reply_waiter(message_id)
             return ToolResult(
@@ -1164,16 +1169,31 @@ class SendMessageToAgentTool(BaseTool):
             self._scheduler.cancel_p2p_reply_waiter(message_id)
             raise
 
+        # waiter 载荷：{"content": str, "source": "explicit"|"fallback_last_message"}
+        if isinstance(reply_payload, dict):
+            reply_text = str(reply_payload.get("content") or "")
+            reply_source = str(reply_payload.get("source") or "explicit")
+        else:  # 兼容旧载荷（纯字符串）
+            reply_text = str(reply_payload or "")
+            reply_source = "explicit"
+
+        if reply_source == "fallback_last_message":
+            msg = (
+                f"{target_session_id} 未调用 reply_to_message；以下为其本轮最后一条输出"
+                f"（fallback，可能不是给你的正式答复，message_id={message_id}）"
+            )
+        else:
+            msg = f"已收到来自 {target_session_id} 的回复（message_id={message_id}）"
+
         return ToolResult(
             success=True,
             data={
                 "message_id": message_id,
                 "target_session": target_session_id,
                 "reply_content": reply_text,
+                "reply_source": reply_source,
             },
-            message=(
-                f"已收到来自 {target_session_id} 的回复（message_id={message_id}）"
-            ),
+            message=msg,
         )
 
 

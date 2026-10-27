@@ -394,7 +394,7 @@ async def perform_workspace_switch(
     )
     mcp_line, skill_count = await _refresh_remote_side(sid, live, admission.target)
     notice = _remote_notice(state, skill_count=skill_count, mcp_line=mcp_line)
-    _append_notice(live, notice)
+    await _append_notice(live, notice)
     from agent_core.remote.workspace_notice import (
         format_frontend_remote_switch_message,
         notify_workspace_switch_frontend,
@@ -427,7 +427,7 @@ async def _release_to_daemon(session_id: str, agent: Any) -> ToolResult:
     released = await release_remote_workspace_session(agent, session_id=session_id)
     notice = format_local_workspace_switch_notice(previous=previous)
     if previous is not None:
-        _append_notice(agent, notice)
+        await _append_notice(agent, notice)
         workspace_dir = (
             _session_daemon_workspace_root(agent) if agent is not None else ""
         )
@@ -557,12 +557,14 @@ def _remote_notice(
     )
 
 
-def _append_notice(agent: Any, notice: str) -> None:
+async def _append_notice(agent: Any, notice: str) -> None:
     if agent is None:
         return
     try:
-        from agent_core.remote.workspace_notice import append_workspace_switch_notice
+        from agent_core.remote.workspace_notice import (
+            append_workspace_switch_notice_async,
+        )
 
-        append_workspace_switch_notice(agent, notice, persist=True)
+        await append_workspace_switch_notice_async(agent, notice, persist=True)
     except Exception:  # noqa: BLE001
         logger.warning("switch_workspace notice inject failed", exc_info=True)

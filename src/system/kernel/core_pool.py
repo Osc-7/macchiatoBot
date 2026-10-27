@@ -464,6 +464,7 @@ class CorePool:
             from agent_core.remote.worker_registry import get_remote_worker_registry
             from agent_core.remote.workspace_notice import (
                 append_workspace_switch_notice,
+                append_workspace_switch_notice_async,
                 format_local_workspace_switch_notice,
                 format_remote_workspace_switch_notice,
             )
@@ -518,7 +519,7 @@ class CorePool:
                     exc,
                 )
                 release_remote_workspace(session_id)
-                append_workspace_switch_notice(
+                await append_workspace_switch_notice_async(
                     agent,
                     format_local_workspace_switch_notice(previous=state)
                     + f"\n原因: daemon 重启后重新打开远程工作区失败: {exc}",
@@ -788,12 +789,16 @@ class CorePool:
                             exc,
                         )
                 owner_id = getattr(agent, "_user_id", None)
+                summary_llm_client = getattr(
+                    agent, "_summary_llm_client", None
+                ) or getattr(agent, "_llm_client", None)
                 await self._summarizer.summarize_and_persist(
                     stats=core_stats,
                     long_term_memory=long_term_memory,
                     messages=messages,
                     owner_id=owner_id,
                     system_message=system_message,
+                    llm_client=summary_llm_client,
                 )
             except Exception as exc:
                 logger.warning(

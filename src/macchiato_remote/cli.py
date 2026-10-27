@@ -643,9 +643,38 @@ async def _run_worker(data: dict) -> None:
         login=str(data.get("login") or ""),
         token=str(data.get("token") or "") or None,
     )
+    async def _tunnel_watchdog() -> None:
+        nonlocal tunnel_proc
+        while True:
+            await asyncio.sleep(5)
+            if tunnel_proc is not None and tunnel_proc.poll() is None:
+                continue
+            print(
+                "macchiato-remote: SSH tunnel process exited; restarting\u2026",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                tunnel_proc = await asyncio.to_thread(
+                    _start_ssh_tunnel_if_configured, data
+                )
+            except Exception as exc:
+                print(
+                    f"macchiato-remote: SSH tunnel restart failed: {exc!r}. "
+                    "Retrying in 10s\u2026",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                await asyncio.sleep(10)
+
+    watchdog = (
+        asyncio.create_task(_tunnel_watchdog()) if data.get("ssh_tunnel") else None
+    )
     try:
         await client.run_forever()
     finally:
+        if watchdog is not None:
+            watchdog.cancel()
         await client.close()
         _stop_ssh_tunnel(tunnel_proc)
 

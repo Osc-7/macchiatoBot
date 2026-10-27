@@ -22,19 +22,20 @@ from agent_core.bash_os_user import reconcile_admin_linux_users
 from agent_core.config import get_config
 from agent_core.interfaces import AgentHooks
 from agent_core.llm.client import LLMClient
+from agent_core.tools.agent_wake import (
+    deliver_wake_via_inject,
+    format_wake_notification,
+    poll_due_wakes,
+)
 from agent_core.tools.bash_job_notify import (
     deliver_via_inject,
     format_notification,
     poll_terminal_jobs,
     set_notify_dependencies,
 )
-from agent_core.tools.agent_wake import (
-    deliver_wake_via_inject,
-    format_wake_notification,
-    poll_due_wakes,
-)
 from frontend.feishu.ask_user_notify import install_feishu_ask_user_notify_hook
 from frontend.feishu.client import FeishuClient
+from frontend.feishu.operator_notify import install_feishu_operator_error_sender
 from frontend.feishu.permission_notify import install_feishu_permission_notify_hook
 from frontend.feishu.reply_dispatch import send_feishu_agent_reply
 from system.automation import (
@@ -94,6 +95,10 @@ logger = logging.getLogger("automation_daemon")
 POLL_INTERVAL_SECONDS = 5
 # 单条自动化任务超过此时长打 WARNING，便于发现「卡住整条队列」的长任务
 _CONSUME_SLOW_SECONDS = 300.0
+# 队列取任务的硬超时：pop_pending 卡在 sqlite 锁上时不能把整条消费循环拖死
+_POP_TIMEOUT_SECONDS = 60.0
+# 任务结束后的飞书活动通知是旁路副作用，绝不允许阻塞消费循环（07-20 曾卡死 4 小时）
+_ACTIVITY_NOTIFY_TIMEOUT_SECONDS = 90.0
 
 # 无 memory_owner 的定时任务共用这个 user_id 段，对应目录如
 # data/workspace/cron/_automation/ ，避免每个 job 名一层 cron/job-config-xxxx/。
@@ -179,7 +184,16 @@ async def _consume_loop(
     _ALIVE_LOG_INTERVAL = 120  # 每 120 次空轮询(~10min)打一次存活日志
     while not stop_event.is_set():
         try:
-            task = queue.pop_pending()
+            task = await asyncio.wait_for(
+                asyncio.to_thread(queue.pop_pending),
+                timeout=_POP_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "consume: pop_pending() timed out after %ss (sqlite lock?); loop continues",
+                _POP_TIMEOUT_SECONDS,
+            )
+            task = None
         except Exception:
             logger.exception(
                 "consume: pop_pending() raised, will retry in %ss",
@@ -192,7 +206,7 @@ async def _consume_loop(
                 logger.info(
                     "consume: alive (idle polls=%d, pending=%d)",
                     _idle_polls,
-                    queue.pending_count(),
+                    await asyncio.to_thread(queue.pending_count),
                 )
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=POLL_INTERVAL_SECONDS)
@@ -201,8 +215,8 @@ async def _consume_loop(
             continue
         _idle_polls = 0
         started = time.perf_counter()
-        pending_behind = queue.pending_count()
-        running_in_db = queue.running_count()
+        pending_behind = await asyncio.to_thread(queue.pending_count)
+        running_in_db = await asyncio.to_thread(queue.running_count)
         task_logger = AutomationTaskLogger(task)
         task_logger.log_task_start()
         logger.info(
@@ -223,14 +237,14 @@ async def _consume_loop(
             if isinstance(task.metadata, dict):
                 remote_login = str(task.metadata.get("remote_login") or "").strip()
                 if remote_login:
+                    from agent_core.remote.skills_index import (
+                        refresh_remote_skills_best_effort,
+                    )
                     from agent_core.remote.worker_registry import (
                         get_remote_worker_registry,
                     )
                     from agent_core.remote.workspace_state import (
                         activate_remote_workspace,
-                    )
-                    from agent_core.remote.skills_index import (
-                        refresh_remote_skills_best_effort,
                     )
 
                     remote_path = (
@@ -350,9 +364,7 @@ async def _consume_loop(
                                     mcp_line=mcp_line,
                                 )
                                 # Prepend so the first turn sees workspace context.
-                                task.instruction = (
-                                    f"{notice}\n\n{task.instruction}"
-                                )
+                                task.instruction = f"{notice}\n\n{task.instruction}"
                         except Exception:
                             logger.warning(
                                 "consume: remote workspace notice prepend failed task_id=%s",
@@ -487,15 +499,21 @@ async def _consume_loop(
             op_ok, op_problems = task_logger.evaluate_required_operations()
             if op_ok:
                 outcome = "success"
-                queue.update_status(task.task_id, TaskStatus.SUCCESS, result=result)
+                await asyncio.to_thread(
+                    queue.update_status, task.task_id, TaskStatus.SUCCESS, result=result
+                )
                 activity_record = task_logger.log_task_end(
                     status=TaskStatus.SUCCESS, result=result, error=None
                 )
             else:
                 outcome = "failed_validation"
                 error_msg = "; ".join(op_problems)
-                queue.update_status(
-                    task.task_id, TaskStatus.FAILED, result=result, error=error_msg
+                await asyncio.to_thread(
+                    queue.update_status,
+                    task.task_id,
+                    TaskStatus.FAILED,
+                    result=result,
+                    error=error_msg,
                 )
                 activity_record = task_logger.log_task_end(
                     status=TaskStatus.FAILED, result=result, error=error_msg
@@ -506,14 +524,16 @@ async def _consume_loop(
             activity_record = task_logger.log_task_end(
                 status=TaskStatus.FAILED, result=None, error=str(exc)
             )
-            queue.update_status(task.task_id, TaskStatus.FAILED, error=str(exc))
+            await asyncio.to_thread(
+                queue.update_status, task.task_id, TaskStatus.FAILED, error=str(exc)
+            )
         finally:
             if remote_bound:
-                from agent_core.remote.worker_registry import get_remote_worker_registry
-                from agent_core.remote.workspace_state import release_remote_workspace
                 from agent_core.remote.mcp_lifecycle import (
                     before_remote_workspace_released,
                 )
+                from agent_core.remote.worker_registry import get_remote_worker_registry
+                from agent_core.remote.workspace_state import release_remote_workspace
 
                 try:
                     entry = scheduler.core_pool.get_entry(task.session_id)
@@ -551,11 +571,20 @@ async def _consume_loop(
                 task.session_id,
                 outcome,
                 elapsed,
-                queue.pending_count(),
+                await asyncio.to_thread(queue.pending_count),
             )
             if activity_record is not None:
                 try:
-                    await _maybe_notify_feishu_activity(activity_record)
+                    await asyncio.wait_for(
+                        _maybe_notify_feishu_activity(activity_record),
+                        timeout=_ACTIVITY_NOTIFY_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "consume: activity notify timed out after %ss task_id=%s; loop continues",
+                        _ACTIVITY_NOTIFY_TIMEOUT_SECONDS,
+                        task.task_id,
+                    )
                 except Exception as notify_exc:  # noqa: BLE001
                     logger.warning(
                         "Failed to send Feishu automation activity notification: %s",
@@ -741,6 +770,7 @@ async def _main() -> None:
     reconcile_admin_linux_users(cfg.command_tools)
     install_feishu_permission_notify_hook()
     install_feishu_ask_user_notify_hook()
+    install_feishu_operator_error_sender()
     owner_id = (sys.argv[1].strip() if len(sys.argv) > 1 else "root") or "root"
     source = (sys.argv[2].strip() if len(sys.argv) > 2 else "cli") or "cli"
     # 工具在 daemon 进程内加载；修改工具实现/定义（如 file_tools.read_file）后需重启本 daemon 才能生效
@@ -749,7 +779,7 @@ async def _main() -> None:
     default_session_id = f"{source}:{owner_id}"
 
     queue = AgentTaskQueue()
-    recovered = queue.recover_stale_running()
+    recovered = await asyncio.to_thread(queue.recover_stale_running)
     if recovered:
         logger.info("Recovered %d stale running tasks", recovered)
 
@@ -765,8 +795,8 @@ async def _main() -> None:
 
     kernel_tool_registry = build_tool_registry(config=cfg)
     kernel = AgentKernel(tool_registry=kernel_tool_registry)
-    # 使用轻量模型或与主模型相同的配置，为会话结束摘要提供专用 LLM 客户端。
-    # 如需单独的总结模型，可在此处通过 model_override 指定，例如 "qwen2.5-7b-instruct" 等。
+    # 仅作 fallback：正常 evict 时 CorePool 会把 agent._summary_llm_client 传进来，
+    # 从而跟随会话 provider / frontend_providers / /model。全局 client 不感知 session。
     summary_llm_client = LLMClient(config=cfg)
     summarizer = SessionSummarizer(llm_client=summary_llm_client)
     core_pool = CorePool(
@@ -867,6 +897,20 @@ async def _main() -> None:
         )
         notify_task: asyncio.Task[Any] | None = None
         if notify_enabled or agent_wake_enabled:
+            if agent_wake_enabled:
+                # 重启后把未触发的 wake 从磁盘捞回来（宽限期外的过期条目会被丢弃）。
+                try:
+                    from agent_core.tools.agent_wake import restore_persisted_wakes
+
+                    restored = restore_persisted_wakes()
+                    if restored:
+                        logger.info(
+                            "agent_wake: restored %d persisted wake(s)", restored
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "agent_wake: restore persisted wakes failed: %s", exc
+                    )
             notify_task = asyncio.create_task(
                 _bash_job_notify_loop(
                     stop_event=stop_event,

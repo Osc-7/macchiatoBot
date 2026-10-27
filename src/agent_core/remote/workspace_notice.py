@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -223,28 +224,56 @@ def append_workspace_switch_notice(
             agent._last_prompt_tokens = None
         except Exception:
             pass
-    if not persist:
-        return True
-    if not getattr(agent, "_memory_enabled", False):
-        return True
+    if persist and getattr(agent, "_memory_enabled", False):
+        _note_history_id(agent, _persist_workspace_notice(agent, notice))
+    return True
+
+
+def _note_history_id(agent: Any, msg_id: Optional[int]) -> None:
+    if msg_id is None or not hasattr(agent, "_last_history_id"):
+        return
+    agent._last_history_id = max(
+        int(getattr(agent, "_last_history_id", 0) or 0),
+        int(msg_id),
+    )
+
+
+def _persist_workspace_notice(agent: Any, notice: str) -> Optional[int]:
+    """Best-effort ChatHistoryDB write. Safe to run on a worker thread."""
     try:
         db = agent._require_chat_history_db()
         sid = getattr(agent, "_session_id", "") or ""
         source = getattr(agent, "_source", "cli") or "cli"
-        if sid:
-            msg_id = db.write_message(
+        if not sid:
+            return None
+        return int(
+            db.write_message(
                 session_id=sid,
                 role="user",
                 content=notice,
                 source=source,
             )
-            if hasattr(agent, "_last_history_id"):
-                agent._last_history_id = max(
-                    int(getattr(agent, "_last_history_id", 0) or 0),
-                    int(msg_id),
-                )
+        )
     except Exception:
-        pass
+        return None
+
+
+async def append_workspace_switch_notice_async(
+    agent: Any,
+    text: str,
+    *,
+    persist: bool = True,
+) -> bool:
+    """Same as append_workspace_switch_notice, but the sqlite write leaves the event loop."""
+    notice = (text or "").strip()
+    if not notice:
+        return False
+    appended = append_workspace_switch_notice(agent, notice, persist=False)
+    if not appended:
+        return False
+    if persist and getattr(agent, "_memory_enabled", False):
+        msg_id = await asyncio.to_thread(_persist_workspace_notice, agent, notice)
+        _note_history_id(agent, msg_id)
     return True
 
 
@@ -272,3 +301,28 @@ def reinject_remote_workspace_notice_if_active(agent: Any) -> bool:
         skill_count=skill_count,
     )
     return append_workspace_switch_notice(agent, notice, persist=True)
+
+
+async def reinject_remote_workspace_notice_if_active_async(agent: Any) -> bool:
+    """Event-loop variant: ChatHistoryDB persist runs on a worker thread."""
+    from agent_core.remote.workspace_state import (
+        get_remote_workspace_skills_index,
+        get_remote_workspace_state,
+    )
+
+    sid = getattr(agent, "_session_id", "") or ""
+    state = get_remote_workspace_state(sid)
+    if state is None:
+        return False
+    skill_count = None
+    idx = get_remote_workspace_skills_index(sid)
+    if idx:
+        skill_count = sum(
+            1 for line in idx.splitlines() if line.strip().startswith("- **")
+        )
+    notice = format_remote_workspace_switch_notice(
+        state,
+        reason="reinjected",
+        skill_count=skill_count,
+    )
+    return await append_workspace_switch_notice_async(agent, notice, persist=True)

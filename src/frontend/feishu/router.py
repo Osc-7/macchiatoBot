@@ -41,6 +41,8 @@ from .ipc_bridge import (
     format_feishu_processing_error,
     get_feishu_push_forwarder,
     register_feishu_push_session,
+    remember_feishu_chat,
+    send_classified_feishu_error,
     send_feishu_error_notice,
     try_handle_slash_command_via_ipc,
 )
@@ -237,6 +239,8 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
         or session_id
     )
     meta["feishu_session_id"] = session_id
+    if event.message.chat_id:
+        remember_feishu_chat(session_id, event.message.chat_id)
     metadata: Dict[str, Any] = {**meta, "feishu_event_id": header.event_id}
     incoming_refs = list(content_refs)
 
@@ -310,11 +314,22 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
         logger.exception(
             "failed to process feishu message via automation daemon: %s", exc
         )
-        await send_feishu_error_notice(
-            chat_id=msg.chat_id,
-            text=format_feishu_processing_error(exc),
-            timeout_seconds=cfg.timeout_seconds,
-        )
+        # 主会话失败兜底：优先用结构化错误卡片说明（类型/码/时间/建议），
+        # 拿不到结构化信息时退回一行文本提示。
+        notice_sent = False
+        raw_info = getattr(exc, "error_info", None)
+        if isinstance(raw_info, dict):
+            notice_sent = await send_classified_feishu_error(
+                chat_id=msg.chat_id,
+                error_info=raw_info,
+                timeout_seconds=cfg.timeout_seconds,
+            )
+        if not notice_sent:
+            await send_feishu_error_notice(
+                chat_id=msg.chat_id,
+                text=format_feishu_processing_error(exc),
+                timeout_seconds=cfg.timeout_seconds,
+            )
         return JSONResponse(
             {"code": 1, "msg": "internal error"},
             status_code=500,
@@ -322,10 +337,34 @@ async def handle_feishu_event(request: Request) -> JSONResponse:
 
     # 将 Agent 回复通过飞书再发回用户（流式 PATCH 已完成时跳过重复卡片）
     feishu_client = _build_feishu_client()
+    result_meta = result.metadata or {}
     try:
         from agent_core.agent.media_helpers import filter_undelivered_attachments
 
-        if not (result.metadata or {}).get("feishu_skip_final_reply"):
+        if result_meta.get("_error_info"):
+            # 主会话失败兜底：给用户一条可读的错误回执，而不是静默或内部串。
+            # 注意这里不看 feishu_skip_final_reply——失败轮次不会有正常最终回复，
+            # 流式卡片若已建也只可能是半截内容，错误说明必须补上。
+            try:
+                from system.kernel.error_notify import (
+                    build_user_facing_error_card,
+                    error_info_from_dict,
+                )
+
+                card = build_user_facing_error_card(
+                    error_info_from_dict(result_meta["_error_info"])
+                )
+                await feishu_client.send_interactive_card(
+                    chat_id=msg.chat_id, card=card
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("发送飞书错误回执失败，降级为文本: %s", exc)
+                await send_feishu_agent_final_reply(
+                    client=feishu_client,
+                    chat_id=msg.chat_id,
+                    output_text=result.output_text,
+                )
+        elif not result_meta.get("feishu_skip_final_reply"):
             await send_feishu_agent_final_reply(
                 client=feishu_client,
                 chat_id=msg.chat_id,

@@ -233,14 +233,16 @@ class FeishuTurnHooksController:
         cfg.pop("streaming_config", None)
         # 先关流式模式，再全量替换 header 标签（Streaming → Complete/Segment）。
         await self._ck_stop_streaming_mode()
+        mid = (self._assistant_stream_mid or "").strip()
+        replaced = False
         try:
             await self._feishu_client.cardkit_replace_card_entity(
                 card_id=self._ck_card_id,
                 card=card,
                 sequence=self._ck_next_seq(),
             )
+            replaced = True
         except Exception as exc:  # noqa: BLE001
-            mid = self._assistant_stream_mid
             if not mid:
                 raise
             logger.warning(
@@ -248,6 +250,10 @@ class FeishuTurnHooksController:
                 "fallback to message PATCH: %s",
                 exc,
             )
+        # 终态回复后面往往没有下一条消息。关流之后只 replace 卡片实体时，
+        # 客户端经常要等到下一次 IM 推送才刷出正文。终态再 PATCH 原消息，
+        # 让回复走消息通道当场出现。工具前的 segment 后面紧跟工具卡，不必再 PATCH。
+        if mid and (close_kind == "final" or not replaced):
             await self._feishu_client.patch_interactive_card_message(
                 message_id=mid, card=card
             )

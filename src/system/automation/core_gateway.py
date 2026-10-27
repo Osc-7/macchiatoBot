@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -25,6 +27,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _PUSH_BUFFER_MAXLEN = 50
+# 前端确认送达前，结果留在队列里。连续放弃或发送失败超过这么多次后丢弃，避免一条坏消息堵住后面的。
+_PUSH_SEND_ATTEMPT_LIMIT = 30
+# 派发出去到确认之间的租约。前端进程若在确认前退出，租约到期后同一条结果会再交出去。
+_PUSH_LEASE_SECONDS = 120.0
 
 
 def _enrich_content_refs_with_context(
@@ -54,6 +60,16 @@ def _enrich_content_refs_with_context(
 
 
 CoreSessionFactory = Callable[[str], CoreSession | Awaitable[CoreSession]]
+
+
+@dataclass
+class _QueuedPush:
+    """一条还没被前端确认送达的输出。"""
+
+    request_id: str
+    result: AgentRunResult
+    attempts: int = 0
+    leased_until: float = 0.0
 
 
 @dataclass
@@ -166,13 +182,15 @@ class AutomationCoreGateway:
         if inspect.isawaitable(maybe):
             await maybe
 
-    def list_sessions(self) -> list[str]:
+    async def list_sessions(self) -> list[str]:
         seen = set(self._sessions.keys())
         try:
             seen.update(self._kernel_scheduler.core_pool.list_sessions())
         except Exception:
             pass
-        for sid in self._session_registry.list_sessions(self._owner_id, self._source):
+        for sid in await asyncio.to_thread(
+            self._session_registry.list_sessions, self._owner_id, self._source
+        ):
             seen.add(sid)
         return sorted(seen)
 
@@ -188,11 +206,11 @@ class AutomationCoreGateway:
         session_id = session_id.strip()
         if not session_id:
             raise ValueError("session_id 不能为空")
-        existed_any = (
-            session_id in self._sessions
-            or self._session_registry.session_exists(
-                self._owner_id, self._source, session_id
-            )
+        existed_any = session_id in self._sessions or await asyncio.to_thread(
+            self._session_registry.session_exists,
+            self._owner_id,
+            self._source,
+            session_id,
         )
         try:
             existed_any = existed_any or self._kernel_scheduler.core_pool.has_session(
@@ -203,8 +221,11 @@ class AutomationCoreGateway:
         if session_id not in self._sessions:
             if not create_if_missing and not existed_any:
                 raise KeyError(f"session not found: {session_id}")
-            self._session_registry.upsert_session(
-                self._owner_id, self._source, session_id
+            await asyncio.to_thread(
+                self._session_registry.upsert_session,
+                self._owner_id,
+                self._source,
+                session_id,
             )
             self._last_activity[session_id] = datetime.now()
         return not existed_any
@@ -215,11 +236,11 @@ class AutomationCoreGateway:
         session_id = session_id.strip()
         if not session_id:
             raise ValueError("session_id 不能为空")
-        existed_any = (
-            session_id in self._sessions
-            or self._session_registry.session_exists(
-                self._owner_id, self._source, session_id
-            )
+        existed_any = session_id in self._sessions or await asyncio.to_thread(
+            self._session_registry.session_exists,
+            self._owner_id,
+            self._source,
+            session_id,
         )
         try:
             existed_any = existed_any or self._kernel_scheduler.core_pool.has_session(
@@ -232,13 +253,16 @@ class AutomationCoreGateway:
             if not create_if_missing and not existed_any:
                 raise KeyError(f"session not found: {session_id}")
             if not existed_any:
-                self._session_registry.upsert_session(
-                    self._owner_id, self._source, session_id
+                await asyncio.to_thread(
+                    self._session_registry.upsert_session,
+                    self._owner_id,
+                    self._source,
+                    session_id,
                 )
                 created = True
             self._last_activity[session_id] = datetime.now()
         self._active_session_id = session_id
-        self.mark_activity(session_id)
+        await self.mark_activity(session_id)
         return created
 
     @property
@@ -266,7 +290,9 @@ class AutomationCoreGateway:
             return
         if session_id not in self._push_buffers:
             self._push_buffers[session_id] = deque(maxlen=_PUSH_BUFFER_MAXLEN)
-        self._push_buffers[session_id].append((request_id, result))
+        self._push_buffers[session_id].append(
+            _QueuedPush(request_id=request_id, result=result)
+        )
         logger.debug(
             "gateway: buffered output session_id=%s request_id=%s buf_size=%d",
             session_id,
@@ -275,15 +301,141 @@ class AutomationCoreGateway:
         )
 
     def poll_push_result(self, session_id: str) -> Optional[tuple[str, AgentRunResult]]:
-        """非阻塞：弹出该 session 的下一条推送结果，无则返回 None。
+        """非阻塞：弹出该 session 下一条没有租约的推送结果，无则返回 None。
 
         结果来源于 OutputBus subscriber 回调缓冲的 inject_turn 等非 submit 结果。
-        返回 (request_id, result)。典型使用方：IPC poll_push、CLI/Feishu 后台轮询。
+        返回 (request_id, result)。正在派发、尚未确认的结果不会被这里拿走。
         """
         buf = self._push_buffers.get(session_id)
         if not buf:
             return None
-        return buf.popleft()
+        now = time.monotonic()
+        kept: deque[_QueuedPush] = deque(maxlen=_PUSH_BUFFER_MAXLEN)
+        found: Optional[_QueuedPush] = None
+        for item in buf:
+            if found is None and item.leased_until <= now:
+                found = item
+                continue
+            kept.append(item)
+        if found is None:
+            return None
+        self._store_push_buffer(session_id, kept)
+        return found.request_id, found.result
+
+    def pending_push_sessions(self) -> List[str]:
+        """kernel 输出队列里还有未确认结果的 session。"""
+        return [sid for sid, buf in self._push_buffers.items() if buf]
+
+    @staticmethod
+    def frontend_of_session(session_id: str) -> str:
+        """会话属于哪个前端：session_id 的第一段，如 feishu、shuiyuan、cli。"""
+        sid = (session_id or "").strip()
+        head, sep, _rest = sid.partition(":")
+        return head if sep else ""
+
+    def _store_push_buffer(self, session_id: str, buf: deque) -> None:
+        if buf:
+            self._push_buffers[session_id] = buf
+        else:
+            self._push_buffers.pop(session_id, None)
+
+    def _drop_push(self, session_id: str, item: _QueuedPush) -> None:
+        logger.error(
+            "gateway: drop push after %d failed deliveries session_id=%s request_id=%s",
+            item.attempts,
+            session_id,
+            (item.request_id or "")[:8],
+        )
+
+    def lease_frontend_push(
+        self,
+        frontend: str,
+        *,
+        lease_seconds: float = _PUSH_LEASE_SECONDS,
+    ) -> List[tuple[str, str, AgentRunResult]]:
+        """把该前端当前没有租约的结果标成派发中。原件留在队列里，直到 ack。
+
+        其它前端的队列不动。上一次租约已经到期仍未确认的，记一次失败后再派发。
+        """
+        name = (frontend or "").strip()
+        if not name:
+            return []
+        try:
+            lease_for = float(lease_seconds)
+        except (TypeError, ValueError):
+            lease_for = _PUSH_LEASE_SECONDS
+        if lease_for <= 0:
+            lease_for = _PUSH_LEASE_SECONDS
+        now = time.monotonic()
+        leased: List[tuple[str, str, AgentRunResult]] = []
+        for sid, buf in list(self._push_buffers.items()):
+            if self.frontend_of_session(sid) != name or not buf:
+                continue
+            kept: deque[_QueuedPush] = deque(maxlen=_PUSH_BUFFER_MAXLEN)
+            for item in buf:
+                if item.leased_until > now:
+                    kept.append(item)
+                    continue
+                if item.leased_until > 0:
+                    item.attempts += 1
+                if item.attempts > _PUSH_SEND_ATTEMPT_LIMIT:
+                    self._drop_push(sid, item)
+                    continue
+                item.leased_until = now + lease_for
+                kept.append(item)
+                leased.append((sid, item.request_id, item.result))
+            self._store_push_buffer(sid, kept)
+        return leased
+
+    def ack_push_payloads(self, session_id: str, request_ids: List[str]) -> int:
+        """前端确认送达后，从队列删除这些结果。"""
+        sid = (session_id or "").strip()
+        wanted = {str(rid).strip() for rid in request_ids or [] if str(rid).strip()}
+        buf = self._push_buffers.get(sid)
+        if not sid or not wanted or not buf:
+            return 0
+        kept: deque[_QueuedPush] = deque(maxlen=_PUSH_BUFFER_MAXLEN)
+        removed = 0
+        for item in buf:
+            if item.request_id in wanted:
+                removed += 1
+                continue
+            kept.append(item)
+        self._store_push_buffer(sid, kept)
+        return removed
+
+    def release_push_leases(
+        self,
+        session_id: str,
+        request_ids: List[str],
+        *,
+        count_attempt: bool = True,
+    ) -> int:
+        """解除租约，结果留在队列里，下一轮可以再派发。
+
+        发送失败会计数，超过上限则丢弃。还不知道发给谁时不要计数，避免空转把结果丢掉。
+        """
+        sid = (session_id or "").strip()
+        wanted = {str(rid).strip() for rid in request_ids or [] if str(rid).strip()}
+        buf = self._push_buffers.get(sid)
+        if not sid or not wanted or not buf:
+            return 0
+        kept: deque[_QueuedPush] = deque(maxlen=_PUSH_BUFFER_MAXLEN)
+        still_queued = 0
+        for item in buf:
+            if item.request_id not in wanted:
+                kept.append(item)
+                continue
+            if count_attempt:
+                item.attempts += 1
+            item.leased_until = 0.0
+            if count_attempt and item.attempts > _PUSH_SEND_ATTEMPT_LIMIT:
+                self._drop_push(sid, item)
+                continue
+            kept.append(item)
+            still_queued += 1
+        self._store_push_buffer(sid, kept)
+        return still_queued
 
     async def run_turn(
         self,
@@ -358,10 +510,12 @@ class AutomationCoreGateway:
                     sync_content_items_to_remote_inbox,
                 )
 
-                synced_items, turn_text, notices = await sync_content_items_to_remote_inbox(
-                    session_id=session_id,
-                    content_items=items_for_sync,
-                    user_text=turn_text,
+                synced_items, turn_text, notices = (
+                    await sync_content_items_to_remote_inbox(
+                        session_id=session_id,
+                        content_items=items_for_sync,
+                        user_text=turn_text,
+                    )
                 )
                 metadata["content_items"] = synced_items
                 notice_block = format_attachment_sync_notices(notices)
@@ -371,7 +525,9 @@ class AutomationCoreGateway:
                         f"{turn_text}\n\n{notice_block}" if turn_text else notice_block
                     )
             except Exception as exc:
-                logger.warning("remote attachment sync failed before scheduler: %s", exc)
+                logger.warning(
+                    "remote attachment sync failed before scheduler: %s", exc
+                )
 
         profile = metadata.pop("_core_profile", None)
         frontend_id = self._source
@@ -404,7 +560,7 @@ class AutomationCoreGateway:
             )
         finally:
             self._pending_submits.discard(request.request_id)
-        self.mark_activity(session_id)
+        await self.mark_activity(session_id)
         return result
 
     async def inject_message(
@@ -417,24 +573,32 @@ class AutomationCoreGateway:
             command.input,
             hooks=hooks,
         )
-        self.mark_activity(command.session_id)
+        await self.mark_activity(command.session_id)
         return result
 
-    def mark_activity(self, session_id: Optional[str] = None) -> None:
+    async def mark_activity(self, session_id: Optional[str] = None) -> None:
         sid = session_id or self._active_session_id
         now = datetime.now()
         self._last_activity[sid] = now
-        self._session_registry.upsert_session(self._owner_id, self._source, sid)
+        await asyncio.to_thread(
+            self._session_registry.upsert_session, self._owner_id, self._source, sid
+        )
 
-    def should_expire_session(self, session_id: Optional[str] = None) -> bool:
+    async def should_expire_session(self, session_id: Optional[str] = None) -> bool:
         sid = session_id or self._active_session_id
-        if self._session_registry.is_expired(self._owner_id, self._source, sid):
+        expired = await asyncio.to_thread(
+            self._session_registry.is_expired, self._owner_id, self._source, sid
+        )
+        if expired:
             return False
         now = datetime.now()
         last_activity = self._last_activity.get(sid)
         if last_activity is None:
-            registry_ts = self._session_registry.get_updated_at(
-                self._owner_id, self._source, sid
+            registry_ts = await asyncio.to_thread(
+                self._session_registry.get_updated_at,
+                self._owner_id,
+                self._source,
+                sid,
             )
             last_activity = registry_ts or now
             self._last_activity[sid] = last_activity
@@ -466,12 +630,14 @@ class AutomationCoreGateway:
                 reason,
                 exc,
             )
-        self._session_registry.mark_expired(self._owner_id, self._source, sid)
+        await asyncio.to_thread(
+            self._session_registry.mark_expired, self._owner_id, self._source, sid
+        )
         self._last_activity[sid] = datetime.now()
 
     async def expire_session_if_needed(self, reason: str = "session_expire") -> bool:
         sid = self._active_session_id
-        if not self.should_expire_session(sid):
+        if not await self.should_expire_session(sid):
             return False
         await self.expire_session(reason=reason, session_id=sid)
         return True
@@ -485,13 +651,13 @@ class AutomationCoreGateway:
                 return await maybe if inspect.isawaitable(maybe) else maybe
         return None
 
-    def reset_session(self) -> None:
+    async def reset_session(self) -> None:
         entry = self._kernel_scheduler.core_pool.get_entry(self._active_session_id)
         if entry is not None:
             fn = getattr(entry.agent, "reset_session", None)
             if callable(fn):
                 fn()
-        self.mark_activity(self._active_session_id)
+        await self.mark_activity(self._active_session_id)
 
     async def clear_context_for_session(self, session_id: str) -> None:
         entry = self._kernel_scheduler.core_pool.get_entry(session_id)
@@ -619,7 +785,7 @@ class AutomationCoreGateway:
             self._kernel_scheduler.inject_turn(request)
             autostart_queued = True
 
-        self.mark_activity(sid)
+        await self.mark_activity(sid)
         return {
             "ok": True,
             "goal": goal,
@@ -656,7 +822,12 @@ class AutomationCoreGateway:
             agent = entry.agent
         list_fn = getattr(agent, "list_user_goals", None)
         if not callable(list_fn):
-            return {"ok": False, "goals": [], "session_loaded": True, "supported": False}
+            return {
+                "ok": False,
+                "goals": [],
+                "session_loaded": True,
+                "supported": False,
+            }
         goals = list_fn(include_completed=include_completed)
         return {
             "ok": True,
@@ -1009,7 +1180,7 @@ class AutomationCoreGateway:
             create_if_missing=True,
             profile=profile,
         )
-        self.mark_activity(sid)
+        await self.mark_activity(sid)
         return {
             "session_id": sid,
             "dangerous_mode_enabled": bool(profile.approval_bypass_enabled),
@@ -1060,14 +1231,16 @@ class AutomationCoreGateway:
         ttl_seconds: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Enable remote workspace mode for a session and announce it in history."""
-        from agent_core.remote.workspace_state import activate_remote_workspace
-        from agent_core.remote.worker_registry import get_remote_worker_registry
         from agent_core.remote.skills_index import refresh_remote_skills_best_effort
+        from agent_core.remote.worker_registry import get_remote_worker_registry
         from agent_core.remote.workspace_notice import (
-            append_workspace_switch_notice,
+            append_workspace_switch_notice_async,
             format_remote_workspace_switch_notice,
         )
-        from agent_core.remote.workspace_state import get_remote_workspace_skills_index
+        from agent_core.remote.workspace_state import (
+            activate_remote_workspace,
+            get_remote_workspace_skills_index,
+        )
 
         sid = session_id or self._active_session_id
         self._reject_workspace_switch(sid)
@@ -1149,7 +1322,7 @@ class AutomationCoreGateway:
                     create_if_missing=True,
                     profile=None,
                 )
-            append_workspace_switch_notice(agent, notice, persist=True)
+            await append_workspace_switch_notice_async(agent, notice, persist=True)
         except Exception:
             logger.warning(
                 "remote workspace notice inject failed session_id=%s",
@@ -1164,7 +1337,7 @@ class AutomationCoreGateway:
         await notify_workspace_switch_frontend(
             format_frontend_remote_switch_message(state)
         )
-        self.mark_activity(sid)
+        await self.mark_activity(sid)
         payload = state.model_dump()
         payload["frontend_message"] = format_frontend_remote_switch_message(state)
         return payload
@@ -1172,9 +1345,8 @@ class AutomationCoreGateway:
     def remote_workspace_status(
         self, session_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        from agent_core.remote.workspace_state import get_remote_workspace_state
-
         from agent_core.remote.worker_registry import get_remote_worker_registry
+        from agent_core.remote.workspace_state import get_remote_workspace_state
 
         sid = session_id or self._active_session_id
         state = get_remote_workspace_state(sid)
@@ -1194,12 +1366,12 @@ class AutomationCoreGateway:
     async def remote_workspace_release(
         self, session_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        from agent_core.remote.workspace_state import release_remote_workspace
         from agent_core.remote.worker_registry import get_remote_worker_registry
         from agent_core.remote.workspace_notice import (
-            append_workspace_switch_notice,
+            append_workspace_switch_notice_async,
             format_local_workspace_switch_notice,
         )
+        from agent_core.remote.workspace_state import release_remote_workspace
 
         sid = session_id or self._active_session_id
         self._reject_workspace_switch(sid)
@@ -1242,7 +1414,7 @@ class AutomationCoreGateway:
                         create_if_missing=True,
                         profile=None,
                     )
-                append_workspace_switch_notice(agent, notice, persist=True)
+                await append_workspace_switch_notice_async(agent, notice, persist=True)
             except Exception:
                 logger.warning(
                     "local workspace notice inject failed session_id=%s",
@@ -1255,7 +1427,6 @@ class AutomationCoreGateway:
                 format_frontend_daemon_switch_message,
                 notify_workspace_switch_frontend,
             )
-
             from agent_core.remote.workspace_switch import (
                 _session_daemon_workspace_root,
             )
@@ -1267,7 +1438,7 @@ class AutomationCoreGateway:
                 previous=old, workspace_dir=workspace_dir
             )
             await notify_workspace_switch_frontend(frontend_message)
-        self.mark_activity(sid)
+        await self.mark_activity(sid)
         return {
             "released": old is not None,
             "state": old.model_dump() if old is not None else None,
@@ -1317,9 +1488,7 @@ class AutomationCoreGateway:
             create_if_missing=True,
             profile=None,
         )
-        row = await get_mcp_session_overlay().attach(
-            agent, name, session_id=sid
-        )
+        row = await get_mcp_session_overlay().attach(agent, name, session_id=sid)
         return {
             "ok": bool(row.attached) and not row.error,
             "server_name": row.name,
@@ -1343,9 +1512,7 @@ class AutomationCoreGateway:
             create_if_missing=True,
             profile=None,
         )
-        row = await get_mcp_session_overlay().detach(
-            agent, name, session_id=sid
-        )
+        row = await get_mcp_session_overlay().detach(agent, name, session_id=sid)
         return {
             "ok": not row.error,
             "server_name": row.name,
@@ -1369,9 +1536,7 @@ class AutomationCoreGateway:
             create_if_missing=True,
             profile=None,
         )
-        row = await get_mcp_session_overlay().reload(
-            agent, name, session_id=sid
-        )
+        row = await get_mcp_session_overlay().reload(agent, name, session_id=sid)
         return {
             "ok": bool(row.attached) and not row.error,
             "server_name": row.name,
@@ -1491,7 +1656,9 @@ class AutomationCoreGateway:
             )
             remote_state = get_remote_workspace_state(sid)
             if remote_state is not None:
-                from agent_core.remote.skills_index import refresh_remote_skills_best_effort
+                from agent_core.remote.skills_index import (
+                    refresh_remote_skills_best_effort,
+                )
 
                 await refresh_remote_skills_best_effort(
                     session_id=sid,
@@ -1545,8 +1712,8 @@ class AutomationCoreGateway:
             return False
 
         existed_in_memory = sid in self._sessions
-        existed_in_registry = self._session_registry.session_exists(
-            self._owner_id, self._source, sid
+        existed_in_registry = await asyncio.to_thread(
+            self._session_registry.session_exists, self._owner_id, self._source, sid
         )
         # 既不在内存也不在注册表中，视为不存在的会话，直接返回失败，避免误报“删除成功”。
         if not existed_in_memory and not existed_in_registry:
@@ -1635,7 +1802,9 @@ class AutomationCoreGateway:
         elif created_temp:
             await _close_session_if_needed(session, temp=True)
 
-        self._session_registry.delete_session(self._owner_id, self._source, sid)
+        await asyncio.to_thread(
+            self._session_registry.delete_session, self._owner_id, self._source, sid
+        )
         self._kernel_scheduler.core_pool.clear_session_preferred_llm_provider(sid)
         return True
 

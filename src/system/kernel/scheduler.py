@@ -38,6 +38,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _IN_QUEUE_WARN_THRESHOLD = 500
+# 对方没调 reply_to_message 时，只把本轮输出的末尾交回去，避免整段过程文本灌进对方上下文。
+_P2P_FALLBACK_MAX_CHARS = 800
+
+
+def _p2p_fallback_excerpt(output_text: str) -> str:
+    text = (output_text or "").strip()
+    if len(text) <= _P2P_FALLBACK_MAX_CHARS:
+        return text
+    tail = text[-_P2P_FALLBACK_MAX_CHARS:]
+    return "…（本轮输出已截断，仅保留末尾）\n" + tail
 
 # 调度器兜底捕获：部分异常（如某些 ReadTimeout）str(exc) 为空，需拼装可读说明
 _KERNEL_TASK_ERR_HINTS: dict[str, str] = {
@@ -70,6 +80,84 @@ def _kernel_task_exception_detail(exc: BaseException) -> str:
     if hint:
         text = f"{text} {hint}"
     return text
+
+
+def _classify_request_error(
+    exc: BaseException,
+    *,
+    agent: Any = None,
+    request: Any = None,
+):
+    """把请求级异常归一成 LLMErrorInfo；分类失败时返回 None（绝不抛）。"""
+    try:
+        from agent_core.llm.error_info import classify_llm_error
+
+        provider_name = None
+        model_name = None
+        llm_client = getattr(agent, "_llm_client", None) if agent is not None else None
+        if llm_client is not None:
+            try:
+                provider_name = llm_client.active_provider_name
+            except Exception:  # noqa: BLE001
+                provider_name = None
+            try:
+                model_name = llm_client.model
+            except Exception:  # noqa: BLE001
+                model_name = None
+        return classify_llm_error(exc, provider=provider_name, model=model_name)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _request_source_and_user(request: Any) -> tuple[str, Optional[str]]:
+    metadata = getattr(request, "metadata", None) or {}
+    source = str(metadata.get("source") or getattr(request, "frontend_id", "") or "")
+    user_id = metadata.get("user_id")
+    return source, (str(user_id) if user_id else None)
+
+
+def _request_user_text(request: Any, limit: int = 300) -> str:
+    """取「用户真正说了什么」，而不是拼装后的完整 prompt。"""
+    metadata = getattr(request, "metadata", None) or {}
+    sy = metadata.get("shuiyuan_meta")
+    if isinstance(sy, dict):
+        raw = sy.get("user_message")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()[:limit]
+    text = str(getattr(request, "text", "") or "")
+    return text.strip()[:limit]
+
+
+async def _notify_request_error(err_info: Any, *, request: Any, session_id: str) -> None:
+    """把结构化错误推给 owner 飞书；失败只记日志。"""
+    try:
+        from system.kernel.error_notify import notify_operator_error
+
+        source, user_id = _request_source_and_user(request)
+        metadata = getattr(request, "metadata", None) or {}
+        extra: Dict[str, str] = {}
+        sy = metadata.get("shuiyuan_meta")
+        if isinstance(sy, dict):
+            if sy.get("topic_title"):
+                extra["话题"] = str(sy["topic_title"])
+            loc_bits = []
+            if sy.get("topic_id"):
+                loc_bits.append(f"topic {sy['topic_id']}")
+            if sy.get("post_number"):
+                loc_bits.append(f"#{sy['post_number']}")
+            if loc_bits:
+                extra["位置"] = " / ".join(loc_bits)
+        await notify_operator_error(
+            error=err_info,
+            source=source or "unknown",
+            session_id=session_id,
+            user_id=user_id,
+            user_text=_request_user_text(request),
+            stage="模型请求",
+            extra_lines=extra or None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("KernelScheduler: 错误上报失败: %s", exc)
 
 
 # 子任务完成/失败通知：CorePool._inject_to_parent 使用此前端标签（与 P2P 的 agent_msg 区分）
@@ -250,6 +338,8 @@ class KernelScheduler:
         self._ttl_task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
         self._active_tasks: set[asyncio.Task] = set()
+        # 错误上报等 fire-and-forget 后台任务（持有引用，避免被 GC 回收）
+        self._bg_tasks: set[asyncio.Task] = set()
         # session_id -> in-flight request count（用于阻止 TTL 驱逐运行中的 session）
         self._inflight_sessions: Dict[str, int] = defaultdict(int)
         # per-session 串行化锁：防止同一 session 的并发请求竞争 context/turn_id/DB 写入
@@ -261,8 +351,8 @@ class KernelScheduler:
         self._cancelled_sessions: set[str] = set()
         # session_id -> 仍在优先级队列中、尚未被 dispatch 取出的请求数
         self._queued_by_session: Dict[str, int] = defaultdict(int)
-        # send_message_to_agent(require_reply=True) 注册的等待：message_id -> Future[回复正文]
-        self._p2p_reply_waiters: Dict[str, asyncio.Future[str]] = {}
+        # send_message_to_agent(require_reply=True) 注册的等待：message_id -> Future[{content, source}]
+        self._p2p_reply_waiters: Dict[str, "asyncio.Future[Dict[str, Any]]"] = {}
         # wait_subagent：sub_session_id -> Future[终态信息]
         self._subagent_terminal_waiters: Dict[str, asyncio.Future[Dict[str, Any]]] = {}
         # wait_for_agent_message：接收方 session_id -> Future[P2P 载荷]
@@ -335,9 +425,15 @@ class KernelScheduler:
             self._out_bus.cancel_all()
         logger.info("KernelScheduler: stopped")
 
-    def register_p2p_reply_waiter(self, message_id: str) -> asyncio.Future[str]:
-        """供 send_message_to_agent(require_reply=True) 注册，等待 reply_to_message 唤醒。"""
-        fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    def register_p2p_reply_waiter(
+        self, message_id: str
+    ) -> "asyncio.Future[Dict[str, Any]]":
+        """供 send_message_to_agent(require_reply=True) 注册，等待 reply_to_message 唤醒。
+
+        Future 结果是 ``{"content": str, "source": "explicit"|"fallback_last_message"}``：
+        ``source`` 用来区分「对方主动调了 reply_to_message」与「turn 结束兜底拿到的最后一条输出」。
+        """
+        fut: "asyncio.Future[Dict[str, Any]]" = asyncio.get_running_loop().create_future()
         self._p2p_reply_waiters[message_id] = fut
         return fut
 
@@ -346,15 +442,58 @@ class KernelScheduler:
         fut = self._p2p_reply_waiters.get(message_id)
         return fut is not None and not fut.done()
 
-    def complete_p2p_reply(self, message_id: str, reply_text: str) -> bool:
-        """reply_to_message 成功投递后调用，唤醒阻塞中的 send_message_to_agent。"""
+    def complete_p2p_reply(
+        self, message_id: str, reply_text: str, *, source: str = "explicit"
+    ) -> bool:
+        """reply_to_message 成功投递（或 turn 结束兜底）后调用，唤醒阻塞中的 send_message_to_agent。"""
         fut = self._p2p_reply_waiters.pop(message_id, None)
         if fut is None:
             return False
         if fut.done():
             return False
-        fut.set_result(reply_text)
+        fut.set_result({"content": reply_text, "source": source})
         return True
+
+    def maybe_complete_p2p_reply_from_turn(
+        self, request: Any, output_text: str
+    ) -> bool:
+        """P2P query 收信方没调 reply_to_message 时的兜底。
+
+        仅当：请求是 P2P、AgentMessage 明确 require_reply、waiter 仍在阻塞（对方没超时也没显式回复）、
+        且本轮确实产出了文本时，才用最后一条 assistant 文本完成 waiter，并打
+        ``source="fallback_last_message"`` 标记——发送方据此知道这不是协议回复。
+        """
+        from system.multi_agent.constants import (
+            METADATA_KEY_AGENT_MESSAGE,
+            P2P_REQUEST_FRONTEND_TAG,
+        )
+
+        if (getattr(request, "frontend_id", "") or "").strip() != P2P_REQUEST_FRONTEND_TAG:
+            return False
+        md = getattr(request, "metadata", None)
+        if not isinstance(md, dict):
+            return False
+        agent_msg = md.get(METADATA_KEY_AGENT_MESSAGE)
+        message_id = str(getattr(agent_msg, "message_id", "") or "").strip()
+        if not message_id or not bool(getattr(agent_msg, "require_reply", False)):
+            return False
+        if not self.has_p2p_reply_waiter(message_id):
+            return False
+        text = _p2p_fallback_excerpt(output_text)
+        if not text:
+            return False
+        ok = self.complete_p2p_reply(
+            message_id, text, source="fallback_last_message"
+        )
+        if ok:
+            logger.warning(
+                "P2P fallback: session=%s 未调用 reply_to_message，用本轮最后一条输出兜底 message_id=%s"
+                "（%d 字符）",
+                getattr(request, "session_id", "?"),
+                message_id,
+                len(text),
+            )
+        return ok
 
     def cancel_p2p_reply_waiter(self, message_id: str) -> None:
         """超时或投递失败时取消防抖，避免悬挂 Future。"""
@@ -966,6 +1105,20 @@ class KernelScheduler:
 
                     run_result = _run_result_holder["result"]
 
+                    # P2P query 兜底：收信方这一轮没调 reply_to_message 时，
+                    # 用其最后一条输出完成发送方的 waiter（带 fallback 标记，避免静默超时）。
+                    try:
+                        self.maybe_complete_p2p_reply_from_turn(
+                            request,
+                            getattr(run_result, "output_text", "") or "",
+                        )
+                    except Exception:
+                        logger.debug(
+                            "KernelScheduler: p2p fallback hook failed request_id=%s",
+                            request.request_id[:8],
+                            exc_info=True,
+                        )
+
                     # 后处理
                     await agent._finalize_turn(run_result)
 
@@ -1023,6 +1176,8 @@ class KernelScheduler:
                     raise
                 except Exception as exc:
                     err_detail = _kernel_task_exception_detail(exc)
+                    # 结构化错误信息：供前端兜底回复、owner 通知与日志诊断使用
+                    err_info = _classify_request_error(exc, agent=agent, request=request)
                     # 异常时也写 checkpoint，保证 daemon 重启后可从未完成状态恢复
                     if agent is not None:
                         try:
@@ -1043,6 +1198,9 @@ class KernelScheduler:
                                 metadata={
                                     "error": err_detail,
                                     "error_type": type(exc).__name__,
+                                    "error_info": (
+                                        err_info.to_dict() if err_info is not None else None
+                                    ),
                                 },
                                 request_id=request.request_id,
                             )
@@ -1053,6 +1211,20 @@ class KernelScheduler:
                         request.request_id[:8],
                         exc,
                     )
+                    # 上报 owner（飞书卡片）；fire-and-forget，绝不影响主流程
+                    if err_info is not None:
+                        try:
+                            task = asyncio.create_task(
+                                _notify_request_error(
+                                    err_info,
+                                    request=request,
+                                    session_id=session_id,
+                                )
+                            )
+                            self._bg_tasks.add(task)
+                            task.add_done_callback(self._bg_tasks.discard)
+                        except Exception:
+                            pass
                     # 区分两种错误投递路径：
                     # - 有 waiter（submit 路径）→ publish_error 以异常形式交给 await 方
                     # - 无 waiter（inject_turn 路径）→ publish 包装后的 AgentRunResult 给订阅者
@@ -1062,7 +1234,12 @@ class KernelScheduler:
                     else:
                         err_result = AgentRunResult(
                             output_text=f"[后台任务处理出错] {err_detail}",
-                            metadata={"_push_error": err_detail},
+                            metadata={
+                                "_push_error": err_detail,
+                                "_error_info": (
+                                    err_info.to_dict() if err_info is not None else None
+                                ),
+                            },
                         )
                         await self._out_bus.publish(
                             session_id, request.request_id, err_result

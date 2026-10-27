@@ -169,7 +169,7 @@ async def test_create_goal_for_feishu_passes_chat_id_hint(monkeypatch) -> None:
     )
     gateway.ensure_session = AsyncMock()
     gateway._ensure_subscribed = MagicMock()
-    gateway.mark_activity = MagicMock()
+    gateway.mark_activity = AsyncMock()
 
     build_calls: list = []
 
@@ -252,7 +252,7 @@ async def test_create_goal_for_feishu_session_injects_feishu_metadata(monkeypatc
     )
     gateway.ensure_session = AsyncMock()
     gateway._ensure_subscribed = MagicMock()
-    gateway.mark_activity = MagicMock()
+    gateway.mark_activity = AsyncMock()
 
     monkeypatch.setattr(
         "agent_core.tools.bash_job_notify.build_feishu_inject_metadata",

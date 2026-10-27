@@ -66,6 +66,16 @@ def _format_ipc_error(exc: BaseException) -> str:
     return text
 
 
+def _ipc_error_info(exc: BaseException) -> Optional[Dict[str, Any]]:
+    """把异常归一成结构化错误描述，随 final 事件一起发给前端（分类失败返回 None）。"""
+    try:
+        from agent_core.llm.error_info import classify_llm_error
+
+        return classify_llm_error(exc).to_dict()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def default_socket_path() -> str:
     test_dir = os.environ.get("SCHEDULE_AGENT_TEST_DATA_DIR")
     if test_dir:
@@ -153,8 +163,8 @@ class AutomationIPCServer:
             if self._gateway.has_scheduler:
                 continue
             try:
-                for sid in self._gateway.list_sessions():
-                    if self._gateway.should_expire_session(session_id=sid):
+                for sid in await self._gateway.list_sessions():
+                    if await self._gateway.should_expire_session(session_id=sid):
                         await self._gateway.expire_session(
                             reason="timer", session_id=sid
                         )
@@ -313,6 +323,7 @@ class AutomationIPCServer:
                     len(_ci),
                     [str(i.get("type")) for i in _ci[:3]],
                 )
+
             # Pass IPC stream forward functions through metadata to the scheduler,
             # where ContextVars will be properly restored (scheduler dispatches via
             # create_task which does NOT inherit ContextVars from this scope).
@@ -364,7 +375,12 @@ class AutomationIPCServer:
             # 业务级取消（如 session 被 scheduler skip），需要给客户端明确的 final 事件
             try:
                 await _send_event(
-                    "final", {"ok": False, "error": _format_ipc_error(exc)}
+                    "final",
+                    {
+                        "ok": False,
+                        "error": _format_ipc_error(exc),
+                        "error_info": _ipc_error_info(exc),
+                    },
                 )
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 logger.warning(
@@ -379,7 +395,12 @@ class AutomationIPCServer:
             # 若此时连接也已断开，则忽略第二次 BrokenPipe/ConnectionReset。
             try:
                 await _send_event(
-                    "final", {"ok": False, "error": _format_ipc_error(exc)}
+                    "final",
+                    {
+                        "ok": False,
+                        "error": _format_ipc_error(exc),
+                        "error_info": _ipc_error_info(exc),
+                    },
                 )
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 logger.warning(
@@ -478,7 +499,7 @@ class AutomationIPCServer:
 
         if method == "session_list":
             return {
-                "sessions": self._gateway.list_sessions(),
+                "sessions": await self._gateway.list_sessions(),
                 "active_session_id": active_session,
             }
 
@@ -491,7 +512,7 @@ class AutomationIPCServer:
                 session_id, create_if_missing=create_if_missing
             )
             self._client_active_session[client_id] = session_id
-            self._gateway.mark_activity(session_id)
+            await self._gateway.mark_activity(session_id)
             return {"created": created, "active_session_id": session_id}
 
         if method == "session_expire":
@@ -784,21 +805,71 @@ class AutomationIPCServer:
         if method == "poll_stream_recoveries":
             return {"results": self._poll_stream_recoveries(client_id)}
 
+        if method == "pending_push_sessions":
+            sessions: list[str] = []
+            if hasattr(self._gateway, "pending_push_sessions"):
+                sessions = list(self._gateway.pending_push_sessions())
+            return {"sessions": sessions}
+
+        if method == "poll_frontend_push":
+            # 按前端租出还没确认的结果。队列里的原件留到 ack 或 release。
+            frontend = str(params.get("frontend") or "").strip()
+            results = []
+            if frontend and hasattr(self._gateway, "lease_frontend_push"):
+                for sid, request_id, result in self._gateway.lease_frontend_push(
+                    frontend
+                ):
+                    results.append(
+                        self._serialize_run_result_for_push(request_id, sid, result)
+                    )
+            return {"results": results, "frontend": frontend}
+
+        if method == "ack_push":
+            session_id = str(params.get("session_id") or "").strip()
+            request_ids = params.get("request_ids")
+            removed = 0
+            if (
+                session_id
+                and isinstance(request_ids, list)
+                and hasattr(self._gateway, "ack_push_payloads")
+            ):
+                removed = self._gateway.ack_push_payloads(session_id, request_ids)
+            return {"removed": removed, "session_id": session_id}
+
+        if method == "release_push":
+            session_id = str(params.get("session_id") or "").strip()
+            request_ids = params.get("request_ids")
+            count_attempt = params.get("count_attempt", True)
+            kept = 0
+            if (
+                session_id
+                and isinstance(request_ids, list)
+                and hasattr(self._gateway, "release_push_leases")
+            ):
+                kept = self._gateway.release_push_leases(
+                    session_id,
+                    request_ids,
+                    count_attempt=bool(count_attempt),
+                )
+            return {"kept": kept, "session_id": session_id}
+
         if method == "poll_push":
             # 非阻塞轮询：批量取出该 session 所有 [out] 队列结果（统一出口）
+            # 显式 session_id 时不依赖当前客户端切到的会话。
+            session_id = str(params.get("session_id") or "").strip() or active_session
             results = []
             if hasattr(self._gateway, "poll_push_result"):
                 while True:
-                    envelope = self._gateway.poll_push_result(active_session)
+                    envelope = self._gateway.poll_push_result(session_id)
                     if envelope is None:
                         break
                     request_id, result = envelope
                     results.append(
                         self._serialize_run_result_for_push(
-                            request_id, active_session, result
+                            request_id, session_id, result
                         )
                     )
-            return {"results": results, "session_id": active_session}
+            return {"results": results, "session_id": session_id}
 
         if method == "run_turn":
             text = str(params.get("text") or "")
@@ -1306,15 +1377,70 @@ class AutomationIPCClient:
             card if isinstance(card, dict) else None,
         )
 
-    async def poll_push(self) -> list:
-        """非阻塞轮询当前 session 的 inject_turn 推送结果列表（空则返回 []）。
+    async def poll_push(self, session_id: Optional[str] = None) -> list:
+        """非阻塞轮询 inject_turn 推送结果列表（空则返回 []）。
 
         供 CLI 后台通知循环调用：有新的 subagent 完成通知时，主 agent 会在后台处理
         并通过 inject_turn 产生回复，该回复通过此接口推送给前端展示。
+        传入 session_id 时直接取该会话的队列，不先切换当前会话。
         """
-        data = await self._request("poll_push", {})
+        payload: Dict[str, Any] = {}
+        sid = str(session_id or "").strip()
+        if sid:
+            payload["session_id"] = sid
+        data = await self._request("poll_push", payload)
         results = data.get("results")
         return results if isinstance(results, list) else []
+
+    async def pending_push_sessions(self) -> list:
+        """kernel 输出队列里还有未取走结果的 session id。"""
+        data = await self._request("pending_push_sessions", {})
+        sessions = data.get("sessions")
+        return sessions if isinstance(sessions, list) else []
+
+    async def poll_frontend_push(self) -> list:
+        """租出本客户端所属前端尚未确认的结果。其它前端的队列不动。
+
+        这些结果仍留在 kernel 队列里，送达后要 ack_push，发不出去则 release_push。
+        """
+        data = await self._request(
+            "poll_frontend_push",
+            {"frontend": self.source},
+        )
+        results = data.get("results")
+        return results if isinstance(results, list) else []
+
+    async def ack_push(self, session_id: str, request_ids: list) -> int:
+        """确认这些结果已经送达，kernel 才把它们从队列删掉。"""
+        data = await self._request(
+            "ack_push",
+            {"session_id": session_id, "request_ids": list(request_ids)},
+        )
+        try:
+            return int(data.get("removed") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    async def release_push(
+        self,
+        session_id: str,
+        request_ids: list,
+        *,
+        count_attempt: bool = True,
+    ) -> int:
+        """没发出去：解除租约，结果留在队列里等下一轮。"""
+        data = await self._request(
+            "release_push",
+            {
+                "session_id": session_id,
+                "request_ids": list(request_ids),
+                "count_attempt": count_attempt,
+            },
+        )
+        try:
+            return int(data.get("kept") or 0)
+        except (TypeError, ValueError):
+            return 0
 
     async def poll_stream_recoveries(self) -> list:
         """Poll completed run_turn_stream results whose original IPC stream died."""
@@ -1412,9 +1538,17 @@ class AutomationIPCClient:
                     continue
                 if event_type == "final":
                     if not payload.get("ok"):
-                        raise RuntimeError(
+                        err = RuntimeError(
                             str(payload.get("error") or "automation ipc error")
                         )
+                        info = payload.get("error_info")
+                        if isinstance(info, dict):
+                            # 把结构化错误挂到异常上，前端可据此生成可读回执
+                            try:
+                                setattr(err, "error_info", info)
+                            except Exception:  # noqa: BLE001
+                                pass
+                        raise err
                     result_data = payload.get("result")
                     final_result = result_data if isinstance(result_data, dict) else {}
                     break

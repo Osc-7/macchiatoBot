@@ -208,8 +208,8 @@ async def test_gateway_switch_session_upserts_and_routes(tmp_path):
 
     assert created is True
     assert result.output_text == "new"
-    assert "cli:root" in gateway.list_sessions()
-    assert "cli:work" in gateway.list_sessions()
+    assert "cli:root" in await gateway.list_sessions()
+    assert "cli:work" in await gateway.list_sessions()
 
 
 @pytest.mark.asyncio
@@ -285,7 +285,7 @@ async def test_gateway_sessions_visible_across_instances(tmp_path):
         owner_id="root",
         source="cli",
     )
-    sessions = gw_b.list_sessions()
+    sessions = await gw_b.list_sessions()
     await gw_b.close()
 
     assert "cli:root" in sessions
@@ -320,7 +320,7 @@ async def test_gateway_should_expire_uses_registry_timestamp_for_unloaded_sessio
         owner_id="root",
         source="cli",
     )
-    assert gateway.should_expire_session("cli:stale") is True
+    assert await gateway.should_expire_session("cli:stale") is True
     await gateway.close()
 
 
@@ -343,7 +343,7 @@ async def test_gateway_expired_session_not_repeated_until_activity(tmp_path):
     assert changed_1 is True
     assert changed_2 is False
 
-    gateway.mark_activity("cli:root")
+    await gateway.mark_activity("cli:root")
     changed_3 = await gateway.expire_session_if_needed(reason="idle")
     assert changed_3 is True
     await gateway.close()
@@ -428,7 +428,7 @@ async def test_gateway_delete_session_returns_false_when_history_delete_fails(tm
     await gateway.ensure_session("cli:work")
 
     ok = await gateway.delete_session("cli:work")
-    sessions = gateway.list_sessions()
+    sessions = await gateway.list_sessions()
     assert ok is False
     assert registry.session_exists("root", "cli", "cli:work") is True
     assert "cli:work" in sessions

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import threading
-import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from agent_core.config import get_config
@@ -28,6 +30,15 @@ FeishuPushForwarder：后台轮询 [out] 队列，将 inject_turn 等推送结�
 
 logger = logging.getLogger(__name__)
 
+
+def _default_feishu_chat_store_path() -> Path:
+    """私聊 session 到 chat_id 的落盘位置。只属于飞书进程，kernel 不读这个文件。"""
+    test_dir = os.environ.get("SCHEDULE_AGENT_TEST_DATA_DIR")
+    if test_dir:
+        return Path(test_dir) / "feishu" / "session_chats.json"
+    return Path("data") / "feishu" / "session_chats.json"
+
+
 # 全局 push 转发器，供 ws_client 注册会话并启动
 _feishu_push_forwarder: Optional["FeishuPushForwarder"] = None
 _forwarder_lock = threading.Lock()
@@ -45,8 +56,19 @@ def get_feishu_push_forwarder() -> "FeishuPushForwarder":
 def register_feishu_push_session(
     session_id: str, chat_id: str, ttl_seconds: float = 300.0
 ) -> None:
-    """注册需转发 push 的会话，供 FeishuPushForwarder 轮询并投递到对应 chat。"""
-    get_feishu_push_forwarder().register(session_id, chat_id, ttl_seconds)
+    """记下这个会话发回哪个聊天，并确保转发循环在跑。
+
+    ttl_seconds 不再决定要不要去取队列。结果留在 kernel 队列里，直到本进程确认送达。
+    """
+    del ttl_seconds
+    remember_feishu_chat(session_id, chat_id)
+
+
+def remember_feishu_chat(session_id: str, chat_id: str) -> None:
+    """记下 session 发回哪个聊天，并落盘。进程重启后私聊仍能对上。"""
+    forwarder = get_feishu_push_forwarder()
+    forwarder.remember_chat(session_id, chat_id)
+    forwarder.start()
 
 
 class AutomationDaemonUnavailable(RuntimeError):
@@ -109,6 +131,33 @@ def format_feishu_processing_error(exc: BaseException) -> str:
     if len(msg) > 500:
         msg = msg[:499] + "…"
     return f"处理消息时出错：{msg}"
+
+
+async def send_classified_feishu_error(
+    *,
+    chat_id: str,
+    error_info: Dict[str, Any],
+    timeout_seconds: float = 30.0,
+) -> bool:
+    """把结构化错误发成说明卡片。发送失败返回 False，调用方再决定是否改发纯文本。"""
+    cid = (chat_id or "").strip()
+    if not cid or not isinstance(error_info, dict):
+        return False
+    try:
+        from system.kernel.error_notify import (
+            build_user_facing_error_card,
+            error_info_from_dict,
+        )
+
+        client = FeishuClient(timeout_seconds=timeout_seconds)
+        await client.send_interactive_card(
+            chat_id=cid,
+            card=build_user_facing_error_card(error_info_from_dict(error_info)),
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("飞书错误卡片发送失败 (chat_id=%s): %s", cid, exc)
+        return False
 
 
 async def send_feishu_error_notice(
@@ -201,7 +250,9 @@ async def try_handle_slash_command_via_ipc(
                 )
         # /goal 等斜杠命令会 inject_turn 异步执行；须注册 push 转发，否则结果不会回到飞书。
         chat_id = (feishu_chat_id or "").strip()
-        active_sid = str(getattr(client, "active_session_id", "") or effective_session).strip()
+        active_sid = str(
+            getattr(client, "active_session_id", "") or effective_session
+        ).strip()
         if chat_id and active_sid:
             get_feishu_push_forwarder().start()
             # Goal 可能长时间运行；与 agent_wake 一致保持 push 转发注册
@@ -287,11 +338,28 @@ class FeishuIPCBridge:
         return await ctrl.finalize_after_run(result)
 
 
-class FeishuPushForwarder:
-    """后台轮询 [out] 队列，将 inject_turn 等推送结果发回飞书。
+def _push_payload_needs_delivery(payload: Dict[str, Any]) -> bool:
+    """这条推送如果没发出去，就还得留在队列里。空结果直接丢掉。"""
+    if not isinstance(payload, dict):
+        return False
+    meta = payload.get("metadata")
+    meta = meta if isinstance(meta, dict) else {}
+    if meta.get("_error_info"):
+        return True
+    attachments = payload.get("attachments")
+    if isinstance(attachments, list) and attachments:
+        return True
+    text = str(payload.get("output_text") or "").strip()
+    if text and not meta.get("feishu_skip_final_reply"):
+        return True
+    return False
 
-    与 CLI 的 _automation_notifier_loop 对齐：统一从 kernel [out] 队列取结果，
-    按 session 投递到对应前端。飞书侧投递到 feishu_chat_id。
+
+class FeishuPushForwarder:
+    """后台领取 kernel 交给本前端的队列结果，发回对应的飞书聊天。
+
+    结果在确认送达前留在 kernel 队列里。聊天地址记在本进程，并落到
+    data/feishu/session_chats.json，私聊在进程重启后仍能对上。
     """
 
     def __init__(
@@ -300,33 +368,86 @@ class FeishuPushForwarder:
         poll_interval_seconds: float = 2.0,
         socket_path: Optional[str] = None,
         timeout_seconds: float = 30.0,
-        session_ttl_seconds: float = 300.0,
+        chat_store_path: Optional[str] = None,
     ) -> None:
         self._poll_interval = poll_interval_seconds
         self._socket_path = socket_path or default_socket_path()
         self._timeout = timeout_seconds
-        # 会话注册有效期：subagent 等 inject_turn 可能远超 5 分钟才全部完成，
-        # 成功转发推送后会在 _poll_once 内滑动续期，避免后续结果无法送达飞书。
-        self._session_ttl_seconds = float(session_ttl_seconds)
-        self._registry: Dict[str, tuple[str, float]] = (
-            {}
-        )  # session_id -> (chat_id, expiry_ts)
+        self._chat_store_path = (
+            Path(chat_store_path)
+            if chat_store_path is not None
+            else _default_feishu_chat_store_path()
+        )
+        self._chat_by_session: Dict[str, str] = self._load_chats()
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
 
+    def _load_chats(self) -> Dict[str, str]:
+        path = self._chat_store_path
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("feishu session chat store unreadable: %s", exc)
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        loaded: Dict[str, str] = {}
+        for key, value in raw.items():
+            sid = str(key or "").strip()
+            cid = str(value or "").strip()
+            if sid and cid:
+                loaded[sid] = cid
+        return loaded
+
+    def _save_chats_locked(self) -> None:
+        path = self._chat_store_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(self._chat_by_session, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("feishu session chat store write failed: %s", exc)
+
+    def remember_chat(self, session_id: str, chat_id: str) -> None:
+        """记住这个会话的飞书聊天，并落盘。不开始轮询。"""
+        sid = (session_id or "").strip()
+        cid = (chat_id or "").strip()
+        if not sid or not cid:
+            return
+        with self._lock:
+            if self._chat_by_session.get(sid) == cid:
+                return
+            self._chat_by_session[sid] = cid
+            self._save_chats_locked()
+
+    def chat_id_for_session(self, session_id: str) -> str:
+        """本进程见过的聊天，或群会话 id 里自带的 chat_id。"""
+        sid = (session_id or "").strip()
+        if not sid:
+            return ""
+        with self._lock:
+            known = (self._chat_by_session.get(sid) or "").strip()
+        if known:
+            return known
+        if sid.startswith("feishu:chat:"):
+            rest = sid.split(":", 2)
+            if len(rest) >= 3:
+                return rest[2].strip()
+        return ""
+
     def register(
         self, session_id: str, chat_id: str, ttl_seconds: Optional[float] = None
     ) -> None:
-        """注册会话，在 ttl_seconds 内轮询 [out] 队列并转发到 chat_id。"""
-        if not session_id or not chat_id:
-            return
-        ttl = (
-            float(ttl_seconds) if ttl_seconds is not None else self._session_ttl_seconds
-        )
-        expiry = time.time() + ttl
-        with self._lock:
-            self._registry[session_id] = (chat_id, expiry)
+        """记下会话对应的聊天。ttl_seconds 不再控制投递。"""
+        del ttl_seconds
+        self.remember_chat(session_id, chat_id)
 
     def start(self) -> None:
         """启动后台轮询线程。"""
@@ -351,20 +472,7 @@ class FeishuPushForwarder:
                 logger.warning("FeishuPushForwarder poll_once failed: %s", exc)
 
     async def _poll_once(self) -> None:
-        """单次轮询：对已注册会话执行 poll_push 并转发。"""
-        now = time.time()
-        with self._lock:
-            to_poll = [
-                (sid, chat_id)
-                for sid, (chat_id, expiry) in list(self._registry.items())
-                if expiry > now
-            ]
-            # 移除过期
-            self._registry = {
-                sid: (cid, exp)
-                for sid, (cid, exp) in self._registry.items()
-                if exp > now
-            }
+        """领取本前端的队列结果。发出去之后确认，发不出去就解除租约。"""
         try:
             client = AutomationIPCClient(
                 owner_id="root",
@@ -382,10 +490,8 @@ class FeishuPushForwarder:
                 for item in load_feishu_push_watch_targets_from_file():
                     sid = str(item.get("session_id") or "").strip()
                     cid = str(item.get("chat_id") or "").strip()
-                    if not sid or not cid:
-                        continue
-                    ttl = float(item.get("ttl_seconds") or self._session_ttl_seconds)
-                    self.register(sid, cid, ttl_seconds=max(60.0, ttl))
+                    if sid and cid:
+                        self.remember_chat(sid, cid)
             except Exception as exc:
                 logger.debug("FeishuPushForwarder wake watch load failed: %s", exc)
             feishu_client = FeishuClient(timeout_seconds=self._timeout)
@@ -405,25 +511,74 @@ class FeishuPushForwarder:
                 if sent:
                     session_id = str(pr.get("session_id") or "").strip()
                     if session_id:
-                        self.register(session_id, chat_id)
-            for session_id, chat_id in to_poll:
-                await client.switch_session(session_id, create_if_missing=False)
-                results = await client.poll_push()
-                sent_any = False
-                for pr in results or []:
-                    sent_any = (
-                        await self._send_result_payload(
-                            feishu_client=feishu_client,
-                            chat_id=chat_id,
-                            payload=pr,
-                        )
-                        or sent_any
+                        self.remember_chat(session_id, chat_id)
+            dispatched: list[Dict[str, Any]] = []
+            poll_frontend = getattr(client, "poll_frontend_push", None)
+            if poll_frontend is not None:
+                try:
+                    dispatched = list(await poll_frontend() or [])
+                except Exception as exc:
+                    logger.warning(
+                        "FeishuPushForwarder poll_frontend_push failed: %s", exc
                     )
-                # 有推送成功则续期，避免长任务在首条用户消息后固定 300s 过期、后续 inject 丢失
-                if sent_any:
-                    self.register(session_id, chat_id)
+            acked: Dict[str, list[str]] = {}
+            failed: Dict[str, list[str]] = {}
+            unrouted: Dict[str, list[str]] = {}
+            for pr in dispatched:
+                if not isinstance(pr, dict):
+                    continue
+                session_id = str(pr.get("session_id") or "").strip()
+                request_id = str(pr.get("request_id") or "").strip()
+                chat_id = self.chat_id_for_session(session_id)
+                if not chat_id:
+                    meta = pr.get("metadata")
+                    if isinstance(meta, dict):
+                        chat_id = str(meta.get("feishu_chat_id") or "").strip()
+                    if chat_id and session_id:
+                        self.remember_chat(session_id, chat_id)
+                if not session_id or not chat_id or not request_id:
+                    if session_id and request_id:
+                        unrouted.setdefault(session_id, []).append(request_id)
+                    continue
+                sent = await self._send_result_payload(
+                    feishu_client=feishu_client,
+                    chat_id=chat_id,
+                    payload=pr,
+                )
+                if sent or not _push_payload_needs_delivery(pr):
+                    acked.setdefault(session_id, []).append(request_id)
+                else:
+                    failed.setdefault(session_id, []).append(request_id)
+            await self._settle_push(client, "ack_push", acked)
+            await self._settle_push(client, "release_push", failed)
+            await self._settle_push(
+                client, "release_push", unrouted, count_attempt=False
+            )
         except Exception as exc:
             logger.debug("FeishuPushForwarder _poll_once: %s", exc)
+
+    async def _settle_push(
+        self,
+        client: AutomationIPCClient,
+        method_name: str,
+        buckets: Dict[str, list[str]],
+        **kwargs: Any,
+    ) -> None:
+        fn = getattr(client, method_name, None)
+        if fn is None or not buckets:
+            return
+        for session_id, request_ids in buckets.items():
+            if not request_ids:
+                continue
+            try:
+                await fn(session_id, request_ids, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "FeishuPushForwarder %s session=%s failed: %s",
+                    method_name,
+                    session_id,
+                    exc,
+                )
 
     async def _send_result_payload(
         self,
@@ -439,6 +594,22 @@ class FeishuPushForwarder:
             meta.get("feishu_skip_final_reply")
         )
         text = (payload.get("output_text") or "").strip()
+        # 后台轮次（定时任务/子任务推送）失败时也要让用户看到原因，而不是只推一句内部错误串
+        err_raw = meta.get("_error_info") if isinstance(meta, dict) else None
+        if err_raw:
+            try:
+                from system.kernel.error_notify import (
+                    build_user_facing_error_card,
+                    error_info_from_dict,
+                )
+
+                await feishu_client.send_interactive_card(
+                    chat_id=chat_id,
+                    card=build_user_facing_error_card(error_info_from_dict(err_raw)),
+                )
+                return True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("FeishuPushForwarder 错误卡片发送失败: %s", exc)
         attachments = payload.get("attachments")
         if not isinstance(attachments, list):
             attachments = []

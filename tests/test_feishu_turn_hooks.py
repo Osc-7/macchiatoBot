@@ -114,8 +114,35 @@ async def test_visible_text_then_tool_closes_segment_before_tool_card(monkeypatc
         "replace:Segment"
     )
     assert fake.ops.index("replace:Segment") < fake.ops.index("send_card:tool")
+    assert "patch" not in fake.ops
     assert ctrl._ck_card_id == ""
     assert ctrl._assistant_buffer == ""
+
+
+@pytest.mark.asyncio
+async def test_final_reply_after_tool_patches_message(monkeypatch):
+    """工具卡之后的终态回复必须 PATCH 原消息，不能只 replace 卡片实体。"""
+    fake = _FakeFeishu()
+    ctrl = _ctrl(monkeypatch, fake)
+
+    await ctrl._on_trace_event(
+        {
+            "type": "tool_call",
+            "name": "bash",
+            "tool_call_id": "call_3",
+            "arguments": {"command": "date"},
+        }
+    )
+    await ctrl._on_assistant_delta("查完了，现在是晚上八点。")
+    result = await ctrl.finalize_after_run(
+        AgentRunResult(output_text="查完了，现在是晚上八点。")
+    )
+
+    assert "send_card:tool" in fake.ops
+    assert "replace:Complete" in fake.ops
+    assert fake.ops.index("send_card:tool") < fake.ops.index("replace:Complete")
+    assert fake.ops.index("replace:Complete") < fake.ops.index("patch")
+    assert result.metadata.get("feishu_skip_final_reply") is True
 
 
 @pytest.mark.asyncio
@@ -131,9 +158,11 @@ async def test_finalize_stops_streaming_mode_then_replaces_complete(monkeypatch)
 
     assert "patch_settings:streaming_mode=False" in fake.ops
     assert "replace:Complete" in fake.ops
+    assert "patch" in fake.ops
     assert fake.ops.index("patch_settings:streaming_mode=False") < fake.ops.index(
         "replace:Complete"
     )
+    assert fake.ops.index("replace:Complete") < fake.ops.index("patch")
     assert result.metadata.get("feishu_skip_final_reply") is True
     assert ctrl._ck_card_id == ""
 

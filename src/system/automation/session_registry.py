@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -31,6 +32,8 @@ class SessionRegistry:
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
+        # 同一连接会被 to_thread 丢到工作线程，访问必须串行。
+        self._lock = threading.Lock()
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.executescript(_DDL)
         self._ensure_columns()
@@ -46,6 +49,12 @@ class SessionRegistry:
 
     def upsert_session(self, owner_id: str, source: str, session_id: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._upsert_session_locked(owner_id, source, session_id, now)
+
+    def _upsert_session_locked(
+        self, owner_id: str, source: str, session_id: str, now: str
+    ) -> None:
         self._conn.execute(
             """
             INSERT INTO sessions(owner_id, source, session_id, is_expired, created_at, updated_at)
@@ -60,27 +69,29 @@ class SessionRegistry:
 
     def mark_expired(self, owner_id: str, source: str, session_id: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        self._conn.execute(
-            """
-            UPDATE sessions
-            SET is_expired=1, updated_at=?
-            WHERE owner_id=? AND source=? AND session_id=?
-            """,
-            (now, owner_id, source, session_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE sessions
+                SET is_expired=1, updated_at=?
+                WHERE owner_id=? AND source=? AND session_id=?
+                """,
+                (now, owner_id, source, session_id),
+            )
+            self._conn.commit()
 
     def is_expired(self, owner_id: str, source: str, session_id: str) -> bool:
-        cur = self._conn.execute(
-            """
-            SELECT is_expired
-            FROM sessions
-            WHERE owner_id=? AND source=? AND session_id=?
-            LIMIT 1
-            """,
-            (owner_id, source, session_id),
-        )
-        row = cur.fetchone()
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT is_expired
+                FROM sessions
+                WHERE owner_id=? AND source=? AND session_id=?
+                LIMIT 1
+                """,
+                (owner_id, source, session_id),
+            )
+            row = cur.fetchone()
         if row is None:
             return False
         try:
@@ -89,6 +100,12 @@ class SessionRegistry:
             return False
 
     def get_updated_at(
+        self, owner_id: str, source: str, session_id: str
+    ) -> Optional[datetime]:
+        with self._lock:
+            return self._get_updated_at_locked(owner_id, source, session_id)
+
+    def _get_updated_at_locked(
         self, owner_id: str, source: str, session_id: str
     ) -> Optional[datetime]:
         cur = self._conn.execute(
@@ -112,37 +129,41 @@ class SessionRegistry:
         return dt
 
     def session_exists(self, owner_id: str, source: str, session_id: str) -> bool:
-        cur = self._conn.execute(
-            "SELECT 1 FROM sessions WHERE owner_id=? AND source=? AND session_id=? LIMIT 1",
-            (owner_id, source, session_id),
-        )
-        return cur.fetchone() is not None
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT 1 FROM sessions WHERE owner_id=? AND source=? AND session_id=? LIMIT 1",
+                (owner_id, source, session_id),
+            )
+            return cur.fetchone() is not None
 
     def list_sessions(self, owner_id: str, source: str) -> List[str]:
-        cur = self._conn.execute(
-            """
-            SELECT session_id
-            FROM sessions
-            WHERE owner_id=? AND source=? AND is_expired=0
-            ORDER BY updated_at DESC
-            """,
-            (owner_id, source),
-        )
-        return [str(row[0]) for row in cur.fetchall()]
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT session_id
+                FROM sessions
+                WHERE owner_id=? AND source=? AND is_expired=0
+                ORDER BY updated_at DESC
+                """,
+                (owner_id, source),
+            )
+            return [str(row[0]) for row in cur.fetchall()]
 
     def delete_session(self, owner_id: str, source: str, session_id: str) -> None:
         """从注册表中删除指定会话记录。
 
         仅影响 session 注册元数据，不删除底层对话历史或长期记忆。
         """
-        self._conn.execute(
-            "DELETE FROM sessions WHERE owner_id=? AND source=? AND session_id=?",
-            (owner_id, source, session_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM sessions WHERE owner_id=? AND source=? AND session_id=?",
+                (owner_id, source, session_id),
+            )
+            self._conn.commit()
 
     def close(self) -> None:
-        try:
-            self._conn.close()
-        except Exception:
-            pass
+        with self._lock:
+            try:
+                self._conn.close()
+            except Exception:
+                pass

@@ -48,6 +48,8 @@ from .ipc_bridge import (
     format_feishu_processing_error,
     get_feishu_push_forwarder,
     register_feishu_push_session,
+    remember_feishu_chat,
+    send_classified_feishu_error,
     send_feishu_error_notice,
     try_handle_slash_command_via_ipc,
 )
@@ -291,6 +293,8 @@ async def _handle_im_message_event_async(data: Any) -> None:
         or session_id
     )
     meta["feishu_session_id"] = session_id
+    if feishu_message.chat_id:
+        remember_feishu_chat(session_id, feishu_message.chat_id)
     metadata = {
         **meta,
         "feishu_message_id": message_id,
@@ -371,11 +375,20 @@ async def _handle_im_message_event_async(data: Any) -> None:
         logger.exception(
             "failed to process feishu ws message via automation daemon: %s", exc
         )
-        await send_feishu_error_notice(
-            chat_id=feishu_message.chat_id,
-            text=format_feishu_processing_error(exc),
-            timeout_seconds=feishu_cfg.timeout_seconds,
-        )
+        raw_info = getattr(exc, "error_info", None)
+        notice_sent = False
+        if isinstance(raw_info, dict):
+            notice_sent = await send_classified_feishu_error(
+                chat_id=feishu_message.chat_id,
+                error_info=raw_info,
+                timeout_seconds=feishu_cfg.timeout_seconds,
+            )
+        if not notice_sent:
+            await send_feishu_error_notice(
+                chat_id=feishu_message.chat_id,
+                text=format_feishu_processing_error(exc),
+                timeout_seconds=feishu_cfg.timeout_seconds,
+            )
         return
 
     # 将 Agent 回复发回飞书（已在 IPC 内对流式 PATCH 最终标题时跳过重复发送）

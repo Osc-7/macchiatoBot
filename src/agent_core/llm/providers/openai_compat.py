@@ -196,6 +196,49 @@ def _normalize_text_content(content: Any) -> Optional[str]:
     return str(content)
 
 
+# provider 侧图片降级：部分网关（DeepSeek 等）会在服务端预取图片，
+# 任一图片拉取失败即整单 400（如 "Failed to download image"）。
+# 图片属附件级内容，不该让整条回复失败——换成文本占位符降级重试一次。
+_IMAGE_PLACEHOLDER_TEXT = (
+    "[系统提示：此处原本有一张图片，但服务端拉取失败，未能送达模型；"
+    "请在回复中向用户说明没能看到这张图片，并基于其余内容正常作答。]"
+)
+
+
+def _is_image_fetch_400(exc: BaseException) -> bool:
+    """判断是否为「provider 服务端拉取图片失败」导致的整单 400。"""
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    msg = str(exc).lower()
+    return "image" in msg and ("download" in msg or "fetch" in msg)
+
+
+def _replace_image_parts_with_placeholder(
+    messages: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], int]:
+    """把消息里的图片 part 替换为文本占位符，返回 (新消息列表, 替换数)。"""
+    replaced = 0
+    out: List[Dict[str, Any]] = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            out.append(msg)
+            continue
+        new_parts: List[Any] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") in (
+                "image_url",
+                "image",
+                "input_image",
+            ):
+                new_parts.append({"type": "text", "text": _IMAGE_PLACEHOLDER_TEXT})
+                replaced += 1
+            else:
+                new_parts.append(part)
+        out.append({**msg, "content": new_parts})
+    return out, replaced
+
+
 _TOOL_CODE_RE = re.compile(
     r"<tool_code>\s*(\w+)\((.*?)\)\s*</tool_code>",
     re.DOTALL,
@@ -402,6 +445,29 @@ class OpenAICompatProvider(BaseProvider):
             pass
         return None
 
+    async def _create_completion(self, request_params: Dict[str, Any]) -> Any:
+        """chat.completions.create 统一入口：图片拉取型 400 时摘除图片降级重试一次。"""
+        try:
+            return await self._client.chat.completions.create(**request_params)
+        except Exception as exc:
+            if not _is_image_fetch_400(exc):
+                raise
+            messages = request_params.get("messages")
+            if not isinstance(messages, list):
+                raise
+            new_messages, replaced = _replace_image_parts_with_placeholder(messages)
+            if replaced == 0:
+                raise
+            logger.warning(
+                "OpenAICompatProvider[%s] 图片拉取失败导致 400，"
+                "摘除 %d 张图片降级重试一次: %s",
+                self._name,
+                replaced,
+                exc,
+            )
+            degraded = {**request_params, "messages": new_messages}
+            return await self._client.chat.completions.create(**degraded)
+
     async def chat(
         self,
         messages: List[Dict[str, Any]],
@@ -423,7 +489,7 @@ class OpenAICompatProvider(BaseProvider):
         if self._stream:
             return await self._chat_with_tools_stream(request_params)
 
-        response = await self._client.chat.completions.create(**request_params)
+        response = await self._create_completion(request_params)
         choice = response.choices[0]
         usage = TokenUsage.from_response(response)
         content = _strip_thinking_content(
@@ -470,7 +536,7 @@ class OpenAICompatProvider(BaseProvider):
         }
         self._apply_vendor_extra_body(request_params)
 
-        response = await self._client.chat.completions.create(**request_params)
+        response = await self._create_completion(request_params)
         choice = response.choices[0]
         usage = TokenUsage.from_response(response)
         content = _strip_thinking_content(
@@ -570,7 +636,7 @@ class OpenAICompatProvider(BaseProvider):
             self._name,
             self._model,
         )
-        response = await self._client.chat.completions.create(**request_params)
+        response = await self._create_completion(request_params)
         choice = response.choices[0]
 
         tool_calls: List[ToolCall] = []
@@ -639,7 +705,7 @@ class OpenAICompatProvider(BaseProvider):
             self._name,
             self._model,
         )
-        stream = await self._client.chat.completions.create(**params)
+        stream = await self._create_completion(params)
 
         content_parts: List[str] = []
         reasoning_parts: List[str] = []

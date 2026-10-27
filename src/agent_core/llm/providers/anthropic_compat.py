@@ -9,6 +9,7 @@ Kimi Code (api.kimi.com/coding/v1) 等。
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import inspect
 import json
@@ -266,9 +267,31 @@ class AnthropicCompatProvider(BaseProvider):
         if self._vendor_params:
             payload.update(self._vendor_params)
 
-        response = await self._http_client.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        return response.json()
+        last_exc: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                response = await self._http_client.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                return response.json()
+            except (
+                httpx.RemoteProtocolError,
+                httpx.ConnectError,
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+            ) as exc:
+                last_exc = exc
+                if attempt >= 2:
+                    raise
+                delay = float(2 ** attempt)
+                logger.warning(
+                    "Anthropic 请求瞬时网络错误 (%r)，%.0fs 后重试 (%d/2)",
+                    exc,
+                    delay,
+                    attempt + 1,
+                )
+                await asyncio.sleep(delay)
+        assert last_exc is not None
+        raise last_exc
 
     async def _make_stream_request(
         self,
@@ -455,27 +478,57 @@ class AnthropicCompatProvider(BaseProvider):
                     raise RuntimeError(str(err.get("message") or "Anthropic stream error"))
                 raise RuntimeError(f"Anthropic stream error: {data}")
 
-        async with self._http_client.stream(
-            "POST",
-            url,
-            headers=headers,
-            json=stream_payload,
-        ) as response:
-            response.raise_for_status()
-            buffer = ""
-            async for chunk in response.aiter_bytes():
-                if not chunk:
-                    continue
-                try:
-                    buffer += chunk.decode("utf-8", errors="replace")
-                except Exception:
-                    continue
-                buffer = buffer.replace("\r\n", "\n")
-                while "\n\n" in buffer:
-                    block, buffer = buffer.split("\n\n", 1)
-                    await _handle_sse_block(block)
-            if buffer.strip():
-                await _handle_sse_block(buffer)
+        received_any_chunk = False
+
+        async def _stream_once() -> None:
+            nonlocal received_any_chunk
+            async with self._http_client.stream(
+                "POST",
+                url,
+                headers=headers,
+                json=stream_payload,
+            ) as response:
+                response.raise_for_status()
+                buffer = ""
+                async for chunk in response.aiter_bytes():
+                    received_any_chunk = True
+                    if not chunk:
+                        continue
+                    try:
+                        buffer += chunk.decode("utf-8", errors="replace")
+                    except Exception:
+                        continue
+                    buffer = buffer.replace("\r\n", "\n")
+                    while "\n\n" in buffer:
+                        block, buffer = buffer.split("\n\n", 1)
+                        await _handle_sse_block(block)
+                if buffer.strip():
+                    await _handle_sse_block(buffer)
+
+
+        last_exc = None
+        for attempt in range(3):
+            try:
+                await _stream_once()
+                break
+            except (
+                httpx.RemoteProtocolError,
+                httpx.ConnectError,
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+            ) as exc:
+                last_exc = exc
+                # 已收到任何流数据后不再重试，避免重复吐字；仅在连接/响应头阶段重试
+                if received_any_chunk or attempt >= 2:
+                    raise
+                delay = float(2 ** attempt)
+                logger.warning(
+                    "Anthropic 流式请求瞬时网络错误 (%r)，%.0fs 后重试 (%d/2)",
+                    exc,
+                    delay,
+                    attempt + 1,
+                )
+                await asyncio.sleep(delay)
 
         tool_calls: List[ToolCall] = []
         for idx in sorted(tool_calls_map.keys()):

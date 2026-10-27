@@ -1,29 +1,28 @@
+# kimi-for-coding 2026-10 已升级为 K2.8 Preview（kimi.com/code/docs 模型配置页）：
+# 思考改为 low/high/max 三档（默认 max），支持 1M 上下文，不再是旧 K2 的 budget_tokens。
 kimi_code:
-  label: "Kimi Code"
+  label: "Kimi Code (K2.8 Preview)"
   base_url: "https://api.kimi.com/coding/v1"
   api_key: "${KIMI_CODE_API_KEY}"
   model: "kimi-for-coding"
   temperature: 1.0
   protocol: "anthropic"
-  # Anthropic 扩展思考要求 budget_tokens；见
-  # https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking
   vendor_params:
     thinking:
       type: "enabled"
-      budget_tokens: 65536
-  # headers:
-  #   User-Agent: "claude-code/0.1.0"
+      effort: "max"
   capabilities:
     vision: true
     function_calling: true
     parallel_tool_calls: true
     reasoning_content: true
     thinking_tag_inline: false
-    context_window: 262144
+    context_window: 1048576
     vendor_files_api: kimi
 
+# kimi-for-coding-highspeed = K2.7 Code HighSpeed（仍是 K2 系，Thinking:ON，保留 budget_tokens）
 kimi_code_fast:
-  label: "Kimi Code Fast"
+  label: "Kimi Code Fast (K2.7 HighSpeed)"
   base_url: "https://api.kimi.com/coding/v1"
   api_key: "${KIMI_CODE_API_KEY}"
   model: "kimi-for-coding-highspeed"
@@ -54,6 +53,49 @@ kimi_k3:
   temperature: 1.0
   protocol: "anthropic"
   # Coding 端点走 Anthropic Messages；k3 用 thinking.effort=max（非 K2 的 budget_tokens）
+  vendor_params:
+    thinking:
+      type: "enabled"
+      effort: "max"
+  capabilities:
+    vision: true
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: true
+    thinking_tag_inline: false
+    context_window: 1048576
+    vendor_files_api: kimi
+
+# k3-256k：K3 的 256K 上下文版，消耗约为 k3(1M) 的一半；不支持视频输入。
+kimi_k3_256k:
+  label: "Kimi K3 256K"
+  base_url: "https://api.kimi.com/coding/v1"
+  api_key: "${KIMI_CODE_API_KEY}"
+  model: "k3-256k"
+  temperature: 1.0
+  protocol: "anthropic"
+  vendor_params:
+    thinking:
+      type: "enabled"
+      effort: "max"
+  capabilities:
+    vision: true
+    function_calling: true
+    parallel_tool_calls: true
+    reasoning_content: true
+    thinking_tag_inline: false
+    context_window: 262144
+    vendor_files_api: kimi
+
+# k3.1-pro：2026-10-24 上线（API 先行，文档页尚未更新）。端点实测 200，effort 三档与 k3 同形态；
+# 不传 thinking 也会思考（默认档位未官宣）。context_window 暂按 k3 同规格，待文档确认。
+kimi_k31_pro:
+  label: "Kimi K3.1 Pro"
+  base_url: "https://api.kimi.com/coding/v1"
+  api_key: "${KIMI_CODE_API_KEY}"
+  model: "k3.1-pro"
+  temperature: 1.0
+  protocol: "anthropic"
   vendor_params:
     thinking:
       type: "enabled"

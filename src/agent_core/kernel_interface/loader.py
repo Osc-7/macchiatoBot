@@ -12,35 +12,21 @@ InternalLoader — 在每次 LLM 调用前，动态组装完整的请求 Payload
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List
 
 if TYPE_CHECKING:
     from agent_core.agent.agent import AgentCore
 
-from agent_core.context.conversation import repair_incomplete_assistant_tool_call_sequence
+from agent_core.context.message_sanitize import normalize_tool_sequence
+
+logger = logging.getLogger(__name__)
 
 
 def _strip_orphan_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    移除孤立的 tool 消息。
-    API 要求：tool 消息必须跟在「带 tool_calls 的 assistant」之后。同一轮并行多个
-    tool_call 时会有多条连续的 role=tool；第二条起相邻上一条也是 tool，不得丢弃。
-    """
-    out: List[Dict[str, Any]] = []
-    for m in messages:
-        role = m.get("role", "")
-        if role == "tool":
-            prev = out[-1] if out else {}
-            pr = prev.get("role", "")
-            if pr == "assistant" and prev.get("tool_calls"):
-                out.append(m)
-            elif pr == "tool":
-                out.append(m)
-            # 否则跳过该 tool（孤立）
-        else:
-            out.append(m)
-    return out
+    """Backward-compatible wrapper around the shared tool-sequence normalizer."""
+    return normalize_tool_sequence(messages)[0]
 
 
 @dataclass
@@ -70,11 +56,14 @@ class InternalLoader:
         每次 LLM 调用前调用，确保 Prompt/Context/Tools 都是最新状态。
         若 agent._core_profile 不为 None，则对工具列表进行用户态过滤（双重防御的第一层）。
         """
-        # 与 prepare_turn / _finalize_turn 一致：打断后可能残留「有 tool_calls 无 tool」
-        repair_incomplete_assistant_tool_call_sequence(agent._context.messages)
         system_prompt = agent._build_system_prompt()
-        messages = list(agent._context.get_messages())
-        messages = _strip_orphan_tool_messages(messages)
+        messages, repair_stats = normalize_tool_sequence(agent._context.get_messages())
+        if any(repair_stats.values()):
+            logger.warning(
+                "InternalLoader: normalized tool sequence for session=%s stats=%s",
+                getattr(agent, "_session_id", "?"),
+                repair_stats,
+            )
 
         # 注入待处理的多模态内容（图片/视频）
         if agent._pending_multimodal_items:

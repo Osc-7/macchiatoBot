@@ -6,7 +6,14 @@ from agent_core.kernel_interface.loader import _strip_orphan_tool_messages
 
 def test_strip_orphan_keeps_parallel_tool_chain():
     msgs = [
-        {"role": "assistant", "content": "x", "tool_calls": [{"id": "a"}, {"id": "b"}]},
+        {
+            "role": "assistant",
+            "content": "x",
+            "tool_calls": [
+                {"id": "a", "type": "function", "function": {"name": "x", "arguments": "{}"}},
+                {"id": "b", "type": "function", "function": {"name": "x", "arguments": "{}"}},
+            ],
+        },
         {"role": "tool", "tool_call_id": "a", "content": "{}"},
         {"role": "tool", "tool_call_id": "b", "content": "{}"},
     ]
@@ -29,14 +36,20 @@ def test_strip_orphan_skips_tool_after_user_between_results():
     msgs = [
         {
             "role": "assistant",
-            "tool_calls": [{"id": "a"}, {"id": "b"}],
+            "tool_calls": [
+                {"id": "a", "type": "function", "function": {"name": "x", "arguments": "{}"}},
+                {"id": "b", "type": "function", "function": {"name": "x", "arguments": "{}"}},
+            ],
         },
         {"role": "tool", "tool_call_id": "a", "content": "{}"},
         {"role": "user", "content": "inject"},
         {"role": "tool", "tool_call_id": "b", "content": "{}"},
     ]
     out = _strip_orphan_tool_messages(msgs)
-    assert [m.get("role") for m in out] == ["assistant", "tool", "user"]
+    assert [m.get("role") for m in out] == ["assistant", "tool", "tool", "user"]
+    assert out[1].get("tool_call_id") == "a"
+    assert out[2].get("tool_call_id") == "b"
+    assert "无有效输出" in out[2].get("content", "")
 
 
 def test_repair_then_strip_handles_interrupt_mid_parallel_tools():

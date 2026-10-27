@@ -426,10 +426,10 @@ class AgentKernel:
         # 自动压缩路径与 /compress 一致：远程状态若仍有效，补一条切换提示。
         try:
             from agent_core.remote.workspace_notice import (
-                reinject_remote_workspace_notice_if_active,
+                reinject_remote_workspace_notice_if_active_async,
             )
 
-            reinject_remote_workspace_notice_if_active(agent)
+            await reinject_remote_workspace_notice_if_active_async(agent)
         except Exception:
             pass
 
@@ -541,8 +541,18 @@ class AgentKernel:
         if llm is None or not messages:
             return ""
 
-        # 浅拷贝即可：总结完成后原段会从 context 丢弃；此处仅防 LLM 客户端改写 message dict
-        chat_messages: List[Dict[str, Any]] = [dict(m) for m in messages]
+        # 总结不继续对话：统一做结构归一化 + 多模态文本化，避免 orphan tool / media_ref
+        # 在旁路请求里触发 provider 400。原消息列表不被修改。
+        from agent_core.context.message_sanitize import prepare_messages_for_summary
+
+        chat_messages, sanitize_stats = prepare_messages_for_summary(messages)
+        if any(sanitize_stats.values()):
+            logger.warning(
+                "AgentKernel._summarize_messages: sanitized messages stats=%s",
+                sanitize_stats,
+            )
+        if not chat_messages:
+            return ""
         chat_messages.append(
             {
                 "role": "user",

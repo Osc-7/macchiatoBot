@@ -566,6 +566,8 @@ async def test_evict_passes_normal_system_prompt_to_session_summarizer() -> None
     agent._context.get_messages.return_value = [{"role": "user", "content": "hi"}]
     agent._build_system_prompt.return_value = "普通 system"
     agent._user_id = "root"
+    summary_client = object()
+    agent._summary_llm_client = summary_client
     pool = CorePool()
     profile = CoreProfile.default_full(frontend_id="cli", dialog_window_id="root")
     pool._pool["cli:root"] = CoreEntry(agent=agent, profile=profile)
@@ -582,6 +584,10 @@ async def test_evict_passes_normal_system_prompt_to_session_summarizer() -> None
     assert (
         pool._summarizer.summarize_and_persist.await_args.kwargs["system_message"]
         == "普通 system"
+    )
+    assert (
+        pool._summarizer.summarize_and_persist.await_args.kwargs["llm_client"]
+        is summary_client
     )
 
 
@@ -1098,12 +1104,36 @@ async def test_summarize_messages_passes_transcript_and_appends_summarize() -> N
 
 
 @pytest.mark.asyncio
-async def test_session_summarizer_uses_original_messages_and_normal_system_prompt() -> (
-    None
-):
+async def test_summarize_messages_sanitizes_orphan_tool_before_llm() -> None:
+    registry = VersionedToolRegistry()
+    kernel = AgentKernel(tool_registry=registry)
     llm = AsyncMock()
-    llm.chat = AsyncMock(return_value=SimpleNamespace(content="长期摘要"))
-    summarizer = SessionSummarizer(llm_client=llm)
+    llm.chat = AsyncMock(return_value=SimpleNamespace(content="摘要"))
+    agent = SimpleNamespace(
+        _summary_llm_client=llm,
+        _build_system_prompt=MagicMock(return_value="主系统提示"),
+    )
+    old_messages = [
+        {"role": "user", "content": "开始"},
+        {"role": "tool", "tool_call_id": "orphan", "content": "无主结果"},
+        {"role": "user", "content": "结束"},
+    ]
+
+    out = await kernel._summarize_messages(agent, old_messages)
+
+    assert out == "摘要"
+    sent = llm.chat.call_args[1]["messages"]
+    assert [m["role"] for m in sent] == ["user", "user", "user"]
+    assert all(m.get("tool_call_id") is None for m in sent)
+
+
+@pytest.mark.asyncio
+async def test_session_summarizer_uses_session_client_and_sanitizes_messages() -> None:
+    default_llm = AsyncMock()
+    default_llm.chat = AsyncMock(return_value=SimpleNamespace(content="默认摘要"))
+    session_llm = AsyncMock()
+    session_llm.chat = AsyncMock(return_value=SimpleNamespace(content="会话摘要"))
+    summarizer = SessionSummarizer(llm_client=default_llm)
     stats = CoreStatsAction(
         session_id="feishu:user:ou_1",
         turn_count=2,
@@ -1111,26 +1141,61 @@ async def test_session_summarizer_uses_original_messages_and_normal_system_promp
     )
     messages = [
         {"role": "user", "content": "用户目标"},
-        {"role": "assistant", "content": "助手回答"},
-        {"role": "tool", "content": "工具结果"},
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "内部推理",
+            "tool_calls": [
+                {
+                    "id": "call_a",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_a", "content": "工具结果"},
+        {"role": "tool", "tool_call_id": "call_orphan", "content": "孤立结果"},
     ]
 
     out = await summarizer._generate_summary(
         stats,
         messages,
         system_message="普通对话 system",
+        llm_client=session_llm,
     )
 
-    assert out == "长期摘要"
-    llm.chat.assert_awaited_once()
-    call_kw = llm.chat.call_args[1]
+    assert out == "会话摘要"
+    session_llm.chat.assert_awaited_once()
+    default_llm.chat.assert_not_awaited()
+    call_kw = session_llm.chat.call_args[1]
     assert call_kw["system_message"] == "普通对话 system"
     sent = call_kw["messages"]
-    assert sent[:3] == messages
-    assert sent[0] is not messages[0]
+    assert [m["role"] for m in sent] == ["user", "assistant", "tool", "user"]
+    assert "reasoning_content" not in sent[1]
     assert sent[-1]["role"] == "user"
     assert "Please summarize everything above" in sent[-1]["content"]
     assert "请总结上文内容" in sent[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_session_summarizer_defaults_to_constructor_client() -> None:
+    llm = AsyncMock()
+    llm.chat = AsyncMock(return_value=SimpleNamespace(content="默认摘要"))
+    summarizer = SessionSummarizer(llm_client=llm)
+    stats = CoreStatsAction(
+        session_id="feishu:user:ou_1",
+        turn_count=1,
+        token_usage={"total_tokens": 1},
+    )
+
+    out = await summarizer._generate_summary(
+        stats,
+        [{"role": "user", "content": "hi"}],
+        system_message="sys",
+    )
+
+    assert out == "默认摘要"
+    llm.chat.assert_awaited_once()
 
 
 @pytest.mark.asyncio

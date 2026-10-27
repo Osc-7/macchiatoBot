@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from agent_core.context.message_sanitize import prepare_messages_for_summary
 from system.kernel.summary_prompt import SUMMARY_USER_APPEND
 
 if TYPE_CHECKING:
@@ -54,6 +55,7 @@ class SessionSummarizer:
         messages: Optional[List[Dict[str, Any]]] = None,
         owner_id: Optional[str] = None,
         system_message: Optional[str] = None,
+        llm_client: Optional["LLMClient"] = None,
     ) -> Optional[str]:
         """
         生成摘要并写入长期记忆。
@@ -64,13 +66,17 @@ class SessionSummarizer:
             messages:          该 session 的完整对话消息列表（可选，有则生成语义摘要）
             owner_id:          记忆所有者 ID（水源等多用户场景需要）
             system_message:    与该 Core 正常对话一致的 system prompt，用于提高 prefix cache 命中率
+            llm_client:        会话自己的 LLM client（CorePool 从 agent 传入）；缺省才用全局 fallback
 
         Returns:
             生成的摘要文本，若跳过则返回 None。
         """
         try:
             summary_text = await self._generate_summary(
-                stats, messages, system_message=system_message
+                stats,
+                messages,
+                system_message=system_message,
+                llm_client=llm_client,
             )
             if summary_text and long_term_memory is not None:
                 add_recent = getattr(long_term_memory, "add_recent_topic", None)
@@ -104,12 +110,14 @@ class SessionSummarizer:
         messages: Optional[List[Dict[str, Any]]],
         *,
         system_message: Optional[str] = None,
+        llm_client: Optional["LLMClient"] = None,
     ) -> str:
         """调用 LLM 生成摘要，无 LLM 则退化为结构化文本摘要。"""
         if stats.turn_count == 0:
             return ""
 
-        if not messages or self._llm_client is None:
+        client = llm_client or self._llm_client
+        if not messages or client is None:
             # 无 LLM / 无消息时不写「[自动摘要] turns=… tokens=…」垃圾条目：
             # 这类条目无信息价值，注入后会稀释最近话题窗口（复读事故来源之一）。
             logger.info(
@@ -118,7 +126,13 @@ class SessionSummarizer:
             )
             return ""
 
-        chat_messages = [dict(m) for m in messages]
+        chat_messages, sanitize_stats = prepare_messages_for_summary(messages)
+        if any(sanitize_stats.values()):
+            logger.warning(
+                "SessionSummarizer: sanitized messages session=%s stats=%s",
+                stats.session_id,
+                sanitize_stats,
+            )
         if not chat_messages:
             return ""
         chat_messages.append(
@@ -129,13 +143,24 @@ class SessionSummarizer:
         )
 
         try:
-            response = await self._llm_client.chat(
+            logger.info(
+                "SessionSummarizer: generating session=%s provider=%s model=%s",
+                stats.session_id,
+                getattr(client, "active_provider_name", "?"),
+                getattr(client, "model", "?"),
+            )
+            response = await client.chat(
                 system_message=(system_message or "").strip(),
                 messages=chat_messages,
             )
             return (response.content or "").strip()
         except Exception as exc:
-            logger.warning("SessionSummarizer: LLM call failed: %s", exc)
+            logger.warning(
+                "SessionSummarizer: LLM call failed session=%s provider=%s: %s",
+                stats.session_id,
+                getattr(client, "active_provider_name", "?"),
+                exc,
+            )
             return ""
 
     @staticmethod

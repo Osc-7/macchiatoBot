@@ -13,7 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from threading import Lock
+from threading import RLock
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
@@ -22,10 +22,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_LOCK = Lock()
+# 注册表会被持久化函数在持锁状态下再次进入，所以用可重入锁。
+_LOCK = RLock()
 _WAKES: Dict[str, "_ScheduledWake"] = {}
 # session_id -> 待注入唤醒正文（父会话 inflight>0 时暂存）
 _PENDING_BY_SESSION: Dict[str, List[Dict[str, Any]]] = {}
+
+# 持久化：daemon 重启后从磁盘恢复未触发的 wake，避免「N 分钟后提醒我」被静默丢掉。
+_WAKES_FILE_NAME = "agent_wakes.json"
+# 重启耗时超过这个宽限期的 wake 视为过期：投递一条几分钟前的提醒没有意义，反而像 bug。
+_WAKES_RESTORE_GRACE_SECONDS = 600.0
+# 系统续跑类 label 不跨重启恢复（goal 恢复后由 goal-check 机制重新登记）。
+_NON_PERSISTED_LABELS = frozenset({"goal-check"})
+_LOADED = False
 
 
 @dataclass
@@ -65,6 +74,7 @@ def register_wake(
     metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
     """登记一条待触发的会话唤醒，返回 wake_id。"""
+    _ensure_loaded()
     sid = str(session_id or "").strip()
     if not sid:
         raise ValueError("session_id is required")
@@ -86,6 +96,7 @@ def register_wake(
     )
     with _LOCK:
         _WAKES[wid] = rec
+        _persist_wakes_locked()
     _sync_feishu_push_watch_file()
     logger.info(
         "agent_wake: registered wake_id=%s session=%s fire_at=%.0f label=%r",
@@ -166,11 +177,14 @@ def _wake_still_actionable(
 
 
 def cancel_wake(wake_id: str) -> bool:
+    _ensure_loaded()
     wid = str(wake_id or "").strip()
     if not wid:
         return False
     with _LOCK:
         rec = _WAKES.pop(wid, None)
+        if rec is not None and _LOADED:
+            _persist_wakes_locked()
     if rec is None:
         return False
     _remove_pending_wake(wid, rec.session_id)
@@ -180,6 +194,7 @@ def cancel_wake(wake_id: str) -> bool:
 
 
 def list_wakes(*, session_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    _ensure_loaded()
     sid = str(session_id or "").strip() if session_id else ""
     with _LOCK:
         items = list(_WAKES.values())
@@ -195,6 +210,7 @@ def session_has_deferred_agent_wake(
     min_lead_seconds: float = 5.0,
 ) -> bool:
     """Session 是否已有 Agent 主动登记的 future wake（不含 goal-check 系统续跑）。"""
+    _ensure_loaded()
     sid = str(session_id or "").strip()
     if not sid:
         return False
@@ -260,6 +276,7 @@ def _wake_to_dict(w: _ScheduledWake) -> Dict[str, Any]:
 
 def poll_due_wakes(*, max_items: int = 20) -> List[Dict[str, Any]]:
     """返回已到点且尚未投递的唤醒（不移除注册表）。"""
+    _ensure_loaded()
     if max_items <= 0:
         return []
     now = _now()
@@ -288,13 +305,16 @@ def format_wake_notification(wake: Dict[str, Any]) -> str:
 
 
 def _get_wake(wake_id: str) -> Optional[_ScheduledWake]:
+    _ensure_loaded()
     with _LOCK:
         return _WAKES.get(str(wake_id or "").strip())
 
 
 def _mark_fired(wake_id: str) -> None:
+    _ensure_loaded()
     with _LOCK:
         _WAKES.pop(str(wake_id or "").strip(), None)
+        _persist_wakes_locked()
     _sync_feishu_push_watch_file()
 
 
@@ -306,6 +326,7 @@ def _feishu_watch_file_path() -> Path:
 
 def list_feishu_push_watch_targets() -> List[Dict[str, Any]]:
     """供飞书 FeishuPushForwarder 在唤醒触发前持续 poll_push。"""
+    _ensure_loaded()
     now = _now()
     with _LOCK:
         wakes = list(_WAKES.values())
@@ -331,6 +352,135 @@ def list_feishu_push_watch_targets() -> List[Dict[str, Any]]:
             }
         )
     return out
+
+
+def _wakes_file_path() -> Path:
+    """注册表持久化文件：与 job_definitions 同目录，daemon 单写者。"""
+    from system.automation.repositories import _automation_base_dir
+
+    return _automation_base_dir() / _WAKES_FILE_NAME
+
+
+def _persist_wakes_locked() -> None:
+    """把未触发的 wake 原子写盘（调用方需持 _LOCK）。"""
+    if not _LOADED:
+        # 还没从磁盘恢复就写盘 = 用不完整的内存覆盖已有条目，宁可不写。
+        return
+    try:
+        payload = {
+            "version": 1,
+            "saved_at": _now(),
+            "wakes": [
+                _wake_to_dict(w)
+                for w in _WAKES.values()
+                if not w.fired
+                and str(w.label or "").strip() not in _NON_PERSISTED_LABELS
+            ],
+        }
+        path = _wakes_file_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        tmp.replace(path)
+    except Exception as exc:  # pragma: no cover - 持久化失败不应影响内存调度
+        logger.debug("agent_wake: persist wakes failed: %s", exc)
+
+
+def _persist_wakes() -> None:
+    with _LOCK:
+        _persist_wakes_locked()
+
+
+def _restore_wakes_locked() -> None:
+    """从磁盘恢复未触发的 wake（调用方需持 _LOCK）。
+
+    三条规则：
+      - 系统续跑唤醒（goal-check）不恢复：Core 此刻可能还没 load，提前恢复会被判 stale 丢掉，
+        且 goal 自身恢复后 goal-check 机制会重新登记。
+      - 过点超过宽限期的丢弃（重启太久，补投一条旧提醒只会像 bug）。
+      - 宽限期内的过点 wake 保留，下一次 poll 立刻投递。
+    """
+    path = _wakes_file_path()
+    if not path.is_file():
+        return
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    items = raw.get("wakes") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        return
+
+    now = _now()
+    restored = expired = system = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        wake_id = str(item.get("wake_id") or "").strip()
+        session_id = str(item.get("session_id") or "").strip()
+        message = str(item.get("message") or "").strip()
+        if not wake_id or not session_id or not message or wake_id in _WAKES:
+            continue
+        label = str(item.get("label") or "").strip()
+        if label in _NON_PERSISTED_LABELS:
+            system += 1
+            continue
+        try:
+            fire_at = float(item.get("fire_at") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if fire_at <= now - _WAKES_RESTORE_GRACE_SECONDS:
+            expired += 1
+            continue
+        _WAKES[wake_id] = _ScheduledWake(
+            wake_id=wake_id,
+            session_id=session_id,
+            fire_at=fire_at,
+            message=message,
+            label=label,
+            created_at=float(item.get("created_at") or now),
+            frontend_id=str(item.get("frontend_id") or "cli"),
+            source=str(item.get("source") or "cli"),
+            user_id=str(item.get("user_id") or "root"),
+            metadata=dict(item.get("metadata") or {}),
+        )
+        restored += 1
+
+    logger.info(
+        "agent_wake: restored %d wake(s) from %s (expired=%d, system-skipped=%d)",
+        restored,
+        path,
+        expired,
+        system,
+    )
+
+
+def _ensure_loaded() -> None:
+    """首次访问注册表时从磁盘恢复一次（懒加载，避免 import 期依赖 system.*）。"""
+    global _LOADED
+    if _LOADED:
+        return
+    with _LOCK:
+        if _LOADED:
+            return
+        _LOADED = True
+        try:
+            _restore_wakes_locked()
+        except Exception as exc:
+            logger.warning("agent_wake: restore wakes failed: %s", exc)
+
+
+def restore_persisted_wakes() -> int:
+    """显式触发恢复（daemon 启动时调用）；返回恢复的条数。"""
+    global _LOADED
+    with _LOCK:
+        if _LOADED:
+            return len(_WAKES)
+        _LOADED = True
+        try:
+            _restore_wakes_locked()
+        except Exception as exc:
+            logger.warning("agent_wake: restore wakes failed: %s", exc)
+        return len(_WAKES)
 
 
 def _sync_feishu_push_watch_file() -> None:
@@ -586,7 +736,10 @@ def deliver_wake_via_inject(
 
 
 def clear_all_wakes_for_tests() -> None:
+    global _LOADED
     with _LOCK:
+        _LOADED = True  # 测试里不该再去磁盘恢复旧条目
         _WAKES.clear()
         _PENDING_BY_SESSION.clear()
+        _persist_wakes_locked()
     _sync_feishu_push_watch_file()

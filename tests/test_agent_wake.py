@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import time
+from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
@@ -10,17 +12,31 @@ from agent_core.tools.agent_wake import (
     cancel_pending_wakes,
     cancel_wake,
     clear_all_wakes_for_tests,
+    confirm_wake_delivered,
     deliver_wake_via_inject,
     flush_pending_wakes_for_session,
     format_wake_notification,
     list_wakes,
     poll_due_wakes,
     register_wake,
+    restore_persisted_wakes,
     session_has_deferred_agent_wake,
 )
+from agent_core.tools import agent_wake as agent_wake_module
 from agent_core.tools.bash_job_notify import set_notify_dependencies
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+def _isolate_wake_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """把 wake 持久化文件指向 tmp，避免单测清空 daemon 的真实注册表。"""
+    monkeypatch.setattr(
+        agent_wake_module, "_wakes_file_path", lambda: tmp_path / "agent_wakes.json"
+    )
+    clear_all_wakes_for_tests()
+    yield
+    clear_all_wakes_for_tests()
 
 
 class _FakeScheduler:
@@ -422,3 +438,109 @@ async def test_stale_goal_check_wake_skipped_when_deferred() -> None:
     assert ok is False
     assert len(scheduler.injected) == 0
     assert list_wakes() == []
+
+
+# -- 持久化：重启后恢复 -----------------------------------------------------
+
+
+def _reload_from_disk() -> int:
+    """模拟 daemon 重启：清空内存注册表并重置加载标志，再从磁盘恢复。"""
+    with agent_wake_module._LOCK:
+        agent_wake_module._WAKES.clear()
+        agent_wake_module._PENDING_BY_SESSION.clear()
+    agent_wake_module._LOADED = False
+    return restore_persisted_wakes()
+
+
+def _stored(tmp_path: Path) -> List[Dict[str, Any]]:
+    raw = json.loads((tmp_path / "agent_wakes.json").read_text(encoding="utf-8"))
+    return raw.get("wakes") or []
+
+
+async def test_register_persists_to_disk(tmp_path: Path) -> None:
+    wid = register_wake(
+        session_id="cli:root",
+        fire_at=time.time() + 3600,
+        message="记得喝水",
+        label="reminder",
+    )
+    items = _stored(tmp_path)
+    assert [i["wake_id"] for i in items] == [wid]
+    assert items[0]["session_id"] == "cli:root"
+    assert items[0]["fire_at"] > time.time()
+
+
+async def test_restore_after_restart(tmp_path: Path) -> None:
+    wid = register_wake(
+        session_id="feishu:ou_x",
+        fire_at=time.time() + 1800,
+        message="两分钟后提醒我",
+        label="reminder",
+        frontend_id="feishu",
+        source="feishu",
+        user_id="ou_x",
+        metadata={"feishu_chat_id": "oc_y"},
+    )
+    assert _reload_from_disk() == 1
+    wakes = list_wakes()
+    assert [w["wake_id"] for w in wakes] == [wid]
+    assert wakes[0]["session_id"] == "feishu:ou_x"
+    assert wakes[0]["frontend_id"] == "feishu"
+    assert wakes[0]["metadata"].get("feishu_chat_id") == "oc_y"
+
+
+async def test_restore_keeps_wake_within_grace_window() -> None:
+    """重启只花了一分钟：过点但还在宽限期内，应立刻可投递。"""
+    register_wake(
+        session_id="cli:root",
+        fire_at=time.time() - 60,
+        message="刚过点",
+    )
+    assert _reload_from_disk() == 1
+    due = poll_due_wakes()
+    assert len(due) == 1 and due[0]["message"] == "刚过点"
+
+
+async def test_restore_drops_stale_wake() -> None:
+    register_wake(
+        session_id="cli:root",
+        fire_at=time.time() - agent_wake_module._WAKES_RESTORE_GRACE_SECONDS - 60,
+        message="太久以前了",
+    )
+    assert _reload_from_disk() == 0
+    assert list_wakes() == []
+    assert poll_due_wakes() == []
+
+
+async def test_goal_check_wake_not_persisted(tmp_path: Path) -> None:
+    register_wake(
+        session_id="cli:root",
+        fire_at=time.time() + 60,
+        message="goal 续跑",
+        label="goal-check",
+    )
+    assert _stored(tmp_path) == []
+    assert _reload_from_disk() == 0
+
+
+async def test_cancel_removes_from_disk(tmp_path: Path) -> None:
+    wid = register_wake(
+        session_id="cli:root", fire_at=time.time() + 600, message="x"
+    )
+    assert len(_stored(tmp_path)) == 1
+    assert cancel_wake(wid) is True
+    assert _stored(tmp_path) == []
+
+
+async def test_fired_wake_removed_from_disk(tmp_path: Path) -> None:
+    register_wake(session_id="cli:root", fire_at=time.time() - 1, message="到点了")
+    assert len(_stored(tmp_path)) == 1
+    wake = poll_due_wakes()[0]
+    scheduler = _FakeScheduler()
+    set_notify_dependencies(scheduler=scheduler, core_pool=None)
+    if deliver_wake_via_inject(wake=wake):
+        # 已 inject，但要等 kernel 确认（confirm）才从注册表移除；
+        # 这期间仍留在盘上，重启后可重投一次，宁可重复也不丢。
+        assert len(_stored(tmp_path)) == 1
+        confirm_wake_delivered(wake["wake_id"])
+        assert _stored(tmp_path) == []

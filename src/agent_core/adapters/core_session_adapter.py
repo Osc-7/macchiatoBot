@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional
 
 from agent_core.content import ContentReference, resolve_content_refs
 from agent_core.interfaces import (
@@ -324,11 +324,14 @@ class CoreSessionAdapter:
     def get_turn_count(self) -> int:
         return self._agent.get_turn_count()
 
-    def delete_session_history(self, session_id: str) -> int:
+    async def delete_session_history(self, session_id: str) -> int:
         fn = getattr(self._agent, "delete_session_history", None)
-        if callable(fn):
-            return cast(int, fn(session_id))
-        return 0
+        if not callable(fn):
+            return 0
+        result = fn(session_id)
+        if inspect.isawaitable(result):
+            result = await result
+        return int(result or 0)
 
     @property
     def config(self):

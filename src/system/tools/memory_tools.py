@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from pathlib import Path
@@ -69,7 +70,7 @@ MEMORY.md、identity、user、soul 等成体系文档已自动注入 system prom
                 error="MISSING_QUERY",
                 message="请提供检索查询内容",
             )
-        results = self._corpus.search(query, self._top_n)
+        results = await asyncio.to_thread(self._corpus.search, query, self._top_n)
         if not results:
             return ToolResult(
                 success=True,
@@ -182,7 +183,9 @@ class MemoryStoreTool(BaseTool):
 
         if file_path:
             title = kwargs.get("title")
-            result_path = self._corpus.store_file(file_path, category, title)
+            result_path = await asyncio.to_thread(
+                self._corpus.store_file, file_path, category, title
+            )
             if result_path is None:
                 return ToolResult(
                     success=False,
@@ -199,7 +202,9 @@ class MemoryStoreTool(BaseTool):
         if not title:
             snippet = re.sub(r"\s+", " ", content)[:40]
             title = snippet or f"note-{int(time.time())}"
-        path = self._corpus.store_text(content, title, category)
+        path = await asyncio.to_thread(
+            self._corpus.store_text, content, title, category
+        )
         return ToolResult(
             success=True,
             data={"path": str(path), "searchable": True},

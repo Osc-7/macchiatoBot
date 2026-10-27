@@ -497,7 +497,7 @@ class AgentCore:
             return True
         return self._goal_store.goals_defer_auto_continue()
 
-    def _try_inject_goal_check(self, turn_id: int) -> bool:
+    async def _try_inject_goal_check(self, turn_id: int) -> bool:
         """模型准备结束且仍有活跃目标时，注入自检提示并返回 True（run_loop 继续迭代）。"""
         if not self._goal_auto_continue_enabled():
             return False
@@ -512,14 +512,7 @@ class AgentCore:
         self._goal_continuation_nudges += 1
         self._context.add_user_message(check_msg)
         self._last_prompt_tokens = None
-        if self._memory_enabled:
-            msg_id = self._require_chat_history_db().write_message(
-                session_id=self._session_id,
-                role="user",
-                content=check_msg,
-                source=self._source,
-            )
-            self._last_history_id = max(self._last_history_id, int(msg_id))
+        await self._persist_chat_message(role="user", content=check_msg)
         if self._session_logger:
             self._session_logger.on_user_message(turn_id, check_msg)
         logger.info(
@@ -866,7 +859,7 @@ class AgentCore:
             for g in self._goal_store.list_goals(include_completed=include_completed)
         ]
 
-    def delete_session_history(self, session_id: Optional[str] = None) -> int:
+    async def delete_session_history(self, session_id: Optional[str] = None) -> int:
         """
         删除指定 session 的对话历史。
 
@@ -876,8 +869,10 @@ class AgentCore:
         sid = (session_id or self._session_id or "").strip()
         if not sid or not self._memory_enabled:
             return 0
-        return self._require_chat_history_db().delete_session_messages(
-            sid, source=self._source
+        return await asyncio.to_thread(
+            self._require_chat_history_db().delete_session_messages,
+            sid,
+            source=self._source,
         )
 
     async def compress_context(
@@ -1055,16 +1050,15 @@ class AgentCore:
         这里按当前 system + messages + tools schema 估算，更适合 /usage 与压缩检查。
         """
         try:
-            from agent_core.kernel_interface.loader import _strip_orphan_tool_messages
+            from agent_core.context.message_sanitize import normalize_tool_sequence
             from agent_core.memory.working_memory import (
                 estimate_messages_tokens,
                 estimate_tokens,
             )
 
             total = estimate_tokens(self._build_system_prompt())
-            total += estimate_messages_tokens(
-                _strip_orphan_tool_messages(self._context.get_messages())
-            )
+            normalized_messages, _ = normalize_tool_sequence(self._context.get_messages())
+            total += estimate_messages_tokens(normalized_messages)
 
             snapshot = self._working_set.build_snapshot(self._tool_registry)
             tools = snapshot.openai_tools
@@ -1270,14 +1264,7 @@ class AgentCore:
         self._outgoing_attachments.clear()
         if self._session_logger:
             self._session_logger.on_user_message(turn_id, text)
-        if self._memory_enabled:
-            msg_id = self._require_chat_history_db().write_message(
-                session_id=self._session_id,
-                role="user",
-                content=text,
-                source=self._source,
-            )
-            self._last_history_id = max(self._last_history_id, int(msg_id))
+        await self._persist_chat_message(role="user", content=text)
 
         return turn_id
 
@@ -1476,7 +1463,8 @@ class AgentCore:
                             )
                         )
                         self._last_prompt_tokens = pt
-                        self._record_usage_stats(
+                        await asyncio.to_thread(
+                            self._record_usage_stats,
                             prompt_tokens=pt,
                             completion_tokens=ct,
                             cache_hit_tokens=int(
@@ -1747,17 +1735,11 @@ class AgentCore:
                         self._context.add_tool_result(tool_call.id, store_result)
                         self._last_prompt_tokens = None
 
-                        if self._memory_enabled:
-                            msg_id = self._require_chat_history_db().write_message(
-                                session_id=self._session_id,
-                                role="tool",
-                                content=store_result.to_json(),
-                                tool_name=tool_call.name,
-                                source=self._source,
-                            )
-                            self._last_history_id = max(
-                                self._last_history_id, int(msg_id)
-                            )
+                        await self._persist_chat_message(
+                            role="tool",
+                            content=store_result.to_json(),
+                            tool_name=tool_call.name,
+                        )
 
                     continue
 
@@ -1816,20 +1798,16 @@ class AgentCore:
                         self._session_logger.on_assistant_message(
                             turn_id, response.content
                         )
-                    if self._memory_enabled:
-                        msg_id = self._require_chat_history_db().write_message(
-                            session_id=self._session_id,
-                            role="assistant",
-                            content=response.content,
-                            source=self._source,
-                        )
-                        self._last_history_id = max(self._last_history_id, int(msg_id))
+                    await self._persist_chat_message(
+                        role="assistant",
+                        content=response.content,
+                    )
 
                     # 仍有迭代余量时注入目标自检并继续本轮；勿 break 到 overflow，
                     # 否则 ReturnAction 会变成系统提示，飞书终态 PATCH 会盖掉真实回复。
                     if (
                         iteration < self._max_iterations
-                        and self._try_inject_goal_check(turn_id)
+                        and await self._try_inject_goal_check(turn_id)
                     ):
                         continue
 
@@ -1919,6 +1897,27 @@ class AgentCore:
         用「kernel 关闭时间戳 - last_active_at」计算 elapsed 判断。
         """
         self._context.repair_dangling_assistant_tool_calls()
+        try:
+            from agent_core.context.message_sanitize import normalize_tool_sequence
+
+            cleaned_messages, repair_stats = normalize_tool_sequence(
+                self._context.get_messages()
+            )
+            if any(repair_stats.values()):
+                self._context.messages = cleaned_messages
+                logger.warning(
+                    "AgentCore._finalize_turn: repaired tool sequence "
+                    "session=%s stats=%s",
+                    self._session_id,
+                    repair_stats,
+                )
+        except Exception as exc:
+            logger.warning(
+                "AgentCore._finalize_turn: normalize tool sequence failed "
+                "session=%s: %s",
+                self._session_id,
+                exc,
+            )
         run_status = None
         if run_result is not None:
             run_status = (run_result.metadata or {}).get("status")
@@ -2551,12 +2550,15 @@ class AgentCore:
         owner_id: Optional[str] = None
         if self._source == "shuiyuan":
             owner_id = self._user_id
-        self._require_long_term_memory().add_recent_topic(
+        ltm = self._require_long_term_memory()
+        ltm.add_recent_topic(
             summary=session_summary.summary,
             session_id=self._session_id,
             tags=session_summary.tags,
             owner_id=owner_id,
+            defer_qmd=True,
         )
+        ltm.embed_async()
 
         return session_summary
 
@@ -2612,7 +2614,9 @@ class AgentCore:
         if not self._memory_enabled:
             return
 
-        history = self._require_chat_history_db().get_session_messages(sid)
+        history = await asyncio.to_thread(
+            self._require_chat_history_db().get_session_messages, sid
+        )
         if not history:
             return
         replay_rows = [r for r in history if r.get("role") in {"user", "assistant"}]
@@ -2702,7 +2706,8 @@ class AgentCore:
         """同步其他终端在同一 session 里新增的 user/assistant 消息。"""
         if not self._memory_enabled:
             return
-        new_rows = self._require_chat_history_db().get_session_messages_after(
+        new_rows = await asyncio.to_thread(
+            self._require_chat_history_db().get_session_messages_after,
             self._session_id,
             self._last_history_id,
             roles=["user", "assistant"],
@@ -2784,6 +2789,28 @@ class AgentCore:
         if self._memory_enabled and self._chat_history_db is not None:
             self._chat_history_db.close()
 
+    async def _persist_chat_message(
+        self,
+        *,
+        role: str,
+        content: str,
+        tool_name: Optional[str] = None,
+    ) -> None:
+        """写入 ChatHistoryDB。sqlite 在工作线程执行，避免堵住 daemon 事件循环。"""
+        if not self._memory_enabled:
+            return
+        db = self._require_chat_history_db()
+        msg_id = await asyncio.to_thread(
+            db.write_message,
+            self._session_id,
+            role,
+            content,
+            tool_name,
+            None,
+            self._source,
+        )
+        self._last_history_id = max(self._last_history_id, int(msg_id))
+
     def _require_chat_history_db(self) -> ChatHistoryDB:
         """
         返回非可选的 ChatHistoryDB。
@@ -2850,32 +2877,38 @@ class AgentCore:
             os_user_bash = bool(posix_run_as)
             jail_cd = not (os_user_bash and ws_restricted)
             if os_user_bash and caps.workspace_isolated:
-                if getattr(cmd_cfg, "bash_os_auto_provision_users", True):
-                    provision_system_user(
-                        posix_run_as,
-                        system=True,
-                        comment=f"macchiato {self._source}-{self._user_id}",
-                        home_dir=caps.owner_root,
-                    )
-                migrate_legacy_workspace_and_memory_to_home(
-                    cmd_cfg,
-                    self._config.memory if self._memory_enabled else None,
-                    source=self._source,
-                    user_id=self._user_id,
-                )
-                ch_paths = [
-                    caps.owner_root.resolve(),
-                    caps.tmp_root.resolve(),
-                ]
-                if self._memory_enabled:
-                    mp0 = resolve_memory_owner_paths(
-                        self._config.memory,
-                        self._user_id,
-                        config=self._config,
+
+                def _provision_os_user() -> None:
+                    if getattr(cmd_cfg, "bash_os_auto_provision_users", True):
+                        provision_system_user(
+                            posix_run_as,
+                            system=True,
+                            comment=f"macchiato {self._source}-{self._user_id}",
+                            home_dir=caps.owner_root,
+                        )
+                    migrate_legacy_workspace_and_memory_to_home(
+                        cmd_cfg,
+                        self._config.memory if self._memory_enabled else None,
                         source=self._source,
+                        user_id=self._user_id,
                     )
-                    ch_paths.append(Path(mp0["chat_history_db_path"]).parent.resolve())
-                chown_tree_to_user(ch_paths, posix_run_as)
+                    ch_paths = [
+                        caps.owner_root.resolve(),
+                        caps.tmp_root.resolve(),
+                    ]
+                    if self._memory_enabled:
+                        mp0 = resolve_memory_owner_paths(
+                            self._config.memory,
+                            self._user_id,
+                            config=self._config,
+                            source=self._source,
+                        )
+                        ch_paths.append(
+                            Path(mp0["chat_history_db_path"]).parent.resolve()
+                        )
+                    chown_tree_to_user(ch_paths, posix_run_as)
+
+                await asyncio.to_thread(_provision_os_user)
             mem_lt: Optional[str] = None
             mem_owner_dir: Optional[str] = None
             if self._memory_enabled:

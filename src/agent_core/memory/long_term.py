@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,8 @@ from typing import List, Optional
 from .types import MemoryEntry, SessionSummary
 
 _QMD_COLLECTION_NAME = "agent_memory"
+# collection add / embed / query 共用一把锁，避免多个工作线程同时打 qmd。
+_QMD_LOCK = threading.Lock()
 
 
 def _write_to_qmd_collection(
@@ -30,23 +33,24 @@ def _write_to_qmd_collection(
 ) -> bool:
     """将 Markdown 文件所在目录注册为 QMD collection 并触发 embed（best-effort）。"""
     try:
-        subprocess.run(
-            [
-                qmd_command,
-                "collection",
-                "add",
-                str(md_path.parent),
-                "--name",
-                collection_name,
-            ],
-            capture_output=True,
-            timeout=15,
-        )
-        subprocess.run(
-            [qmd_command, "embed"],
-            capture_output=True,
-            timeout=120,
-        )
+        with _QMD_LOCK:
+            subprocess.run(
+                [
+                    qmd_command,
+                    "collection",
+                    "add",
+                    str(md_path.parent),
+                    "--name",
+                    collection_name,
+                ],
+                capture_output=True,
+                timeout=15,
+            )
+            subprocess.run(
+                [qmd_command, "embed"],
+                capture_output=True,
+                timeout=120,
+            )
         return True
     except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
         return False
@@ -269,12 +273,13 @@ class LongTermMemory:
         if not self._qmd_enabled or not self._entries:
             return []
         try:
-            result = subprocess.run(
-                [self._qmd_command, "query", query, "--json", "-n", str(top_n * 2)],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            with _QMD_LOCK:
+                result = subprocess.run(
+                    [self._qmd_command, "query", query, "--json", "-n", str(top_n * 2)],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
             if result.returncode != 0 or not result.stdout.strip():
                 return []
             raw = json.loads(result.stdout)

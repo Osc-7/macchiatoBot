@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -123,3 +124,27 @@ async def test_memory_search_finds_legacy_content_dir():
             hit.get("source") == "legacy" and "JWT" in hit.get("snippet", "")
             for hit in result.data["results"]
         )
+
+
+@pytest.mark.asyncio
+async def test_memory_store_and_search_leave_event_loop():
+    """qmd / 语料写入会跑 subprocess，必须离开 daemon 事件循环。"""
+    loop_thread = threading.get_ident()
+    seen: dict[str, int] = {}
+
+    class _Corpus:
+        def store_text(self, content: str, filename: str, category: str = "notes") -> Path:
+            seen["store"] = threading.get_ident()
+            return Path("/tmp") / f"{filename}.md"
+
+        def search(self, query: str, top_n: int = 5) -> list:
+            seen["search"] = threading.get_ident()
+            return [{"path": "notes/x.md", "snippet": query, "source": "corpus"}]
+
+    corpus = _Corpus()
+    stored = await MemoryStoreTool(corpus).execute(content="记住这件事", title="note")
+    found = await MemorySearchTool(corpus).execute(query="这件事")
+    assert stored.success
+    assert found.success
+    assert seen["store"] != loop_thread
+    assert seen["search"] != loop_thread

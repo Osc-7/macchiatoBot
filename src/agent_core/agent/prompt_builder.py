@@ -129,11 +129,17 @@ def build_agent_system_prompt(agent: Any) -> str:
                     parts.append(f"- [{ts_prefix}] {topic.content}")
             md_content = agent._long_term_memory.read_memory_md()
             if md_content and len(md_content) > 50:
-                excerpt = (
-                    md_content
-                    if len(md_content) <= 1000
-                    else md_content[:1000] + "\n..."
+                inject_limit = getattr(
+                    agent._config.memory, "memory_md_inject_chars", None
                 )
+                if inject_limit and len(md_content) > inject_limit:
+                    excerpt = (
+                        md_content[:inject_limit]
+                        + "\n\n...（MEMORY.md 超出注入上限 "
+                        + f"{inject_limit} 字符，其余内容需 read_file 查看全文）"
+                    )
+                else:
+                    excerpt = md_content
                 parts.append("\n## 核心记忆 (MEMORY.md)")
                 parts.append(excerpt)
         # long_term / content: recall 结果

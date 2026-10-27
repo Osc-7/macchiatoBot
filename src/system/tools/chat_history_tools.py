@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
@@ -87,7 +88,7 @@ class ChatSearchTool(BaseTool):
             )
 
         try:
-            results = self._db.search(query, top_k=top_k)
+            results = await asyncio.to_thread(self._db.search, query, top_k)
         except Exception as e:
             return ToolResult(
                 success=False,
@@ -170,7 +171,7 @@ class ChatContextTool(BaseTool):
 
         try:
             message_id = int(message_id)
-            results = self._db.get_context(message_id, n=n)
+            results = await asyncio.to_thread(self._db.get_context, message_id, n)
         except Exception as e:
             return ToolResult(
                 success=False,
@@ -274,7 +275,9 @@ class ChatScrollTool(BaseTool):
 
         try:
             message_id = int(message_id)
-            results = self._db.scroll(message_id, direction=direction, n=n)
+            results = await asyncio.to_thread(
+                self._db.scroll, message_id, direction, n
+            )
         except Exception as e:
             return ToolResult(
                 success=False,

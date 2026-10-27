@@ -10,6 +10,7 @@ ChatHistoryDB - 对话历史持久化数据库
 from __future__ import annotations
 
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,6 +70,8 @@ class ChatHistoryDB:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._default_source = (default_source or "").strip()
         self._conn: Optional[sqlite3.Connection] = None
+        # 连接可被事件循环上的 to_thread 调用到工作线程；同一连接必须串行访问。
+        self._lock = threading.Lock()
         self._ensure_schema()
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -79,16 +82,17 @@ class ChatHistoryDB:
 
     @contextmanager
     def _cursor(self) -> Generator[sqlite3.Cursor, None, None]:
-        conn = self._get_conn()
-        cur = conn.cursor()
-        try:
-            yield cur
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            cur.close()
+        with self._lock:
+            conn = self._get_conn()
+            cur = conn.cursor()
+            try:
+                yield cur
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                cur.close()
 
     def _ensure_schema(self) -> None:
         conn = self._get_conn()
@@ -422,9 +426,10 @@ class ChatHistoryDB:
 
     def close(self) -> None:
         """关闭数据库连接。"""
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
 
 def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:

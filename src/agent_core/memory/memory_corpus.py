@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from .long_term import _QMD_COLLECTION_NAME, _write_to_qmd_collection
+from .long_term import _QMD_COLLECTION_NAME, _QMD_LOCK, _write_to_qmd_collection
 
 _VALID_CATEGORIES = (
     "docs",
@@ -223,12 +223,13 @@ class MemoryCorpus:
 
     def _search_qmd(self, query: str, top_n: int) -> List[dict]:
         try:
-            result = subprocess.run(
-                [self._qmd_command, "query", query, "--json", "-n", str(top_n * 2)],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            with _QMD_LOCK:
+                result = subprocess.run(
+                    [self._qmd_command, "query", query, "--json", "-n", str(top_n * 2)],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
             if result.returncode != 0 or not result.stdout.strip():
                 return []
             raw = json.loads(result.stdout)

@@ -49,6 +49,10 @@ class JobRunRepository(JSONRepository[JobRun]):
         items.sort(key=lambda i: i.triggered_at, reverse=True)
         return items[: max(1, limit)]
 
+    def list_for_job(self, job_name: str) -> List[JobRun]:
+        """该任务的全部运行记录，供幂等与配额对账（不截断成全局最近 N 条）。"""
+        return [item for item in self.get_all() if item.job_name == job_name]
+
 
 class SourceAccountRepository(JSONRepository[SourceAccount]):
     def __init__(self, base_dir: Optional[str] = None):

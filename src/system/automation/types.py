@@ -44,6 +44,23 @@ class JobDefinition(BaseModel):
     interval_seconds: int = Field(default=3600, ge=1)
     timezone: str = "Asia/Shanghai"
     payload_template: Dict[str, Any] = Field(default_factory=dict)
+    schedule: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "结构化触发规则（automation.calendar.ScheduleSpec 的 dict 形态）："
+            "{kind: once|interval|calendar, times, weekdays(ISO 1-7), month_days, months, "
+            "interval_seconds, start_time, run_at, catch_up, until, count, exceptions}。"
+            "为空时按 payload_template 的旧语义（daily_time/times/start_time/run_at）推导。"
+        ),
+    )
+    runs_done: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "已按规则成功触发的次数，用于 schedule.count 配额（由调度器根据成功的计划时刻对账）。"
+            "只改描述、次数上限、until、catch_up 或跳过日期时保留；触发时刻规则变了才从 0 重算。"
+        ),
+    )
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
@@ -75,6 +92,14 @@ class JobRun(BaseModel):
     job_name: str
     job_type: Literal["human", "agent"] = "human"
     triggered_at: datetime = Field(default_factory=datetime.now)
+    scheduled_at: Optional[datetime] = Field(
+        default=None,
+        description=(
+            "计划触发时刻（调度器求解出的 target）。"
+            "与 triggered_at 区分：前者是日历上的那一格，后者是实际开始跑的时刻。"
+            "手动触发/补跑时为空。"
+        ),
+    )
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     status: JobStatus = JobStatus.PENDING

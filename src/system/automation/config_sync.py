@@ -14,6 +14,17 @@ from typing import Any, Optional
 
 from agent_core.config import Config
 
+from .calendar import (
+    ScheduleSpec,
+    ScheduleSpecError,
+    normalize_count,
+    normalize_exceptions,
+    normalize_ints,
+    normalize_times,
+    normalize_until,
+    schedule_cadence,
+)
+
 from .repositories import JobDefinitionRepository
 from .types import JobDefinition
 
@@ -25,6 +36,17 @@ def _stable_job_name(name: str, memory_owner: str) -> str:
     key = f"{name}:{memory_owner}"
     h = hashlib.sha256(key.encode()).hexdigest()[:8]
     return f"job-config-{h}"
+
+
+def _inherit_runs_done(existing: JobDefinition, new: JobDefinition) -> int:
+    """config 同步是「覆盖写」，不能把调度器记的 runs_done 抹掉。
+
+    只有「什么时候触发」变了才从 0 重算。改描述、次数上限、until、catch_up
+    或跳过日期都还是同一条规则，已跑次数留着。
+    """
+    if schedule_cadence(existing.schedule) != schedule_cadence(new.schedule):
+        return 0
+    return int(getattr(existing, "runs_done", 0) or 0)
 
 
 def _config_job_to_definition(cfg: Config, job_config: Any) -> JobDefinition:
@@ -92,6 +114,67 @@ def _config_job_to_definition(cfg: Config, job_config: Any) -> JobDefinition:
 
     stable_owner = memory_owner or user_id
     job_name = _stable_job_name(name, stable_owner)
+
+    # 结构化触发规则（与 payload 的 daily_time/times/start_time 双写，便于回滚）
+    schedule_obj = None
+    try:
+        catch_up = bool(getattr(job_config, "catch_up", False))
+        # 有界规则（到期 / 次数上限 / 跳过某些天），对任意 kind 都可叠加。
+        bounds = {
+            "until": normalize_until(getattr(job_config, "until", None)),
+            "count": normalize_count(getattr(job_config, "count", None)),
+            "exceptions": normalize_exceptions(
+                getattr(job_config, "skip_dates", None)
+            ),
+        }
+        if one_shot and run_at is not None:
+            schedule_obj = ScheduleSpec(
+                kind="once", run_at=run_at, catch_up=catch_up, **bounds
+            )
+        else:
+            calendar_times = normalize_times(
+                job_config.times
+                or ([job_config.daily_time] if job_config.daily_time else None)
+            )
+            weekdays = normalize_ints(
+                getattr(job_config, "weekdays", None), 1, 7, "weekdays"
+            )
+            month_days = normalize_ints(
+                getattr(job_config, "month_days", None), 1, 31, "month_days"
+            )
+            months = normalize_ints(
+                getattr(job_config, "months", None), 1, 12, "months"
+            )
+            if calendar_times:
+                schedule_obj = ScheduleSpec(
+                    kind="calendar",
+                    times=calendar_times,
+                    weekdays=weekdays,
+                    month_days=month_days,
+                    months=months,
+                    catch_up=catch_up,
+                    **bounds,
+                )
+            elif job_config.start_time:
+                schedule_obj = ScheduleSpec(
+                    kind="interval",
+                    interval_seconds=interval_seconds,
+                    start_time=job_config.start_time,
+                    catch_up=catch_up,
+                    **bounds,
+                )
+            else:
+                schedule_obj = ScheduleSpec(
+                    kind="interval",
+                    interval_seconds=interval_seconds,
+                    catch_up=catch_up,
+                    **bounds,
+                )
+    except ScheduleSpecError as exc:
+        # 配置写错时不让整批同步失败：记 warning，调度侧按 legacy payload 推导。
+        logger.warning("config_sync: job %s 的日历字段非法（%s），回退旧语义", name, exc)
+        schedule_obj = None
+
     return JobDefinition(
         job_name=job_name,
         job_type="human",
@@ -101,6 +184,7 @@ def _config_job_to_definition(cfg: Config, job_config: Any) -> JobDefinition:
         interval_seconds=interval_seconds,
         timezone=timezone,
         payload_template=payload,
+        schedule=schedule_obj.to_dict() if schedule_obj is not None else None,
     )
 
 
@@ -151,6 +235,7 @@ def sync_job_definitions_from_config(
             if existing is not None:
                 job.job_name = existing.job_name
                 job.created_at = existing.created_at
+                job.runs_done = _inherit_runs_done(existing, job)
                 repo.update(job)
                 kept_id_for_key[key] = existing.job_name
                 existing_by_key.pop(key, None)
@@ -158,6 +243,7 @@ def sync_job_definitions_from_config(
                 existing = repo.get(job.job_name)
                 if existing is not None:
                     job.created_at = existing.created_at
+                    job.runs_done = _inherit_runs_done(existing, job)
                     repo.update(job)
                 else:
                     repo.create(job)

@@ -8,6 +8,19 @@ import time
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
+from system.automation.calendar import (
+    ScheduleSpec,
+    ScheduleSpecError,
+    describe_schedule,
+    effective_spec,
+    next_fire_at_for_job,
+    normalize_count,
+    normalize_exceptions,
+    normalize_ints,
+    normalize_times,
+    normalize_until,
+    remaining_runs,
+)
 from system.automation.repositories import (
     AutomationPolicyRepository,
     JobDefinitionRepository,
@@ -474,7 +487,13 @@ class CreateScheduledJobTool(BaseTool):
                 "0）one-shot alarm：run_at（或 once_at）指定一次性触发时间；\n"
                 "1）interval：基于 interval_minutes/interval_seconds 的固定间隔执行；\n"
                 "2）daily_time/times：基于每天一个或多个固定时间点（HH:MM，本地时区）执行；\n"
-                "3）start_time + interval：从某个起始时间开始，按给定间隔滚动触发。"
+                "3）start_time + interval：从某个起始时间开始，按给定间隔滚动触发。\n\n"
+                "日历限制（仅对 2/3 的循环模式有效，可选）：weekdays（ISO 编号 1=周一…7=周日）、"
+                "month_days（1-31）、months（1-12）。例如「每周一 07:35」= times=\"07:35\" + weekdays=\"1\"；"
+                "「每月 1 号 20:00」= times=\"20:00\" + month_days=\"1\"。\n"
+                "**要指定星期/月日就用这些参数，不要靠指令里自检日期**——那样任务每天仍会被唤醒一次。\n"
+                "有界规则（可选，叠加在以上任意模式上）：until=到期即停；count=最多触发 N 次；"
+                "skip_dates=跳过指定日期（停课/放假）。学期类任务建议顺手给 until。"
             ),
             parameters=[
                 ToolParameter(
@@ -523,6 +542,60 @@ class CreateScheduledJobTool(BaseTool):
                     name="start_time",
                     type="string",
                     description="可选：起始时间（HH:MM），与 interval_minutes/interval_seconds 搭配，表示“从此时起按间隔滚动触发”。",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="weekdays",
+                    type="string",
+                    description=(
+                        "可选：限定星期，逗号分隔的 ISO 编号（1=周一 … 7=周日），例如 \"1\" 或 \"1,4\"。"
+                        "需要配合 times 或 daily_time 使用。"
+                    ),
+                    required=False,
+                ),
+                ToolParameter(
+                    name="month_days",
+                    type="string",
+                    description="可选：限定每月哪几天（1-31，逗号分隔），例如 \"1\"。需要配合 times 或 daily_time。",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="months",
+                    type="string",
+                    description="可选：限定哪几个月（1-12，逗号分隔），例如 \"3,6,9,12\"。需要配合 times 或 daily_time。",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="catch_up",
+                    type="boolean",
+                    description="可选：错过的计划时刻是否补跑最近一格（不回放整个空档）。默认否。",
+                    required=False,
+                ),
+                ToolParameter(
+                    name="until",
+                    type="string",
+                    description=(
+                        "可选：到期时间（ISO-8601 或 YYYY-MM-DD）。超过它不再触发并自动停用。"
+                        "适合「这学期结束就停」这类有终点的任务。"
+                    ),
+                    required=False,
+                ),
+                ToolParameter(
+                    name="count",
+                    type="integer",
+                    description=(
+                        "可选：总共最多触发多少次，用尽后自动停用。"
+                        "手动触发不消耗配额；适合「再跑 5 次就收工」。"
+                    ),
+                    required=False,
+                ),
+                ToolParameter(
+                    name="skip_dates",
+                    type="string",
+                    description=(
+                        "可选：跳过的日期，逗号分隔的 YYYY-MM-DD，例如 \"2026-10-21,2026-11-04\"。"
+                        "等价日历里的 EXDATE，只对日历规则生效（如某周停课、某天放假）。"
+                    ),
                     required=False,
                 ),
                 ToolParameter(
@@ -654,9 +727,44 @@ class CreateScheduledJobTool(BaseTool):
         if start_time_raw:
             start_time = str(start_time_raw).strip() or None
 
+        # 日历限制（weekdays/month_days/months），与 times/daily_time 组合使用
+        try:
+            weekdays = normalize_ints(kwargs.get("weekdays"), 1, 7, "weekdays")
+            month_days = normalize_ints(kwargs.get("month_days"), 1, 31, "month_days")
+            months = normalize_ints(kwargs.get("months"), 1, 12, "months")
+        except ScheduleSpecError as exc:
+            return ToolResult(
+                success=False,
+                error="INVALID_CALENDAR_FIELD",
+                message=str(exc),
+            )
+        catch_up = bool(kwargs.get("catch_up", False))
+
+        # 有界规则：until / count / skip_dates（对任意 kind 都可叠加）
+        try:
+            until = normalize_until(kwargs.get("until"))
+            count = normalize_count(kwargs.get("count"))
+            exceptions = normalize_exceptions(kwargs.get("skip_dates"))
+        except ScheduleSpecError as exc:
+            return ToolResult(
+                success=False,
+                error="INVALID_SCHEDULE_BOUND",
+                message=str(exc),
+            )
+        bounds = {"until": until, "count": count, "exceptions": exceptions}
+
         one_shot = run_at is not None
         if one_shot and any(
-            [interval_seconds_raw, interval_minutes_raw, daily_time, times, start_time]
+            [
+                interval_seconds_raw,
+                interval_minutes_raw,
+                daily_time,
+                times,
+                start_time,
+                weekdays,
+                month_days,
+                months,
+            ]
         ):
             return ToolResult(
                 success=False,
@@ -789,6 +897,63 @@ class CreateScheduledJobTool(BaseTool):
             # 回退时也统一使用上海时区，避免混用 UTC。
             timezone = "Asia/Shanghai"
 
+        # 结构化触发规则：schedule 是调度语义的唯一真源。
+        # payload 里仍然保留 daily_time/times/start_time，只为回滚到旧 daemon 时能跑。
+        try:
+            if one_shot:
+                spec = ScheduleSpec(
+                    kind="once", run_at=run_at, catch_up=catch_up, **bounds
+                )
+            elif weekdays or month_days or months:
+                calendar_times = normalize_times(
+                    times or ([daily_time] if daily_time else None)
+                )
+                if not calendar_times:
+                    return ToolResult(
+                        success=False,
+                        error="MISSING_TIMES_FOR_CALENDAR",
+                        message=(
+                            "使用 weekdays/month_days/months 时必须同时提供 times 或 daily_time（HH:MM）。"
+                        ),
+                    )
+                spec = ScheduleSpec(
+                    kind="calendar",
+                    times=calendar_times,
+                    weekdays=weekdays,
+                    month_days=month_days,
+                    months=months,
+                    catch_up=catch_up,
+                    **bounds,
+                )
+            elif times or daily_time:
+                spec = ScheduleSpec(
+                    kind="calendar",
+                    times=normalize_times(times or [daily_time]),
+                    catch_up=catch_up,
+                    **bounds,
+                )
+            elif start_time is not None:
+                spec = ScheduleSpec(
+                    kind="interval",
+                    interval_seconds=interval_seconds,
+                    start_time=start_time,
+                    catch_up=catch_up,
+                    **bounds,
+                )
+            else:
+                spec = ScheduleSpec(
+                    kind="interval",
+                    interval_seconds=interval_seconds,
+                    catch_up=catch_up,
+                    **bounds,
+                )
+        except ScheduleSpecError as exc:
+            return ToolResult(
+                success=False,
+                error="INVALID_CALENDAR_SPEC",
+                message=str(exc),
+            )
+
         job = JobDefinition(
             job_name=job_name,
             job_type="agent",
@@ -797,6 +962,7 @@ class CreateScheduledJobTool(BaseTool):
             run_at=run_at,
             interval_seconds=interval_seconds,
             timezone=timezone,
+            schedule=spec.to_dict(),
             payload_template={
                 "instruction": instruction,
                 "user_id": user_id,
@@ -823,8 +989,11 @@ class CreateScheduledJobTool(BaseTool):
 
         return ToolResult(
             success=True,
-            message="定时任务已创建。",
-            data={"job": job.model_dump(mode="json")},
+            message=f"定时任务已创建（{describe_schedule(spec)}）。",
+            data={
+                "job": job.model_dump(mode="json"),
+                "schedule_desc": describe_schedule(spec),
+            },
         )
 
 
@@ -884,11 +1053,30 @@ class ListScheduledJobsTool(BaseTool):
         items.sort(key=lambda j: j.updated_at, reverse=True)
         items = items[:limit]
 
+        jobs_payload = []
+        for job in items:
+            row = job.model_dump(mode="json")
+            try:
+                spec = effective_spec(job)
+                row["schedule_desc"] = describe_schedule(spec)
+                row["remaining_runs"] = remaining_runs(job, spec)
+                try:
+                    tz = ZoneInfo(job.timezone or "Asia/Shanghai")
+                except Exception:
+                    tz = ZoneInfo("Asia/Shanghai")
+                nxt = next_fire_at_for_job(job, datetime.now(tz), tz)
+                row["next_run_at"] = nxt.isoformat() if nxt else None
+            except Exception:
+                row["schedule_desc"] = "unknown"
+                row["remaining_runs"] = None
+                row["next_run_at"] = None
+            jobs_payload.append(row)
+
         return ToolResult(
             success=True,
             message=f"共 {len(items)} 条定时任务（已按更新时间倒序）。",
             data={
-                "jobs": [j.model_dump(mode="json") for j in items],
+                "jobs": jobs_payload,
                 "total_returned": len(items),
             },
         )

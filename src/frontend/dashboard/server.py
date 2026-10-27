@@ -240,15 +240,10 @@ def _format_console_jobs(data: Dict[str, Any]) -> str:
         name = dfn.get("name") or jid
         alive = not job.get("task_done") and not job.get("task_cancelled")
         state = "alive" if alive else ("cancelled" if job.get("task_cancelled") else "done")
-        schedule = "unknown"
-        if dfn.get("one_shot") and dfn.get("run_at"):
-            schedule = f"once @ {dfn['run_at']}"
-        elif dfn.get("times"):
-            schedule = f"daily {','.join(dfn['times'])}"
-        elif dfn.get("daily_time"):
-            schedule = f"daily {dfn['daily_time']}"
-        elif dfn.get("interval_seconds"):
-            schedule = f"every {dfn['interval_seconds']}s"
+        schedule = job.get("schedule_desc") or "unknown"
+        next_run = job.get("next_run_at")
+        if next_run:
+            schedule = f"{schedule}  ·  next {str(next_run)[:16].replace('T', ' ')}"
         lines.append(f"[{idx}/{len(jobs)}] {name}  ·  {state}")
         lines.append(f"  schedule   {schedule}")
         if dfn.get("instruction_preview"):

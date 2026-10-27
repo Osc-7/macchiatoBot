@@ -920,6 +920,14 @@ class MemoryConfig(BaseModel):
         default="",
         description="[已废弃] 空则用 {base}/{frontend}/{user}/long_term/MEMORY.md",
     )
+    memory_md_inject_chars: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "MEMORY.md 注入 system prompt 的字符上限；None 或 0 表示全量注入（不截断）。"
+            "超限时只注入前 N 字符并附提示，其余内容需 read_file 查看。"
+        ),
+    )
     chat_history_db_path: str = Field(
         default="./data/memory/chat_history.db",
         description="[已废弃，由 memory_base_dir 推导] 对话历史库路径",
@@ -1253,6 +1261,41 @@ class AutomationJobConfig(BaseModel):
         default=None,
         description="可选：起始时间（HH:MM），与 interval_minutes 搭配，表示“从 start_time 开始，每隔 interval_minutes 分钟触发一次”。",
     )
+    weekdays: Optional[List[int]] = Field(
+        default=None,
+        description=(
+            "可选：限定星期，ISO 编号（1=周一 … 7=周日）。需要配合 daily_time/times 使用。"
+            "例如 [1] 表示只在周一触发，避免每天唤醒后靠指令自检空跑。"
+        ),
+    )
+    month_days: Optional[List[int]] = Field(
+        default=None,
+        description="可选：限定每月哪几天（1-31）。需要配合 daily_time/times 使用。",
+    )
+    months: Optional[List[int]] = Field(
+        default=None,
+        description="可选：限定哪几个月（1-12）。需要配合 daily_time/times 使用。",
+    )
+    catch_up: bool = Field(
+        default=False,
+        description="错过的计划时刻是否补跑最近一格（不回放整个空档）。默认否，错过就等下一次。",
+    )
+    until: Optional[str] = Field(
+        default=None,
+        description=(
+            "可选：到期时间（ISO-8601 或 YYYY-MM-DD）。超过它不再触发，并自动停用任务。"
+            "例如学期结束后课表同步自动收尾，不需要手动禁用。"
+        ),
+    )
+    count: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="可选：总共最多触发多少次（配额用尽后自动停用）。手动触发不消耗配额。",
+    )
+    skip_dates: Optional[List[str]] = Field(
+        default=None,
+        description='可选：跳过某些日期（YYYY-MM-DD），等价日历里的 EXDATE，例如 ["2026-10-21", "2026-11-04"]。',
+    )
     run_at: Optional[str] = Field(
         default=None,
         description="可选：一次性触发时间（ISO-8601），例如 2026-03-09T21:30:00+08:00。触发一次后自动停用。",
@@ -1467,9 +1510,45 @@ class FeishuConfig(BaseModel):
     )
 
 
+class ErrorReportingConfig(BaseModel):
+    """运行时/LLM 错误上报与兜底回复配置。"""
+
+    enabled: bool = Field(
+        default=True,
+        description="是否启用错误上报（推送到 owner 飞书）。",
+    )
+    notify_chat_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "错误通知接收的飞书 chat_id；为空时回退到 "
+            "feishu.automation_activity_chat_id。"
+        ),
+    )
+    dedupe_seconds: float = Field(
+        default=300.0,
+        gt=0,
+        description="同类错误（同会话+同类型+同 provider）的推送限流窗口（秒）。",
+    )
+    public_fallback_enabled: bool = Field(
+        default=True,
+        description=(
+            "公共渠道（水源论坛）在重试仍失败后是否发送兜底回复；"
+            "文案不含 provider、状态码等内部细节。"
+        ),
+    )
+    fallback_reply_enabled: bool = Field(
+        default=True,
+        description="主会话（飞书/CLI）失败时是否给用户回一条错误说明。",
+    )
+
+
 class Config(BaseModel):
     """应用配置"""
 
+    error_reporting: ErrorReportingConfig = Field(
+        default_factory=ErrorReportingConfig,
+        description="运行时错误上报与兜底回复配置",
+    )
     llm: LLMConfig
     multimodal: MultimodalConfig = Field(
         default_factory=MultimodalConfig,

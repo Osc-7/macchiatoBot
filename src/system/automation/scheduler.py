@@ -10,12 +10,38 @@ from zoneinfo import ZoneInfo
 
 _logger = logging.getLogger(__name__)
 
+from .calendar import (
+    DEFAULT_TIMEZONE,
+    describe_schedule,
+    effective_spec,
+    exhaustion_reason,
+    next_fire_at_for_job,
+    previous_fire_at,
+    remaining_runs,
+)
 from .event_bus import AsyncEventBus
 from .repositories import JobDefinitionRepository, JobRunRepository
 from .types import JobDefinition, JobRun, JobStatus
 
 if TYPE_CHECKING:
     from .task_queue import AgentTaskQueue
+
+
+# 同一计划时刻失败后的进程内重试。放弃该格时不扣配额，下一格照常排。
+_SLOT_MAX_ATTEMPTS = 3
+_SLOT_RETRY_DELAYS_SECONDS = (1.0, 4.0)
+
+
+def _run_status(run: JobRun) -> str:
+    return str(getattr(run.status, "value", run.status) or "").lower()
+
+
+def _same_instant(a: datetime, b: datetime) -> bool:
+    """比较两个 datetime 是否指向同一时刻（容忍 naive/aware 混用与亚秒差）。"""
+    try:
+        return abs(a.timestamp() - b.timestamp()) < 1.0
+    except Exception:
+        return a == b
 
 
 class AutomationScheduler:
@@ -72,6 +98,19 @@ class AutomationScheduler:
                     "core_mode": pt.get("core_mode"),
                     "instruction_preview": instruction[:80] + ("…" if len(instruction) > 80 else ""),
                 }
+                try:
+                    spec = effective_spec(snap)
+                    row["schedule"] = spec.to_dict()
+                    row["schedule_desc"] = describe_schedule(spec)
+                    row["runs_done"] = int(getattr(snap, "runs_done", 0) or 0)
+                    row["remaining_runs"] = remaining_runs(snap, spec)
+                    tz = ZoneInfo(snap.timezone or DEFAULT_TIMEZONE)
+                    nxt = next_fire_at_for_job(snap, datetime.now(tz), tz)
+                    row["next_run_at"] = nxt.isoformat() if nxt else None
+                except Exception:
+                    row["schedule"] = snap.schedule
+                    row["schedule_desc"] = "unknown"
+                    row["next_run_at"] = None
             if task.done() and not task.cancelled():
                 try:
                     exc = task.exception()
@@ -137,11 +176,30 @@ class AutomationScheduler:
                 pass
             self._watch_task = None
 
-    async def run_job_once(self, job: JobDefinition) -> JobRun:
+    async def run_job_once(
+        self,
+        job: JobDefinition,
+        scheduled_at: Optional[datetime] = None,
+    ) -> JobRun:
+        # 幂等防线（持久化层）：同一 job 的同一计划时刻只消费一次。
+        # _run_loop 里的 last_fired 只防进程内重放；这里覆盖 watcher 重启 loop、
+        # daemon 重启后从 checkpoint 冷启动、以及任何未来可能出现的并发实例。
+        if scheduled_at is not None:
+            previous = self._find_duplicate_run(job.job_name, scheduled_at)
+            if previous is not None:
+                _logger.warning(
+                    "scheduler: skip duplicate fire job=%s scheduled_at=%s (already %s, run_id=%s)",
+                    job.job_name,
+                    scheduled_at.isoformat(),
+                    previous.status,
+                    previous.run_id,
+                )
+                return previous
         run = JobRun(
             job_name=job.job_name,
             job_type=job.job_type,
             triggered_at=datetime.now(),
+            scheduled_at=scheduled_at,
             started_at=datetime.now(),
             status=JobStatus.RUNNING,
         )
@@ -150,7 +208,10 @@ class AutomationScheduler:
         try:
             await self._dispatch_job(job)
             run.status = JobStatus.SUCCESS
-            run.metrics = {"trigger": "scheduler"}
+            run.metrics = {
+                "trigger": "scheduler",
+                "scheduled_at": scheduled_at.isoformat() if scheduled_at else None,
+            }
             run.error = None
         except Exception as exc:  # pragma: no cover
             run.status = JobStatus.FAILED
@@ -158,7 +219,8 @@ class AutomationScheduler:
         finally:
             run.finished_at = datetime.now()
             self._job_run_repo.update(run)
-            if job.one_shot and job.enabled:
+            # 失败留给同一时刻重试；只有这次真正跑成才收掉一次性任务。
+            if job.one_shot and job.enabled and run.status == JobStatus.SUCCESS:
                 job.enabled = False
                 job.updated_at = datetime.now()
                 self._job_def_repo.update(job)
@@ -167,135 +229,278 @@ class AutomationScheduler:
     async def _run_loop(self, job: JobDefinition) -> None:
         """持续调度单个 Job。
 
-        注意：首次执行前会先等待到下一次计划触发时间，
-        避免在 scheduler / 后台守护进程启动瞬间就立刻跑一遍。
+        每一轮：求解下一次计划触发时刻 → 分片睡眠到点前 0.5 秒 → 触发。
+        分片（最多 600 秒一片）是为了让系统挂起、NTP 跳变、容器 suspend 之后能按墙钟重新对齐，
+        而不是抱着一个过期的长 sleep 整周错位。首次执行前同样只等待到计划时刻，
+        避免 daemon 启动瞬间立刻把所有任务跑一遍。
         """
         _logger.info("scheduler: run_loop started for %s", job.job_name)
+        try:
+            tz = ZoneInfo(job.timezone or DEFAULT_TIMEZONE)
+        except Exception:
+            tz = ZoneInfo(DEFAULT_TIMEZONE)
+
+        last_fired: datetime | None = None
+        # 进程在「运行记录已写入、配额还没对上」时崩溃的，这里按成功/未结束的计划时刻补记。
+        if self._reconcile_runs_done(job):
+            _logger.info("scheduler: run_loop ended for %s", job.job_name)
+            return
+
         while self._running:
+            # 防重复触发：_sleep_until 会提前 ~50ms 放行，若此刻立刻重算，
+            # next_fire_at 仍会返回「同一个还没到的 target」，于是同一计划时刻被连触发多次。
+            # 因此记住已触发的计划时刻，等墙钟真正越过它再继续求解。
+            if last_fired is not None:
+                now = datetime.now(tz)
+                if now <= last_fired:
+                    try:
+                        await asyncio.sleep(
+                            min((last_fired - now).total_seconds() + 0.02, 5.0)
+                        )
+                    except asyncio.CancelledError:
+                        break
+                    continue
             try:
-                delay = self._compute_sleep_seconds(job)
+                spec = effective_spec(job)
+                now = datetime.now(tz)
+                target = next_fire_at_for_job(job, now, tz)
             except Exception:
-                _logger.exception("scheduler: _compute_sleep_seconds failed for %s, fallback 60s", job.job_name)
-                delay = 60.0
-            try:
-                await asyncio.sleep(delay)
-            except asyncio.CancelledError:
+                _logger.exception(
+                    "scheduler: resolve next fire time failed for %s, fallback 60s",
+                    job.job_name,
+                )
+                spec, target = None, datetime.now(tz) + timedelta(seconds=60)
+                now = datetime.now(tz)
+
+            if await self._maybe_catch_up(job, spec, now, tz, last_fired):
+                missed_now = previous_fire_at(spec, now, tz) if spec is not None else None
+                if missed_now is not None:
+                    last_fired = missed_now
+                if not self._running or self._should_retire_after_fire(job, spec):
+                    break
+                continue
+
+            if target is None:
+                reason = exhaustion_reason(job, datetime.now(tz), tz)
+                if not reason:
+                    if job.one_shot or (spec is not None and spec.kind == "once"):
+                        reason = "一次性任务已过期或已触发"
+                    else:
+                        reason = "未来 4 年内无命中（检查 weekdays/month_days/months/exceptions）"
+                # 正常收尾也要停用。否则 watcher 把 loop 结束当成崩溃，每个刷新周期重启一次。
+                self._disable_job(job, reason)
                 break
-            if not self._running:
+
+            if not await self._sleep_until(target, tz):
                 break
-            try:
-                await self.run_job_once(job)
-            except Exception:
-                _logger.exception("scheduler: run_job_once raised for %s, loop continues", job.job_name)
-            if job.one_shot:
+
+            last_fired = target
+            outcome = await self._fire_scheduled_slot(job, target)
+            if outcome == "stopped" or not self._running:
+                break
+            if self._should_retire_after_fire(job, spec):
                 break
         _logger.info("scheduler: run_loop ended for %s", job.job_name)
 
-    def _compute_sleep_seconds(self, job: JobDefinition) -> float:
-        """根据 JobDefinition 计算下一次调度前应 sleep 的秒数。
+    def _find_duplicate_run(
+        self, job_name: str, scheduled_at: datetime
+    ) -> Optional[JobRun]:
+        """返回同一 job 在同一计划时刻已经占住的 run。
 
-        优先顺序：
-        0. one_shot + run_at: 指定时间触发一次
-        1. payload['times']: 每天多个闹钟时间点（HH:MM 列表）
-        2. payload['start_time'] + job.interval_seconds: 起始时刻 + 间隔
-        3. payload['daily_time']: 每天单个闹钟时间点
-        4. 退回简单的 interval_seconds 间隔
+        失败不算重复，方便同一格重试。成功和尚未写完的记录都算占住，
+        避免崩溃后续跑，也避免只扫全局最近 200 条时把更早的同刻运行漏掉。
         """
-        delay = float(job.interval_seconds)
-        payload = job.payload_template or {}
-
-        # 使用 job 指定的时区，脱离全局 TZ 环境变量
         try:
-            tz = ZoneInfo(job.timezone or "Asia/Shanghai")
-        except Exception:
-            tz = ZoneInfo("Asia/Shanghai")
-
-        # 0) 一次性闹钟：one_shot + run_at
-        if job.one_shot and job.run_at is not None:
-            if job.run_at.tzinfo is None:
-                target = job.run_at.replace(tzinfo=tz)
-            else:
-                target = job.run_at.astimezone(tz)
-            now = datetime.now(tz)
-            return max(0.0, (target - now).total_seconds())
-
-        # 1) 多个闹钟时间点：payload['times'] = ["08:00", "14:00", ...]
-        times_raw = payload.get("times")
-        times_list: list[str] = []
-        if isinstance(times_raw, list):
-            times_list = [str(t).strip() for t in times_raw if str(t).strip()]
-        elif isinstance(times_raw, str):
-            times_list = [s.strip() for s in times_raw.split(",") if s.strip()]
-        if times_list:
-            candidates: list[int] = []
-            for t in times_list:
-                try:
-                    h_str, m_str = t.split(":", 1)
-                    h = int(h_str)
-                    m = int(m_str)
-                    if 0 <= h <= 23 and 0 <= m <= 59:
-                        candidates.append(h * 3600 + m * 60)
-                except Exception:
+            for prev in self._job_run_repo.list_for_job(job_name):
+                if prev.scheduled_at is None:
                     continue
-            if candidates:
-                now = datetime.now(tz)
-                now_sec = now.hour * 3600 + now.minute * 60 + now.second
-                today_future = [c for c in candidates if c > now_sec]
-                if today_future:
-                    next_sec = min(today_future)
-                    seconds = next_sec - now_sec
-                else:
-                    # 今天都过了，选明天的最早一个
-                    first = min(candidates)
-                    seconds = (24 * 3600 - now_sec) + first
-                return max(1.0, float(seconds))
+                if _run_status(prev) == "failed":
+                    continue
+                if _same_instant(prev.scheduled_at, scheduled_at):
+                    return prev
+        except Exception:
+            _logger.exception(
+                "scheduler: duplicate-run check failed job=%s", job_name
+            )
+        return None
 
-        # 2) 起始时刻 + 间隔：payload['start_time'] + job.interval_seconds
-        start_time = payload.get("start_time")
-        if start_time:
+    async def _maybe_catch_up(
+        self,
+        job: JobDefinition,
+        spec: Any,
+        now: datetime,
+        tz: Any,
+        last_fired: Optional[datetime],
+    ) -> bool:
+        """catch_up 开启时补最近一个错过的时刻。返回 True 表示这一轮已经处理过补跑。"""
+        if spec is None or not getattr(spec, "catch_up", False):
+            return False
+        try:
+            missed = previous_fire_at(spec, now, tz)
+        except Exception:
+            _logger.exception("scheduler: previous fire time failed for %s", job.job_name)
+            return False
+        if missed is None:
+            return False
+        if last_fired is not None and _same_instant(last_fired, missed):
+            return False
+        if self._find_duplicate_run(job.job_name, missed) is not None:
+            return False
+        _logger.info(
+            "scheduler: catch up job=%s missed=%s",
+            job.job_name,
+            missed.isoformat(),
+        )
+        await self._fire_scheduled_slot(job, missed)
+        return True
+
+    async def _fire_scheduled_slot(self, job: JobDefinition, target: datetime) -> str:
+        """触发一个计划时刻。成功才记配额；失败在进程内重试同一格，重复触发不记配额。"""
+        delays = _SLOT_RETRY_DELAYS_SECONDS
+        for attempt in range(_SLOT_MAX_ATTEMPTS):
+            if not self._running:
+                return "stopped"
+            before = self._find_duplicate_run(job.job_name, target)
             try:
-                h_str, m_str = str(start_time).split(":", 1)
-                h = int(h_str)
-                m = int(m_str)
-                if 0 <= h <= 23 and 0 <= m <= 59:
-                    period = max(1.0, delay)
-                    now = datetime.now(tz)
-                    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-                    first = midnight + timedelta(hours=h, minutes=m)
-                    t = first
-                    # 沿着时间线按 interval 向前推进，直到超过当前时间
-                    while t <= now:
-                        t = t + timedelta(seconds=period)
-                    seconds = (t - now).total_seconds()
-                    return max(1.0, seconds)
+                run = await self.run_job_once(job, scheduled_at=target)
+            except asyncio.CancelledError:
+                return "stopped"
             except Exception:
-                # 配置非法时回退其他语义
-                pass
-
-        # 3) 单个 daily_time 闹钟
-        daily_time = payload.get("daily_time")
-        if daily_time:
+                _logger.exception(
+                    "scheduler: run_job_once raised for %s", job.job_name
+                )
+                run = None
+            if (
+                run is not None
+                and before is not None
+                and run.run_id == before.run_id
+            ):
+                self._reconcile_runs_done(job)
+                return "duplicate"
+            if run is not None and _run_status(run) == "success":
+                self._reconcile_runs_done(job)
+                return "success"
+            if attempt + 1 >= _SLOT_MAX_ATTEMPTS:
+                _logger.warning(
+                    "scheduler: job %s 计划时刻 %s 连续失败 %d 次，放弃这一格且不扣配额",
+                    job.job_name,
+                    target.isoformat(),
+                    _SLOT_MAX_ATTEMPTS,
+                )
+                return "failed"
+            delay = delays[min(attempt, len(delays) - 1)]
             try:
-                # daily_time: "HH:MM"
-                hour_str, minute_str = str(daily_time).split(":", 1)
-                hour = int(hour_str)
-                minute = int(minute_str)
-                if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                    return max(1.0, delay)
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return "stopped"
+        return "failed"
+
+    def _should_retire_after_fire(self, job: JobDefinition, spec: Any) -> bool:
+        """一次性任务，或次数用尽，这一轮之后就该退出 loop。"""
+        if not job.enabled:
+            return True
+        if job.one_shot or (spec is not None and getattr(spec, "kind", "") == "once"):
+            self._disable_job(job, "一次性任务已结束")
+            return True
+        return self._reconcile_runs_done(job)
+
+    def _disable_job(self, job: JobDefinition, reason: str) -> None:
+        if not job.enabled:
+            return
+        _logger.info("scheduler: job %s 自动停用（%s）", job.job_name, reason)
+        job.enabled = False
+        self._persist_job_state(job)
+
+    def _persist_job_state(self, job: JobDefinition) -> None:
+        """把调度器改过的运行态（runs_done / enabled）写回仓库。"""
+        try:
+            job.updated_at = datetime.now()
+            self._job_def_repo.update(job)
+            snap = self._job_snapshots.get(job.job_name)
+            if snap is not None:
+                snap.runs_done = job.runs_done
+                snap.enabled = job.enabled
+        except Exception:
+            _logger.exception(
+                "scheduler: persist job state failed for %s", job.job_name
+            )
+
+    def _reconcile_runs_done(self, job: JobDefinition) -> bool:
+        """按已占住的计划时刻把 runs_done 补齐。返回 True 表示配额已经用尽。
+
+        只升不降：历史多记的次数不在这里改回去。没有 count 的任务不扫运行记录。
+        重复触发不会多记，失败不记，崩溃前写下的成功/未结束记录会补记。
+        """
+        try:
+            spec = effective_spec(job)
+            if spec.count is None:
+                return False
+            done = self._count_consumed_slots(job.job_name)
+            changed = False
+            if done > int(getattr(job, "runs_done", 0) or 0):
+                job.runs_done = done
+                changed = True
+            remaining = remaining_runs(job, spec)
+            if remaining is not None and remaining <= 0:
+                if job.enabled:
+                    job.enabled = False
+                    changed = True
+                    _logger.info(
+                        "scheduler: job %s 达 count=%s 上限，已自动停用",
+                        job.job_name,
+                        spec.count,
+                    )
+                if changed:
+                    self._persist_job_state(job)
+                return True
+            if changed:
+                self._persist_job_state(job)
+        except Exception:
+            _logger.exception(
+                "scheduler: reconcile count quota failed for %s", job.job_name
+            )
+        return False
+
+    def _count_consumed_slots(self, job_name: str) -> int:
+        seen: set[int] = set()
+        for run in self._job_run_repo.list_for_job(job_name):
+            if run.scheduled_at is None or _run_status(run) == "failed":
+                continue
+            try:
+                seen.add(int(run.scheduled_at.timestamp()))
             except Exception:
-                # 配置非法时回退 interval 语义
-                return max(1.0, delay)
+                continue
+        return len(seen)
 
-            now = datetime.now(tz)
-            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if target <= now:
-                target = target + timedelta(days=1)
+    async def _sleep_until(self, target: datetime, tz: Any) -> bool:
+        """睡到 target 前 0.05 秒；返回 False 表示被取消或调度器停机。"""
+        while self._running:
+            remain = (target - datetime.now(tz)).total_seconds()
+            if remain <= 0.05:
+                return True
+            try:
+                await asyncio.sleep(min(remain - 0.05, 600.0))
+            except asyncio.CancelledError:
+                return False
+        return False
 
-            seconds = (target - now).total_seconds()
-            return max(1.0, seconds)
+    def _compute_sleep_seconds(self, job: JobDefinition) -> float:
+        """下一次触发前应 sleep 的秒数（兼容保留）。
 
-        # 4) 退回简单 interval 语义
-        return max(1.0, delay)
+        语义已统一到 calendar.next_fire_at：优先结构化 schedule，缺失时按旧
+        payload（times / start_time+interval / daily_time / interval）推导。
+        """
+        try:
+            tz = ZoneInfo(job.timezone or DEFAULT_TIMEZONE)
+        except Exception:
+            tz = ZoneInfo(DEFAULT_TIMEZONE)
+        spec = effective_spec(job)
+        target = next_fire_at_for_job(job, datetime.now(tz), tz)
+        if target is None:
+            return max(1.0, float(job.interval_seconds or 60))
+        return max(0.0, (target - datetime.now(tz)).total_seconds())
+
+
 
     def _job_changed(self, old: JobDefinition, new: JobDefinition) -> bool:
         """检测 JobDefinition 是否发生了会影响调度的配置变更。"""
@@ -308,6 +513,10 @@ class AutomationScheduler:
         if old.run_at != new.run_at:
             return True
         if (old.timezone or "") != (new.timezone or ""):
+            return True
+        # schedule 必须参与比较：否则改了 weekdays 之后 watcher 不会重启 loop，
+        # 运行中的协程仍按旧规则计时，改了等于没改。
+        if (old.schedule or {}) != (new.schedule or {}):
             return True
         if (old.payload_template or {}) != (new.payload_template or {}):
             return True
@@ -346,7 +555,17 @@ class AutomationScheduler:
                         need_start = True
                         reason = "new"
                     elif existing_task.done():
-                        exc = existing_task.exception() if not existing_task.cancelled() else None
+                        if existing_task.cancelled():
+                            exc = None
+                        else:
+                            exc = existing_task.exception()
+                        fresh = self._job_def_repo.get(job.job_name)
+                        still_enabled = fresh is not None and fresh.enabled
+                        if exc is None:
+                            # 正常收尾不是崩溃。规则没自己停用时这里补一刀，避免每个刷新周期重启。
+                            if still_enabled:
+                                self._disable_job(fresh, "调度循环已正常结束")
+                            continue
                         _logger.warning(
                             "scheduler: run_loop for %s died (exc=%s), restarting",
                             job.job_name,
@@ -434,4 +653,4 @@ class AutomationScheduler:
             remote_ttl_seconds=remote_ttl_seconds,
             remote_required=remote_required,
         )
-        self._task_queue.push(task)  # type: ignore[union-attr]
+        await asyncio.to_thread(self._task_queue.push, task)

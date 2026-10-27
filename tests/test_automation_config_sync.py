@@ -158,3 +158,38 @@ async def test_sync_creates_and_disables_config_jobs(
     # job_b 仍然存在，但应被自动标记为 disabled
     assert "job_b" in all_jobs2
     assert all_jobs2["job_b"].enabled is False
+
+
+def test_sync_keeps_runs_done_unless_cadence_changes(tmp_path: Path) -> None:
+    """改描述、until、count 不重置配额；改触发时刻才从 0 重算。"""
+    repo = JobDefinitionRepository(base_dir=str(tmp_path / "automation"))
+    cfg = _make_base_config(tmp_path)
+    cfg.automation.jobs = [
+        AutomationJobConfig(
+            name="quota_job",
+            description="原描述",
+            daily_time="08:00",
+            count=5,
+            user_id="default",
+            enabled=True,
+        ),
+    ]
+    sync_job_definitions_from_config(config=cfg, job_def_repo=repo)
+    stored = repo.get_all()[0]
+    stored.runs_done = 4
+    repo.update(stored)
+
+    cfg.automation.jobs[0].description = "只改了说法"
+    cfg.automation.jobs[0].until = "2026-12-31"
+    cfg.automation.jobs[0].count = 9
+    sync_job_definitions_from_config(config=cfg, job_def_repo=repo)
+    kept = repo.get_all()[0]
+    assert kept.runs_done == 4
+    assert kept.payload_template.get("instruction") == "只改了说法"
+    assert kept.schedule.get("count") == 9
+
+    cfg.automation.jobs[0].daily_time = "09:30"
+    sync_job_definitions_from_config(config=cfg, job_def_repo=repo)
+    reset = repo.get_all()[0]
+    assert reset.runs_done == 0
+    assert reset.schedule.get("times") == ["09:30"]

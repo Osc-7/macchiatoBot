@@ -408,18 +408,10 @@ async def run_kernel_shell(client: AutomationIPCClient) -> None:
                     display_name = dfn.get("name") or jid
                     alive = not j.get("task_done") and not j.get("task_cancelled")
                     stat = "alive" if alive else ("cancelled" if j.get("task_cancelled") else "done")
-                    schedule_parts = []
-                    if dfn.get("one_shot") and dfn.get("run_at"):
-                        schedule_parts.append(f"once @ {dfn['run_at']}")
-                    elif dfn.get("times"):
-                        schedule_parts.append(f"daily {','.join(dfn['times'])}")
-                    elif dfn.get("daily_time"):
-                        schedule_parts.append(f"daily {dfn['daily_time']}")
-                    elif dfn.get("start_time"):
-                        schedule_parts.append(f"from {dfn['start_time']} every {dfn.get('interval_seconds')}s")
-                    else:
-                        schedule_parts.append(f"every {dfn.get('interval_seconds')}s")
-                    schedule = "  ".join(schedule_parts)
+                    schedule = j.get("schedule_desc") or "unknown"
+                    next_run = j.get("next_run_at")
+                    if next_run:
+                        schedule = f"{schedule}  ·  下次 {str(next_run)[:16].replace('T', ' ')}"
                     _panel_top(term, f"[{idx}/{nj}] {display_name}")
                     badge = _job_state_badge(term, stat)
                     _panel_line(term, f" track_state      {badge}")

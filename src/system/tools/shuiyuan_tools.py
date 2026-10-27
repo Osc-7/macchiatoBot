@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Optional
 
 from agent_core.config import Config
@@ -142,7 +143,7 @@ class ShuiyuanSearchTool(BaseTool):
         page = int(kwargs.get("page", 1))
 
         try:
-            result = client.search(q=q, page=page)
+            result = await asyncio.to_thread(client.search, q=q, page=page)
         except Exception as e:
             return ToolResult(
                 success=False,
@@ -247,7 +248,7 @@ class ShuiyuanGetTopicTool(BaseTool):
             )
 
         try:
-            topic = client.get_topic(topic_id)
+            topic = await asyncio.to_thread(client.get_topic, topic_id)
         except Exception as e:
             return ToolResult(
                 success=False,
@@ -263,7 +264,9 @@ class ShuiyuanGetTopicTool(BaseTool):
             )
 
         # 截断：仅返回最近 N 条帖子
-        posts = client.get_topic_recent_posts(topic_id, limit=self._posts_limit)
+        posts = await asyncio.to_thread(
+            client.get_topic_recent_posts, topic_id, limit=self._posts_limit
+        )
         result: dict[str, Any] = {
             "id": topic.get("id"),
             "title": topic.get("title"),
@@ -401,7 +404,9 @@ post_id 可从 shuiyuan_get_topic 返回的 posts 中的 id 字段获取。""",
                 pass
 
         try:
-            ok, status, detail = client.toggle_retort(post_id, emoji_raw, topic_id_int)
+            ok, status, detail = await asyncio.to_thread(
+                client.toggle_retort, post_id, emoji_raw, topic_id_int
+            )
         except Exception as e:
             return ToolResult(
                 success=False,
@@ -510,19 +515,28 @@ class ShuiyuanPostReplyTool(BaseTool):
 
         base_dir = getattr(cfg, "db_base_dir", None) or "./data/shuiyuan"
         db_path = get_shuiyuan_db_path_for_user(base_dir, self._username)
-        db = ShuiyuanDB(
-            db_path=db_path,
-            chat_limit_per_user=cfg.memory.chat_limit_per_user,
-            replies_per_minute=cfg.rate_limit.replies_per_minute,
-        )
-        success, msg, _post_id = post_reply(
-            username=self._username,
-            topic_id=self._topic_id,
-            raw=raw,
-            reply_to_post_number=self._reply_to_post_number,
-            db=db,
-            client=client,
-        )
+        chat_limit = cfg.memory.chat_limit_per_user
+        replies_per_minute = cfg.rate_limit.replies_per_minute
+        username = self._username
+        topic_id = self._topic_id
+        reply_to = self._reply_to_post_number
+
+        def _send() -> tuple:
+            db = ShuiyuanDB(
+                db_path=db_path,
+                chat_limit_per_user=chat_limit,
+                replies_per_minute=replies_per_minute,
+            )
+            return post_reply(
+                username=username,
+                topic_id=topic_id,
+                raw=raw,
+                reply_to_post_number=reply_to,
+                db=db,
+                client=client,
+            )
+
+        success, msg, _post_id = await asyncio.to_thread(_send)
         if success:
             return ToolResult(success=True, message=msg, data={"posted": True})
         return ToolResult(success=False, error="SHUIYUAN_POST_FAILED", message=msg)
@@ -598,7 +612,8 @@ class ShuiyuanGetLatestTool(BaseTool):
             order = "default"
 
         try:
-            result = client.get_latest_topics(
+            result = await asyncio.to_thread(
+                client.get_latest_topics,
                 page=page,
                 per_page=self._max_results,
                 order=order,
@@ -713,7 +728,8 @@ class ShuiyuanGetTopTool(BaseTool):
         page = int(kwargs.get("page", 0))
 
         try:
-            result = client.get_top_topics(
+            result = await asyncio.to_thread(
+                client.get_top_topics,
                 period=period,
                 page=page,
                 per_page=self._max_results,
@@ -820,7 +836,9 @@ class ShuiyuanGetCategoriesTool(BaseTool):
             include_sub = include_sub.lower() in ("true", "1", "yes")
 
         try:
-            result = client.get_categories(include_subcategories=bool(include_sub))
+            result = await asyncio.to_thread(
+                client.get_categories, include_subcategories=bool(include_sub)
+            )
         except Exception as e:
             return ToolResult(
                 success=False,
@@ -949,7 +967,8 @@ class ShuiyuanGetCategoryTopicsTool(BaseTool):
             order = "default"
 
         try:
-            result = client.get_category_topics(
+            result = await asyncio.to_thread(
+                client.get_category_topics,
                 category_id=category_id,
                 page=page,
                 per_page=self._max_results,
@@ -1097,7 +1116,8 @@ class ShuiyuanBrowseTopicTool(BaseTool):
         limit = max(10, min(100, limit))
 
         try:
-            posts = client.get_topic_posts_paged(
+            posts = await asyncio.to_thread(
+                client.get_topic_posts_paged,
                 topic_id=topic_id,
                 post_number_start=start_post,
                 limit=limit,

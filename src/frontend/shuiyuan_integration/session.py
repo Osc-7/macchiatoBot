@@ -41,6 +41,124 @@ from system.tools.shuiyuan_tools import (
 
 logger = logging.getLogger("shuiyuan_session")
 
+
+# ── 公共兜底回复 ─────────────────────────────────────────────────────────
+# 公共论坛上绝不暴露 provider / HTTP 状态码 / 上游原文，只给一句人话。
+# 文案由 error_info._PUBLIC_HINTS 按错误类型给出，这里不再拼接前缀，
+# 避免「这边临时出了点状况，我这边临时出了点状况」这类重复。
+
+
+def build_public_fallback_text(
+    exc: Optional[BaseException] = None,
+    *,
+    error_info: Optional[Dict[str, Any]] = None,
+) -> str:
+    """生成水源兜底回复文案（不含任何内部细节）。
+
+    优先使用 IPC 透传的结构化 ``error_info``，拿不到再对异常本身分类。
+    """
+    hint = ""
+    kind = "unknown"
+    info_obj = None
+    try:
+        from agent_core.llm.error_info import KIND_UNKNOWN, classify_llm_error
+
+        raw_info = error_info
+        if not isinstance(raw_info, dict) and exc is not None:
+            maybe = getattr(exc, "error_info", None)
+            if isinstance(maybe, dict):
+                raw_info = maybe
+        if isinstance(raw_info, dict):
+            try:
+                from system.kernel.error_notify import error_info_from_dict
+
+                info_obj = error_info_from_dict(raw_info)
+            except Exception:  # noqa: BLE001
+                info_obj = None
+        elif exc is not None:
+            info_obj = classify_llm_error(exc)
+        if info_obj is not None:
+            kind = info_obj.kind
+            hint = info_obj.public_hint
+        else:
+            kind = KIND_UNKNOWN
+    except Exception:  # noqa: BLE001
+        hint = "这边临时出了点状况，已经通知主人了。"
+    return hint or "刚才那句没接住，我这边卡了一下，稍后再来。"
+
+
+async def post_public_fallback(
+    *,
+    username: str,
+    topic_id: int,
+    reply_to_post_number: Optional[int],
+    db: Any,
+    client: Any,
+    exc: Optional[BaseException] = None,
+    error_info: Optional[Dict[str, Any]] = None,
+    config: Optional[Config] = None,
+) -> Optional[str]:
+    """在公共线程里发一条兜底回复。返回实际发出的文本（未启用/失败返回 None）。"""
+    cfg = config or get_config()
+    er = getattr(cfg, "error_reporting", None)
+    if er is not None and not getattr(er, "public_fallback_enabled", True):
+        return None
+    text = build_public_fallback_text(exc, error_info=error_info)
+    try:
+        from .reply import post_reply
+
+        success, msg, _post_id = await asyncio.to_thread(
+            post_reply,
+            username,
+            topic_id,
+            text,
+            reply_to_post_number,
+            db=db,
+            client=client,
+        )
+        if not success:
+            logger.warning("水源兜底回复发送失败: %s", msg)
+            return None
+        logger.info("水源兜底回复已发送（topic=%s post=%s）", topic_id, reply_to_post_number)
+        return text
+    except Exception as exc2:  # noqa: BLE001
+        logger.warning("水源兜底回复异常: %s", exc2)
+        return None
+
+
+async def post_public_fallback_simple(
+    *,
+    username: str,
+    topic_id: int,
+    reply_to_post_number: Optional[int],
+    exc: Optional[BaseException] = None,
+    config: Optional[Config] = None,
+) -> Optional[str]:
+    """connector 兜底用：自行解析 client/db，失败只记日志。"""
+    try:
+        cfg = config or get_config()
+        from frontend.shuiyuan_integration import get_shuiyuan_client_from_config
+
+        client = get_shuiyuan_client_from_config(cfg)
+        if client is None:
+            logger.warning("水源兜底：未配置 client")
+            return None
+        from .reply import get_shuiyuan_db_for_user
+
+        db = get_shuiyuan_db_for_user(cfg, username)
+        return await post_public_fallback(
+            username=username,
+            topic_id=int(topic_id),
+            reply_to_post_number=reply_to_post_number,
+            db=db,
+            client=client,
+            exc=exc,
+            config=cfg,
+        )
+    except Exception as exc2:  # noqa: BLE001
+        logger.warning("水源兜底回复（simple）失败: %s", exc2)
+        return None
+
 # 与飞书 FeishuPushForwarder / CLI poll_push 一致：收 subagent inject_turn 等推送
 _SHUIYUAN_INJECT_POLL_INTERVAL_SEC = 2.0
 _SHUIYUAN_INJECT_MAX_WALL_SEC = 900.0
@@ -330,6 +448,8 @@ async def _run_via_daemon(
     *,
     content_refs: Optional[List[ContentReference]] = None,
     config: Optional[Config] = None,
+    topic_title: Optional[str] = None,
+    invocation_text: Optional[str] = None,
 ) -> Optional[str]:
     """通过 daemon IPC 运行，使用 per-user 受限 Core。成功返回 str（可为空），daemon 不可用时返回 None。"""
     cfg = config or get_config()
@@ -354,6 +474,14 @@ async def _run_via_daemon(
     # 进程侧就地 resolve content_refs → content_items（base64 data URL），
     # 通过 metadata["content_items"] 直接传给 CoreSessionAdapter。
     metadata: Dict[str, Any] = {}
+    # 供 kernel 侧错误上报卡片展示「哪条帖子、谁问的、问了什么」
+    metadata["shuiyuan_meta"] = {
+        "username": username,
+        "topic_id": int(topic_id),
+        "topic_title": (topic_title or "").strip()[:200],
+        "post_number": int(reply_to_post_number) if reply_to_post_number else None,
+        "user_message": (invocation_text or "")[:600],
+    }
     if content_refs:
         try:
             from agent_core.content import resolve_content_refs
@@ -401,12 +529,54 @@ async def _run_via_daemon(
         except Exception as exc:  # noqa: BLE001
             logger.warning("shuiyuan workspace switch notify failed: %s", exc)
 
-    result = await ipc.run_turn(
-        AgentRunInput(text=ctx_user, metadata=metadata),
-        hooks=AgentHooks(on_workspace_notice=_on_workspace_notice),
-    )
+    try:
+        result = await ipc.run_turn(
+            AgentRunInput(text=ctx_user, metadata=metadata),
+            hooks=AgentHooks(on_workspace_notice=_on_workspace_notice),
+        )
+    except Exception as exc:  # noqa: BLE001
+        # daemon 内部已按结构化错误上报 owner；这里只负责在公共线程里给出兜底回复，
+        # 避免论坛上「@ 了人却一个字都没有」的沉默。
+        logger.exception(
+            "水源 daemon 轮次失败 topic=%s post=%s: %s",
+            topic_id,
+            reply_to_post_number,
+            exc,
+        )
+        fallback = await post_public_fallback(
+            username=username,
+            topic_id=topic_id,
+            reply_to_post_number=reply_to_post_number,
+            db=db,
+            client=client,
+            exc=exc,
+            config=cfg,
+        )
+        return fallback or ""
     reply_text = (result.output_text or "").strip()
 
+    # 第二道闸：daemon 把错误包成了正常结果（inject_turn 路径），
+    # 或文本本身是内部错误串——都不能原样贴到公共论坛。
+    _meta = getattr(result, "metadata", None) or {}
+    if _meta.get("_push_error") or reply_text.startswith("[后台任务处理出错]"):
+        logger.warning(
+            "水源轮次返回错误结果 topic=%s post=%s err=%s",
+            topic_id,
+            reply_to_post_number,
+            (_meta.get("_push_error") or reply_text)[:200],
+        )
+        raw_info = _meta.get("_error_info") if isinstance(_meta, dict) else None
+        fallback = await post_public_fallback(
+            username=username,
+            topic_id=topic_id,
+            reply_to_post_number=reply_to_post_number,
+            db=db,
+            client=client,
+            exc=None,
+            error_info=raw_info if isinstance(raw_info, dict) else None,
+            config=cfg,
+        )
+        return fallback or ""
     # 处理 attach_image_to_reply 登记的附件：上传并拼接 Markdown
     attach_md = await _upload_and_embed_attachments(
         list(getattr(result, "attachments", None) or []),
@@ -600,6 +770,8 @@ async def run_shuiyuan_reply(
         client=client,
         content_refs=content_refs or None,
         config=cfg,
+        topic_title=(topic_op or {}).get("topic_title") if topic_op else None,
+        invocation_text=effective_message,
     )
     if via_daemon is not None:
         return via_daemon

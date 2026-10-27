@@ -563,6 +563,19 @@ async def _poll_topic_watch(
                 return True  # 仍视为有活动
             except Exception as e:
                 logger.exception("水源回复失败: %s", e)
+                # 公共线程不能沉默：发一条不含内部细节的兜底回复
+                try:
+                    from .session import post_public_fallback_simple
+
+                    await post_public_fallback_simple(
+                        username=username,
+                        topic_id=int(topic_id),
+                        reply_to_post_number=int(post_number) if post_number else None,
+                        exc=e,
+                        config=config,
+                    )
+                except Exception as exc2:  # noqa: BLE001
+                    logger.warning("水源兜底回复失败: %s", exc2)
                 return True  # 异常也视为有活动（已尝试处理）
 
     for topic_id, post_number, post_id, post in items:
@@ -697,6 +710,18 @@ async def _poll_once(
                     logger.warning("水源回复返回空")
             except Exception as e:
                 logger.exception("水源回复失败: %s", e)
+                try:
+                    from .session import post_public_fallback_simple
+
+                    await post_public_fallback_simple(
+                        username=username,
+                        topic_id=int(topic_id),
+                        reply_to_post_number=int(post_number) if post_number else None,
+                        exc=e,
+                        config=config,
+                    )
+                except Exception as exc2:  # noqa: BLE001
+                    logger.warning("水源兜底回复失败: %s", exc2)
 
     for topic_id, post_number, post_id in novel_items:
         if not topic_id or not post_id:

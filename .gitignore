@@ -35,6 +35,10 @@ ENV/
 *.swp
 *.swo
 *~
+*.bak
+*.bak.*
+*.bak-*
+*.before-*
 .cursor/
 # Testing
 .pytest_cache/

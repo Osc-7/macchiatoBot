@@ -1127,6 +1127,14 @@ class AgentConfig(BaseModel):
     """Agent 配置"""
 
     max_iterations: int = Field(default=10, ge=1, description="最大工具调用迭代次数")
+    session_expired_seconds: int = Field(
+        default=3600,
+        ge=60,
+        description=(
+            "会话空闲 TTL（秒）：Kernel TTL 扫描在 (now - last_active) 超过该值时 evict Core；"
+            "守护进程重启后也用它判断 checkpoint 能否被拉回进程池"
+        ),
+    )
     subagent_max_seconds: int = Field(
         default=600,
         ge=1,

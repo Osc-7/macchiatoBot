@@ -163,19 +163,77 @@ def inject_gemini_dummy_thought_signatures_in_messages(
     return out
 
 
-# Qwen 深度思考模式会将推理内容放在 content 中（有时与回复混合），用 <think>...</think> 包裹。
-# 参见 https://www.alibabacloud.com/help/zh/model-studio/deep-thinking
+# 思考块写在 content 里的两种写法：
+# - Qwen：</think> 之前都是思考，开头可以没有 <think>
+# - Antigravity 反代：<thinking>...</thinking>，空标签也会贴在正文前面
+# 更长的结束标签必须先参与比较，避免被更短的标签截错。
+_INLINE_THINK_PAIRS = (
+    ("<thinking>", "</thinking>"),
+    ("<think>", "</think>"),
+)
 THINKING_END_TAG = "</think>"
 
 
+def _earliest_inline_think_end(content: str) -> Optional[tuple[int, str, str]]:
+    """返回最早出现的 (下标, 开始标签, 结束标签)。"""
+    best: Optional[tuple[int, str, str]] = None
+    for open_tag, end_tag in _INLINE_THINK_PAIRS:
+        idx = content.find(end_tag)
+        if idx == -1:
+            continue
+        if best is None or idx < best[0] or (
+            idx == best[0] and len(end_tag) > len(best[2])
+        ):
+            best = (idx, open_tag, end_tag)
+    return best
+
+
+def _split_inline_thinking(
+    content: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """把内嵌思考切成 (可见正文, 思考文本)。没有结束标签时原样返回。"""
+    if not isinstance(content, str):
+        return content, None
+    if not content:
+        return content, None
+    found = _earliest_inline_think_end(content)
+    if found is None:
+        return content, None
+    idx, open_tag, end_tag = found
+    raw_reason = content[:idx].strip()
+    visible = content[idx + len(end_tag) :].strip()
+    if raw_reason.startswith(open_tag):
+        raw_reason = raw_reason[len(open_tag) :].strip()
+    return visible, (raw_reason or None)
+
+
 def _strip_thinking_content(content: Optional[str]) -> Optional[str]:
-    """剥离 Qwen 等模型输出中 </think> 之前的思考内容。"""
-    if not content or not isinstance(content, str):
-        return content
-    idx = content.find(THINKING_END_TAG)
-    if idx == -1:
-        return content
-    return content[idx + len(THINKING_END_TAG) :].strip()
+    """剥离 content 里 </think> 或 </thinking> 之前的思考，只留可见正文。"""
+    visible, _ = _split_inline_thinking(content)
+    return visible
+
+
+def _merge_inline_thinking(
+    content: Optional[str],
+    reasoning_content: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """可见正文去掉内嵌思考；独立 reasoning 字段为空时，用标签里的文本补上。"""
+    visible, inline = _split_inline_thinking(content)
+    if inline and not (reasoning_content and reasoning_content.strip()):
+        reasoning_content = inline
+    return visible, reasoning_content
+
+
+def _max_tag_prefix_suffix(text: str, tags: tuple[str, ...]) -> int:
+    """text 末尾有多长是某个标签的真前缀（不含完整标签）。"""
+    best = 0
+    for token in tags:
+        max_len = min(len(text), len(token) - 1)
+        for n in range(max_len, 0, -1):
+            if text.endswith(token[:n]):
+                best = max(best, n)
+                break
+    return best
 
 
 def _normalize_text_content(content: Any) -> Optional[str]:
@@ -492,11 +550,12 @@ class OpenAICompatProvider(BaseProvider):
         response = await self._create_completion(request_params)
         choice = response.choices[0]
         usage = TokenUsage.from_response(response)
-        content = _strip_thinking_content(
-            _normalize_text_content(choice.message.content)
-        )
         rc = getattr(choice.message, "reasoning_content", None)
         reasoning_content = rc.strip() if isinstance(rc, str) and rc.strip() else None
+        content, reasoning_content = _merge_inline_thinking(
+            _normalize_text_content(choice.message.content),
+            reasoning_content,
+        )
 
         return LLMResponse(
             content=content,
@@ -539,11 +598,12 @@ class OpenAICompatProvider(BaseProvider):
         response = await self._create_completion(request_params)
         choice = response.choices[0]
         usage = TokenUsage.from_response(response)
-        content = _strip_thinking_content(
-            _normalize_text_content(choice.message.content)
-        )
         rc = getattr(choice.message, "reasoning_content", None)
         reasoning_content = rc.strip() if isinstance(rc, str) and rc.strip() else None
+        content, reasoning_content = _merge_inline_thinking(
+            _normalize_text_content(choice.message.content),
+            reasoning_content,
+        )
 
         return LLMResponse(
             content=content,
@@ -652,13 +712,13 @@ class OpenAICompatProvider(BaseProvider):
                 )
 
         usage = TokenUsage.from_response(response)
-        content = _strip_thinking_content(
-            _normalize_text_content(choice.message.content)
-        )
-        content, tool_calls = _extract_tool_code_calls(content, tool_calls)
-
         rc = getattr(choice.message, "reasoning_content", None)
         reasoning_content = rc.strip() if isinstance(rc, str) and rc.strip() else None
+        content, reasoning_content = _merge_inline_thinking(
+            _normalize_text_content(choice.message.content),
+            reasoning_content,
+        )
+        content, tool_calls = _extract_tool_code_calls(content, tool_calls)
 
         if self._capabilities.reasoning_content:
             # region agent log
@@ -712,7 +772,11 @@ class OpenAICompatProvider(BaseProvider):
         tool_calls_map: Dict[int, Dict[str, Any]] = {}
         finish_reason = "stop"
         last_usage: Any = None
-        filter_state: Dict[str, str] = {"mode": "normal", "pending": ""}
+        filter_state: Dict[str, str] = {
+            "mode": "normal",
+            "pending": "",
+            "end_tag": "",
+        }
 
         async for chunk in stream:
             if not chunk.choices:
@@ -729,10 +793,16 @@ class OpenAICompatProvider(BaseProvider):
 
             if delta.content:
                 content_parts.append(delta.content)
-                if on_content_delta:
-                    filtered = self._filter_thinking_delta(delta.content, filter_state)
-                    if filtered:
-                        maybe_awaitable = on_content_delta(filtered)
+                if on_content_delta or on_reasoning_delta:
+                    visible, thought = self._filter_thinking_delta(
+                        delta.content, filter_state
+                    )
+                    if visible and on_content_delta:
+                        maybe_awaitable = on_content_delta(visible)
+                        if inspect.isawaitable(maybe_awaitable):
+                            await maybe_awaitable
+                    if thought and on_reasoning_delta:
+                        maybe_awaitable = on_reasoning_delta(thought)
                         if inspect.isawaitable(maybe_awaitable):
                             await maybe_awaitable
             rfrag = OpenAICompatProvider._reasoning_fragment_from_delta(delta)
@@ -771,7 +841,6 @@ class OpenAICompatProvider(BaseProvider):
                 last_usage = chunk.usage
 
         raw_content = "".join(content_parts) if content_parts else None
-        content = _strip_thinking_content(raw_content)
 
         tool_calls_list: List[ToolCall] = []
         for idx in sorted(tool_calls_map.keys()):
@@ -825,14 +894,16 @@ class OpenAICompatProvider(BaseProvider):
 
         usage = TokenUsage.from_usage(last_usage) if last_usage else None
 
-        content, tool_calls_list = _extract_tool_code_calls(content, tool_calls_list)
-
         reasoning_joined = "".join(reasoning_parts) if reasoning_parts else None
         reasoning_content = (
             reasoning_joined.strip()
             if reasoning_joined and reasoning_joined.strip()
             else None
         )
+        content, reasoning_content = _merge_inline_thinking(
+            raw_content, reasoning_content
+        )
+        content, tool_calls_list = _extract_tool_code_calls(content, tool_calls_list)
 
         if self._capabilities.reasoning_content:
             # region agent log
@@ -862,49 +933,57 @@ class OpenAICompatProvider(BaseProvider):
         )
 
     @staticmethod
-    def _filter_thinking_delta(chunk: str, state: Dict[str, str]) -> str:
-        """流式输出时剔除 <think>...</think> 段，仅返回可展示文本。"""
-        start_tag = "<think>"
-        end_tag = "</think>"
+    def _filter_thinking_delta(chunk: str, state: Dict[str, str]) -> tuple[str, str]:
+        """流式剔除 <think> / <thinking> 段。返回 (可见正文, 思考增量)。"""
+        open_tags = tuple(open_tag for open_tag, _ in _INLINE_THINK_PAIRS)
         text = state.get("pending", "") + chunk
         mode = state.get("mode", "normal")
-        out_parts: List[str] = []
-
-        def _max_prefix_suffix_len(s: str, token: str) -> int:
-            max_len = min(len(s), len(token) - 1)
-            for n in range(max_len, 0, -1):
-                if s.endswith(token[:n]):
-                    return n
-            return 0
+        end_tag = state.get("end_tag", "")
+        visible_parts: List[str] = []
+        reason_parts: List[str] = []
 
         while text:
             if mode == "normal":
-                idx = text.find(start_tag)
-                if idx == -1:
-                    keep = _max_prefix_suffix_len(text, start_tag)
+                found: Optional[tuple[int, str]] = None
+                for open_tag in open_tags:
+                    idx = text.find(open_tag)
+                    if idx != -1 and (found is None or idx < found[0]):
+                        found = (idx, open_tag)
+                if found is None:
+                    keep = _max_tag_prefix_suffix(text, open_tags)
                     if keep:
-                        out_parts.append(text[:-keep])
+                        visible_parts.append(text[:-keep])
                         text = text[-keep:]
                     else:
-                        out_parts.append(text)
+                        visible_parts.append(text)
                         text = ""
                     break
-                out_parts.append(text[:idx])
-                text = text[idx + len(start_tag) :]
+                idx, open_tag = found
+                visible_parts.append(text[:idx])
+                text = text[idx + len(open_tag) :]
                 mode = "in_think"
+                end_tag = "</thinking>" if open_tag == "<thinking>" else "</think>"
                 continue
 
             idx = text.find(end_tag)
             if idx == -1:
-                keep = _max_prefix_suffix_len(text, end_tag)
-                text = text[-keep:] if keep else ""
+                keep = _max_tag_prefix_suffix(text, (end_tag,))
+                if keep:
+                    reason_parts.append(text[:-keep])
+                    text = text[-keep:]
+                else:
+                    reason_parts.append(text)
+                    text = ""
                 break
+            reason_parts.append(text[:idx])
             text = text[idx + len(end_tag) :]
             mode = "normal"
+            end_tag = ""
 
         state["mode"] = mode
         state["pending"] = text
-        return "".join(out_parts)
+        state["end_tag"] = end_tag
+        return "".join(visible_parts), "".join(reason_parts)
 
     async def close(self) -> None:
         await self._client.close()

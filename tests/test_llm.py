@@ -13,6 +13,8 @@ from agent_core.llm.client import _strip_thinking_content
 from agent_core.llm.capabilities import Capabilities
 from agent_core.llm.providers.openai_compat import (
     OpenAICompatProvider,
+    _merge_inline_thinking,
+    _split_inline_thinking,
     inject_gemini_dummy_thought_signatures_in_messages,
 )
 from agent_core.config import Config, LLMConfig
@@ -52,6 +54,56 @@ class TestStripThinkingContent:
     def test_empty_string(self):
         """空字符串原样返回"""
         assert _strip_thinking_content("") == ""
+
+    def test_empty_thinking_pair_prefix(self):
+        """Antigravity 空 <thinking></thinking> 不进入正文"""
+        raw = "<thinking></thinking>收到，在线。刚是在试消息通路还是刚才重启了 daemon？"
+        assert _strip_thinking_content(raw) == (
+            "收到，在线。刚是在试消息通路还是刚才重启了 daemon？"
+        )
+        visible, reasoning = _split_inline_thinking(raw)
+        assert visible == _strip_thinking_content(raw)
+        assert reasoning is None
+
+    def test_thinking_pair_becomes_reasoning(self):
+        """<thinking> 里的文本收进 reasoning，正文只留标签后面的话"""
+        raw = "<thinking>先确认通道是通的</thinking>收到，在线。"
+        visible, reasoning = _merge_inline_thinking(raw, None)
+        assert visible == "收到，在线。"
+        assert reasoning == "先确认通道是通的"
+
+    def test_existing_reasoning_field_wins(self):
+        """已有独立 reasoning 字段时，不拿标签内容覆盖"""
+        visible, reasoning = _merge_inline_thinking(
+            "<thinking>标签里的</thinking>正文",
+            "字段里的",
+        )
+        assert visible == "正文"
+        assert reasoning == "字段里的"
+
+    def test_stream_filter_hides_thinking_pair(self):
+        """流式增量跨 chunk 时也不把 <thinking> 露出去"""
+        state = {"mode": "normal", "pending": "", "end_tag": ""}
+        visible_parts = []
+        thought_parts = []
+        for chunk in ("<thin", "king>先看一下</thin", "king>收到"):
+            visible, thought = OpenAICompatProvider._filter_thinking_delta(
+                chunk, state
+            )
+            visible_parts.append(visible)
+            thought_parts.append(thought)
+        assert "".join(visible_parts) == "收到"
+        assert "".join(thought_parts) == "先看一下"
+
+    def test_stream_filter_still_hides_think_tag(self):
+        """<think> 流式过滤保持原行为"""
+        state = {"mode": "normal", "pending": "", "end_tag": ""}
+        visible, thought = OpenAICompatProvider._filter_thinking_delta(
+            "<think>secret</think>看看安排",
+            state,
+        )
+        assert visible == "看看安排"
+        assert thought == "secret"
 
 
 @pytest.fixture

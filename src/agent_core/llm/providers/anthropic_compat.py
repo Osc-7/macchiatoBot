@@ -21,7 +21,7 @@ import httpx
 
 from agent_core.llm.capabilities import Capabilities
 from agent_core.llm.response import LLMResponse, ToolCall, TokenUsage
-from agent_core.llm.providers.openai_compat import _strip_thinking_content
+from agent_core.llm.providers.openai_compat import _merge_inline_thinking
 
 from .base import BaseProvider
 
@@ -545,7 +545,7 @@ class AnthropicCompatProvider(BaseProvider):
         content = "".join(text_parts).strip() or None
         reasoning = "".join(thinking_parts).strip() or None
         if content and self._capabilities.thinking_tag_inline:
-            content = _strip_thinking_content(content)
+            content, reasoning = _merge_inline_thinking(content, reasoning)
 
         usage = TokenUsage(
             prompt_tokens=usage_input_tokens,
@@ -848,7 +848,9 @@ class AnthropicCompatProvider(BaseProvider):
                 content = "\n".join(text_parts).strip()
 
         if content and self._capabilities.thinking_tag_inline:
-            content = _strip_thinking_content(content)
+            content, reasoning_content = _merge_inline_thinking(
+                content, reasoning_content
+            )
         if content == "":
             content = None
 

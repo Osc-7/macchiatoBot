@@ -160,6 +160,15 @@ def _default_token_usage_dict() -> dict[str, int]:
 
 _MISSING_TOOL_REASONING_RETRY_LIMIT = 1
 
+# 模型在工具链末尾偶发返回空内容（content 空、无 tool_calls、finish_reason=stop）。
+# 直接降级成通用兜底文案会静默丢掉整轮已完成的工作（2026-11-03 paper-radar 即如此），
+# 故先注入一次提示让其补最终答复，仍空才降级。
+_EMPTY_FINAL_RETRY_LIMIT = 1
+_EMPTY_FINAL_RETRY_PROMPT = (
+    "（系统提示）你上一条回复为空。请基于本轮已经完成的工具调用结果，"
+    "直接给出最终答复，不要再调用工具。"
+)
+
 
 def _should_attach_user_time_stamp(
     effective_text: str,
@@ -1341,6 +1350,7 @@ class AgentCore:
 
         loader = InternalLoader()
         iteration = 0
+        empty_final_retries = 0
 
         while iteration < self._max_iterations:
             iteration += 1
@@ -1827,8 +1837,38 @@ class AgentCore:
                     )
                     return
 
+                # 空回复重试：模型在工具链末尾偶发返回空内容（上游空包/token 截断），
+                # 直接降级会静默丢掉整轮已完成的工作，先注入提示让它补最终答复。
+                if (
+                    empty_final_retries < _EMPTY_FINAL_RETRY_LIMIT
+                    and iteration < self._max_iterations
+                ):
+                    empty_final_retries += 1
+                    logger.warning(
+                        "empty final response from model; retrying with nudge: "
+                        "session=%s turn=%s iteration=%s retry=%s",
+                        self._session_id,
+                        turn_id,
+                        iteration,
+                        empty_final_retries,
+                    )
+                    self._context.add_user_message(
+                        _EMPTY_FINAL_RETRY_PROMPT,
+                        turn_id=turn_id,
+                    )
+                    self._last_prompt_tokens = None
+                    continue
+
                 # 没有内容也没有工具调用（降级）
                 fallback = "抱歉，我无法处理您的请求。请重试或换一种方式表达。"
+                logger.warning(
+                    "empty final response from model; falling back: "
+                    "session=%s turn=%s iteration=%s retries=%s",
+                    self._session_id,
+                    turn_id,
+                    iteration,
+                    empty_final_retries,
+                )
                 if self._session_logger:
                     self._session_logger.on_assistant_message(turn_id, fallback)
                 yield ReturnAction(message=fallback, status="fallback", attachments=list(self._outgoing_attachments))

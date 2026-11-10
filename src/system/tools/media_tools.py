@@ -16,6 +16,7 @@ from agent_core.config import Config, get_config
 from agent_core.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from agent_core.utils.media import (
     _remote_media_cache_dir,
+    _remote_media_cache_name,
     looks_like_remote_worker_disconnect,
     remote_blob_too_large_message,
     remote_worker_disconnect_message,
@@ -82,8 +83,12 @@ async def _read_remote_attachment_blob(
         rel, verr = normalize_remote_workspace_relative_path(path_str)
         if verr or rel is None:
             return None, verr or "无效远程路径", "READ_FAILED"
-        dest = _remote_media_cache_dir(sid) / (
-            f"attach-{Path(rel).name or 'attachment.bin'}"
+        # 临时落盘名必须带上相对路径摘要，否则同名的多个远程文件
+        # （例如 p0000/evaluation/video.mp4 与 p0383/evaluation/video.mp4）
+        # 会落到同一个 attach-video.mp4，后拉取的覆盖前一个，一轮里发多个附件
+        # 就全变成同一条内容。
+        dest = _remote_media_cache_dir(sid) / _remote_media_cache_name(
+            rel, Path(rel).name or "attachment.bin"
         )
         outcome = await get_remote_worker_registry().blob_pull_to_path(
             login=state.login,

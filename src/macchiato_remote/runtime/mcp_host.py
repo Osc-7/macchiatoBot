@@ -26,9 +26,13 @@ logger = logging.getLogger(__name__)
 class _ServerRuntime:
     config: WorkspaceMcpServerConfig
     session: Any
-    stack: AsyncExitStack
+    stop_event: asyncio.Event
+    runner_task: asyncio.Task[None]
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     tool_metas: List[Tuple[str, str, Dict[str, Any]]] = field(default_factory=list)
+
+    def is_alive(self) -> bool:
+        return not self.runner_task.done()
 
 
 class RemoteMcpHost:
@@ -103,9 +107,13 @@ class RemoteMcpHost:
         for raw_name in server_names:
             name = (raw_name or "").strip()
             key = (session_id, name)
-            if key in self._runtimes:
-                results.append({"name": name, "ok": True, "error": None})
-                continue
+            existing = self._runtimes.get(key)
+            if existing is not None:
+                if existing.is_alive():
+                    results.append({"name": name, "ok": True, "error": None})
+                    continue
+                self._runtimes.pop(key, None)
+                await self._close_runtime(key[0], key[1], existing)
             server = find_server(cfg, name)
             if server is None:
                 results.append(
@@ -123,7 +131,11 @@ class RemoteMcpHost:
                 )
                 continue
             try:
-                runtime = await self._connect_stdio(server, workspace_root=root)
+                runtime = await self._connect_stdio(
+                    server,
+                    workspace_root=root,
+                    session_id=session_id,
+                )
             except Exception as exc:
                 logger.warning(
                     "remote mcp ensure failed session=%s server=%s: %s",
@@ -153,6 +165,10 @@ class RemoteMcpHost:
         name = (server_name or "").strip()
         key = (session_id, name)
         runtime = self._runtimes.get(key)
+        if runtime is not None and not runtime.is_alive():
+            self._runtimes.pop(key, None)
+            await self._close_runtime(session_id, name, runtime)
+            runtime = None
         if runtime is None:
             ensure = await self.ensure(session_id, [name])
             status = ensure[0] if ensure else {"ok": False, "error": "MCP_SERVER_NOT_FOUND"}
@@ -228,6 +244,10 @@ class RemoteMcpHost:
         name = (server_name or "").strip()
         key = (session_id, name)
         runtime = self._runtimes.get(key)
+        if runtime is not None and not runtime.is_alive():
+            self._runtimes.pop(key, None)
+            await self._close_runtime(session_id, name, runtime)
+            runtime = None
         if runtime is None:
             return {
                 "is_error": True,
@@ -279,6 +299,30 @@ class RemoteMcpHost:
             "error": None if not is_error else "MCP_TOOL_RETURNED_ERROR",
         }
 
+    async def _close_runtime(
+        self,
+        session_id: str,
+        server_name: str,
+        runtime: _ServerRuntime,
+    ) -> None:
+        runtime.stop_event.set()
+        try:
+            await asyncio.wait_for(runtime.runner_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "remote mcp shutdown timed out session=%s server=%s; cancelling task",
+                session_id,
+                server_name,
+            )
+            runtime.runner_task.cancel()
+            await asyncio.gather(runtime.runner_task, return_exceptions=True)
+        except Exception:
+            logger.exception(
+                "remote mcp shutdown error session=%s server=%s",
+                session_id,
+                server_name,
+            )
+
     async def shutdown(
         self, session_id: str, server_name: Optional[str] = None
     ) -> List[str]:
@@ -293,17 +337,21 @@ class RemoteMcpHost:
             runtime = self._runtimes.pop(key, None)
             if runtime is None:
                 continue
-            try:
-                await runtime.stack.aclose()
-            except BaseException:  # anyio cancel-scope bug 会抛 CancelledError(BaseException)
-                logger.exception(
-                    "remote mcp shutdown error session=%s server=%s",
-                    key[0],
-                    key[1],
-                )
+            await self._close_runtime(key[0], key[1], runtime)
             closed.append(key[1])
         if target is None:
             self.unbind_workspace(session_id)
+        return closed
+
+    async def shutdown_all(self) -> List[Tuple[str, str]]:
+        closed: List[Tuple[str, str]] = []
+        for key in list(self._runtimes):
+            runtime = self._runtimes.pop(key, None)
+            if runtime is None:
+                continue
+            await self._close_runtime(key[0], key[1], runtime)
+            closed.append(key)
+        self._workspace_roots.clear()
         return closed
 
     async def _connect_stdio(
@@ -311,6 +359,7 @@ class RemoteMcpHost:
         server: WorkspaceMcpServerConfig,
         *,
         workspace_root: Path,
+        session_id: str = "",
     ) -> _ServerRuntime:
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
@@ -333,15 +382,46 @@ class RemoteMcpHost:
             env=merged_env,
             cwd=cwd_path,
         )
-        stack = AsyncExitStack()
+        loop = asyncio.get_running_loop()
+        ready: asyncio.Future[Any] = loop.create_future()
+        stop_event = asyncio.Event()
+
+        async def _lifecycle() -> None:
+            try:
+                async with AsyncExitStack() as stack:
+                    read, write = await stack.enter_async_context(stdio_client(params))
+                    session = await stack.enter_async_context(ClientSession(read, write))
+                    await asyncio.wait_for(
+                        session.initialize(),
+                        timeout=server.init_timeout_seconds,
+                    )
+                    if not ready.done():
+                        ready.set_result(session)
+                    await stop_event.wait()
+            except BaseException as exc:
+                if not ready.done():
+                    ready.set_exception(exc)
+                    return
+                if not isinstance(exc, asyncio.CancelledError) and not stop_event.is_set():
+                    logger.warning(
+                        "remote mcp runtime exited session=%s server=%s: %s",
+                        session_id,
+                        server.name,
+                        exc,
+                    )
+
+        task_label = f"mcp-stdio-{session_id}:{server.name}" if session_id else f"mcp-stdio-{server.name}"
+        runner_task = asyncio.create_task(_lifecycle(), name=task_label)
         try:
-            read, write = await stack.enter_async_context(stdio_client(params))
-            session = await stack.enter_async_context(ClientSession(read, write))
-            await asyncio.wait_for(
-                session.initialize(),
-                timeout=server.init_timeout_seconds,
-            )
-        except Exception:
-            await stack.aclose()
+            session = await ready
+        except BaseException:
+            stop_event.set()
+            runner_task.cancel()
+            await asyncio.gather(runner_task, return_exceptions=True)
             raise
-        return _ServerRuntime(config=server, session=session, stack=stack)
+        return _ServerRuntime(
+            config=server,
+            session=session,
+            stop_event=stop_event,
+            runner_task=runner_task,
+        )

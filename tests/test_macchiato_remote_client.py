@@ -74,3 +74,57 @@ async def test_remote_execute_wait_for_completion_disables_auto_background(tmp_p
         await asyncio.sleep(0.05)
     finally:
         await client.close()
+
+
+async def test_close_workspace_restores_leaked_task_cancelling(tmp_path, monkeypatch):
+    from macchiato_remote.protocol import (
+        RemoteMcpShutdownRequest,
+        RemoteWorkspaceCloseRequest,
+    )
+
+    client = RemoteWorkerClient(server="http://127.0.0.1:9380", login="tester")
+    session_id = "sid-cancel-leak"
+    try:
+        opened = await client._open_workspace(
+            RemoteWorkspaceOpenRequest(
+                request_id="open-leak",
+                session_id=session_id,
+                requested_path=str(tmp_path),
+                profile="dev",
+            )
+        )
+        assert opened.success
+
+        async def leaky_shutdown(sid, server_name=None):
+            t = asyncio.current_task()
+            assert t is not None
+            # Simulate dual un-cleared cancel() before RuntimeError (old anyio bug)
+            t.cancel()
+            t.cancel()
+            raise RuntimeError("Attempted to exit cancel scope in a different task")
+
+        monkeypatch.setattr(client._mcp_host, "shutdown", leaky_shutdown)
+
+        mcp_res = await client._mcp_shutdown(
+            RemoteMcpShutdownRequest(
+                request_id="mcp-shut-1",
+                session_id=session_id,
+                server_name="gpu_worker",
+            )
+        )
+        assert mcp_res.closed == []
+        await asyncio.sleep(0)
+
+        close_res = await client._close_workspace(
+            RemoteWorkspaceCloseRequest(
+                request_id="close-leak",
+                session_id=session_id,
+            )
+        )
+        assert close_res.success is True
+        # Must NOT raise CancelledError on the very next await!
+        await asyncio.sleep(0)
+        cur = asyncio.current_task()
+        assert cur is not None and cur.cancelling() == 0
+    finally:
+        await client.close()

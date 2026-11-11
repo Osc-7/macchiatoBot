@@ -356,6 +356,7 @@ class RemoteWorkerClient:
 
     async def close(self) -> None:
         self._abort_push_sessions()
+        await self._mcp_host.shutdown_all()
         for session in list(self._sessions.values()):
             await session.close()
         self._sessions.clear()
@@ -577,6 +578,7 @@ class RemoteWorkerClient:
                 )
             old = self._sessions.pop(req.session_id, None)
             if old is not None:
+                await self._mcp_host.shutdown(req.session_id)
                 await old.close()
             session = LocalShellSession(
                 LocalShellConfig(root=root, shell_path=self.shell_path)
@@ -614,24 +616,53 @@ class RemoteWorkerClient:
                 error="OPEN_WORKSPACE_ERROR",
             )
 
+    @staticmethod
+    async def _drain_leaked_cancellation(baseline: Optional[int]) -> None:
+        if baseline is None:
+            return
+        task = asyncio.current_task()
+        if (
+            task is None
+            or not hasattr(task, "cancelling")
+            or not hasattr(task, "uncancel")
+        ):
+            return
+        while True:
+            while task.cancelling() > baseline:
+                task.uncancel()
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                while task.cancelling() > baseline:
+                    task.uncancel()
+                if task.cancelling() > 0:
+                    raise
+                continue
+            break
+
     async def _close_workspace(
         self, req: RemoteWorkspaceCloseRequest
     ) -> RemoteWorkspaceCloseResult:
-        # best-effort 清理：MCP host 的 anyio cancel-scope bug 会在 shutdown 时
-        # 抛出逃逸的 CancelledError（BaseException，不被 except Exception 捕获）。
-        # 若放任它抛出，会被 run_forever 的 `except CancelledError: raise` 当成
-        # 真取消而把整个 worker 干掉（release 后 worker 掉线）。这里吞掉，
-        # 保证 close_workspace 只清会话、worker 保持连接。
+        task = asyncio.current_task()
+        cancel_baseline = (
+            task.cancelling()
+            if task is not None and hasattr(task, "cancelling")
+            else None
+        )
         try:
             await self._mcp_host.shutdown(req.session_id)
         except BaseException:
-            pass
+            await self._drain_leaked_cancellation(cancel_baseline)
+        else:
+            await self._drain_leaked_cancellation(cancel_baseline)
         session = self._sessions.pop(req.session_id, None)
         if session is not None:
             try:
                 await session.close()
             except BaseException:
-                pass
+                await self._drain_leaked_cancellation(cancel_baseline)
+            else:
+                await self._drain_leaked_cancellation(cancel_baseline)
         self._jobs.close_session(req.session_id)
         return RemoteWorkspaceCloseResult(
             request_id=req.request_id,
@@ -702,7 +733,19 @@ class RemoteWorkerClient:
     async def _mcp_shutdown(
         self, req: RemoteMcpShutdownRequest
     ) -> RemoteMcpShutdownResult:
-        closed = await self._mcp_host.shutdown(req.session_id, req.server_name)
+        task = asyncio.current_task()
+        cancel_baseline = (
+            task.cancelling()
+            if task is not None and hasattr(task, "cancelling")
+            else None
+        )
+        closed: List[str] = []
+        try:
+            closed = await self._mcp_host.shutdown(req.session_id, req.server_name)
+        except BaseException:
+            await self._drain_leaked_cancellation(cancel_baseline)
+        else:
+            await self._drain_leaked_cancellation(cancel_baseline)
         return RemoteMcpShutdownResult(request_id=req.request_id, closed=closed)
 
     async def _execute(self, req: RemoteCommandRequest):

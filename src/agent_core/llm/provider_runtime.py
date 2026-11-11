@@ -381,7 +381,7 @@ MODEL_ADD_HELP = """
 
   常用选项:
     --label "展示名"          /model 切换时显示的备注名
-    --protocol openai|anthropic|codex_oauth
+    --protocol openai|anthropic|gemini|codex_oauth
     --vision / --no-vision
     --reasoning / --no-reasoning
     --context-window 1000000

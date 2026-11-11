@@ -124,7 +124,7 @@ class ProviderEntry(BaseModel):
     )
     protocol: Optional[str] = Field(
         default=None,
-        description="API 协议类型：'openai'（默认）、'anthropic' 或 'codex_oauth'",
+        description="API 协议类型：'openai'（默认）、'anthropic'、'gemini' 或 'codex_oauth'",
     )
     auth_file: Optional[str] = Field(
         default=None,

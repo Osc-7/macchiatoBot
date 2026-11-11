@@ -20,6 +20,7 @@ from agent_core.llm.provider_resolve import resolve_llm_provider_key
 from agent_core.llm.providers import (
     AnthropicCompatProvider,
     BaseProvider,
+    GeminiNativeProvider,
     OpenAICompatProvider,
 )
 from agent_core.llm.providers.codex_oauth_provider import CodexOAuthProvider
@@ -117,6 +118,20 @@ def _build_provider_from_entry(
             vendor_params=vendor_params,
             headers=headers,
         )
+    elif protocol == "gemini":
+        return GeminiNativeProvider(
+            name=name,
+            base_url=str(entry.base_url),
+            api_key=str(entry.api_key),
+            model=str(entry.model),
+            capabilities=caps,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            request_timeout_seconds=request_timeout_seconds,
+            stream=stream,
+            vendor_params=vendor_params,
+            headers=headers,
+        )
     elif protocol == "codex_oauth":
         auth_file = getattr(entry, "auth_file", None)
         if not auth_file:
@@ -140,6 +155,17 @@ def _build_provider_from_entry(
         )
     else:
         # 默认使用 OpenAI 兼容协议
+        # 注意：配置目录（providers.d）是热加载的，但 provider 类型由进程内代码决定。
+        # 若配置写入了当前进程不认识的 protocol（典型场景：刚加入新协议但 daemon 未重启），
+        # 会静默回退到 OpenAI 兼容路径，通常表现为上游 404（例如 Gemini 网关只认
+        # /v1beta/...，而 OpenAI 兼容层会拼出 /chat/completions）。这里显式告警。
+        if protocol and str(protocol).strip().lower() not in {"", "openai"}:
+            logger.warning(
+                "Provider %s: 未知 protocol=%r，已回退 OpenAI 兼容协议；"
+                "若上游返回 404，请确认协议名拼写并重启 daemon 以加载新 provider 代码",
+                name,
+                protocol,
+            )
         return OpenAICompatProvider(
             name=name,
             base_url=str(entry.base_url),

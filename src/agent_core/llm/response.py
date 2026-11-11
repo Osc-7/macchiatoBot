@@ -94,6 +94,12 @@ class LLMResponse:
     仅靠 OpenAI 风格的 content + tool_calls 重建会丢失 thinking/signature，导致 400。
     """
 
+    gemini_message_content: Optional[List[Dict[str, Any]]] = None
+    """Gemini GenerateContent 原生 API 返回的 parts 列表（含 thought: true 与真实 thoughtSignature）。
+
+    原生多轮调用时原样放回 contents 历史，避免丢失真实签名或退化回 skip_thought_signature_validator。
+    """
+
     responses_reasoning_items: Optional[List[Dict[str, Any]]] = None
     """Responses API 的 reasoning item 列表（含 encrypted_content/summary）。
 

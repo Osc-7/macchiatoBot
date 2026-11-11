@@ -130,6 +130,7 @@ class ConversationContext:
         tool_calls: Optional[List[Dict[str, Any]]] = None,
         reasoning_content: Optional[str] = None,
         anthropic_message_content: Optional[List[Dict[str, Any]]] = None,
+        gemini_message_content: Optional[List[Dict[str, Any]]] = None,
         responses_reasoning_items: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """
@@ -141,6 +142,7 @@ class ConversationContext:
             reasoning_content: 模型推理/思考文本（部分厂商多轮工具调用需原样回传）
             anthropic_message_content: Anthropic Messages 的 content 块（thinking/tool_use 等），
                 扩展思考多轮工具时由 provider 填充并原样回传。
+            gemini_message_content: Gemini GenerateContent 原生 parts 块（thought/thoughtSignature/functionCall 等）。
             responses_reasoning_items: Responses API reasoning item（含 encrypted_content）。
         """
         message: Dict[str, Any] = {"role": "assistant"}
@@ -156,6 +158,9 @@ class ConversationContext:
 
         if anthropic_message_content is not None:
             message["anthropic_message_content"] = anthropic_message_content
+
+        if gemini_message_content is not None:
+            message["gemini_message_content"] = gemini_message_content
 
         if responses_reasoning_items is not None:
             message["responses_reasoning_items"] = responses_reasoning_items

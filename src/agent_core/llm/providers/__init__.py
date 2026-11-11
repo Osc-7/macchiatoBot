@@ -9,5 +9,12 @@ from .base import BaseProvider
 from .openai_compat import OpenAICompatProvider
 from .anthropic_compat import AnthropicCompatProvider
 from .codex_oauth_provider import CodexOAuthProvider
+from .gemini_native import GeminiNativeProvider
 
-__all__ = ["BaseProvider", "OpenAICompatProvider", "AnthropicCompatProvider", "CodexOAuthProvider"]
+__all__ = [
+    "BaseProvider",
+    "OpenAICompatProvider",
+    "AnthropicCompatProvider",
+    "CodexOAuthProvider",
+    "GeminiNativeProvider",
+]

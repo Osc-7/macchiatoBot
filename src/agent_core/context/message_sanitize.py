@@ -21,6 +21,7 @@ _SYNTHESIZED_TOOL_RESULT = "（该工具调用被中断或未在当轮执行完�
 _INTERNAL_MESSAGE_FIELDS = {
     "_turn_id",
     "anthropic_message_content",
+    "gemini_message_content",
     "responses_reasoning_items",
     "reasoning_content",
 }

@@ -260,7 +260,7 @@ class CoreProfile:
             allow_dangerous_commands=allow_dangerous,
             frontend_id=frontend_id,
             dialog_window_id=dialog_window_id,
-            max_context_tokens=getattr(agent_cfg, "max_context_tokens", 300000),
+            max_context_tokens=getattr(agent_cfg, "max_context_tokens", 500000),
             session_expired_seconds=getattr(agent_cfg, "session_expired_seconds", 3600),
             tool_template=resolved_template,
             tool_exposure_mode=exposure,

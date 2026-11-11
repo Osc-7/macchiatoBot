@@ -1799,6 +1799,9 @@ class AgentCore:
                         anthropic_message_content=getattr(
                             response, "anthropic_message_content", None
                         ),
+                        gemini_message_content=getattr(
+                            response, "gemini_message_content", None
+                        ),
                         responses_reasoning_items=getattr(
                             response, "responses_reasoning_items", None
                         ),
@@ -2109,6 +2112,9 @@ class AgentCore:
             reasoning_content=response.reasoning_content,
             anthropic_message_content=getattr(
                 response, "anthropic_message_content", None
+            ),
+            gemini_message_content=getattr(
+                response, "gemini_message_content", None
             ),
             responses_reasoning_items=getattr(
                 response, "responses_reasoning_items", None

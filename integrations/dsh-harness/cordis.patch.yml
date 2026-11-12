@@ -1,0 +1,57 @@
+# @lab/dsh-agent-mbot 的 bundle 层
+#
+# 这一层做两件事：
+#   1. 关掉官方 agent loop（@deepseek-ai/dsh-agent-loop）——它会把回合交给 llm + dsh-tools
+#   2. 插入本包（bundle 内的插件行）——同一条会话/发布/取消链路，step() 换成 mbot
+#
+# 注意：其余行（session / llm / tools / 前端）全部不动，前端因此就是 DSH 原版。
+
+- id: agent-loop
+  disabled: true
+
+- insert:
+    - id: lab-agent-mbot
+      name: '@lab/dsh-agent-mbot'
+      config:
+        agents: []
+
+# mbot 的模型目录：注册成 DSH 的 `mbot` provider，供前端「模型选择器」使用。
+# 只提供目录与元数据；真实推理仍在 daemon 里，所以这个 provider 没有可用的 stream。
+- insert:
+    - id: lab-mbot-provider
+      name: '@lab/dsh-agent-mbot/provider'
+
+# /machine、/workspace 命令：给会话挑 mbot 的工作机器与子目录。
+- insert:
+    - id: lab-mbot-commands
+      name: '@lab/dsh-agent-mbot/commands'
+
+# 远程文件面板：**官方 workspace-files 行必须保留**——它的浏览器端会给文档预览
+# 注册 `file` 协议 provider。这里只补一个插件，在宿主侧把这几个读文件方法换成
+# 「会话绑了远程就读远端、否则调原实现」。
+- insert:
+    - id: lab-workspace-files-override
+      name: '@lab/dsh-agent-mbot/workspace-files-patch'
+
+# 左侧栏工作区：把「机器 → proj」同步成 DSH 工作区条目（远端走 ~/mnt/<机器>/<proj> 挂载点）。
+- insert:
+    - id: lab-workspaces-sync
+      name: '@lab/dsh-agent-mbot/workspaces-sync'
+
+# 浏览器登录 cookie 有效期：默认 30 天，手机上不想反复登录就拉到一年。
+# 注意：cookie 本身是持久的（签名密钥存在 profile 凭据里，重启 dsh 不失效），
+# 只有「第一次带 ?token= 换 cookie」才需要这个 URL。
+
+# /api 的同源检查白名单。0.1.5 的 `--trusted-host` 参数在 `--profile` 模式下
+# 没被应用（只有 `dsh web` 子命令才会解析它），所以直接写进连接层配置。
+# 结果：公网域名访问时 /api/remote.mux 不再 403。
+- id: connection
+  config:
+    # 手机/新设备不用 30 天重登
+    cookieMaxAgeDays: 365
+    # 0.1.5 在 `--profile` 模式下不解析 `--trusted-host`，只能写在配置里；
+    # 否则公网域名访问 /api/remote.mux 会 403，前端表现为一直重连。
+    trustedHosts:
+      - lab.drewjin.sh
+      - old.lab.drewjin.sh
+      - 127.0.0.1:9443

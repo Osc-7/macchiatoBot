@@ -379,22 +379,30 @@ class BashSecurity:
 
     @staticmethod
     def _split_command_segments(command: str) -> List[str]:
+        # 在引号不配对时不要崩：shlex 会抛 ValueError("No closing quotation")，
+        # 之前直通到工具层成了「未处理异常」，直接把回合打断。
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
         lexer.whitespace_split = True
         segments: list[list[str]] = [[]]
-        for token in lexer:
-            if token in _WORKSPACE_SEGMENT_OPERATORS:
-                if segments[-1]:
-                    segments.append([])
-                continue
-            segments[-1].append(token)
+        try:
+            for token in lexer:
+                if token in _WORKSPACE_SEGMENT_OPERATORS:
+                    if segments[-1]:
+                        segments.append([])
+                    continue
+                segments[-1].append(token)
+        except ValueError:
+            return []
         return [" ".join(seg).strip() for seg in segments if seg]
 
     @staticmethod
     def _tokenize_segment(segment: str) -> List[str]:
         lexer = shlex.shlex(segment, posix=True, punctuation_chars="<>")
         lexer.whitespace_split = True
-        return list(lexer)
+        try:
+            return list(lexer)
+        except ValueError:
+            return []
 
     @staticmethod
     def _is_option(token: str) -> bool:

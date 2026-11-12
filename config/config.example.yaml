@@ -10,7 +10,7 @@ llm:
   summary_model: null          # light summarization; null uses active provider model
   temperature: 0.7
   max_tokens: 4096
-  request_timeout_seconds: 120
+  request_timeout_seconds: 300
   stream: true
   providers_dir: llm/providers.d
   # provider_include: []
@@ -167,13 +167,16 @@ command_tools:
   # bash_real_home_path_suffixes: [".local/share/pnpm"]
 
 agent:
-  max_iterations: 10
-  subagent_max_seconds: 600
+  # 一次回合最多多少次模型调用。默认 10 会让任何多步任务中途被截断。
+  max_iterations: 300
+  # 会话空闲多久后被内核淘汰（秒）。14400 = 4 小时；太短会让长任务丢上下文。
+  session_expired_seconds: 14400
+  subagent_max_seconds: 900
   subagent_max_tokens: 500000
   # subagent_max_context_tokens: null
-  subagent_max_iterations: 15
+  subagent_max_iterations: 200
   enable_debug: true
-  working_set_size: 6
+  working_set_size: 30
 
 tools:
   core_tools:
@@ -296,7 +299,8 @@ feishu:
 
 memory:
   enabled: true
-  max_working_tokens: 8000
+  # 工作记忆上限；8000 会在长会话里过早压缩，丢掉关键上下文
+  max_working_tokens: 500000
   working_summary_threshold: 0.8
   working_summary_hard_ratio: null
   working_keep_recent: 4

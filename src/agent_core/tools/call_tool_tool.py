@@ -88,7 +88,10 @@ class CallToolTool(BaseTool):
             return ToolResult(
                 success=False,
                 error="TOOL_NOT_FOUND",
-                message=f"工具 '{name}' 不存在",
+                message=(
+                    f"工具 '{name}' 不存在或当前会话未启用"
+                    "（有些工具只在特定工具模板/渠道下可用；先 search_tools 查一下再调用）"
+                ),
             )
 
         if self._profile_getter is not None:

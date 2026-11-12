@@ -72,6 +72,13 @@ user_file/
 pictures/
 scripts/
 
+# DSH Harness integration ships JS/Node sources that collide with the Python-only
+# ignore rules above ("lib/", "scripts/"), so re-include them explicitly.
+!integrations/dsh-harness/lib/
+!integrations/dsh-harness/lib/**
+!integrations/dsh-harness/scripts/
+!integrations/dsh-harness/scripts/**
+
 # Local-only helpers
 gitleaks
 claude-progress.txt

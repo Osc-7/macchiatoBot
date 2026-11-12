@@ -1,0 +1,51 @@
+{
+  "name": "@lab/dsh-agent-mbot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DSH agent loop driven by macchiatoBot: vendor @deepseek-ai/dsh-agent-loop and replace step()",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./provider": "./lib/provider.js",
+    "./commands": "./lib/commands.js",
+    "./workspace-files-patch": "./lib/workspace-files-patch.js",
+    "./client": {
+      "types": "./lib/types/client.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./workspaces-sync": "./lib/workspaces-sync.js"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.json",
+    "cordis.patch.yml"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "react",
+        "react/jsx-runtime"
+      ]
+    }
+  },
+  "scripts": {
+    "install:lab": "node scripts/install.mjs lab",
+    "vendor": "node scripts/vendor.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:model": "node scripts/smoke-model.mjs",
+    "smoke:fs": "node scripts/smoke-fs.mjs",
+    "patch:dsh-web": "node scripts/patch-dsh-web-url.mjs",
+    "patch:dsh-web:check": "node scripts/patch-dsh-web-url.mjs --check",
+    "smoke:stall": "node scripts/smoke-stall.mjs",
+    "smoke:approval": "node scripts/smoke-approval.mjs",
+    "smoke:jobwatch": "node scripts/smoke-jobwatch.mjs"
+  }
+}

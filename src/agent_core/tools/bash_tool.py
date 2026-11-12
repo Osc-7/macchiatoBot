@@ -1365,17 +1365,38 @@ class BashTool(BaseTool):
         cfg = get_config()
         session_id = str(exec_ctx.get("session_id") or "").strip()
         registry = get_remote_worker_registry()
-        result, metadata = await self._remote_exec_with_reopen(
-            registry=registry,
-            remote_state=remote_state,
-            session_id=session_id,
-            command=command,
-            timeout=timeout,
-            wait_window_seconds=wait_window_seconds,
-            wait_for_completion=wait_for_completion,
-            output_limit=cfg.command_tools.default_output_limit,
-            exec_ctx=exec_ctx,
-        )
+        try:
+            result, metadata = await self._remote_exec_with_reopen(
+                registry=registry,
+                remote_state=remote_state,
+                session_id=session_id,
+                command=command,
+                timeout=timeout,
+                wait_window_seconds=wait_window_seconds,
+                wait_for_completion=wait_for_completion,
+                output_limit=cfg.command_tools.default_output_limit,
+                exec_ctx=exec_ctx,
+            )
+        except Exception as exc:  # noqa: BLE001 —— 远端断连不该终止整轮
+            # 2026-11-12：worker 断线/重连期抛 RuntimeError 曾让整个回合崩掉。
+            # 转成可重试的工具错误，agent 可以重试或直接告诉用户。
+            login = getattr(remote_state, "login", "") or "?"
+            detail = str(exc)[:200]
+            return ToolResult(
+                success=False,
+                error="REMOTE_WORKER_UNAVAILABLE",
+                message=(
+                    f"远程机器 {login} 当前不可达（连接中断或正在重连）：{detail}。"
+                    "这通常是暂时的，可以稍等几秒后重试；如果持续失败，说明那台机器的 "
+                    "macchiato-remote worker 没在跑。"
+                ),
+                data={
+                    "remote": True,
+                    "remote_login": login,
+                    "retryable": True,
+                },
+                metadata={"workspace_backend": "remote", "remote_login": login},
+            )
         tool_result = self._remote_command_tool_result(result, remote_state, metadata)
         data = tool_result.data if isinstance(tool_result.data, dict) else {}
         if (

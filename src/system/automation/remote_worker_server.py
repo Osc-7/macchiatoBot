@@ -38,6 +38,39 @@ from macchiato_remote.tokens import (
 
 logger = logging.getLogger(__name__)
 
+# ── 拒绝日志节流（2026-11-12）──────────────────────────────────────────────
+# 旧机器用失效 token 时会每几秒重试一次，日志会被刷爆（实测 3 小时 2508 条）。
+# 同一 (login, reason) 10 分钟只打一条，并把期间的次数带出来。
+_REJECTION_LOG_INTERVAL_SECONDS = 600.0
+_rejection_log_state: Dict[tuple, tuple] = {}
+
+def _rejection_clock() -> float:
+    """节流用的时钟（测试可替换）。"""
+    import time as _time
+
+    return _time.monotonic()
+
+
+def _log_rejection_once(login: str, reason: str) -> None:
+    key = (login, reason)
+    now = _rejection_clock()
+    last_at, suppressed = _rejection_log_state.get(key, (0.0, 0))
+    if now - last_at < _REJECTION_LOG_INTERVAL_SECONDS:
+        _rejection_log_state[key] = (last_at, suppressed + 1)
+        return
+    _rejection_log_state[key] = (now, 0)
+    suffix = f"（期间又拒绝 {suppressed} 次）" if suppressed else ""
+    logger.warning(
+        "remote worker rejected: login=%s reason=%s%s "
+        "(check token registry, MACCHIATO_REMOTE_TOKENS, or "
+        "MACCHIATO_REMOTE_TOKEN vs macchiato-remote login --token)",
+        login,
+        reason,
+        suffix,
+    )
+
+
+
 # 默认 WebSocket 端口（避免与常见 8765 开发端口冲突）；可用 MACCHIATO_REMOTE_PORT 覆盖。
 DEFAULT_REMOTE_WORKER_WEBSOCKET_PORT = 9380
 _REMOTE_LOGIN_DEVICE_TTL_SECONDS = 600
@@ -575,13 +608,7 @@ def create_remote_worker_app(*, token: Optional[str] = None) -> FastAPI:
             token_override=token,
         )
         if not allowed:
-            logger.warning(
-                "remote worker rejected: login=%s reason=%s "
-                "(check token registry, MACCHIATO_REMOTE_TOKENS, or "
-                "MACCHIATO_REMOTE_TOKEN vs macchiato-remote login --token)",
-                (login or "").strip(),
-                reason,
-            )
+            _log_rejection_once((login or "").strip(), reason)
             await websocket.close(code=1008)
             return
 

@@ -451,19 +451,15 @@ def _escape_fts_query(query: str) -> str:
     目标：
     - 对用户友好：支持用「多个词」作为关键词，不要求理解 FTS5 语法
     - 行为直观：多个词时表示「匹配其中任意一个」（OR），单词时按原样匹配
-    - 安全：简单转义双引号，避免语法错误
+    - 安全：每个词**整体加双引号**，内部双引号转义成两个
+
+    为什么必须加引号：FTS5 会把 `gpu-worker` 解析成 `gpu - worker`，
+    于是 `worker` 被当成列名，抛出 `no such column: worker`（实测踩过）。
+    加引号后按「包含这个完整词」匹配，连字符、`C++`、中文都安全。
     """
-    # 拆分为非空词
     words = [w.strip() for w in query.split() if w.strip()]
     if not words:
         return '""'
 
-    # 转义双引号，但不强制加整体引号，保留 FTS5 默认分词与匹配行为
-    escaped = [w.replace('"', '""') for w in words]
-
-    if len(escaped) == 1:
-        # 单个词：直接用该词，等价于「包含这个词」
-        return escaped[0]
-
-    # 多个词：使用 OR 连接，表示「包含任意一个关键词」
-    return " OR ".join(escaped)
+    quoted = ['"' + w.replace('"', '""') + '"' for w in words]
+    return " OR ".join(quoted)

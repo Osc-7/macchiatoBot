@@ -110,7 +110,7 @@ class TestConfigModels:
     def test_agent_config_defaults(self):
         """测试 Agent 配置默认值"""
         config = AgentConfig()
-        assert config.max_iterations == 10
+        assert config.max_iterations == 300  # 2026-11-12 默认值从 10 提到 300
         assert config.enable_debug is False
         assert config.working_set_size == 6
 
@@ -152,7 +152,7 @@ class TestConfigModels:
         assert config.llm.api_key == "test-key"
         assert config.time.timezone == "Asia/Shanghai"
         assert config.storage.type == "json"
-        assert config.agent.max_iterations == 10
+        assert config.agent.max_iterations == 300  # 同上
         assert config.multimodal.enabled is False
         assert config.canvas.enabled is False
 

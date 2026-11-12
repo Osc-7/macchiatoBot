@@ -1126,7 +1126,11 @@ class ToolsConfig(BaseModel):
 class AgentConfig(BaseModel):
     """Agent 配置"""
 
-    max_iterations: int = Field(default=10, ge=1, description="最大工具调用迭代次数")
+    max_iterations: int = Field(
+        default=300,
+        ge=1,
+        description="最大工具调用迭代次数（10 会让多步任务中途被截断）",
+    )
     session_expired_seconds: int = Field(
         default=3600,
         ge=60,

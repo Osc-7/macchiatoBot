@@ -496,7 +496,7 @@ cd() {
   case "$here" in
     "$MACCHIATO_WORKSPACE_ROOT"|"$MACCHIATO_WORKSPACE_ROOT"/*) ;;
     *)
-      echo "cd: 已阻止离开工作区 (macchiato)" >&2
+      echo "cd: 已阻止离开工作区 (macchiato)；允许的根：$MACCHIATO_WORKSPACE_ROOT" >&2
       builtin cd "$MACCHIATO_WORKSPACE_ROOT" || true
       return 1
       ;;
@@ -509,7 +509,7 @@ pushd() {
   case "$here" in
     "$MACCHIATO_WORKSPACE_ROOT"|"$MACCHIATO_WORKSPACE_ROOT"/*) ;;
     *)
-      echo "pushd: 已阻止离开工作区 (macchiato)" >&2
+      echo "pushd: 已阻止离开工作区 (macchiato)；允许的根：$MACCHIATO_WORKSPACE_ROOT" >&2
       builtin popd 2>/dev/null || true
       builtin cd "$MACCHIATO_WORKSPACE_ROOT" || true
       return 1
@@ -523,7 +523,7 @@ popd() {
   case "$here" in
     "$MACCHIATO_WORKSPACE_ROOT"|"$MACCHIATO_WORKSPACE_ROOT"/*) ;;
     *)
-      echo "popd: 已阻止离开工作区 (macchiato)" >&2
+      echo "popd: 已阻止离开工作区 (macchiato)；允许的根：$MACCHIATO_WORKSPACE_ROOT" >&2
       builtin cd "$MACCHIATO_WORKSPACE_ROOT" || true
       return 1
       ;;

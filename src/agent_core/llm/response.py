@@ -39,6 +39,21 @@ class TokenUsage:
             return cls()
         hit = getattr(usage, "prompt_cache_hit_tokens", None)
         miss = getattr(usage, "prompt_cache_miss_tokens", None)
+        # 兼容 OpenAI 风格：usage.prompt_tokens_details.cached_tokens
+        if hit is None:
+            details = getattr(usage, "prompt_tokens_details", None)
+            if details is None and isinstance(usage, dict):
+                details = usage.get("prompt_tokens_details")
+            if details is not None:
+                cached = (
+                    details.get("cached_tokens")
+                    if isinstance(details, dict)
+                    else getattr(details, "cached_tokens", None)
+                )
+                if cached is not None:
+                    hit = cached
+                    total_prompt = getattr(usage, "prompt_tokens", 0) or 0
+                    miss = max(0, int(total_prompt) - int(cached)) if total_prompt else None
         return cls(
             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
